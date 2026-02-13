@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Build CLI binaries ───────────────────────────────────────
+  cli:
+    name: CLI (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            ext: ''
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            ext: ''
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            ext: ''
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            ext: ''
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            ext: ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cross-compilation tools
+        if: contains(matrix.target, 'linux')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} -p agentoven-cli
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/agentoven${{ matrix.ext }} dist/agentoven-${{ matrix.target }}${{ matrix.ext }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentoven-${{ matrix.target }}
+          path: dist/
+
+  # ── Python wheels ────────────────────────────────────────────
+  python-wheels:
+    name: Python (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: sdk/python
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-wheels-${{ matrix.os }}
+          path: sdk/python/dist/
+
+  # ── Create GitHub Release ────────────────────────────────────
+  release:
+    name: Create Release
+    needs: [cli, python-wheels]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*
+          generate_release_notes: true

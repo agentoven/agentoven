@@ -1,0 +1,34 @@
+[package]
+name = "agentoven-core"
+description = "Core SDK for AgentOven — the enterprise agent control plane"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords = ["agent", "ai", "control-plane", "orchestration", "enterprise"]
+categories = ["api-bindings", "web-programming"]
+
+[dependencies]
+a2a-rs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+url = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+tracing-opentelemetry = "0.28"
+async-trait = "0.1"
+base64 = "0.22"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

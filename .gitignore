@@ -1,0 +1,58 @@
+# Build artifacts
+target/
+dist/
+build/
+
+# Go
+control-plane/bin/
+control-plane/vendor/
+
+# Node / TypeScript
+node_modules/
+sdk/typescript/*.node
+sdk/typescript/dist/
+ui/node_modules/
+ui/dist/
+ui/.next/
+docs/node_modules/
+docs/build/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+sdk/python/dist/
+sdk/python/*.so
+sdk/python/*.dylib
+sdk/python/*.pyd
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Docker
+docker-compose.override.yml
+
+# Test / Coverage
+coverage/
+*.lcov
+htmlcov/
+
+# Logs
+*.log
+logs/

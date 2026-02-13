@@ -1,0 +1,18 @@
+[package]
+name = "agentoven-python"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "agentoven"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+agentoven-core = { path = "../../crates/agentoven-core" }
+a2a-rs = { path = "../../crates/a2a-rs" }
+tokio = { workspace = true }
+serde_json = { workspace = true }

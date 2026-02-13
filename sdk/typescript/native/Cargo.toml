@@ -1,0 +1,22 @@
+[package]
+name = "agentoven-napi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "2", features = ["napi9", "async", "serde-json"] }
+napi-derive = "2"
+agentoven-core = { path = "../../../crates/agentoven-core" }
+a2a-rs = { path = "../../../crates/a2a-rs" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[build-dependencies]
+napi-build = "2"

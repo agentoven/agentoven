@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  # ── Rust ─────────────────────────────────────────────────────
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Test
+        run: cargo test --workspace
+
+  # ── Go Control Plane ─────────────────────────────────────────
+  go:
+    name: Go Control Plane
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: control-plane/go.sum
+
+      - name: Build
+        working-directory: control-plane
+        run: go build ./...
+
+      - name: Test
+        working-directory: control-plane
+        run: go test ./...
+
+      - name: Vet
+        working-directory: control-plane
+        run: go vet ./...
+
+  # ── Python SDK ───────────────────────────────────────────────
+  python-sdk:
+    name: Python SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build wheel
+        working-directory: sdk/python
+        run: maturin build --release
+
+      - name: Install and test
+        working-directory: sdk/python
+        run: |
+          pip install target/wheels/*.whl
+          python -c "import agentoven; print(agentoven.__version__)"
+
+  # ── TypeScript SDK ───────────────────────────────────────────
+  typescript-sdk:
+    name: TypeScript SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: sdk/typescript
+        run: npm install
+
+      - name: Build native module
+        working-directory: sdk/typescript
+        run: npm run build
+
+  # ── Docker ───────────────────────────────────────────────────
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build control plane image
+        run: docker build -t agentoven-server:test ./control-plane
