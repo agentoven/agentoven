@@ -1,0 +1,33 @@
+[package]
+name = "agentoven-cli"
+description = "CLI for AgentOven — bake production-ready AI agents from the terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords = ["agent", "ai", "cli", "devtools"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "agentoven"
+path = "src/main.rs"
+
+[dependencies]
+agentoven-core = { workspace = true }
+a2a-rs = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+
+# CLI-specific
+colored = "2"
+dialoguer = "0.11"
+indicatif = "0.17"
+tabled = "0.16"
+dirs = "5"
+toml = "0.8"

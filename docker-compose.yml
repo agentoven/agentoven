@@ -1,0 +1,76 @@
+# AgentOven — Local Development Stack
+#
+# Usage:
+#   docker compose up -d          # Start everything
+#   docker compose logs -f server # Watch server logs
+#   docker compose down -v        # Tear down everything
+#
+# Services:
+#   - server:   AgentOven control plane (Go)   → http://localhost:8080
+#   - postgres: PostgreSQL 16                   → localhost:5432
+#   - jaeger:   Jaeger (traces)                 → http://localhost:16686
+#   - otel:     OpenTelemetry Collector         → gRPC :4317
+
+services:
+  # ── PostgreSQL ───────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: agentoven
+      POSTGRES_PASSWORD: agentoven
+      POSTGRES_DB: agentoven
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./control-plane/internal/db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentoven"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── AgentOven Control Plane ──────────────────────────────────
+  server:
+    build:
+      context: ./control-plane
+      dockerfile: Dockerfile
+    environment:
+      AGENTOVEN_PORT: "8080"
+      DATABASE_URL: "postgres://agentoven:agentoven@postgres:5432/agentoven?sslmode=disable"
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
+      OTEL_SERVICE_NAME: "agentoven-control-plane"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── OpenTelemetry Collector ──────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.100.0
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./infra/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # Metrics
+    depends_on:
+      - jaeger
+
+  # ── Jaeger (Distributed Tracing UI) ─────────────────────────
+  jaeger:
+    image: jaegertracing/all-in-one:1.58
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "14268:14268"  # Accept traces from OTel Collector
+      - "14250:14250"  # gRPC
+    restart: unless-stopped
+
+volumes:
+  pgdata:

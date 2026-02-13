@@ -1,0 +1,81 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/a2a-rs",
+    "crates/agentoven-core",
+    "crates/agentoven-cli",
+    "sdk/python",
+]
+# Built separately — requires Rust 1.88+ for napi-build
+exclude = [
+    "sdk/typescript/native",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/agentoven/agentoven"
+homepage = "https://agentoven.dev"
+authors = ["AgentOven Contributors"]
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP
+reqwest = { version = "0.12", features = ["json", "stream"] }
+axum = "0.7"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Tracing / OpenTelemetry
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+opentelemetry = "0.27"
+opentelemetry-otlp = "0.27"
+opentelemetry_sdk = "0.27"
+
+# CLI
+clap = { version = "4", features = ["derive", "env", "color"] }
+
+# UUID
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# URL
+url = { version = "2", features = ["serde"] }
+
+# Schema
+schemars = { version = "0.8", features = ["url", "chrono"] }
+
+# Encoding
+base64 = "0.22"
+
+# MCP (Model Context Protocol)
+rmcp = { version = "0.1", features = ["client", "transport-streamable-http"] }
+
+# PyO3 (Python bindings)
+pyo3 = { version = "0.22", features = ["extension-module"] }
+
+# napi-rs (Node.js bindings)
+napi = { version = "2", features = ["async", "serde-json"] }
+napi-derive = "2"
+
+# Internal crates
+a2a-rs = { path = "crates/a2a-rs" }
+agentoven-core = { path = "crates/agentoven-core" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
