@@ -39,7 +39,7 @@ make dev-control-plane
 
 | Directory | Language | Description |
 |---|---|---|
-| `crates/a2a-rs` | Rust | A2A protocol SDK (standalone crate) |
+| `crates/a2a-ao` | Rust | A2A protocol SDK (standalone crate) |
 | `crates/agentoven-core` | Rust | SDK core library |
 | `crates/agentoven-cli` | Rust | CLI tool |
 | `control-plane/` | Go | Control plane API server |
@@ -51,7 +51,7 @@ make dev-control-plane
 
 ## Key Contribution Areas
 
-### 🦀 a2a-rs — A2A Protocol Rust SDK
+### 🦀 a2a-ao — A2A Protocol Rust SDK
 The first Rust implementation of the A2A protocol. We aim to contribute this
 upstream to the official A2A project (Linux Foundation).
 
@@ -80,7 +80,7 @@ Help others bake better agents with tutorials, guides, and example recipes.
 We follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 ```
-feat(a2a-rs): add streaming support for task updates
+feat(a2a-ao): add streaming support for task updates
 fix(control-plane): handle concurrent agent registration
 docs(sdk): add Python quickstart guide
 ```

@@ -1,4 +1,4 @@
-# a2a-rs 🤝
+# a2a-ao 🤝
 
 The first Rust implementation of the [Agent-to-Agent (A2A) protocol](https://github.com/google/A2A) —
 the open standard for agent interoperability, governed by the Linux Foundation.
@@ -17,7 +17,7 @@ regardless of which framework or platform they were built on.
 ## Quick Start
 
 ```rust
-use a2a_rs::{AgentCard, A2AClient, SendMessageRequest, MessagePart};
+use a2a_ao::{AgentCard, A2AClient, SendMessageRequest, MessagePart};
 
 // Discover a remote agent
 let card = AgentCard::discover("https://agent.example.com").await?;

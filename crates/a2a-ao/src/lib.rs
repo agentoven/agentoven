@@ -1,4 +1,4 @@
-//! # a2a-rs
+//! # a2a-ao
 //!
 //! Rust SDK for the Agent-to-Agent (A2A) protocol — the open standard for
 //! agent interoperability, governed by the Linux Foundation.
@@ -17,7 +17,7 @@
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use a2a_rs::{A2AClient, AgentCard};
+//! use a2a_ao::{A2AClient, AgentCard};
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {

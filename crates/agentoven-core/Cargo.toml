@@ -12,7 +12,7 @@ categories = ["api-bindings", "web-programming"]
 readme = "README.md"
 
 [dependencies]
-a2a-rs = { workspace = true }
+a2a-ao = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

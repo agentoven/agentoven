@@ -482,7 +482,7 @@ async fn test(args: TestArgs) -> anyhow::Result<()> {
         println!("  {} {}", "You:".bold(), msg);
         // Create an A2A client to the agent
         let a2a_base = format!("http://localhost:8080/agents/{}/a2a", args.name);
-        let a2a_client = a2a_rs::A2AClient::new(&a2a_base);
+        let a2a_client = a2a_ao::A2AClient::new(&a2a_base);
         match a2a_client.send_message_text(msg).await {
             Ok(task) => {
                 println!("  {} Task created: {} ({})", "Agent:".bold().cyan(), task.id.dimmed(), task.state);
@@ -498,7 +498,7 @@ async fn test(args: TestArgs) -> anyhow::Result<()> {
 
     // Interactive REPL loop
     let a2a_base = format!("http://localhost:8080/agents/{}/a2a", args.name);
-    let a2a_client = a2a_rs::A2AClient::new(&a2a_base);
+    let a2a_client = a2a_ao::A2AClient::new(&a2a_base);
     let mut current_task_id: Option<String> = None;
 
     loop {

@@ -3,8 +3,8 @@
 version = 4
 
 [[package]]
-name = "a2a-rs"
-version = "0.1.0"
+name = "a2a-ao"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -28,9 +28,9 @@ dependencies = [
 
 [[package]]
 name = "agentoven-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
- "a2a-rs",
+ "a2a-ao",
  "agentoven-core",
  "anyhow",
  "chrono",
@@ -48,9 +48,9 @@ dependencies = [
 
 [[package]]
 name = "agentoven-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
- "a2a-rs",
+ "a2a-ao",
  "anyhow",
  "async-trait",
  "base64",
@@ -72,9 +72,9 @@ dependencies = [
 
 [[package]]
 name = "agentoven-python"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
- "a2a-rs",
+ "a2a-ao",
  "agentoven-core",
  "pyo3",
  "serde_json",

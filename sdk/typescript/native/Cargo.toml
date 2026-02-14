@@ -13,7 +13,7 @@ crate-type = ["cdylib"]
 napi = { version = "2", features = ["napi9", "async", "serde-json"] }
 napi-derive = "2"
 agentoven-core = { path = "../../../crates/agentoven-core" }
-a2a-rs = { path = "../../../crates/a2a-rs" }
+a2a-ao = { path = "../../../crates/a2a-ao" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/a2a-rs",
+    "crates/a2a-ao",
     "crates/agentoven-core",
     "crates/agentoven-cli",
     "sdk/python",
@@ -71,7 +71,7 @@ napi = { version = "2", features = ["async", "serde-json"] }
 napi-derive = "2"
 
 # Internal crates
-a2a-rs = { path = "crates/a2a-rs" }
+a2a-ao = { path = "crates/a2a-ao" }
 agentoven-core = { path = "crates/agentoven-core" }
 
 [profile.release]

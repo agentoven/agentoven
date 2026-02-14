@@ -171,7 +171,7 @@ AgentOven uses a **clay oven** metaphor throughout:
 ```
 agentoven/
 ├── crates/                    # Rust workspace
-│   ├── a2a-rs/               # A2A protocol SDK (standalone crate)
+│   ├── a2a-ao/               # A2A protocol SDK (standalone crate)
 │   ├── agentoven-core/       # SDK core library
 │   └── agentoven-cli/        # CLI tool
 ├── control-plane/            # Go control plane service
@@ -189,7 +189,7 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ### Key areas to contribute:
 
-- 🦀 **a2a-rs** — The first A2A Rust SDK (help us shape the ecosystem)
+- 🦀 **a2a-ao** — The A2A Rust SDK by AgentOven (help us shape the ecosystem)
 - 🔌 **Model providers** — Add new provider integrations
 - 🧪 **Evaluators** — Build custom evaluation judges
 - 📚 **Docs & examples** — Help others bake better agents

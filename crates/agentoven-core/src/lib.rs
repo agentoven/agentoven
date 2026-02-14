@@ -48,5 +48,5 @@ pub use ingredient::{Ingredient, IngredientKind};
 pub use recipe::{Recipe, Step, StepKind};
 pub use router::{ModelProvider, RoutingStrategy};
 
-// Re-export a2a-rs types for convenience
-pub use a2a_rs;
+// Re-export a2a-ao types for convenience
+pub use a2a_ao;

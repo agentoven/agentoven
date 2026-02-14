@@ -20,7 +20,7 @@ use crate::config::TelemetryConfig;
 /// - Environment-based log filtering
 pub fn init_telemetry(config: &TelemetryConfig) -> anyhow::Result<()> {
     let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,agentoven=debug,a2a_rs=debug"));
+        .unwrap_or_else(|_| EnvFilter::new("info,agentoven=debug,a2a_ao=debug"));
 
     let fmt_layer = tracing_subscriber::fmt::layer()
         .json()
