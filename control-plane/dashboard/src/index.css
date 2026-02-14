@@ -1,0 +1,23 @@
+@import "tailwindcss";
+
+/* AgentOven brand overrides */
+:root {
+  --ao-brand: #e65100;
+  --ao-brand-light: #ff8a50;
+  --ao-bg: #0f172a;
+  --ao-surface: #1e293b;
+  --ao-surface-hover: #334155;
+  --ao-border: #334155;
+  --ao-text: #f1f5f9;
+  --ao-text-muted: #94a3b8;
+  --ao-success: #22c55e;
+  --ao-warning: #eab308;
+  --ao-error: #ef4444;
+}
+
+body {
+  margin: 0;
+  background-color: var(--ao-bg);
+  color: var(--ao-text);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}

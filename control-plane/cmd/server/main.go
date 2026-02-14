@@ -1,13 +1,14 @@
 // AgentOven Control Plane — the brain of the enterprise agent oven.
 //
-// This is the main entry point for the AgentOven control plane server.
+// This is the main entry point for the AgentOven OSS control plane server.
 // It provides:
 //   - Agent Registry (the Menu)
 //   - Model Router (ingredient routing)
 //   - A2A Gateway (agent-to-agent collaboration)
 //   - MCP Gateway (agent-to-tool integration)
 //   - Workflow Engine (recipe execution)
-//   - Multi-tenant API with cost tracking and observability
+//   - Single-kitchen, in-memory store (zero config)
+//   - Dashboard UI
 
 package main
 
@@ -20,9 +21,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/agentoven/agentoven/control-plane/internal/api"
-	"github.com/agentoven/agentoven/control-plane/internal/config"
-	"github.com/agentoven/agentoven/control-plane/internal/telemetry"
+	"github.com/agentoven/agentoven/control-plane/pkg/server"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -35,23 +34,19 @@ func main() {
 
 	log.Info().Msg("🏺 AgentOven Control Plane starting...")
 
-	// Load configuration
-	cfg := config.Load()
-
-	// Initialize telemetry (OpenTelemetry)
-	shutdown, err := telemetry.Init(cfg.Telemetry)
+	// Build the OSS server (in-memory store, single kitchen)
+	ctx := context.Background()
+	srv, err := server.New(ctx)
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to initialize telemetry")
+		log.Fatal().Err(err).Msg("Failed to initialize server")
 	}
-	defer shutdown(context.Background())
-
-	// Build the API router
-	router := api.NewRouter(cfg)
+	defer srv.Store.Close()
+	defer srv.ShutdownFunc(ctx)
 
 	// Start HTTP server
-	server := &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.Port),
-		Handler:      router,
+	httpServer := &http.Server{
+		Addr:         fmt.Sprintf(":%d", srv.Port),
+		Handler:      srv.Handler,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -64,17 +59,16 @@ func main() {
 		<-sigChan
 
 		log.Info().Msg("🛑 Shutting down gracefully...")
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		server.Shutdown(ctx)
+		httpServer.Shutdown(shutdownCtx)
 	}()
 
 	log.Info().
-		Int("port", cfg.Port).
-		Str("version", cfg.Version).
+		Int("port", srv.Port).
 		Msg("🔥 AgentOven is hot and ready!")
 
-	if err := server.ListenAndServe(); err != http.ErrServerClosed {
+	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatal().Err(err).Msg("Server failed")
 	}
 }

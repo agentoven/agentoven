@@ -1,101 +1,113 @@
+// Package handlers implements the HTTP handlers for the AgentOven control plane.
+// Phase 2: All handlers use the Store interface (PostgreSQL-backed) instead
+// of in-memory maps. New handlers added for Model Router, MCP Gateway, and
+// Workflow Engine.
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
-	"sync"
 	"time"
 
+	"github.com/agentoven/agentoven/control-plane/internal/api/middleware"
+	"github.com/agentoven/agentoven/control-plane/internal/mcpgw"
+	"github.com/agentoven/agentoven/control-plane/internal/router"
+	"github.com/agentoven/agentoven/control-plane/internal/store"
+	"github.com/agentoven/agentoven/control-plane/internal/workflow"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
 
-// ── In-Memory Store (Phase 1) ────────────────────────────────
-// Production will use PostgreSQL via pgx; this enables a fully
-// functional API without a database dependency.
+// Handlers holds all handler dependencies.
+type Handlers struct {
+	Store      store.Store
+	Router     *router.ModelRouter
+	MCPGateway *mcpgw.Gateway
+	Workflow   *workflow.Engine
+}
 
-var (
-	agents     = make(map[string]*models.Agent)   // key: name
-	recipes    = make(map[string]*models.Recipe)   // key: name
-	kitchens   = make(map[string]*models.Kitchen)  // key: id
-	traces     = make(map[string]*models.Trace)    // key: id
-	storeMu    sync.RWMutex
-)
-
-func init() {
-	// Seed default kitchen
-	kitchens["default"] = &models.Kitchen{
-		ID:          "default",
-		Name:        "Default Kitchen",
-		Description: "The default workspace",
-		Owner:       "system",
-		CreatedAt:   time.Now().UTC(),
+// New creates a new Handlers instance with all dependencies.
+func New(s store.Store, mr *router.ModelRouter, gw *mcpgw.Gateway, wf *workflow.Engine) *Handlers {
+	return &Handlers{
+		Store:      s,
+		Router:     mr,
+		MCPGateway: gw,
+		Workflow:   wf,
 	}
 }
 
+// ══════════════════════════════════════════════════════════════
 // ── Agent Handlers ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
 
-func ListAgents(w http.ResponseWriter, r *http.Request) {
-	storeMu.RLock()
-	defer storeMu.RUnlock()
-
-	result := make([]models.Agent, 0, len(agents))
-	for _, a := range agents {
-		result = append(result, *a)
+func (h *Handlers) ListAgents(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+	agents, err := h.Store.ListAgents(r.Context(), kitchen)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
-	respondJSON(w, http.StatusOK, result)
+	if agents == nil {
+		agents = []models.Agent{}
+	}
+	respondJSON(w, http.StatusOK, agents)
 }
 
-func RegisterAgent(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) RegisterAgent(w http.ResponseWriter, r *http.Request) {
 	var req models.Agent
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
-	// Set server-side fields
+	kitchen := middleware.GetKitchen(r.Context())
 	req.ID = uuid.New().String()
 	req.Status = models.AgentStatusDraft
+	req.Kitchen = kitchen
 	req.CreatedAt = time.Now().UTC()
 	req.UpdatedAt = time.Now().UTC()
-
-	storeMu.Lock()
-	agents[req.Name] = &req
-	storeMu.Unlock()
-
-	log.Info().Str("agent", req.Name).Str("id", req.ID).Msg("Agent registered")
-
-	// Auto-generate A2A Agent Card metadata
 	req.A2AEndpoint = "/agents/" + req.Name + "/a2a"
 
+	if err := h.Store.CreateAgent(r.Context(), &req); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	log.Info().Str("agent", req.Name).Str("id", req.ID).Str("kitchen", kitchen).Msg("Agent registered")
 	respondJSON(w, http.StatusCreated, req)
 }
 
-func GetAgent(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) GetAgent(w http.ResponseWriter, r *http.Request) {
 	agentName := chi.URLParam(r, "agentName")
+	kitchen := middleware.GetKitchen(r.Context())
 
-	storeMu.RLock()
-	agent, ok := agents[agentName]
-	storeMu.RUnlock()
-
-	if !ok {
-		respondError(w, http.StatusNotFound, "Agent not found: "+agentName)
+	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 	respondJSON(w, http.StatusOK, agent)
 }
 
-func UpdateAgent(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	agentName := chi.URLParam(r, "agentName")
+	kitchen := middleware.GetKitchen(r.Context())
 
-	storeMu.Lock()
-	defer storeMu.Unlock()
-
-	agent, ok := agents[agentName]
-	if !ok {
-		respondError(w, http.StatusNotFound, "Agent not found: "+agentName)
+	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 
@@ -105,7 +117,6 @@ func UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Merge mutable fields
 	if req.Description != "" {
 		agent.Description = req.Description
 	}
@@ -115,32 +126,44 @@ func UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if len(req.Ingredients) > 0 {
 		agent.Ingredients = req.Ingredients
 	}
+	if len(req.Skills) > 0 {
+		agent.Skills = req.Skills
+	}
 	agent.UpdatedAt = time.Now().UTC()
 
+	if err := h.Store.UpdateAgent(r.Context(), agent); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	respondJSON(w, http.StatusOK, agent)
 }
 
-func DeleteAgent(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) DeleteAgent(w http.ResponseWriter, r *http.Request) {
 	agentName := chi.URLParam(r, "agentName")
+	kitchen := middleware.GetKitchen(r.Context())
 
-	storeMu.Lock()
-	defer storeMu.Unlock()
-
-	if _, ok := agents[agentName]; !ok {
-		respondError(w, http.StatusNotFound, "Agent not found: "+agentName)
+	if err := h.Store.DeleteAgent(r.Context(), kitchen, agentName); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	// Soft-delete: mark as retired
-	agents[agentName].Status = models.AgentStatusRetired
-	agents[agentName].UpdatedAt = time.Now().UTC()
-
-	log.Info().Str("agent", agentName).Msg("Agent retired")
+	log.Info().Str("agent", agentName).Str("kitchen", kitchen).Msg("Agent retired")
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func BakeAgent(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 	agentName := chi.URLParam(r, "agentName")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
 
 	var req struct {
 		Version     string `json:"version"`
@@ -148,22 +171,17 @@ func BakeAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 
-	storeMu.Lock()
-	agent, ok := agents[agentName]
-	if !ok {
-		storeMu.Unlock()
-		respondError(w, http.StatusNotFound, "Agent not found: "+agentName)
-		return
-	}
-
-	// Transition to baking state
 	agent.Status = models.AgentStatusBaking
 	agent.UpdatedAt = time.Now().UTC()
 	if req.Version != "" {
 		agent.Version = req.Version
 	}
 	agent.A2AEndpoint = "/agents/" + agentName + "/a2a"
-	storeMu.Unlock()
+
+	if err := h.Store.UpdateAgent(r.Context(), agent); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	log.Info().
 		Str("agent", agentName).
@@ -171,17 +189,16 @@ func BakeAgent(w http.ResponseWriter, r *http.Request) {
 		Str("environment", req.Environment).
 		Msg("Agent baking started")
 
-	// In a production system, this would trigger an async deployment.
-	// For Phase 1, immediately transition to ready.
+	// Simulate bake completion after delay
 	go func() {
 		time.Sleep(2 * time.Second)
-		storeMu.Lock()
-		if a, ok := agents[agentName]; ok && a.Status == models.AgentStatusBaking {
-			a.Status = models.AgentStatusReady
-			a.UpdatedAt = time.Now().UTC()
+		agent.Status = models.AgentStatusReady
+		agent.UpdatedAt = time.Now().UTC()
+		if err := h.Store.UpdateAgent(context.Background(), agent); err != nil {
+			log.Warn().Err(err).Str("agent", agentName).Msg("Failed to update agent to ready")
+		} else {
 			log.Info().Str("agent", agentName).Msg("Agent is ready")
 		}
-		storeMu.Unlock()
 	}()
 
 	respondJSON(w, http.StatusAccepted, map[string]string{
@@ -193,87 +210,105 @@ func BakeAgent(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func CoolAgent(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) CoolAgent(w http.ResponseWriter, r *http.Request) {
 	agentName := chi.URLParam(r, "agentName")
+	kitchen := middleware.GetKitchen(r.Context())
 
-	storeMu.Lock()
-	defer storeMu.Unlock()
-
-	agent, ok := agents[agentName]
-	if !ok {
-		respondError(w, http.StatusNotFound, "Agent not found: "+agentName)
+	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 
 	agent.Status = models.AgentStatusCooled
 	agent.UpdatedAt = time.Now().UTC()
+	h.Store.UpdateAgent(r.Context(), agent)
 
 	log.Info().Str("agent", agentName).Msg("Agent cooled")
-	respondJSON(w, http.StatusOK, map[string]string{"name": agentName, "status": string(models.AgentStatusCooled)})
+	respondJSON(w, http.StatusOK, map[string]string{
+		"name":   agentName,
+		"status": string(models.AgentStatusCooled),
+	})
 }
 
-func ListAgentVersions(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) ListAgentVersions(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, []string{})
 }
 
-func GetAgentVersion(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) GetAgentVersion(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]string{})
 }
 
+// ══════════════════════════════════════════════════════════════
 // ── Recipe Handlers ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
 
-func ListRecipes(w http.ResponseWriter, r *http.Request) {
-	storeMu.RLock()
-	defer storeMu.RUnlock()
-
-	result := make([]models.Recipe, 0, len(recipes))
-	for _, rec := range recipes {
-		result = append(result, *rec)
+func (h *Handlers) ListRecipes(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+	recipes, err := h.Store.ListRecipes(r.Context(), kitchen)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
-	respondJSON(w, http.StatusOK, result)
+	if recipes == nil {
+		recipes = []models.Recipe{}
+	}
+	respondJSON(w, http.StatusOK, recipes)
 }
 
-func CreateRecipe(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) CreateRecipe(w http.ResponseWriter, r *http.Request) {
 	var req models.Recipe
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
+
+	kitchen := middleware.GetKitchen(r.Context())
 	req.ID = uuid.New().String()
+	req.Kitchen = kitchen
 	req.CreatedAt = time.Now().UTC()
 	req.UpdatedAt = time.Now().UTC()
 
-	storeMu.Lock()
-	recipes[req.Name] = &req
-	storeMu.Unlock()
+	if err := h.Store.CreateRecipe(r.Context(), &req); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	log.Info().Str("recipe", req.Name).Str("id", req.ID).Msg("Recipe created")
 	respondJSON(w, http.StatusCreated, req)
 }
 
-func GetRecipe(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) GetRecipe(w http.ResponseWriter, r *http.Request) {
 	recipeName := chi.URLParam(r, "recipeName")
+	kitchen := middleware.GetKitchen(r.Context())
 
-	storeMu.RLock()
-	recipe, ok := recipes[recipeName]
-	storeMu.RUnlock()
-
-	if !ok {
-		respondError(w, http.StatusNotFound, "Recipe not found: "+recipeName)
+	recipe, err := h.Store.GetRecipe(r.Context(), kitchen, recipeName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 	respondJSON(w, http.StatusOK, recipe)
 }
 
-func UpdateRecipe(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) UpdateRecipe(w http.ResponseWriter, r *http.Request) {
 	recipeName := chi.URLParam(r, "recipeName")
+	kitchen := middleware.GetKitchen(r.Context())
 
-	storeMu.Lock()
-	defer storeMu.Unlock()
-
-	recipe, ok := recipes[recipeName]
-	if !ok {
-		respondError(w, http.StatusNotFound, "Recipe not found: "+recipeName)
+	recipe, err := h.Store.GetRecipe(r.Context(), kitchen, recipeName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 
@@ -291,155 +326,468 @@ func UpdateRecipe(w http.ResponseWriter, r *http.Request) {
 	}
 	recipe.UpdatedAt = time.Now().UTC()
 
+	if err := h.Store.UpdateRecipe(r.Context(), recipe); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	respondJSON(w, http.StatusOK, recipe)
 }
 
-func DeleteRecipe(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) DeleteRecipe(w http.ResponseWriter, r *http.Request) {
 	recipeName := chi.URLParam(r, "recipeName")
+	kitchen := middleware.GetKitchen(r.Context())
 
-	storeMu.Lock()
-	defer storeMu.Unlock()
-
-	if _, ok := recipes[recipeName]; !ok {
-		respondError(w, http.StatusNotFound, "Recipe not found: "+recipeName)
+	if err := h.Store.DeleteRecipe(r.Context(), kitchen, recipeName); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	delete(recipes, recipeName)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func BakeRecipe(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) BakeRecipe(w http.ResponseWriter, r *http.Request) {
 	recipeName := chi.URLParam(r, "recipeName")
+	kitchen := middleware.GetKitchen(r.Context())
 
-	storeMu.RLock()
-	recipe, ok := recipes[recipeName]
-	storeMu.RUnlock()
-
-	if !ok {
-		respondError(w, http.StatusNotFound, "Recipe not found: "+recipeName)
+	recipe, err := h.Store.GetRecipe(r.Context(), kitchen, recipeName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 
-	taskID := uuid.New().String()
+	// Parse optional input
+	var input map[string]interface{}
+	json.NewDecoder(r.Body).Decode(&input)
+
+	runID, err := h.Workflow.ExecuteRecipe(r.Context(), recipe, kitchen, input)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	log.Info().
 		Str("recipe", recipeName).
-		Str("task_id", taskID).
+		Str("run_id", runID).
 		Int("steps", len(recipe.Steps)).
 		Msg("Recipe execution started")
 
-	// In production, this kicks off the workflow engine.
-	// For Phase 1, return the task ID immediately.
 	respondJSON(w, http.StatusAccepted, map[string]string{
-		"recipe":  recipeName,
-		"status":  "baking",
-		"task_id": taskID,
+		"recipe": recipeName,
+		"status": "running",
+		"run_id": runID,
+		"poll":   "/api/v1/recipes/" + recipeName + "/runs/" + runID,
 	})
 }
 
-func RecipeHistory(w http.ResponseWriter, r *http.Request) {
-	// Phase 1: return empty history
-	respondJSON(w, http.StatusOK, []string{})
+func (h *Handlers) RecipeHistory(w http.ResponseWriter, r *http.Request) {
+	recipeName := chi.URLParam(r, "recipeName")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	recipe, err := h.Store.GetRecipe(r.Context(), kitchen, recipeName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	runs, err := h.Store.ListRecipeRuns(r.Context(), recipe.ID, 50)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if runs == nil {
+		runs = []models.RecipeRun{}
+	}
+	respondJSON(w, http.StatusOK, runs)
 }
 
-// ── Model Router Handlers ────────────────────────────────────
+// GetRecipeRun returns the status and results of a specific recipe run.
+func (h *Handlers) GetRecipeRun(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "runId")
 
-func ListProviders(w http.ResponseWriter, r *http.Request) {
-	providers := []map[string]interface{}{
-		{"name": "azure-openai", "status": "configured", "models": []string{"gpt-4o", "gpt-4o-mini"}},
-		{"name": "anthropic", "status": "configured", "models": []string{"claude-sonnet-4-20250514", "claude-haiku"}},
-		{"name": "ollama", "status": "available", "models": []string{"llama3.1", "mistral"}},
+	run, err := h.Store.GetRecipeRun(r.Context(), runID)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	resp := map[string]interface{}{
+		"run": run,
+	}
+	if run.Status == models.RecipeRunPaused {
+		resp["pending_gates"] = h.Workflow.GetPendingGates(run.ID)
+	}
+
+	respondJSON(w, http.StatusOK, resp)
+}
+
+// CancelRecipeRun cancels a running recipe execution.
+func (h *Handlers) CancelRecipeRun(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "runId")
+
+	if ok := h.Workflow.CancelRun(runID); !ok {
+		respondError(w, http.StatusNotFound, "Run not found or already completed: "+runID)
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{
+		"run_id": runID,
+		"status": "canceled",
+	})
+}
+
+// ApproveGate approves or rejects a human gate in a recipe run.
+func (h *Handlers) ApproveGate(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "runId")
+	stepName := chi.URLParam(r, "stepName")
+
+	var req struct {
+		Approved bool `json:"approved"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if ok := h.Workflow.ApproveGate(runID, stepName, req.Approved); !ok {
+		respondError(w, http.StatusNotFound, fmt.Sprintf("No pending gate '%s' for run '%s'", stepName, runID))
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"run_id":   runID,
+		"step":     stepName,
+		"approved": req.Approved,
+	})
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── Model Router Handlers ────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+func (h *Handlers) ListProviders(w http.ResponseWriter, r *http.Request) {
+	providers, err := h.Store.ListProviders(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if providers == nil {
+		providers = []models.ModelProvider{}
 	}
 	respondJSON(w, http.StatusOK, providers)
 }
 
-func RouteModel(w http.ResponseWriter, r *http.Request) {
-	// Phase 1: Simple fallback routing — always pick the first configured provider.
-	// Production will implement RoutingStrategy (cost-optimized, latency, round-robin, A/B).
-	respondJSON(w, http.StatusOK, map[string]string{
-		"routed_to": "azure-openai",
-		"model":     "gpt-4o",
-		"strategy":  "fallback",
-	})
-}
-
-func GetCostSummary(w http.ResponseWriter, r *http.Request) {
-	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"total_cost_usd":    0.0,
-		"total_tokens":      0,
-		"period":            "24h",
-		"by_agent":          map[string]float64{},
-		"by_model":          map[string]float64{},
-	})
-}
-
-// ── Trace Handlers ───────────────────────────────────────────
-
-func ListTraces(w http.ResponseWriter, r *http.Request) {
-	respondJSON(w, http.StatusOK, []string{})
-}
-
-func GetTrace(w http.ResponseWriter, r *http.Request) {
-	traceID := chi.URLParam(r, "traceId")
-	respondJSON(w, http.StatusOK, map[string]string{"trace_id": traceID})
-}
-
-// ── Kitchen Handlers ─────────────────────────────────────────
-
-func ListKitchens(w http.ResponseWriter, r *http.Request) {
-	storeMu.RLock()
-	defer storeMu.RUnlock()
-
-	result := make([]models.Kitchen, 0, len(kitchens))
-	for _, k := range kitchens {
-		result = append(result, *k)
+func (h *Handlers) CreateProvider(w http.ResponseWriter, r *http.Request) {
+	var req models.ModelProvider
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
 	}
-	respondJSON(w, http.StatusOK, result)
+
+	req.ID = uuid.New().String()
+	req.CreatedAt = time.Now().UTC()
+
+	if err := h.Store.CreateProvider(r.Context(), &req); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	log.Info().Str("provider", req.Name).Str("kind", req.Kind).Msg("Model provider registered")
+	respondJSON(w, http.StatusCreated, req)
 }
 
-func CreateKitchen(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) GetProvider(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "providerName")
+	provider, err := h.Store.GetProvider(r.Context(), name)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	respondJSON(w, http.StatusOK, provider)
+}
+
+func (h *Handlers) DeleteProvider(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "providerName")
+	if err := h.Store.DeleteProvider(r.Context(), name); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handlers) RouteModel(w http.ResponseWriter, r *http.Request) {
+	var req models.RouteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if req.Kitchen == "" {
+		req.Kitchen = middleware.GetKitchen(r.Context())
+	}
+
+	resp, err := h.Router.Route(r.Context(), &req)
+	if err != nil {
+		respondError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handlers) GetCostSummary(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+	summary := h.Router.GetCostSummary(kitchen)
+	respondJSON(w, http.StatusOK, summary)
+}
+
+func (h *Handlers) HealthCheckProviders(w http.ResponseWriter, r *http.Request) {
+	results := h.Router.HealthCheck(r.Context())
+	respondJSON(w, http.StatusOK, results)
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── MCP Gateway Handlers ─────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+func (h *Handlers) MCPEndpoint(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+
+	var req models.MCPRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(models.MCPResponse{
+			Jsonrpc: "2.0",
+			Error: &models.MCPError{
+				Code:    -32700,
+				Message: "Parse error",
+				Data:    err.Error(),
+			},
+			ID: nil,
+		})
+		return
+	}
+
+	log.Info().Str("method", req.Method).Str("kitchen", kitchen).Msg("MCP request received")
+
+	resp := h.MCPGateway.HandleJSONRPC(r.Context(), kitchen, &req)
+	if resp == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (h *Handlers) MCPSSEEndpoint(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		respondError(w, http.StatusInternalServerError, "SSE not supported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	ch := h.MCPGateway.Subscribe(kitchen)
+	defer h.MCPGateway.Unsubscribe(kitchen, ch)
+
+	fmt.Fprintf(w, "event: connected\ndata: {\"kitchen\":\"%s\"}\n\n", kitchen)
+	flusher.Flush()
+
+	for {
+		select {
+		case msg, ok := <-ch:
+			if !ok {
+				return
+			}
+			data, _ := json.Marshal(msg)
+			fmt.Fprintf(w, "event: message\ndata: %s\n\n", string(data))
+			flusher.Flush()
+
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+func (h *Handlers) ListMCPTools(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+	tools, err := h.Store.ListTools(r.Context(), kitchen)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if tools == nil {
+		tools = []models.MCPTool{}
+	}
+	respondJSON(w, http.StatusOK, tools)
+}
+
+func (h *Handlers) RegisterMCPTool(w http.ResponseWriter, r *http.Request) {
+	var req models.MCPTool
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	kitchen := middleware.GetKitchen(r.Context())
+	req.ID = uuid.New().String()
+	req.Kitchen = kitchen
+	req.Enabled = true
+	req.CreatedAt = time.Now().UTC()
+	req.UpdatedAt = time.Now().UTC()
+
+	if req.Transport == "" {
+		req.Transport = "http"
+	}
+
+	if err := h.Store.CreateTool(r.Context(), &req); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	log.Info().Str("tool", req.Name).Str("transport", req.Transport).Str("kitchen", kitchen).Msg("MCP tool registered")
+	respondJSON(w, http.StatusCreated, req)
+}
+
+func (h *Handlers) GetMCPTool(w http.ResponseWriter, r *http.Request) {
+	toolName := chi.URLParam(r, "toolName")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	tool, err := h.Store.GetTool(r.Context(), kitchen, toolName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	respondJSON(w, http.StatusOK, tool)
+}
+
+func (h *Handlers) DeleteMCPTool(w http.ResponseWriter, r *http.Request) {
+	toolName := chi.URLParam(r, "toolName")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	if err := h.Store.DeleteTool(r.Context(), kitchen, toolName); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── Trace Handlers ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+func (h *Handlers) ListTraces(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+	traces, err := h.Store.ListTraces(r.Context(), kitchen, 100)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if traces == nil {
+		traces = []models.Trace{}
+	}
+	respondJSON(w, http.StatusOK, traces)
+}
+
+func (h *Handlers) GetTrace(w http.ResponseWriter, r *http.Request) {
+	traceID := chi.URLParam(r, "traceId")
+	trace, err := h.Store.GetTrace(r.Context(), traceID)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	respondJSON(w, http.StatusOK, trace)
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── Kitchen Handlers ─────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+func (h *Handlers) ListKitchens(w http.ResponseWriter, r *http.Request) {
+	kitchens, err := h.Store.ListKitchens(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if kitchens == nil {
+		kitchens = []models.Kitchen{}
+	}
+	respondJSON(w, http.StatusOK, kitchens)
+}
+
+func (h *Handlers) CreateKitchen(w http.ResponseWriter, r *http.Request) {
 	var req models.Kitchen
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
+
 	req.ID = uuid.New().String()
 	req.CreatedAt = time.Now().UTC()
 
-	storeMu.Lock()
-	kitchens[req.ID] = &req
-	storeMu.Unlock()
+	if err := h.Store.CreateKitchen(r.Context(), &req); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	log.Info().Str("kitchen", req.Name).Str("id", req.ID).Msg("Kitchen created")
 	respondJSON(w, http.StatusCreated, req)
 }
 
-func GetKitchen(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) GetKitchen(w http.ResponseWriter, r *http.Request) {
 	kitchenID := chi.URLParam(r, "kitchenId")
-
-	storeMu.RLock()
-	kitchen, ok := kitchens[kitchenID]
-	storeMu.RUnlock()
-
-	if !ok {
-		respondError(w, http.StatusNotFound, "Kitchen not found: "+kitchenID)
+	kitchen, err := h.Store.GetKitchen(r.Context(), kitchenID)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 	respondJSON(w, http.StatusOK, kitchen)
 }
 
+// ══════════════════════════════════════════════════════════════
 // ── A2A Gateway Handlers ─────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
 
-func A2AEndpoint(w http.ResponseWriter, r *http.Request) {
-	// Handle A2A JSON-RPC requests at the gateway level.
-	// Parse the JSON-RPC request and dispatch to the appropriate handler.
+func (h *Handlers) A2AEndpoint(w http.ResponseWriter, r *http.Request) {
 	var rpcReq struct {
 		Jsonrpc string          `json:"jsonrpc"`
 		Method  string          `json:"method"`
 		Params  json.RawMessage `json:"params,omitempty"`
 		ID      interface{}     `json:"id"`
 	}
-
 	if err := json.NewDecoder(r.Body).Decode(&rpcReq); err != nil {
 		w.Header().Set("Content-Type", "application/a2a+json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -456,26 +804,89 @@ func A2AEndpoint(w http.ResponseWriter, r *http.Request) {
 
 	log.Info().Str("method", rpcReq.Method).Msg("A2A JSON-RPC request received")
 
-	// Phase 1: Return method-not-found for unimplemented methods.
-	// Production will dispatch to registered agent handlers.
+	switch rpcReq.Method {
+	case "tasks/send":
+		h.handleA2ATaskSend(w, r, rpcReq.Params, rpcReq.ID)
+	case "tasks/get":
+		h.handleA2ATaskGet(w, rpcReq.Params, rpcReq.ID)
+	default:
+		w.Header().Set("Content-Type", "application/a2a+json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"error": map[string]interface{}{
+				"code":    -32601,
+				"message": "Method not found",
+				"data":    "Method '" + rpcReq.Method + "' is not yet implemented in the gateway",
+			},
+			"id": rpcReq.ID,
+		})
+	}
+}
+
+func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, params json.RawMessage, rpcID interface{}) {
+	var taskReq struct {
+		ID      string `json:"id"`
+		Message struct {
+			Role  string `json:"role"`
+			Parts []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(params, &taskReq); err != nil {
+		w.Header().Set("Content-Type", "application/a2a+json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"error":   map[string]interface{}{"code": -32602, "message": "Invalid params"},
+			"id":      rpcID,
+		})
+		return
+	}
+
+	kitchen := middleware.GetKitchen(r.Context())
+	trace := &models.Trace{
+		ID:        uuid.New().String(),
+		AgentName: "a2a-gateway",
+		Kitchen:   kitchen,
+		Status:    "submitted",
+		CreatedAt: time.Now().UTC(),
+	}
+	h.Store.CreateTrace(r.Context(), trace)
+
 	w.Header().Set("Content-Type", "application/a2a+json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"jsonrpc": "2.0",
-		"error": map[string]interface{}{
-			"code":    -32601,
-			"message": "Method not found",
-			"data":    "Method '" + rpcReq.Method + "' is not yet implemented in the gateway",
+		"result": map[string]interface{}{
+			"id":     taskReq.ID,
+			"status": map[string]string{"state": "submitted"},
 		},
-		"id": rpcReq.ID,
+		"id": rpcID,
 	})
 }
 
-func ServeAgentCard(w http.ResponseWriter, r *http.Request) {
-	// Serve the platform-level A2A Agent Card
+func (h *Handlers) handleA2ATaskGet(w http.ResponseWriter, params json.RawMessage, rpcID interface{}) {
+	var req struct {
+		ID string `json:"id"`
+	}
+	json.Unmarshal(params, &req)
+
+	w.Header().Set("Content-Type", "application/a2a+json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"result": map[string]interface{}{
+			"id":     req.ID,
+			"status": map[string]string{"state": "completed"},
+		},
+		"id": rpcID,
+	})
+}
+
+func (h *Handlers) ServeAgentCard(w http.ResponseWriter, r *http.Request) {
 	card := map[string]interface{}{
 		"name":        "AgentOven Gateway",
 		"description": "AgentOven control plane — multi-agent orchestration gateway",
-		"version":     "0.1.0",
+		"version":     "0.2.0",
 		"provider": map[string]string{
 			"organization": "AgentOven",
 			"url":          "https://agentoven.dev",
@@ -496,14 +907,12 @@ func ServeAgentCard(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(card)
 }
 
-func A2AAgentEndpoint(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) A2AAgentEndpoint(w http.ResponseWriter, r *http.Request) {
 	agentName := chi.URLParam(r, "agentName")
+	kitchen := middleware.GetKitchen(r.Context())
 
-	storeMu.RLock()
-	agent, ok := agents[agentName]
-	storeMu.RUnlock()
-
-	if !ok {
+	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
+	if err != nil {
 		w.Header().Set("Content-Type", "application/a2a+json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"jsonrpc": "2.0",
@@ -531,7 +940,6 @@ func A2AAgentEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Route the JSON-RPC request to the agent's A2A endpoint
 	log.Info().Str("agent", agentName).Msg("Routing A2A request to agent")
 	respondJSON(w, http.StatusOK, map[string]string{
 		"agent":  agentName,
@@ -539,12 +947,9 @@ func A2AAgentEndpoint(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func ServeAgentSpecificCard(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) ServeAgentSpecificCard(w http.ResponseWriter, r *http.Request) {
 	agentName := chi.URLParam(r, "agentName")
-
-	storeMu.RLock()
-	agent, ok := agents[agentName]
-	storeMu.RUnlock()
+	kitchen := middleware.GetKitchen(r.Context())
 
 	scheme := "http"
 	if r.TLS != nil {
@@ -552,8 +957,8 @@ func ServeAgentSpecificCard(w http.ResponseWriter, r *http.Request) {
 	}
 	host := r.Host
 
-	if !ok {
-		// Return a minimal card for unknown agents
+	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
+	if err != nil {
 		card := map[string]interface{}{
 			"name":        agentName,
 			"description": "Agent managed by AgentOven (not found)",
@@ -569,7 +974,6 @@ func ServeAgentSpecificCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate full A2A Agent Card from registry data
 	skills := make([]map[string]interface{}, 0)
 	for _, s := range agent.Skills {
 		skills = append(skills, map[string]interface{}{

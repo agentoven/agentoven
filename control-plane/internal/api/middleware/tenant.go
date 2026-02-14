@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"strings"
+
+	pkgmw "github.com/agentoven/agentoven/control-plane/pkg/middleware"
 )
 
 type contextKey string
@@ -11,8 +13,6 @@ type contextKey string
 const (
 	// TenantIDKey is the context key for the tenant (kitchen) ID.
 	TenantIDKey contextKey = "tenant_id"
-	// KitchenKey is the context key for the kitchen name.
-	KitchenKey contextKey = "kitchen"
 )
 
 // TenantExtractor extracts tenant information from the request.
@@ -49,7 +49,8 @@ func TenantExtractor(next http.Handler) http.Handler {
 			kitchen = "default"
 		}
 
-		ctx := context.WithValue(r.Context(), KitchenKey, kitchen)
+		// Use pkg/middleware for the kitchen context key (shared with enterprise repo)
+		ctx := pkgmw.SetKitchen(r.Context(), kitchen)
 		ctx = context.WithValue(ctx, TenantIDKey, kitchen)
 
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -57,11 +58,9 @@ func TenantExtractor(next http.Handler) http.Handler {
 }
 
 // GetKitchen retrieves the kitchen name from the request context.
+// Delegates to pkg/middleware.GetKitchen for cross-module compatibility.
 func GetKitchen(ctx context.Context) string {
-	if v, ok := ctx.Value(KitchenKey).(string); ok {
-		return v
-	}
-	return "default"
+	return pkgmw.GetKitchen(ctx)
 }
 
 // GetTenantID retrieves the tenant ID from the request context.

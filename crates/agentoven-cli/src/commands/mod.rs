@@ -1,6 +1,7 @@
 //! CLI command definitions and dispatch.
 
 pub mod agent;
+pub mod dashboard;
 pub mod init;
 pub mod login;
 pub mod recipe;
@@ -60,6 +61,9 @@ pub enum Commands {
     #[command(subcommand)]
     Trace(trace::TraceCommands),
 
+    /// 🌐 Start the control plane and open the dashboard UI.
+    Dashboard(dashboard::DashboardArgs),
+
     /// 🔑 Authenticate with the AgentOven control plane.
     Login(login::LoginArgs),
 
@@ -81,6 +85,7 @@ pub async fn execute(cli: Cli) -> anyhow::Result<()> {
         Commands::Agent(cmd) => agent::execute(cmd).await,
         Commands::Recipe(cmd) => recipe::execute(cmd).await,
         Commands::Trace(cmd) => trace::execute(cmd).await,
+        Commands::Dashboard(args) => dashboard::execute(args).await,
         Commands::Login(args) => login::execute(args).await,
         Commands::Status => status().await,
     }

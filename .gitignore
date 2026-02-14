@@ -56,3 +56,4 @@ htmlcov/
 # Logs
 *.log
 logs/
+.github/copilot-instructions.md
