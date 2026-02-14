@@ -71,8 +71,8 @@ napi = { version = "2", features = ["async", "serde-json"] }
 napi-derive = "2"
 
 # Internal crates
-a2a-ao = { path = "crates/a2a-ao" }
-agentoven-core = { path = "crates/agentoven-core" }
+a2a-ao = { version = "0.2.0", path = "crates/a2a-ao" }
+agentoven-core = { version = "0.2.0", path = "crates/agentoven-core" }
 
 [profile.release]
 lto = true
