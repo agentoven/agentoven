@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 use crate::error::A2AError;
 use crate::task::TaskEvent;
 
-/// A stream of task events received via SSE.
+// A stream of task events received via SSE.
 pin_project! {
     pub struct TaskEventStream {
         #[pin]

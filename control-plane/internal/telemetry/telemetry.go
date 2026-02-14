@@ -7,11 +7,11 @@ import (
 	"github.com/agentoven/agentoven/control-plane/internal/config"
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 )
 
 // Init sets up OpenTelemetry tracing with OTLP gRPC exporter.
@@ -28,7 +28,7 @@ func Init(cfg config.TelemetryConfig) (func(context.Context) error, error) {
 	// Create OTLP gRPC exporter
 	exporter, err := otlptracegrpc.New(ctx,
 		otlptracegrpc.WithEndpoint(cfg.OTLPEndpoint),
-		otlptracegrpc.WithInsecure(), // TODO: TLS in production
+		otlptracegrpc.WithInsecure(), // Phase 1: insecure for local dev; production should use TLS via OTEL_EXPORTER_OTLP_CERTIFICATE
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create OTLP exporter: %w", err)
@@ -37,8 +37,8 @@ func Init(cfg config.TelemetryConfig) (func(context.Context) error, error) {
 	// Create resource with service metadata
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
-			semconv.ServiceNameKey.String(cfg.ServiceName),
-			semconv.ServiceVersionKey.String("0.1.0"),
+			attribute.String("service.name", cfg.ServiceName),
+			attribute.String("service.version", "0.1.0"),
 		),
 		resource.WithHost(),
 		resource.WithOS(),
@@ -48,11 +48,14 @@ func Init(cfg config.TelemetryConfig) (func(context.Context) error, error) {
 		return nil, fmt.Errorf("failed to create resource: %w", err)
 	}
 
+	// Use AlwaysSample in dev; production should use TraceIDRatioBased(0.1) or ParentBased
+	sampler := sdktrace.AlwaysSample()
+
 	// Create trace provider
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exporter),
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()), // TODO: configurable sampling
+		sdktrace.WithSampler(sampler),
 	)
 
 	// Register globally

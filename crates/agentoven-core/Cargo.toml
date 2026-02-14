@@ -9,6 +9,7 @@ homepage.workspace = true
 authors.workspace = true
 keywords = ["agent", "ai", "control-plane", "orchestration", "enterprise"]
 categories = ["api-bindings", "web-programming"]
+readme = "README.md"
 
 [dependencies]
 a2a-rs = { workspace = true }

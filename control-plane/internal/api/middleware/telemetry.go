@@ -6,7 +6,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
-	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -23,9 +22,9 @@ func Telemetry(next http.Handler) http.Handler {
 		ctx, span := tracer.Start(ctx, spanName,
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(
-				semconv.HTTPMethodKey.String(r.Method),
-				semconv.HTTPTargetKey.String(r.URL.Path),
-				semconv.HTTPSchemeKey.String(scheme(r)),
+				attribute.String("http.request.method", r.Method),
+				attribute.String("url.path", r.URL.Path),
+				attribute.String("url.scheme", scheme(r)),
 				attribute.String("agentoven.kitchen", GetKitchen(ctx)),
 			),
 		)
@@ -37,7 +36,7 @@ func Telemetry(next http.Handler) http.Handler {
 
 		// Record response status
 		span.SetAttributes(
-			semconv.HTTPStatusCodeKey.Int(rw.statusCode),
+			attribute.Int("http.response.status_code", rw.statusCode),
 			attribute.Int("http.response_content_length", rw.bytes),
 		)
 	})

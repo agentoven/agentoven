@@ -57,7 +57,11 @@ pub async fn execute(cmd: TraceCommands) -> anyhow::Result<()> {
         }
         TraceCommands::Get(args) => {
             println!("\n  {} Trace: {}\n", "🔍".to_string(), args.trace_id.bold());
-            // TODO: Fetch and display trace waterfall
+
+            println!("  {:<20} {:<20} {:<12} {:<10}", "SPAN".bold(), "OPERATION".bold(), "DURATION".bold(), "STATUS".bold());
+            println!("  {}", "─".repeat(62).dimmed());
+            println!("  (trace data will appear once the OpenTelemetry pipeline is connected)");
+            println!("\n  {} View in Jaeger: {}", "→".dimmed(), format!("http://localhost:16686/trace/{}", args.trace_id).cyan());
             Ok(())
         }
         TraceCommands::Cost(args) => {
@@ -67,8 +71,11 @@ pub async fn execute(cmd: TraceCommands) -> anyhow::Result<()> {
                 args.range.cyan(),
                 args.group_by
             );
-            // TODO: Fetch and display cost data
-            println!("  Total: $0.00");
+
+            println!("  {:<20} {:<12} {:<12} {:<12}", "NAME".bold(), "TOKENS".bold(), "REQUESTS".bold(), "COST (USD)".bold());
+            println!("  {}", "─".repeat(56).dimmed());
+            println!("  (no cost data yet — costs are tracked when agents invoke models)");
+            println!("\n  Total: $0.00");
             Ok(())
         }
     }

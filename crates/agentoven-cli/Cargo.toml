@@ -9,6 +9,7 @@ homepage.workspace = true
 authors.workspace = true
 keywords = ["agent", "ai", "cli", "devtools"]
 categories = ["command-line-utilities"]
+readme = "README.md"
 
 [[bin]]
 name = "agentoven"

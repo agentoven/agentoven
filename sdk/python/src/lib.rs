@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use pyo3::exceptions::PyRuntimeError;
 
 /// AgentOven Python SDK — native Rust bindings via PyO3.
 ///
@@ -8,8 +9,8 @@ use pyo3::prelude::*;
 // ── Agent Types ──────────────────────────────────────────────
 
 /// Agent status in the AgentOven kitchen.
-#[pyclass]
-#[derive(Clone, Debug)]
+#[pyclass(eq, eq_int)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentStatus {
     Draft,
     Baking,
@@ -75,8 +76,8 @@ impl Agent {
 
 // ── Ingredient Types ─────────────────────────────────────────
 
-#[pyclass]
-#[derive(Clone, Debug)]
+#[pyclass(eq, eq_int)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IngredientKind {
     Model,
     Tool,
@@ -152,14 +153,65 @@ impl AgentOvenClient {
 
     /// Register an agent with the control plane.
     fn register_agent(&self, agent: &Agent) -> PyResult<String> {
-        // TODO: Call the Rust core client via tokio runtime
-        Ok(format!("Agent '{}' registered at {}", agent.name, self.url))
+        let client = agentoven_core::client::AgentOvenClient::new(&self.url)
+            .map_err(|e| PyRuntimeError::new_err(format!("Client init error: {e}")))?;
+        let client = if let Some(ref key) = self.api_key {
+            client.with_api_key(key.clone())
+        } else {
+            client
+        };
+        let client = client.with_kitchen(self.kitchen.clone());
+        let core_agent = agentoven_core::agent::Agent::builder(&agent.name)
+            .version(&agent.version)
+            .description(&agent.description)
+            .build();
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {e}")))?;
+        rt.block_on(async {
+            let registered = client
+                .register(&core_agent)
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("API error: {e}")))?;
+            Ok(format!("Agent '{}' registered (id={})", registered.name, registered.id))
+        })
     }
 
     /// List all agents in the current kitchen.
     fn list_agents(&self) -> PyResult<Vec<Agent>> {
-        // TODO: Fetch from control plane
-        Ok(vec![])
+        let client = agentoven_core::client::AgentOvenClient::new(&self.url)
+            .map_err(|e| PyRuntimeError::new_err(format!("Client init error: {e}")))?;
+        let client = if let Some(ref key) = self.api_key {
+            client.with_api_key(key.clone())
+        } else {
+            client
+        };
+        let client = client.with_kitchen(self.kitchen.clone());
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {e}")))?;
+        rt.block_on(async {
+            let items = client
+                .list_agents()
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("API error: {e}")))?;
+            let agents = items
+                .into_iter()
+                .map(|a| Agent {
+                    name: a.name,
+                    description: a.description,
+                    framework: format!("{:?}", a.framework),
+                    version: a.version,
+                    status: match a.status {
+                        agentoven_core::agent::AgentStatus::Baking => AgentStatus::Baking,
+                        agentoven_core::agent::AgentStatus::Ready => AgentStatus::Ready,
+                        agentoven_core::agent::AgentStatus::Cooled => AgentStatus::Cooled,
+                        agentoven_core::agent::AgentStatus::Burnt => AgentStatus::Burnt,
+                        agentoven_core::agent::AgentStatus::Retired => AgentStatus::Retired,
+                        _ => AgentStatus::Draft,
+                    },
+                })
+                .collect();
+            Ok(agents)
+        })
     }
 
     /// Deploy (bake) an agent.

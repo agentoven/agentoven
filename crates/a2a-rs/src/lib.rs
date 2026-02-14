@@ -47,9 +47,10 @@ pub use agent_card::{
     AgentCard, AgentCapabilities, AgentProvider, AgentSkill, ContentType, SecurityScheme,
 };
 pub use artifact::Artifact;
-pub use client::A2AClient;
+pub use client::{A2AClient, SendMessageRequest};
 pub use error::A2AError;
 pub use message::{Message, MessagePart, MessageRole, FilePart, DataPart};
 pub use notification::{PushNotificationConfig, PushNotificationEvent};
-pub use task::{Task, TaskState, TaskQueryParams};
+pub use task::{Task, TaskState, TaskEvent, TaskQueryParams};
 pub use transport::jsonrpc::{JsonRpcRequest, JsonRpcResponse, JsonRpcError};
+pub use transport::sse::TaskEventStream;

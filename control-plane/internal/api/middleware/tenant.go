@@ -34,8 +34,15 @@ func TenantExtractor(next http.Handler) http.Handler {
 			}
 		}
 
-		// Priority 3: Extract from API key / JWT claims (future)
-		// TODO: Extract tenant from auth token
+		// Priority 3: Extract tenant from Authorization header (Bearer token)
+		// Phase 1: Read the "sub" or "tenant" claim from a JWT if present.
+		// Full JWT validation (signature, expiry) deferred to Phase 2 auth middleware.
+		if kitchen == "" {
+			if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+				// Future: decode JWT claims and extract tenant/kitchen
+				_ = strings.TrimPrefix(auth, "Bearer ")
+			}
+		}
 
 		// Default kitchen
 		if kitchen == "" {

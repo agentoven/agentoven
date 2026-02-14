@@ -88,11 +88,21 @@ pub async fn execute(cli: Cli) -> anyhow::Result<()> {
 
 async fn status() -> anyhow::Result<()> {
     println!("{BANNER}");
-    println!("  Control plane: checking...");
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
-    // TODO: health check endpoint
-    println!("  Status:        🟢 connected");
-    println!("  Version:       {}", env!("CARGO_PKG_VERSION"));
+
+    // Check if control plane is reachable by attempting to list agents
+    print!("  Control plane: checking...");
+    match client.list_agents().await {
+        Ok(agents) => {
+            println!("\r  Control plane: 🟢 connected    ");
+            println!("  Agents:        {} registered", agents.len());
+        }
+        Err(_) => {
+            println!("\r  Control plane: 🔴 unreachable   ");
+            println!("  Tip:           Start with `docker compose up` or set AGENTOVEN_URL");
+        }
+    }
+    println!("  CLI version:   {}", env!("CARGO_PKG_VERSION"));
     Ok(())
 }

@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AgentOven — The Enterprise Agent Control Plane</title>
+  <meta name="description" content="AgentOven is the open-source control plane for AI agents. Registry, routing, orchestration, observability, and A2A protocol — all from one oven." />
+  <meta name="theme-color" content="#0a0a0f" />
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="AgentOven — Kubernetes for AI Agents" />
+  <meta property="og:description" content="Open-source enterprise control plane for AI agents. Registry, model routing, workflow orchestration, and native A2A protocol support." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://agentoven.dev" />
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- ─── Particle canvas ─────────────────────────────── -->
+  <canvas id="particles"></canvas>
+
+  <!-- ─── Nav ─────────────────────────────────────────── -->
+  <nav class="nav" id="nav">
+    <div class="nav-inner">
+      <a href="#" class="nav-brand">
+        <span class="nav-logo">🏺</span>
+        <span class="nav-name">AgentOven</span>
+      </a>
+      <div class="nav-links">
+        <a href="#features">Features</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#sdks">SDKs</a>
+        <a href="#open-source">Open Source</a>
+        <a href="https://github.com/agentoven/agentoven" class="btn btn-sm btn-ghost" target="_blank" rel="noopener">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+          GitHub
+        </a>
+        <a href="#get-started" class="btn btn-sm btn-primary">Get Started</a>
+      </div>
+      <button class="nav-toggle" id="nav-toggle" aria-label="Toggle navigation">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+  </nav>
+
+  <!-- ─── Hero ────────────────────────────────────────── -->
+  <section class="hero">
+    <div class="hero-glow"></div>
+    <div class="container">
+      <div class="hero-badge" data-animate="fade-up">
+        <span class="badge-dot"></span>
+        Open Source · MIT Licensed
+      </div>
+      <h1 class="hero-title" data-animate="fade-up" data-delay="100">
+        The control plane<br />
+        <span class="gradient-text">your AI agents deserve.</span>
+      </h1>
+      <p class="hero-subtitle" data-animate="fade-up" data-delay="200">
+        AgentOven is the open-source <strong>Kubernetes for AI Agents</strong> —
+        registry, model routing, workflow orchestration, observability,
+        and native <span class="text-accent">A2A protocol</span> support.
+        All from one oven.
+      </p>
+      <div class="hero-actions" data-animate="fade-up" data-delay="300">
+        <a href="#get-started" class="btn btn-primary btn-lg">
+          <span class="btn-icon">🔥</span> Start Baking
+        </a>
+        <a href="https://github.com/agentoven/agentoven" class="btn btn-ghost btn-lg" target="_blank" rel="noopener">
+          View on GitHub →
+        </a>
+      </div>
+      <div class="hero-code" data-animate="fade-up" data-delay="400">
+        <div class="code-window">
+          <div class="code-header">
+            <div class="code-dots"><span></span><span></span><span></span></div>
+            <span class="code-title">terminal</span>
+          </div>
+          <pre class="code-body"><code><span class="code-prompt">$</span> <span class="code-cmd">cargo install agentoven-cli</span>
+<span class="code-prompt">$</span> <span class="code-cmd">agentoven init</span> my-kitchen
+<span class="code-dim">🏺 Created agentoven.toml</span>
+<span class="code-dim">📝 Created prompts/system.md</span>
+
+<span class="code-prompt">$</span> <span class="code-cmd">agentoven agent register</span> \
+    --name research-bot \
+    --framework langchain
+<span class="code-success">✓ Agent 'research-bot' registered in kitchen 'my-kitchen'</span>
+
+<span class="code-prompt">$</span> <span class="code-cmd">agentoven agent bake</span> research-bot
+<span class="code-fire">🔥 Baking agent 'research-bot'... done!</span>
+<span class="code-success">✓ Agent is hot and ready at /agents/research-bot/a2a</span></code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── Logos / Social proof ────────────────────────── -->
+  <section class="social-proof">
+    <div class="container">
+      <p class="social-proof-label">Built with battle-tested foundations</p>
+      <div class="logo-strip">
+        <div class="tech-logo">🦀 Rust</div>
+        <div class="tech-logo">🐹 Go</div>
+        <div class="tech-logo">🐍 Python</div>
+        <div class="tech-logo">📘 TypeScript</div>
+        <div class="tech-logo">🤝 A2A Protocol</div>
+        <div class="tech-logo">🔌 MCP</div>
+        <div class="tech-logo">📡 OpenTelemetry</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── Features ────────────────────────────────────── -->
+  <section class="features" id="features">
+    <div class="container">
+      <div class="section-header" data-animate="fade-up">
+        <span class="section-badge">Capabilities</span>
+        <h2 class="section-title">Everything your agents need.<br /><span class="gradient-text">Nothing they don't.</span></h2>
+        <p class="section-desc">Ten core capabilities. One unified control plane. Zero vendor lock-in.</p>
+      </div>
+      <div class="features-grid">
+
+        <div class="feature-card" data-animate="fade-up" data-delay="0">
+          <div class="feature-icon">📋</div>
+          <h3>Agent Registry</h3>
+          <p>Discover, version, and manage every agent across your organization. The <strong>Menu</strong> for your AI kitchen.</p>
+        </div>
+
+        <div class="feature-card featured" data-animate="fade-up" data-delay="50">
+          <div class="feature-icon">🤝</div>
+          <h3>A2A Protocol</h3>
+          <p>Native Agent-to-Agent protocol support. Your agents can discover and collaborate with agents across teams — and organizations.</p>
+          <span class="feature-tag">Day 1</span>
+        </div>
+
+        <div class="feature-card" data-animate="fade-up" data-delay="100">
+          <div class="feature-icon">🔀</div>
+          <h3>Model Router</h3>
+          <p>Intelligent routing across OpenAI, Anthropic, Azure, Ollama, Bedrock, Vertex, and more. Fallback, cost-optimized, or latency-first.</p>
+        </div>
+
+        <div class="feature-card" data-animate="fade-up" data-delay="150">
+          <div class="feature-icon">📝</div>
+          <h3>Prompt Management</h3>
+          <p>Version-controlled prompts with A/B testing, rollback, and template variables. Prompts are <strong>ingredients</strong>.</p>
+        </div>
+
+        <div class="feature-card" data-animate="fade-up" data-delay="200">
+          <div class="feature-icon">🔄</div>
+          <h3>Workflow Orchestration</h3>
+          <p>DAG-based <strong>Recipes</strong> with fan-out/fan-in, human gates, evaluators, and conditional branching.</p>
+        </div>
+
+        <div class="feature-card" data-animate="fade-up" data-delay="250">
+          <div class="feature-icon">🔒</div>
+          <h3>Governance & RBAC</h3>
+          <p>API keys for OSS. SSO, SAML, and fine-grained RBAC for enterprise. SOC2 + GDPR compliant.</p>
+        </div>
+
+        <div class="feature-card" data-animate="fade-up" data-delay="300">
+          <div class="feature-icon">💰</div>
+          <h3>Cost Tracking</h3>
+          <p>Per-agent, per-model, per-kitchen token and cost tracking. Know exactly where every dollar goes.</p>
+        </div>
+
+        <div class="feature-card" data-animate="fade-up" data-delay="350">
+          <div class="feature-icon">📡</div>
+          <h3>Observability</h3>
+          <p>OpenTelemetry-native distributed tracing. Every agent call, every model invocation, every workflow step — traced.</p>
+        </div>
+
+        <div class="feature-card" data-animate="fade-up" data-delay="400">
+          <div class="feature-icon">🔌</div>
+          <h3>MCP Integration</h3>
+          <p>Native Model Context Protocol support. Connect agents to tools, databases, and APIs with zero friction.</p>
+        </div>
+
+        <div class="feature-card" data-animate="fade-up" data-delay="450">
+          <div class="feature-icon">🚀</div>
+          <h3>Deployment Runtime</h3>
+          <p><strong>Bake</strong> agents to production. Cool them to pause. Retire when done. Full lifecycle management.</p>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── Architecture ────────────────────────────────── -->
+  <section class="architecture" id="architecture">
+    <div class="container">
+      <div class="section-header" data-animate="fade-up">
+        <span class="section-badge">Architecture</span>
+        <h2 class="section-title">Built for <span class="gradient-text">serious scale.</span></h2>
+        <p class="section-desc">Rust core for blazing performance. Go control plane for operational simplicity. Native SDKs for every language.</p>
+      </div>
+      <div class="arch-diagram" data-animate="fade-up" data-delay="100">
+        <div class="arch-layer">
+          <div class="arch-label">SDKs</div>
+          <div class="arch-boxes">
+            <div class="arch-box arch-sdk">🐍 Python<span>PyO3</span></div>
+            <div class="arch-box arch-sdk">📘 TypeScript<span>napi-rs</span></div>
+            <div class="arch-box arch-sdk">🦀 Rust<span>native</span></div>
+            <div class="arch-box arch-sdk">⌨️ CLI<span>agentoven</span></div>
+          </div>
+        </div>
+        <div class="arch-connector">
+          <svg width="2" height="40"><line x1="1" y1="0" x2="1" y2="40" stroke="var(--ember)" stroke-width="2" stroke-dasharray="4 4"/></svg>
+        </div>
+        <div class="arch-layer">
+          <div class="arch-label">Control Plane</div>
+          <div class="arch-boxes">
+            <div class="arch-box arch-core">Agent Registry</div>
+            <div class="arch-box arch-core">Model Router</div>
+            <div class="arch-box arch-core">Recipe Engine</div>
+            <div class="arch-box arch-core">A2A Gateway</div>
+          </div>
+        </div>
+        <div class="arch-connector">
+          <svg width="2" height="40"><line x1="1" y1="0" x2="1" y2="40" stroke="var(--ember)" stroke-width="2" stroke-dasharray="4 4"/></svg>
+        </div>
+        <div class="arch-layer">
+          <div class="arch-label">Infrastructure</div>
+          <div class="arch-boxes">
+            <div class="arch-box arch-infra">PostgreSQL</div>
+            <div class="arch-box arch-infra">OpenTelemetry</div>
+            <div class="arch-box arch-infra">Jaeger / Grafana</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── SDK Examples ────────────────────────────────── -->
+  <section class="sdks" id="sdks">
+    <div class="container">
+      <div class="section-header" data-animate="fade-up">
+        <span class="section-badge">Developer Experience</span>
+        <h2 class="section-title">Your language. <span class="gradient-text">Our oven.</span></h2>
+        <p class="section-desc">Native SDKs powered by Rust — not wrappers. Real types, real performance, real ergonomics.</p>
+      </div>
+
+      <div class="sdk-tabs" data-animate="fade-up" data-delay="100">
+        <button class="sdk-tab active" data-lang="python">Python</button>
+        <button class="sdk-tab" data-lang="typescript">TypeScript</button>
+        <button class="sdk-tab" data-lang="rust">Rust</button>
+        <button class="sdk-tab" data-lang="cli">CLI</button>
+      </div>
+
+      <div class="sdk-panels">
+        <div class="sdk-panel active" data-lang="python">
+          <div class="code-window">
+            <div class="code-header">
+              <div class="code-dots"><span></span><span></span><span></span></div>
+              <span class="code-title">app.py</span>
+            </div>
+            <pre class="code-body"><code><span class="code-kw">from</span> agentoven <span class="code-kw">import</span> Agent, AgentOvenClient, Ingredient, IngredientKind
+
+client = AgentOvenClient(kitchen=<span class="code-str">"production"</span>)
+
+<span class="code-comment"># Define an agent</span>
+agent = Agent(
+    name=<span class="code-str">"research-bot"</span>,
+    description=<span class="code-str">"Researches topics and summarizes findings"</span>,
+    framework=<span class="code-str">"langchain"</span>,
+)
+
+<span class="code-comment"># Register and bake (deploy)</span>
+client.register_agent(agent)
+client.bake(<span class="code-str">"research-bot"</span>)
+<span class="code-comment"># 🔥 Agent is hot and ready!</span></code></pre>
+          </div>
+        </div>
+
+        <div class="sdk-panel" data-lang="typescript">
+          <div class="code-window">
+            <div class="code-header">
+              <div class="code-dots"><span></span><span></span><span></span></div>
+              <span class="code-title">app.ts</span>
+            </div>
+            <pre class="code-body"><code><span class="code-kw">import</span> { AgentOvenClient, createAgent } <span class="code-kw">from</span> <span class="code-str">"agentoven"</span>;
+
+<span class="code-kw">const</span> client = <span class="code-kw">new</span> AgentOvenClient({ kitchen: <span class="code-str">"production"</span> });
+
+<span class="code-comment">// Define an agent</span>
+<span class="code-kw">const</span> agent = createAgent(<span class="code-str">"research-bot"</span>, {
+  description: <span class="code-str">"Researches topics and summarizes findings"</span>,
+  framework: <span class="code-str">"langchain"</span>,
+});
+
+<span class="code-comment">// Register and bake (deploy)</span>
+<span class="code-kw">await</span> client.registerAgent(agent);
+<span class="code-kw">await</span> client.bake(<span class="code-str">"research-bot"</span>);
+<span class="code-comment">// 🔥 Agent is hot and ready!</span></code></pre>
+          </div>
+        </div>
+
+        <div class="sdk-panel" data-lang="rust">
+          <div class="code-window">
+            <div class="code-header">
+              <div class="code-dots"><span></span><span></span><span></span></div>
+              <span class="code-title">main.rs</span>
+            </div>
+            <pre class="code-body"><code><span class="code-kw">use</span> agentoven_core::{AgentBuilder, AgentOvenClient, AgentFramework};
+
+<span class="code-kw">let</span> client = AgentOvenClient::from_env()?;
+
+<span class="code-comment">// Define an agent</span>
+<span class="code-kw">let</span> agent = AgentBuilder::new(<span class="code-str">"research-bot"</span>)
+    .description(<span class="code-str">"Researches topics and summarizes findings"</span>)
+    .framework(AgentFramework::LangChain)
+    .build();
+
+<span class="code-comment">// Register and bake (deploy)</span>
+client.register_agent(&agent).<span class="code-kw">await</span>?;
+client.bake(<span class="code-str">"research-bot"</span>).<span class="code-kw">await</span>?;
+<span class="code-comment">// 🔥 Agent is hot and ready!</span></code></pre>
+          </div>
+        </div>
+
+        <div class="sdk-panel" data-lang="cli">
+          <div class="code-window">
+            <div class="code-header">
+              <div class="code-dots"><span></span><span></span><span></span></div>
+              <span class="code-title">terminal</span>
+            </div>
+            <pre class="code-body"><code><span class="code-prompt">$</span> <span class="code-cmd">agentoven login</span>
+<span class="code-dim">Enter API key: ****</span>
+<span class="code-success">✓ Authenticated to https://api.agentoven.dev</span>
+
+<span class="code-prompt">$</span> <span class="code-cmd">agentoven agent register</span> \
+    --name research-bot \
+    --framework langchain \
+    --description <span class="code-str">"Researches and summarizes"</span>
+<span class="code-success">✓ Registered in kitchen 'production'</span>
+
+<span class="code-prompt">$</span> <span class="code-cmd">agentoven agent bake</span> research-bot
+<span class="code-fire">🔥 Baking... done!</span>
+
+<span class="code-prompt">$</span> <span class="code-cmd">agentoven agent list</span>
+<span class="code-dim">┌────────────────┬───────────┬──────────┐
+│ Name           │ Framework │ Status   │
+├────────────────┼───────────┼──────────┤
+│ research-bot   │ langchain │ 🟢 ready │
+└────────────────┴───────────┴──────────┘</span></code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── Kitchen Vocabulary ──────────────────────────── -->
+  <section class="vocabulary">
+    <div class="container">
+      <div class="section-header" data-animate="fade-up">
+        <span class="section-badge">The Kitchen</span>
+        <h2 class="section-title">Speak the <span class="gradient-text">language of the oven.</span></h2>
+      </div>
+      <div class="vocab-grid" data-animate="fade-up" data-delay="100">
+        <div class="vocab-card">
+          <span class="vocab-emoji">🏺</span>
+          <h4>Oven</h4>
+          <p>The control plane itself</p>
+        </div>
+        <div class="vocab-card">
+          <span class="vocab-emoji">📖</span>
+          <h4>Recipe</h4>
+          <p>A multi-agent workflow</p>
+        </div>
+        <div class="vocab-card">
+          <span class="vocab-emoji">🧂</span>
+          <h4>Ingredient</h4>
+          <p>Model, tool, prompt, or data source</p>
+        </div>
+        <div class="vocab-card">
+          <span class="vocab-emoji">🔥</span>
+          <h4>Bake</h4>
+          <p>Deploy an agent to production</p>
+        </div>
+        <div class="vocab-card">
+          <span class="vocab-emoji">❄️</span>
+          <h4>Cool</h4>
+          <p>Pause an agent gracefully</p>
+        </div>
+        <div class="vocab-card">
+          <span class="vocab-emoji">🍽️</span>
+          <h4>Kitchen</h4>
+          <p>A workspace / tenant</p>
+        </div>
+        <div class="vocab-card">
+          <span class="vocab-emoji">👨‍🍳</span>
+          <h4>Baker</h4>
+          <p>You, the developer</p>
+        </div>
+        <div class="vocab-card">
+          <span class="vocab-emoji">📜</span>
+          <h4>Menu</h4>
+          <p>The agent catalog</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── Open Source ─────────────────────────────────── -->
+  <section class="open-source" id="open-source">
+    <div class="container">
+      <div class="oss-split">
+        <div class="oss-content" data-animate="fade-up">
+          <span class="section-badge">Open Core</span>
+          <h2 class="section-title">Free forever.<br /><span class="gradient-text">Enterprise when ready.</span></h2>
+          <p>The full control plane is MIT-licensed. Use it, fork it, contribute to it. When you need multi-tenant SSO, cross-org A2A federation, FedRAMP compliance, or managed hosting — we've got you.</p>
+          <div class="oss-compare">
+            <div class="oss-tier">
+              <h4>🏺 Open Source</h4>
+              <ul>
+                <li>Full agent registry & lifecycle</li>
+                <li>Model routing (7+ providers)</li>
+                <li>A2A + MCP support</li>
+                <li>Workflow orchestration</li>
+                <li>OpenTelemetry tracing (7-day)</li>
+                <li>CLI + Python + TypeScript + Rust SDKs</li>
+                <li>API key authentication</li>
+              </ul>
+            </div>
+            <div class="oss-tier tier-enterprise">
+              <h4>🏢 Enterprise</h4>
+              <ul>
+                <li>Everything in Open Source</li>
+                <li>Multi-tenant with SSO / SAML / RBAC</li>
+                <li>Cross-org A2A federation</li>
+                <li>400-day trace retention</li>
+                <li>SOC2, GDPR, HIPAA, FedRAMP, GxP</li>
+                <li>Managed cloud or BYOC</li>
+                <li>Priority support & SLA</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── CTA ─────────────────────────────────────────── -->
+  <section class="cta" id="get-started">
+    <div class="container">
+      <div class="cta-card" data-animate="fade-up">
+        <div class="cta-glow"></div>
+        <h2>Ready to fire up the oven?</h2>
+        <p>Get started in under 60 seconds. Your agents will thank you.</p>
+        <div class="cta-install">
+          <div class="code-window code-inline">
+            <pre><code><span class="code-prompt">$</span> <span class="code-cmd">cargo install agentoven-cli</span> && <span class="code-cmd">agentoven init</span></code></pre>
+          </div>
+        </div>
+        <div class="cta-actions">
+          <a href="https://github.com/agentoven/agentoven" class="btn btn-primary btn-lg" target="_blank" rel="noopener">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+            Star on GitHub
+          </a>
+          <a href="https://docs.agentoven.dev" class="btn btn-ghost btn-lg">Read the Docs →</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── Footer ──────────────────────────────────────── -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-inner">
+        <div class="footer-brand">
+          <span class="nav-logo">🏺</span>
+          <span>AgentOven</span>
+          <span class="footer-copy">© 2026 AgentOven Contributors · MIT License</span>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/agentoven/agentoven" target="_blank" rel="noopener">GitHub</a>
+          <a href="https://docs.agentoven.dev">Docs</a>
+          <a href="https://github.com/agentoven/agentoven/issues" target="_blank" rel="noopener">Issues</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script src="main.js"></script>
+</body>
+</html>
