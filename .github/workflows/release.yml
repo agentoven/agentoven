@@ -8,8 +8,11 @@ on:
 permissions:
   contents: write
 
+env:
+  GO_VERSION: '1.24'
+
 jobs:
-  # ── Build CLI binaries ───────────────────────────────────────
+  # ── Build CLI binaries (Rust) ────────────────────────────────
   cli:
     name: CLI (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
@@ -59,6 +62,59 @@ jobs:
           name: agentoven-${{ matrix.target }}
           path: dist/
 
+  # ── Build Go server binaries ─────────────────────────────────
+  server:
+    name: Server (${{ matrix.goos }}-${{ matrix.goarch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            os: ubuntu-latest
+          - goos: linux
+            goarch: arm64
+            os: ubuntu-latest
+          - goos: darwin
+            goarch: amd64
+            os: macos-latest
+          - goos: darwin
+            goarch: arm64
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: control-plane/go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build dashboard
+        working-directory: control-plane/dashboard
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build server
+        working-directory: control-plane
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          go build -trimpath -ldflags="-s -w" \
+            -o ../dist/agentoven-server-${{ matrix.goos }}-${{ matrix.goarch }} \
+            ./cmd/server
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentoven-server-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+
   # ── Python wheels ────────────────────────────────────────────
   python-wheels:
     name: Python (${{ matrix.os }})
@@ -85,7 +141,7 @@ jobs:
   # ── Create GitHub Release ────────────────────────────────────
   release:
     name: Create Release
-    needs: [cli, python-wheels]
+    needs: [cli, server, python-wheels]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -98,3 +154,43 @@ jobs:
         with:
           files: dist/**/*
           generate_release_notes: true
+
+  # ── Update Homebrew tap ──────────────────────────────────────
+  homebrew:
+    name: Update Homebrew Formula
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download source tarball and compute SHA
+        id: sha
+        run: |
+          curl -sL "https://github.com/agentoven/agentoven/archive/refs/tags/${GITHUB_REF#refs/tags/}.tar.gz" \
+            -o source.tar.gz
+          echo "sha256=$(shasum -a 256 source.tar.gz | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: agentoven/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update formula
+        run: |
+          cd homebrew-tap
+          sed -i "s|url \".*\"|url \"https://github.com/agentoven/agentoven/archive/refs/tags/v${{ steps.version.outputs.version }}.tar.gz\"|" Formula/agentoven.rb
+          sed -i "s|sha256 \".*\"|sha256 \"${{ steps.sha.outputs.sha256 }}\"|" Formula/agentoven.rb
+          sed -i "s|agentoven .*\"|agentoven ${{ steps.version.outputs.version }}\"|" Formula/agentoven.rb
+
+      - name: Commit and push
+        working-directory: homebrew-tap
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/agentoven.rb
+          git commit -m "agentoven ${{ steps.version.outputs.version }}"
+          git push

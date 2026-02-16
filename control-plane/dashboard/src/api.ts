@@ -10,9 +10,32 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `API error ${res.status}`);
+    throw new APIError(body.error || `API error ${res.status}`, res.status, body.details);
   }
   return res.json();
+}
+
+/** Structured API error with optional detail array (e.g. bake validation). */
+export class APIError extends Error {
+  status: number;
+  details?: string[];
+  constructor(message: string, status: number, details?: string[]) {
+    super(message);
+    this.status = status;
+    this.details = details;
+  }
+}
+
+// ── Ingredients ───────────────────────────────────────────────
+
+export type IngredientKind = 'model' | 'tool' | 'prompt' | 'data';
+
+export interface Ingredient {
+  id: string;
+  name: string;
+  kind: IngredientKind;
+  config: Record<string, unknown>;
+  required: boolean;
 }
 
 // ── Agents ────────────────────────────────────────────────────
@@ -29,11 +52,26 @@ export interface Agent {
   skills: string[];
   model_provider: string;
   model_name: string;
-  ingredients: unknown[];
+  ingredients: Ingredient[];
   tags: Record<string, string>;
   created_by: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface TestAgentResponse {
+  agent: string;
+  response: string;
+  provider: string;
+  model: string;
+  usage: {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    estimated_cost_usd: number;
+  };
+  latency_ms: number;
+  trace_id: string;
 }
 
 export const agents = {
@@ -49,6 +87,11 @@ export const agents = {
     request<Agent>(`/agents/${name}/bake`, { method: 'POST' }),
   cool: (name: string) =>
     request<Agent>(`/agents/${name}/cool`, { method: 'POST' }),
+  test: (name: string, message: string) =>
+    request<TestAgentResponse>(`/agents/${name}/test`, {
+      method: 'POST',
+      body: JSON.stringify({ message }),
+    }),
 };
 
 // ── Recipes ───────────────────────────────────────────────────
@@ -104,9 +147,14 @@ export const providers = {
   get: (name: string) => request<ModelProvider>(`/models/providers/${name}`),
   create: (provider: Partial<ModelProvider>) =>
     request<ModelProvider>('/models/providers', { method: 'POST', body: JSON.stringify(provider) }),
+  update: (name: string, provider: Partial<ModelProvider>) =>
+    request<ModelProvider>(`/models/providers/${name}`, {
+      method: 'PUT',
+      body: JSON.stringify(provider),
+    }),
   delete: (name: string) =>
     request<void>(`/models/providers/${name}`, { method: 'DELETE' }),
-  health: () => request<unknown>('/models/health'),
+  health: () => request<Record<string, boolean>>('/models/health'),
 };
 
 // ── MCP Tools ─────────────────────────────────────────────────
@@ -130,6 +178,8 @@ export const tools = {
   get: (name: string) => request<MCPTool>(`/tools/${name}`),
   create: (tool: Partial<MCPTool>) =>
     request<MCPTool>('/tools', { method: 'POST', body: JSON.stringify(tool) }),
+  update: (name: string, tool: Partial<MCPTool>) =>
+    request<MCPTool>(`/tools/${name}`, { method: 'PUT', body: JSON.stringify(tool) }),
   delete: (name: string) =>
     request<void>(`/tools/${name}`, { method: 'DELETE' }),
 };

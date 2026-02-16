@@ -123,11 +123,25 @@ func (h *Handlers) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if req.Framework != "" {
 		agent.Framework = req.Framework
 	}
+	if req.ModelProvider != "" {
+		agent.ModelProvider = req.ModelProvider
+	}
+	if req.ModelName != "" {
+		agent.ModelName = req.ModelName
+	}
 	if len(req.Ingredients) > 0 {
 		agent.Ingredients = req.Ingredients
 	}
 	if len(req.Skills) > 0 {
 		agent.Skills = req.Skills
+	}
+	if len(req.Tags) > 0 {
+		if agent.Tags == nil {
+			agent.Tags = map[string]string{}
+		}
+		for k, v := range req.Tags {
+			agent.Tags[k] = v
+		}
 	}
 	agent.UpdatedAt = time.Now().UTC()
 
@@ -171,6 +185,53 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 
+	// ── Validate ingredients before baking ───────────────────────
+	var errors []string
+
+	// Must have a model provider configured (via top-level field or model ingredient)
+	hasModel := agent.ModelProvider != ""
+	for _, ing := range agent.Ingredients {
+		if ing.Kind == models.IngredientModel {
+			hasModel = true
+			break
+		}
+	}
+	if !hasModel {
+		errors = append(errors, "Agent must have a model provider configured (set model_provider or add a model ingredient)")
+	}
+
+	// Validate referenced provider exists and has an API key
+	if agent.ModelProvider != "" {
+		provider, err := h.Store.GetProvider(r.Context(), agent.ModelProvider)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("Model provider '%s' not found — register it first", agent.ModelProvider))
+		} else if provider.Kind != "ollama" {
+			if provider.Config == nil || provider.Config["api_key"] == nil || provider.Config["api_key"] == "" {
+				errors = append(errors, fmt.Sprintf("Model provider '%s' has no API key configured", agent.ModelProvider))
+			}
+		}
+	}
+
+	// Validate referenced tools exist and are enabled
+	for _, ing := range agent.Ingredients {
+		if ing.Kind == models.IngredientTool {
+			tool, err := h.Store.GetTool(r.Context(), kitchen, ing.Name)
+			if err != nil {
+				errors = append(errors, fmt.Sprintf("Tool ingredient '%s' not found — register it first", ing.Name))
+			} else if !tool.Enabled {
+				errors = append(errors, fmt.Sprintf("Tool '%s' is disabled — enable it before baking", ing.Name))
+			}
+		}
+	}
+
+	if len(errors) > 0 {
+		respondJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"error":   "Agent cannot be baked — missing or invalid ingredients",
+			"details": errors,
+		})
+		return
+	}
+
 	agent.Status = models.AgentStatusBaking
 	agent.UpdatedAt = time.Now().UTC()
 	if req.Version != "" {
@@ -189,11 +250,32 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 		Str("environment", req.Environment).
 		Msg("Agent baking started")
 
-	// Simulate bake completion after delay
+	// Validate provider connectivity async, then mark ready or burnt
 	go func() {
-		time.Sleep(2 * time.Second)
+		time.Sleep(1 * time.Second)
+
+		// Health-check the provider
+		if agent.ModelProvider != "" {
+			results := h.Router.HealthCheck(context.Background())
+			if healthy, found := results[agent.ModelProvider]; found && !healthy {
+				agent.Status = models.AgentStatusBurnt
+				if agent.Tags == nil {
+					agent.Tags = map[string]string{}
+				}
+				agent.Tags["error"] = fmt.Sprintf("Provider '%s' health check failed", agent.ModelProvider)
+				agent.UpdatedAt = time.Now().UTC()
+				h.Store.UpdateAgent(context.Background(), agent)
+				log.Warn().Str("agent", agentName).Msg("Agent burnt — provider health check failed")
+				return
+			}
+		}
+
 		agent.Status = models.AgentStatusReady
 		agent.UpdatedAt = time.Now().UTC()
+		if agent.Tags == nil {
+			agent.Tags = map[string]string{}
+		}
+		delete(agent.Tags, "error")
 		if err := h.Store.UpdateAgent(context.Background(), agent); err != nil {
 			log.Warn().Err(err).Str("agent", agentName).Msg("Failed to update agent to ready")
 		} else {
@@ -207,6 +289,91 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 		"environment": req.Environment,
 		"status":      string(models.AgentStatusBaking),
 		"agent_card":  "/agents/" + agentName + "/a2a/.well-known/agent-card.json",
+	})
+}
+
+// TestAgent sends a single test message through the agent's configured provider.
+func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
+	agentName := chi.URLParam(r, "agentName")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	if agent.ModelProvider == "" {
+		respondError(w, http.StatusBadRequest, "Agent has no model provider configured")
+		return
+	}
+
+	var req struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Message == "" {
+		respondError(w, http.StatusBadRequest, "Request must include a non-empty 'message' field")
+		return
+	}
+
+	// Build messages — include system prompt from ingredients if present
+	messages := []models.ChatMessage{}
+	for _, ing := range agent.Ingredients {
+		if ing.Kind == models.IngredientPrompt {
+			if text, ok := ing.Config["text"].(string); ok && text != "" {
+				messages = append(messages, models.ChatMessage{Role: "system", Content: text})
+			}
+		}
+	}
+	messages = append(messages, models.ChatMessage{Role: "user", Content: req.Message})
+
+	// Route through the model router
+	start := time.Now()
+	routeReq := &models.RouteRequest{
+		Messages: messages,
+		Model:    agent.ModelName,
+		Strategy: models.RoutingFallback,
+		Kitchen:  kitchen,
+		AgentRef: agentName,
+	}
+
+	resp, err := h.Router.Route(r.Context(), routeReq)
+	duration := time.Since(start)
+	if err != nil {
+		respondError(w, http.StatusBadGateway, "Model provider error: "+err.Error())
+		return
+	}
+
+	// Record trace
+	trace := &models.Trace{
+		ID:          uuid.New().String(),
+		AgentName:   agentName,
+		Kitchen:     kitchen,
+		Status:      "completed",
+		DurationMs:  duration.Milliseconds(),
+		TotalTokens: resp.Usage.TotalTokens,
+		CostUSD:     resp.Usage.EstimatedCost,
+		Metadata: map[string]interface{}{
+			"provider": resp.Provider,
+			"model":    resp.Model,
+			"type":     "test",
+		},
+		CreatedAt: time.Now().UTC(),
+	}
+	h.Store.CreateTrace(r.Context(), trace)
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"agent":     agentName,
+		"response":  resp.Content,
+		"provider":  resp.Provider,
+		"model":     resp.Model,
+		"usage":     resp.Usage,
+		"latency_ms": duration.Milliseconds(),
+		"trace_id":  trace.ID,
 	})
 }
 
@@ -484,7 +651,13 @@ func (h *Handlers) ListProviders(w http.ResponseWriter, r *http.Request) {
 	if providers == nil {
 		providers = []models.ModelProvider{}
 	}
-	respondJSON(w, http.StatusOK, providers)
+	// Mask API keys in response
+	masked := make([]models.ModelProvider, len(providers))
+	for i, p := range providers {
+		cp := p
+		masked[i] = *maskProviderKeys(&cp)
+	}
+	respondJSON(w, http.StatusOK, masked)
 }
 
 func (h *Handlers) CreateProvider(w http.ResponseWriter, r *http.Request) {
@@ -517,7 +690,7 @@ func (h *Handlers) GetProvider(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	respondJSON(w, http.StatusOK, provider)
+	respondJSON(w, http.StatusOK, maskProviderKeys(provider))
 }
 
 func (h *Handlers) DeleteProvider(w http.ResponseWriter, r *http.Request) {
@@ -527,6 +700,54 @@ func (h *Handlers) DeleteProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handlers) UpdateProvider(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "providerName")
+
+	provider, err := h.Store.GetProvider(r.Context(), name)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	var req models.ModelProvider
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if req.Kind != "" {
+		provider.Kind = req.Kind
+	}
+	if req.Endpoint != "" {
+		provider.Endpoint = req.Endpoint
+	}
+	if len(req.Models) > 0 {
+		provider.Models = req.Models
+	}
+	if req.Config != nil {
+		// Merge config — don't overwrite existing keys that aren't in the update
+		if provider.Config == nil {
+			provider.Config = map[string]interface{}{}
+		}
+		for k, v := range req.Config {
+			provider.Config[k] = v
+		}
+	}
+	provider.IsDefault = req.IsDefault
+
+	if err := h.Store.UpdateProvider(r.Context(), provider); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	log.Info().Str("provider", name).Msg("Model provider updated")
+	respondJSON(w, http.StatusOK, maskProviderKeys(provider))
 }
 
 func (h *Handlers) RouteModel(w http.ResponseWriter, r *http.Request) {
@@ -695,6 +916,54 @@ func (h *Handlers) DeleteMCPTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handlers) UpdateMCPTool(w http.ResponseWriter, r *http.Request) {
+	toolName := chi.URLParam(r, "toolName")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	tool, err := h.Store.GetTool(r.Context(), kitchen, toolName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	var req models.MCPTool
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if req.Description != "" {
+		tool.Description = req.Description
+	}
+	if req.Endpoint != "" {
+		tool.Endpoint = req.Endpoint
+	}
+	if req.Transport != "" {
+		tool.Transport = req.Transport
+	}
+	if req.Schema != nil {
+		tool.Schema = req.Schema
+	}
+	if req.AuthConfig != nil {
+		tool.AuthConfig = req.AuthConfig
+	}
+	// Always apply enabled (it's a boolean, false is meaningful)
+	tool.Enabled = req.Enabled
+	tool.UpdatedAt = time.Now().UTC()
+
+	if err := h.Store.UpdateTool(r.Context(), tool); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	log.Info().Str("tool", toolName).Str("kitchen", kitchen).Msg("MCP tool updated")
+	respondJSON(w, http.StatusOK, tool)
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1018,4 +1287,25 @@ func respondJSON(w http.ResponseWriter, status int, data interface{}) {
 
 func respondError(w http.ResponseWriter, status int, message string) {
 	respondJSON(w, status, map[string]string{"error": message})
+}
+
+// maskProviderKeys redacts sensitive fields (api_key, api_secret) in provider
+// config before returning to API consumers.
+func maskProviderKeys(p *models.ModelProvider) *models.ModelProvider {
+	if p.Config == nil {
+		return p
+	}
+	cp := *p
+	cp.Config = make(map[string]interface{}, len(p.Config))
+	for k, v := range p.Config {
+		cp.Config[k] = v
+	}
+	for _, key := range []string{"api_key", "api_secret"} {
+		if val, ok := cp.Config[key].(string); ok && len(val) > 4 {
+			cp.Config[key] = val[:4] + "****"
+		} else if ok {
+			cp.Config[key] = "****"
+		}
+	}
+	return &cp
 }

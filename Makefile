@@ -8,13 +8,16 @@ all: build
 
 # ── Build ─────────────────────────────────────
 
-build: build-rust build-go build-python build-typescript
+build: build-rust build-go build-dashboard build-python build-typescript
 
 build-rust:
 	cargo build --release
 
 build-go:
 	cd control-plane && go build -o bin/agentoven-server ./cmd/server
+
+build-dashboard:
+	cd control-plane/dashboard && npm install --ignore-scripts && npm run build
 
 build-python:
 	cd sdk/python && maturin build --release
@@ -85,10 +88,15 @@ clean:
 install-cli:
 	cargo install --path crates/agentoven-cli
 
+install-server:
+	cd control-plane && go build -trimpath -ldflags="-s -w" -o $(GOPATH)/bin/agentoven-server ./cmd/server
+
+install-all: install-cli install-server build-dashboard
+	@echo "✅ agentoven + agentoven-server installed, dashboard built"
+
 install-python:
 	cd sdk/python && maturin develop
 
 install-deps:
-	cd ui && npm install
+	cd control-plane/dashboard && npm install
 	cd sdk/typescript && npm install
-	cd docs && npm install

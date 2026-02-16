@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { AgentsPage } from './pages/Agents';
+import { AgentTestPage } from './pages/AgentTest';
 import { RecipesPage } from './pages/Recipes';
 import { ProvidersPage } from './pages/Providers';
 import { ToolsPage } from './pages/Tools';
@@ -14,6 +15,7 @@ function App() {
         <Route element={<Layout />}>
           <Route path="/" element={<OverviewPage />} />
           <Route path="/agents" element={<AgentsPage />} />
+          <Route path="/agents/:name/test" element={<AgentTestPage />} />
           <Route path="/recipes" element={<RecipesPage />} />
           <Route path="/providers" element={<ProvidersPage />} />
           <Route path="/tools" element={<ToolsPage />} />

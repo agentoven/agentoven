@@ -49,7 +49,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.24'
           cache-dependency-path: control-plane/go.sum
 
       - name: Build
@@ -63,6 +63,146 @@ jobs:
       - name: Vet
         working-directory: control-plane
         run: go vet ./...
+
+  # ── Go Integration Tests ─────────────────────────────────────
+  go-integration:
+    name: Go Integration Tests
+    runs-on: ubuntu-latest
+    needs: [go, dashboard]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: control-plane/go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build dashboard
+        working-directory: control-plane/dashboard
+        run: npm ci && npm run build
+
+      - name: Build server
+        working-directory: control-plane
+        run: go build -o agentoven-server ./cmd/server
+
+      - name: Run integration tests
+        working-directory: control-plane
+        run: |
+          # Start server in background (in-memory store, no PG needed)
+          ./agentoven-server &
+          SERVER_PID=$!
+          sleep 2
+
+          BASE="http://localhost:8080/api/v1"
+
+          echo "=== Health check ==="
+          curl -sf http://localhost:8080/health | jq .
+
+          echo "=== Create provider ==="
+          curl -sf -X POST "$BASE/models/providers" \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"test-ollama","kind":"ollama","endpoint":"http://localhost:11434","models":["llama3"],"config":{}}' \
+            | jq .
+
+          echo "=== List providers ==="
+          curl -sf "$BASE/models/providers" | jq .
+
+          echo "=== Update provider ==="
+          curl -sf -X PUT "$BASE/models/providers/test-ollama" \
+            -H 'Content-Type: application/json' \
+            -d '{"is_default":true,"config":{"cost_per_1k_input":0.001}}' \
+            | jq .
+
+          echo "=== Create tool ==="
+          curl -sf -X POST "$BASE/tools" \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"search","endpoint":"http://localhost:3001/mcp","transport":"http","description":"Search tool","enabled":true}' \
+            | jq .
+
+          echo "=== Update tool (toggle enabled) ==="
+          curl -sf -X PUT "$BASE/tools/search" \
+            -H 'Content-Type: application/json' \
+            -d '{"enabled":false}' \
+            | jq .
+
+          echo "=== Create agent with ingredients ==="
+          curl -sf -X POST "$BASE/agents" \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "name":"test-agent",
+              "description":"Integration test agent",
+              "framework":"custom",
+              "model_provider":"test-ollama",
+              "model_name":"llama3",
+              "skills":["summarize"],
+              "ingredients":[
+                {"name":"system-prompt","kind":"prompt","config":{"text":"You are a test assistant."},"required":true}
+              ]
+            }' \
+            | jq .
+
+          echo "=== Get agent ==="
+          curl -sf "$BASE/agents/test-agent" | jq .
+
+          echo "=== Bake agent ==="
+          BAKE_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/agents/test-agent/bake")
+          echo "Bake returned: $BAKE_STATUS"
+          # Bake should succeed (202) — ollama provider doesn't need API key
+          [ "$BAKE_STATUS" = "202" ] || { echo "FAIL: expected 202"; kill $SERVER_PID; exit 1; }
+
+          sleep 1
+          echo "=== Agent status after bake ==="
+          curl -sf "$BASE/agents/test-agent" | jq '{name: .name, status: .status}'
+
+          echo "=== Create agent without model (should fail bake) ==="
+          curl -sf -X POST "$BASE/agents" \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"bad-agent","description":"No model"}' \
+            | jq .
+
+          BAKE_FAIL=$(curl -s -o /tmp/bake_err.json -w "%{http_code}" -X POST "$BASE/agents/bad-agent/bake")
+          echo "Bake bad-agent returned: $BAKE_FAIL"
+          cat /tmp/bake_err.json | jq .
+          [ "$BAKE_FAIL" = "400" ] || { echo "FAIL: expected 400"; kill $SERVER_PID; exit 1; }
+
+          echo "=== List traces ==="
+          curl -sf "$BASE/traces" | jq 'length'
+
+          echo "=== Cleanup ==="
+          curl -sf -X DELETE "$BASE/agents/test-agent"
+          curl -sf -X DELETE "$BASE/agents/bad-agent"
+          curl -sf -X DELETE "$BASE/tools/search"
+          curl -sf -X DELETE "$BASE/models/providers/test-ollama"
+
+          echo "✅ All integration tests passed"
+          kill $SERVER_PID
+
+  # ── Dashboard ────────────────────────────────────────────────
+  dashboard:
+    name: Dashboard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: control-plane/dashboard
+        run: npm ci
+
+      - name: Type check
+        working-directory: control-plane/dashboard
+        run: npx tsc --noEmit
+
+      - name: Build
+        working-directory: control-plane/dashboard
+        run: npm run build
 
   # ── Python SDK ───────────────────────────────────────────────
   python-sdk:

@@ -5,12 +5,15 @@ import type { ReactNode } from 'react';
 const statusColors: Record<string, string> = {
   active: 'bg-emerald-500/20 text-emerald-400',
   baked: 'bg-emerald-500/20 text-emerald-400',
+  ready: 'bg-emerald-500/20 text-emerald-400',
   running: 'bg-blue-500/20 text-blue-400',
+  baking: 'bg-blue-500/20 text-blue-400',
   completed: 'bg-emerald-500/20 text-emerald-400',
   draft: 'bg-slate-500/20 text-slate-400',
   cooled: 'bg-amber-500/20 text-amber-400',
   retired: 'bg-red-500/20 text-red-400',
   failed: 'bg-red-500/20 text-red-400',
+  burnt: 'bg-red-500/20 text-red-400',
   success: 'bg-emerald-500/20 text-emerald-400',
   error: 'bg-red-500/20 text-red-400',
 };

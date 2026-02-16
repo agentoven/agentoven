@@ -54,6 +54,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers) http.Handler {
 				r.Delete("/", h.DeleteAgent)
 				r.Post("/bake", h.BakeAgent)
 				r.Post("/cool", h.CoolAgent)
+				r.Post("/test", h.TestAgent)
 
 				// Agent versions
 				r.Route("/versions", func(r chi.Router) {
@@ -98,6 +99,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers) http.Handler {
 				r.Post("/", h.CreateProvider)
 				r.Route("/{providerName}", func(r chi.Router) {
 					r.Get("/", h.GetProvider)
+					r.Put("/", h.UpdateProvider)
 					r.Delete("/", h.DeleteProvider)
 				})
 			})
@@ -109,6 +111,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers) http.Handler {
 			r.Post("/", h.RegisterMCPTool)
 			r.Route("/{toolName}", func(r chi.Router) {
 				r.Get("/", h.GetMCPTool)
+				r.Put("/", h.UpdateMCPTool)
 				r.Delete("/", h.DeleteMCPTool)
 			})
 		})
@@ -180,19 +183,50 @@ func versionHandler(cfg *config.Config) http.HandlerFunc {
 
 // findDashboardDir looks for the built dashboard UI in several locations.
 func findDashboardDir() string {
-	candidates := []string{
-		"dashboard/dist",                // running from control-plane/ dir
-		"../dashboard/dist",             // running from control-plane/cmd/server/
-		"control-plane/dashboard/dist",  // running from repo root
-	}
-	// Also check AGENTOVEN_DASHBOARD_DIR env var
+	candidates := []string{}
+
+	// Highest priority: explicit env var
 	if envDir := os.Getenv("AGENTOVEN_DASHBOARD_DIR"); envDir != "" {
-		candidates = append([]string{envDir}, candidates...)
+		candidates = append(candidates, envDir)
 	}
+
+	// Check relative to the binary itself (Homebrew / packaged installs).
+	// This runs before CWD-relative paths so packaged installs always win.
+	if exe, err := os.Executable(); err == nil {
+		// Use the raw (possibly symlinked) path first, then resolved path
+		rawDir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(rawDir, "..", "share", "agentoven", "dashboard"),
+		)
+
+		// Follow symlinks (brew symlinks /opt/homebrew/bin → Cellar/)
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			resolvedDir := filepath.Dir(resolved)
+			if resolvedDir != rawDir {
+				candidates = append(candidates,
+					filepath.Join(resolvedDir, "..", "share", "agentoven", "dashboard"),
+				)
+			}
+		}
+	}
+
+	// CWD-relative paths (dev mode)
+	candidates = append(candidates,
+		"dashboard/dist",               // running from control-plane/ dir
+		"../dashboard/dist",            // running from control-plane/cmd/server/
+		"control-plane/dashboard/dist", // running from repo root
+	)
+
 	for _, dir := range candidates {
-		if info, err := os.Stat(dir); err == nil && info.IsDir() {
-			abs, _ := filepath.Abs(dir)
-			return abs
+		abs, err := filepath.Abs(dir)
+		if err != nil {
+			continue
+		}
+		// Verify the dir exists AND contains index.html
+		if info, err := os.Stat(abs); err == nil && info.IsDir() {
+			if _, err := os.Stat(filepath.Join(abs, "index.html")); err == nil {
+				return abs
+			}
 		}
 	}
 	return ""
