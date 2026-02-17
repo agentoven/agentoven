@@ -254,19 +254,22 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		time.Sleep(1 * time.Second)
 
-		// Health-check the provider
+		// Test the provider with a real credential-validating call
 		if agent.ModelProvider != "" {
-			results := h.Router.HealthCheck(context.Background())
-			if healthy, found := results[agent.ModelProvider]; found && !healthy {
-				agent.Status = models.AgentStatusBurnt
-				if agent.Tags == nil {
-					agent.Tags = map[string]string{}
+			provider, err := h.Store.GetProvider(context.Background(), agent.ModelProvider)
+			if err == nil {
+				result := h.Router.TestProvider(context.Background(), provider)
+				if !result.Healthy {
+					agent.Status = models.AgentStatusBurnt
+					if agent.Tags == nil {
+						agent.Tags = map[string]string{}
+					}
+					agent.Tags["error"] = fmt.Sprintf("Provider '%s' test failed: %s", agent.ModelProvider, result.Error)
+					agent.UpdatedAt = time.Now().UTC()
+					h.Store.UpdateAgent(context.Background(), agent)
+					log.Warn().Str("agent", agentName).Msg("Agent burnt — provider test failed")
+					return
 				}
-				agent.Tags["error"] = fmt.Sprintf("Provider '%s' health check failed", agent.ModelProvider)
-				agent.UpdatedAt = time.Now().UTC()
-				h.Store.UpdateAgent(context.Background(), agent)
-				log.Warn().Str("agent", agentName).Msg("Agent burnt — provider health check failed")
-				return
 			}
 		}
 
@@ -399,6 +402,45 @@ func (h *Handlers) CoolAgent(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]string{
 		"name":   agentName,
 		"status": string(models.AgentStatusCooled),
+	})
+}
+
+// RewarmAgent transitions a cooled agent back to ready.
+// POST /api/v1/agents/{agentName}/rewarm
+func (h *Handlers) RewarmAgent(w http.ResponseWriter, r *http.Request) {
+	agentName := chi.URLParam(r, "agentName")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	if agent.Status != models.AgentStatusCooled {
+		respondError(w, http.StatusBadRequest, fmt.Sprintf("agent is '%s', only cooled agents can be rewarmed", agent.Status))
+		return
+	}
+
+	agent.Status = models.AgentStatusReady
+	agent.UpdatedAt = time.Now().UTC()
+	if agent.Tags != nil {
+		delete(agent.Tags, "error")
+	}
+
+	if err := h.Store.UpdateAgent(r.Context(), agent); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	log.Info().Str("agent", agentName).Msg("Agent rewarmed")
+	respondJSON(w, http.StatusOK, map[string]string{
+		"name":   agentName,
+		"status": string(models.AgentStatusReady),
 	})
 }
 
@@ -776,9 +818,41 @@ func (h *Handlers) GetCostSummary(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, summary)
 }
 
-func (h *Handlers) HealthCheckProviders(w http.ResponseWriter, r *http.Request) {
-	results := h.Router.HealthCheck(r.Context())
-	respondJSON(w, http.StatusOK, results)
+// TestProvider performs a real credential-validating test against a single provider.
+// POST /api/v1/models/providers/{providerName}/test
+func (h *Handlers) TestProvider(w http.ResponseWriter, r *http.Request) {
+	providerName := chi.URLParam(r, "providerName")
+	if providerName == "" {
+		respondError(w, http.StatusBadRequest, "provider name is required")
+		return
+	}
+
+	provider, err := h.Store.GetProvider(r.Context(), providerName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, fmt.Sprintf("provider %q not found", providerName))
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	log.Info().Str("provider", providerName).Str("kind", provider.Kind).Msg("Testing provider")
+
+	result := h.Router.TestProvider(r.Context(), provider)
+
+	// Cache the test result on the provider
+	now := time.Now().UTC()
+	provider.LastTestedAt = &now
+	provider.LastTestHealthy = &result.Healthy
+	provider.LastTestError = result.Error
+	provider.LastTestLatency = result.LatencyMs
+
+	if err := h.Store.UpdateProvider(r.Context(), provider); err != nil {
+		log.Warn().Err(err).Str("provider", providerName).Msg("Failed to cache test result on provider")
+	}
+
+	respondJSON(w, http.StatusOK, result)
 }
 
 // ══════════════════════════════════════════════════════════════

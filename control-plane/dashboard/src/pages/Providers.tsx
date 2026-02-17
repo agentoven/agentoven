@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Cpu, Plus, Trash2, Star, Pencil, HeartPulse, Eye, EyeOff } from 'lucide-react';
-import { providers, type ModelProvider } from '../api';
+import { providers, type ModelProvider, type ProviderTestResult } from '../api';
 import { useAPI } from '../hooks';
 import {
   PageHeader, Card, EmptyState,
@@ -11,17 +11,6 @@ export function ProvidersPage() {
   const { data, loading, error, refetch } = useAPI(providers.list);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<ModelProvider | null>(null);
-  const [healthStatus, setHealthStatus] = useState<Record<string, boolean> | null>(null);
-  const [healthLoading, setHealthLoading] = useState(false);
-
-  const testConnection = async () => {
-    setHealthLoading(true);
-    try {
-      const result = await providers.health();
-      setHealthStatus(result);
-    } catch { /* ignore */ }
-    setHealthLoading(false);
-  };
 
   const openEdit = (p: ModelProvider) => {
     setEditing(p);
@@ -40,15 +29,9 @@ export function ProvidersPage() {
         title="Model Providers"
         description="Configure model providers for the Model Router"
         action={
-          <div className="flex gap-2">
-            <Button variant="secondary" onClick={testConnection} disabled={healthLoading}>
-              <HeartPulse size={16} className="mr-1.5" />
-              {healthLoading ? 'Testing...' : 'Test All'}
-            </Button>
-            <Button onClick={() => { setEditing(null); setShowForm(!showForm); }}>
-              <Plus size={16} className="mr-1.5" /> Add Provider
-            </Button>
-          </div>
+          <Button onClick={() => { setEditing(null); setShowForm(!showForm); }}>
+            <Plus size={16} className="mr-1.5" /> Add Provider
+          </Button>
         }
       />
 
@@ -71,7 +54,6 @@ export function ProvidersPage() {
               provider={p}
               onAction={refetch}
               onEdit={() => openEdit(p)}
-              healthy={healthStatus?.[p.name]}
             />
           ))}
         </div>
@@ -88,12 +70,40 @@ export function ProvidersPage() {
 }
 
 function ProviderCard({
-  provider, onAction, onEdit, healthy,
+  provider, onAction, onEdit,
 }: {
-  provider: ModelProvider; onAction: () => void; onEdit: () => void; healthy?: boolean;
+  provider: ModelProvider; onAction: () => void; onEdit: () => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<ProviderTestResult | null>(null);
   const maskedKey = provider.config?.api_key as string | undefined;
+
+  // Determine health status: from fresh test result or cached on provider
+  const healthy = testResult?.healthy ?? provider.last_test_healthy;
+  const latency = testResult?.latency_ms ?? provider.last_test_latency_ms;
+  const testError = testResult?.error ?? provider.last_test_error;
+  const testedAt = testResult ? 'just now' : provider.last_tested_at
+    ? new Date(provider.last_tested_at).toLocaleString()
+    : null;
+
+  const runTest = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const result = await providers.test(provider.name);
+      setTestResult(result);
+    } catch (e) {
+      setTestResult({
+        provider: provider.name,
+        kind: provider.kind,
+        healthy: false,
+        latency_ms: 0,
+        error: e instanceof Error ? e.message : 'Test failed',
+      });
+    }
+    setTesting(false);
+  };
 
   return (
     <Card>
@@ -104,8 +114,8 @@ function ProviderCard({
           {provider.is_default && (
             <Star size={14} className="text-amber-400 fill-amber-400" />
           )}
-          {healthy !== undefined && (
-            <span className={`w-2 h-2 rounded-full ${healthy ? 'bg-emerald-400' : 'bg-red-400'}`} />
+          {healthy !== undefined && healthy !== null && (
+            <span className={`w-2.5 h-2.5 rounded-full ${healthy ? 'bg-emerald-400' : 'bg-red-400'}`} />
           )}
         </div>
         <StatusBadge status={provider.kind} />
@@ -125,7 +135,7 @@ function ProviderCard({
         </p>
       )}
 
-      <div className="flex flex-wrap gap-1 mb-4">
+      <div className="flex flex-wrap gap-1 mb-3">
         {provider.models?.map((m) => (
           <span
             key={m}
@@ -136,7 +146,31 @@ function ProviderCard({
         ))}
       </div>
 
+      {/* Health result summary */}
+      {(healthy !== undefined && healthy !== null) && (
+        <div className={`text-xs px-3 py-2 rounded-lg mb-3 ${healthy
+          ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+          : 'bg-red-500/10 text-red-400 border border-red-500/20'
+        }`}>
+          <div className="flex items-center justify-between">
+            <span>{healthy ? '✓ Healthy' : '✗ Unhealthy'}</span>
+            {latency != null && latency > 0 && (
+              <span className="font-mono">{latency}ms</span>
+            )}
+          </div>
+          {testError && <p className="mt-1 text-xs opacity-80 truncate">{testError}</p>}
+          {testedAt && <p className="mt-0.5 text-xs opacity-60">Tested: {testedAt}</p>}
+        </div>
+      )}
+
       <div className="flex gap-2">
+        <Button size="sm" variant="secondary" onClick={runTest} disabled={testing}>
+          {testing ? (
+            <><Spinner /> Testing...</>
+          ) : (
+            <><HeartPulse size={14} className="mr-1" /> Test</>
+          )}
+        </Button>
         <Button size="sm" variant="secondary" onClick={onEdit}>
           <Pencil size={14} className="mr-1" /> Edit
         </Button>

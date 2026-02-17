@@ -54,6 +54,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers) http.Handler {
 				r.Delete("/", h.DeleteAgent)
 				r.Post("/bake", h.BakeAgent)
 				r.Post("/cool", h.CoolAgent)
+				r.Post("/rewarm", h.RewarmAgent)
 				r.Post("/test", h.TestAgent)
 
 				// Agent versions
@@ -91,7 +92,6 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers) http.Handler {
 		r.Route("/models", func(r chi.Router) {
 			r.Post("/route", h.RouteModel)
 			r.Get("/cost", h.GetCostSummary)
-			r.Get("/health", h.HealthCheckProviders)
 
 			// Provider CRUD
 			r.Route("/providers", func(r chi.Router) {
@@ -101,6 +101,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers) http.Handler {
 					r.Get("/", h.GetProvider)
 					r.Put("/", h.UpdateProvider)
 					r.Delete("/", h.DeleteProvider)
+					r.Post("/test", h.TestProvider)
 				})
 			})
 		})

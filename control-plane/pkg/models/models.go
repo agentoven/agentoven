@@ -179,6 +179,22 @@ type ModelProvider struct {
 	Config    map[string]interface{} `json:"config,omitempty"`
 	IsDefault bool                   `json:"is_default" db:"is_default"`
 	CreatedAt time.Time              `json:"created_at" db:"created_at"`
+
+	// Health check cache — populated by TestProvider
+	LastTestedAt    *time.Time `json:"last_tested_at,omitempty" db:"last_tested_at"`
+	LastTestHealthy *bool      `json:"last_test_healthy,omitempty" db:"last_test_healthy"`
+	LastTestError   string     `json:"last_test_error,omitempty" db:"last_test_error"`
+	LastTestLatency int64      `json:"last_test_latency_ms,omitempty" db:"last_test_latency_ms"`
+}
+
+// ProviderTestResult is returned by the TestProvider endpoint.
+type ProviderTestResult struct {
+	Provider  string `json:"provider"`
+	Kind      string `json:"kind"`
+	Healthy   bool   `json:"healthy"`
+	LatencyMs int64  `json:"latency_ms"`
+	Model     string `json:"model,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 // ── Recipe Run ───────────────────────────────────────────────

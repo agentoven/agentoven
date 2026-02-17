@@ -116,6 +116,16 @@ impl AgentOvenClient {
         Ok(resp.json().await?)
     }
 
+    /// Rewarm a cooled agent (transition back to ready).
+    pub async fn rewarm(&self, name: &str) -> anyhow::Result<serde_json::Value> {
+        let url = self.url(&format!("/api/v1/agents/{name}/rewarm"));
+        let resp = self.authed_request(self.http.post(url))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
     // ── Recipe Operations ────────────────────────────────────
 
     /// Create a new recipe (workflow).

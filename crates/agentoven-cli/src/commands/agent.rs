@@ -34,6 +34,9 @@ pub enum AgentCommands {
     /// Cool down (pause) a deployed agent.
     Cool(CoolArgs),
 
+    /// Rewarm a cooled agent (bring it back to ready).
+    Rewarm(RewarmArgs),
+
     /// Retire an agent from the menu.
     Retire(RetireArgs),
 
@@ -86,6 +89,12 @@ pub struct CoolArgs {
 }
 
 #[derive(Args)]
+pub struct RewarmArgs {
+    /// Agent name.
+    pub name: String,
+}
+
+#[derive(Args)]
 pub struct RetireArgs {
     /// Agent name.
     pub name: String,
@@ -112,6 +121,7 @@ pub async fn execute(cmd: AgentCommands) -> anyhow::Result<()> {
         AgentCommands::Get(args) => get(args).await,
         AgentCommands::Bake(args) => bake(args).await,
         AgentCommands::Cool(args) => cool(args).await,
+        AgentCommands::Rewarm(args) => rewarm(args).await,
         AgentCommands::Retire(args) => retire(args).await,
         AgentCommands::Test(args) => test(args).await,
     }
@@ -407,8 +417,37 @@ async fn cool(args: CoolArgs) -> anyhow::Result<()> {
     println!(
         "  {} Re-activate with: {}",
         "→".dimmed(),
-        format!("agentoven agent bake {}", args.name).green()
+        format!("agentoven agent rewarm {}", args.name).green()
     );
+    Ok(())
+}
+
+async fn rewarm(args: RewarmArgs) -> anyhow::Result<()> {
+    println!(
+        "\n  {} Rewarming {}...\n",
+        "☀️".to_string(),
+        args.name.bold()
+    );
+
+    let client = agentoven_core::AgentOvenClient::from_env()?;
+    match client.rewarm(&args.name).await {
+        Ok(resp) => {
+            let status = resp.get("status").and_then(|v| v.as_str()).unwrap_or("ready");
+            println!("  {} Agent '{}' rewarmed (status: {} {}).", "✓".green().bold(), args.name, "🟢", status);
+            println!(
+                "  {} Test with: {}",
+                "→".dimmed(),
+                format!("agentoven agent test {}", args.name).green()
+            );
+        }
+        Err(e) => {
+            println!(
+                "  {} Rewarm failed: {}",
+                "✗".red().bold(),
+                e.to_string().dimmed()
+            );
+        }
+    }
     Ok(())
 }
 

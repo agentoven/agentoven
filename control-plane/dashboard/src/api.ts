@@ -87,6 +87,8 @@ export const agents = {
     request<Agent>(`/agents/${name}/bake`, { method: 'POST' }),
   cool: (name: string) =>
     request<Agent>(`/agents/${name}/cool`, { method: 'POST' }),
+  rewarm: (name: string) =>
+    request<Agent>(`/agents/${name}/rewarm`, { method: 'POST' }),
   test: (name: string, message: string) =>
     request<TestAgentResponse>(`/agents/${name}/test`, {
       method: 'POST',
@@ -140,6 +142,20 @@ export interface ModelProvider {
   config: Record<string, unknown>;
   is_default: boolean;
   created_at: string;
+  // Health check cache
+  last_tested_at?: string;
+  last_test_healthy?: boolean;
+  last_test_error?: string;
+  last_test_latency_ms?: number;
+}
+
+export interface ProviderTestResult {
+  provider: string;
+  kind: string;
+  healthy: boolean;
+  latency_ms: number;
+  model?: string;
+  error?: string;
 }
 
 export const providers = {
@@ -154,7 +170,8 @@ export const providers = {
     }),
   delete: (name: string) =>
     request<void>(`/models/providers/${name}`, { method: 'DELETE' }),
-  health: () => request<Record<string, boolean>>('/models/health'),
+  test: (name: string) =>
+    request<ProviderTestResult>(`/models/providers/${name}/test`, { method: 'POST' }),
 };
 
 // ── MCP Tools ─────────────────────────────────────────────────

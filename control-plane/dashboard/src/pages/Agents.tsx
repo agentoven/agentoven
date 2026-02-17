@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Bot, Plus, Flame, Snowflake, Trash2, FlaskConical, AlertTriangle, X as XIcon } from 'lucide-react';
+import { Bot, Plus, Flame, Snowflake, Trash2, FlaskConical, AlertTriangle, X as XIcon, Sun } from 'lucide-react';
 import { agents, providers, type Agent, type Ingredient, type IngredientKind, APIError } from '../api';
 import { useAPI } from '../hooks';
 import {
@@ -124,6 +124,16 @@ function AgentCard({ agent, onAction }: { agent: Agent; onAction: () => void }) 
             </Button>
             <Button size="sm" variant="secondary" onClick={() => doAction(() => agents.cool(agent.name))} disabled={busy}>
               <Snowflake size={14} className="mr-1" /> Cool
+            </Button>
+          </>
+        )}
+        {agent.status === 'cooled' && (
+          <>
+            <Button size="sm" onClick={() => doAction(() => agents.rewarm(agent.name))} disabled={busy}>
+              <Sun size={14} className="mr-1" /> Rewarm
+            </Button>
+            <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${agent.name}/test`)}>
+              <FlaskConical size={14} className="mr-1" /> Test
             </Button>
           </>
         )}

@@ -27,11 +27,20 @@ build-typescript:
 
 # ── Development ───────────────────────────────
 
-dev-control-plane:
+# Run everything in dev mode (Go server + Vite HMR dashboard)
+dev:
+	@echo "🏺 Starting AgentOven dev mode..."
+	@echo ""
+	@echo "  API server  → http://localhost:8080"
+	@echo "  Dashboard   → http://localhost:5173"
+	@echo ""
+	@$(MAKE) -j2 dev-server dev-dashboard
+
+dev-server:
 	cd control-plane && go run ./cmd/server
 
-dev-ui:
-	cd ui && npm run dev
+dev-dashboard:
+	cd control-plane/dashboard && npm run dev
 
 # ── Test ──────────────────────────────────────
 

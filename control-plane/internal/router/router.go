@@ -493,66 +493,225 @@ func (mr *ModelRouter) GetCostSummary(kitchen string) *models.CostSummary {
 	return summary
 }
 
-// ── Health Check ────────────────────────────────────────────
+// ── Provider Test ───────────────────────────────────────────
 
-// HealthCheck tests connectivity to all configured providers.
-func (mr *ModelRouter) HealthCheck(ctx context.Context) map[string]bool {
-	providers, err := mr.store.ListProviders(ctx)
-	if err != nil {
-		return map[string]bool{"error": false}
+// TestProvider performs a real credential-validating call to a provider.
+// For openai/azure-openai/anthropic it sends a 1-token chat completion.
+// For ollama it calls /api/tags to list available models.
+// Returns a structured result with latency and error info.
+func (mr *ModelRouter) TestProvider(ctx context.Context, provider *models.ModelProvider) *models.ProviderTestResult {
+	result := &models.ProviderTestResult{
+		Provider: provider.Name,
+		Kind:     provider.Kind,
 	}
 
-	results := make(map[string]bool)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
+	testCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 
-	for _, p := range providers {
-		wg.Add(1)
-		go func(provider models.ModelProvider) {
-			defer wg.Done()
-			healthy := mr.checkProviderHealth(ctx, &provider)
-			mu.Lock()
-			results[provider.Name] = healthy
-			mu.Unlock()
-		}(p)
-	}
+	start := time.Now()
 
-	wg.Wait()
-	return results
-}
-
-func (mr *ModelRouter) checkProviderHealth(ctx context.Context, provider *models.ModelProvider) bool {
-	endpoint := provider.Endpoint
 	switch provider.Kind {
-	case "openai":
-		if endpoint == "" {
-			endpoint = "https://api.openai.com/v1"
-		}
-		endpoint += "/models"
-	case "anthropic":
-		// Anthropic doesn't have a models endpoint; just check reachability
-		if endpoint == "" {
-			endpoint = "https://api.anthropic.com"
-		}
 	case "ollama":
+		// For Ollama, just verify it's running and list models
+		endpoint := provider.Endpoint
 		if endpoint == "" {
 			endpoint = "http://localhost:11434"
 		}
-		endpoint += "/api/tags"
+		url := endpoint + "/api/tags"
+		req, _ := http.NewRequestWithContext(testCtx, "GET", url, nil)
+		resp, err := mr.client.Do(req)
+		if err != nil {
+			result.Error = fmt.Sprintf("ollama unreachable: %v", err)
+			result.LatencyMs = time.Since(start).Milliseconds()
+			return result
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			result.Error = fmt.Sprintf("ollama: status %d: %s", resp.StatusCode, string(body))
+			result.LatencyMs = time.Since(start).Milliseconds()
+			return result
+		}
+
+		// Parse Ollama tags response to confirm models exist
+		var tagsResp struct {
+			Models []struct {
+				Name string `json:"name"`
+			} `json:"models"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&tagsResp); err != nil {
+			result.Error = fmt.Sprintf("ollama: decode response: %v", err)
+			result.LatencyMs = time.Since(start).Milliseconds()
+			return result
+		}
+
+		result.Healthy = true
+		result.LatencyMs = time.Since(start).Milliseconds()
+		if len(tagsResp.Models) > 0 {
+			result.Model = tagsResp.Models[0].Name
+		}
+		return result
+
+	case "openai", "azure-openai", "anthropic":
+		// Send a minimal 1-token chat completion to validate credentials
+		model := ""
+		if len(provider.Models) > 0 {
+			model = provider.Models[0]
+		} else {
+			// Sensible defaults per kind
+			switch provider.Kind {
+			case "openai":
+				model = "gpt-4o-mini"
+			case "azure-openai":
+				model = "gpt-4o-mini"
+			case "anthropic":
+				model = "claude-3-5-haiku-20241022"
+			}
+		}
+
+		testMessages := []models.ChatMessage{
+			{Role: "user", Content: "Say OK"},
+		}
+
+		// Build a minimal request with max_tokens=1 for the cheapest possible validation
+		var resp *models.RouteResponse
+		var err error
+
+		switch provider.Kind {
+		case "openai", "azure-openai":
+			resp, err = mr.callOpenAITest(testCtx, provider, model)
+		case "anthropic":
+			resp, err = mr.callAnthropicTest(testCtx, provider, model)
+		default:
+			resp, err = mr.callOpenAITest(testCtx, provider, model)
+		}
+		_ = testMessages // used implicitly in callXxxTest
+
+		result.LatencyMs = time.Since(start).Milliseconds()
+		if err != nil {
+			result.Error = err.Error()
+			return result
+		}
+
+		result.Healthy = true
+		result.Model = resp.Model
+		return result
+
 	default:
-		return true
+		// Unknown provider kind — try OpenAI-compatible test
+		model := ""
+		if len(provider.Models) > 0 {
+			model = provider.Models[0]
+		}
+		_, err := mr.callOpenAITest(testCtx, provider, model)
+		result.LatencyMs = time.Since(start).Milliseconds()
+		if err != nil {
+			result.Error = err.Error()
+			return result
+		}
+		result.Healthy = true
+		result.Model = model
+		return result
+	}
+}
+
+// callOpenAITest sends a minimal 1-token request to validate OpenAI/Azure credentials.
+func (mr *ModelRouter) callOpenAITest(ctx context.Context, provider *models.ModelProvider, model string) (*models.RouteResponse, error) {
+	endpoint := provider.Endpoint
+	if endpoint == "" {
+		endpoint = "https://api.openai.com/v1"
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
+	apiKey, _ := provider.Config["api_key"].(string)
+	if apiKey == "" {
+		return nil, fmt.Errorf("api_key not configured for provider %s", provider.Name)
+	}
 
-	req, _ := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
-	resp, err := mr.client.Do(req)
+	type testReq struct {
+		Model     string               `json:"model"`
+		Messages  []models.ChatMessage `json:"messages"`
+		MaxTokens int                  `json:"max_tokens"`
+	}
+
+	body, _ := json.Marshal(testReq{
+		Model:     model,
+		Messages:  []models.ChatMessage{{Role: "user", Content: "Say OK"}},
+		MaxTokens: 1,
+	})
+
+	url := endpoint + "/chat/completions"
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
-		return false
+		return nil, fmt.Errorf("create request: %w", err)
 	}
-	defer resp.Body.Close()
-	return resp.StatusCode < 500
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	if provider.Kind == "azure-openai" {
+		httpReq.Header.Set("api-key", apiKey)
+	} else {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	httpResp, err := mr.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(httpResp.Body)
+		return nil, fmt.Errorf("status %d: %s", httpResp.StatusCode, string(respBody))
+	}
+
+	return &models.RouteResponse{Provider: provider.Name, Model: model}, nil
+}
+
+// callAnthropicTest sends a minimal 1-token request to validate Anthropic credentials.
+func (mr *ModelRouter) callAnthropicTest(ctx context.Context, provider *models.ModelProvider, model string) (*models.RouteResponse, error) {
+	endpoint := provider.Endpoint
+	if endpoint == "" {
+		endpoint = "https://api.anthropic.com"
+	}
+
+	apiKey, _ := provider.Config["api_key"].(string)
+	if apiKey == "" {
+		return nil, fmt.Errorf("api_key not configured for provider %s", provider.Name)
+	}
+
+	type testReq struct {
+		Model     string               `json:"model"`
+		Messages  []models.ChatMessage `json:"messages"`
+		MaxTokens int                  `json:"max_tokens"`
+	}
+
+	body, _ := json.Marshal(testReq{
+		Model:     model,
+		Messages:  []models.ChatMessage{{Role: "user", Content: "Say OK"}},
+		MaxTokens: 1,
+	})
+
+	url := endpoint + "/v1/messages"
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-api-key", apiKey)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+
+	httpResp, err := mr.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(httpResp.Body)
+		return nil, fmt.Errorf("status %d: %s", httpResp.StatusCode, string(respBody))
+	}
+
+	return &models.RouteResponse{Provider: provider.Name, Model: model}, nil
 }
 
 // recordTrace creates a trace record for the routed request.
