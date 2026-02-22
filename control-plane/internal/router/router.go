@@ -14,6 +14,7 @@ import (
 	"math/rand"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,18 +40,202 @@ type ModelRouter struct {
 	// Cost tracking: kitchen+agent → accumulated cost
 	costMu sync.RWMutex
 	costs  map[string]*models.CostSummary
+
+	// ProviderDriver registry — maps provider kind to its driver.
+	// OSS registers openai, azure-openai, anthropic, ollama at init.
+	// Pro calls RegisterDriver("bedrock", ...) etc. to add enterprise drivers.
+	driversMu sync.RWMutex
+	drivers   map[string]ProviderDriver
 }
 
-// NewModelRouter creates a new model router.
+// ProviderDriver is the interface for model provider integrations.
+// This mirrors contracts.ProviderDriver but lives in the router package
+// to avoid import cycles. The contracts package re-exports it for Pro.
+type ProviderDriver interface {
+	// Kind returns the provider identifier (e.g., "openai", "bedrock").
+	Kind() string
+
+	// Call sends a chat completion request to the provider.
+	Call(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) (*models.RouteResponse, error)
+
+	// HealthCheck verifies the provider is reachable.
+	HealthCheck(ctx context.Context, provider *models.ModelProvider) error
+}
+
+// StreamingProviderDriver is an OPTIONAL interface that drivers can implement
+// to support streaming responses. Checked at runtime via type assertion:
+//
+//	if sd, ok := driver.(StreamingProviderDriver); ok { sd.StreamCall(...) }
+//
+// Drivers that don't implement this fall back to the non-streaming Call().
+type StreamingProviderDriver interface {
+	ProviderDriver
+
+	// StreamCall sends a streaming chat completion request.
+	// The callback is invoked for each chunk; return non-nil error from callback to abort.
+	StreamCall(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest, callback func(chunk *models.StreamChunk) error) error
+}
+
+// EmbeddingCapableDriver is an OPTIONAL interface that provider drivers can
+// implement to support text embeddings. Checked at runtime via type assertion:
+//
+//	if ecd, ok := driver.(EmbeddingCapableDriver); ok { ecd.Embed(...) }
+//
+// When a provider's driver implements this, the server auto-discovers embedding
+// capabilities from configured providers — no separate embedding configuration needed.
+// This is the "provider-first" embedding model: configure a provider once, and both
+// chat completions AND embeddings are available automatically.
+type EmbeddingCapableDriver interface {
+	ProviderDriver
+
+	// EmbeddingModels returns metadata about the embedding models this provider supports.
+	EmbeddingModels() []EmbeddingModelInfo
+
+	// Embed generates vector embeddings using the provider's credentials and endpoint.
+	Embed(ctx context.Context, provider *models.ModelProvider, model string, texts []string) ([][]float64, error)
+}
+
+// EmbeddingModelInfo describes an embedding model available from a provider kind.
+type EmbeddingModelInfo struct {
+	Model      string `json:"model"`
+	Dimensions int    `json:"dimensions"`
+	MaxBatch   int    `json:"max_batch"`
+}
+
+// ModelDiscoveryDriver is an OPTIONAL interface that provider drivers can
+// implement to support model discovery. Checked at runtime via type assertion.
+// When a driver implements this, the server can auto-discover available models.
+type ModelDiscoveryDriver interface {
+	ProviderDriver
+
+	// DiscoverModels queries the provider's API for available models.
+	DiscoverModels(ctx context.Context, provider *models.ModelProvider) ([]models.DiscoveredModel, error)
+}
+
+// NewModelRouter creates a new model router with built-in drivers registered.
 func NewModelRouter(s store.Store) *ModelRouter {
-	return &ModelRouter{
+	mr := &ModelRouter{
 		store: s,
 		client: &http.Client{
 			Timeout: 120 * time.Second,
 		},
 		latencies: make(map[string]int64),
 		costs:     make(map[string]*models.CostSummary),
+		drivers:   make(map[string]ProviderDriver),
 	}
+
+	// Register built-in OSS drivers
+	mr.registerBuiltinDrivers()
+
+	return mr
+}
+
+// RegisterDriver adds a provider driver to the registry.
+// If a driver with the same kind already exists, it is replaced.
+// This is the primary extension point for Pro to add enterprise drivers
+// (Bedrock, Foundry, Vertex, SageMaker) without modifying OSS code.
+func (mr *ModelRouter) RegisterDriver(driver ProviderDriver) {
+	mr.driversMu.Lock()
+	mr.drivers[driver.Kind()] = driver
+	mr.driversMu.Unlock()
+	log.Info().Str("kind", driver.Kind()).Msg("Provider driver registered")
+}
+
+// GetDriver returns the registered driver for a provider kind, or nil.
+func (mr *ModelRouter) GetDriver(kind string) ProviderDriver {
+	mr.driversMu.RLock()
+	defer mr.driversMu.RUnlock()
+	return mr.drivers[kind]
+}
+
+// ListDrivers returns the kinds of all registered drivers.
+func (mr *ModelRouter) ListDrivers() []string {
+	mr.driversMu.RLock()
+	defer mr.driversMu.RUnlock()
+	kinds := make([]string, 0, len(mr.drivers))
+	for k := range mr.drivers {
+		kinds = append(kinds, k)
+	}
+	return kinds
+}
+
+// ListEmbeddingCapableDrivers returns all registered drivers that implement
+// EmbeddingCapableDriver. Used by server.go to auto-discover embedding
+// capabilities from configured providers.
+func (mr *ModelRouter) ListEmbeddingCapableDrivers() map[string]EmbeddingCapableDriver {
+	mr.driversMu.RLock()
+	defer mr.driversMu.RUnlock()
+	result := make(map[string]EmbeddingCapableDriver)
+	for kind, driver := range mr.drivers {
+		if ecd, ok := driver.(EmbeddingCapableDriver); ok {
+			result[kind] = ecd
+		}
+	}
+	return result
+}
+
+// DiscoverEmbeddingsForProvider checks if a provider's driver supports embeddings
+// and returns the capability info. Returns nil if not embedding-capable.
+func (mr *ModelRouter) DiscoverEmbeddingsForProvider(provider *models.ModelProvider) (EmbeddingCapableDriver, []EmbeddingModelInfo) {
+	driver := mr.GetDriver(provider.Kind)
+	if driver == nil {
+		return nil, nil
+	}
+	ecd, ok := driver.(EmbeddingCapableDriver)
+	if !ok {
+		return nil, nil
+	}
+	return ecd, ecd.EmbeddingModels()
+}
+
+// DiscoverModelsForProvider checks if a provider's driver supports model discovery
+// and queries the provider's API for available models.
+func (mr *ModelRouter) DiscoverModelsForProvider(ctx context.Context, provider *models.ModelProvider) ([]models.DiscoveredModel, error) {
+	driver := mr.GetDriver(provider.Kind)
+	if driver == nil {
+		return nil, fmt.Errorf("no driver registered for kind: %s", provider.Kind)
+	}
+	mdd, ok := driver.(ModelDiscoveryDriver)
+	if !ok {
+		return nil, fmt.Errorf("driver %q does not support model discovery", provider.Kind)
+	}
+	return mdd.DiscoverModels(ctx, provider)
+}
+
+// ListDiscoveryCapableDrivers returns all registered drivers that implement
+// ModelDiscoveryDriver.
+func (mr *ModelRouter) ListDiscoveryCapableDrivers() map[string]ModelDiscoveryDriver {
+	mr.driversMu.RLock()
+	defer mr.driversMu.RUnlock()
+	result := make(map[string]ModelDiscoveryDriver)
+	for kind, driver := range mr.drivers {
+		if mdd, ok := driver.(ModelDiscoveryDriver); ok {
+			result[kind] = mdd
+		}
+	}
+	return result
+}
+
+// HealthCheck pings all configured providers and returns their status.
+func (mr *ModelRouter) HealthCheck(ctx context.Context) map[string]string {
+	providers, err := mr.store.ListProviders(ctx)
+	if err != nil {
+		return map[string]string{"error": err.Error()}
+	}
+	result := make(map[string]string, len(providers))
+	for _, p := range providers {
+		driver := mr.GetDriver(p.Kind)
+		if driver == nil {
+			result[p.Name] = "no driver registered for kind: " + p.Kind
+			continue
+		}
+		if err := driver.HealthCheck(ctx, &p); err != nil {
+			result[p.Name] = "unhealthy: " + err.Error()
+		} else {
+			result[p.Name] = "healthy"
+		}
+	}
+	return result
 }
 
 // Route sends a request through the router using the specified strategy.
@@ -96,6 +281,67 @@ func (mr *ModelRouter) Route(ctx context.Context, req *models.RouteRequest) (*mo
 	}
 
 	return nil, fmt.Errorf("all providers failed, last error: %w", lastErr)
+}
+
+// RouteStream routes a request to a provider that supports streaming.
+// Falls back to non-streaming Route() if the selected driver doesn't implement
+// StreamingProviderDriver, buffering the full response and sending it as one chunk.
+func (mr *ModelRouter) RouteStream(ctx context.Context, req *models.RouteRequest, callback func(chunk *models.StreamChunk) error) error {
+	providers, err := mr.store.ListProviders(ctx)
+	if err != nil {
+		return fmt.Errorf("list providers: %w", err)
+	}
+	if len(providers) == 0 {
+		return fmt.Errorf("no model providers configured")
+	}
+
+	strategy := req.Strategy
+	if strategy == "" {
+		strategy = models.RoutingFallback
+	}
+
+	ordered := mr.orderProviders(providers, strategy, req.Model)
+
+	var lastErr error
+	for _, provider := range ordered {
+		// Look up driver
+		mr.driversMu.RLock()
+		driver, ok := mr.drivers[provider.Kind]
+		mr.driversMu.RUnlock()
+
+		if !ok {
+			lastErr = fmt.Errorf("no driver for kind %q", provider.Kind)
+			continue
+		}
+
+		// Check if driver supports streaming
+		if sd, ok := driver.(StreamingProviderDriver); ok {
+			err := sd.StreamCall(ctx, &provider, req, callback)
+			if err != nil {
+				log.Warn().Str("provider", provider.Name).Err(err).Msg("Streaming call failed, trying next")
+				lastErr = err
+				continue
+			}
+			return nil
+		}
+
+		// Fallback: non-streaming call → emit as single chunk
+		resp, err := driver.Call(ctx, &provider, req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		mr.trackCost(req.Kitchen, req.AgentRef, resp)
+		mr.recordTrace(ctx, req, resp)
+
+		return callback(&models.StreamChunk{
+			Content: resp.Content,
+			Done:    true,
+			Usage:   &resp.Usage,
+		})
+	}
+
+	return fmt.Errorf("all providers failed (stream), last error: %w", lastErr)
 }
 
 // orderProviders sorts providers based on the routing strategy.
@@ -171,21 +417,21 @@ func (mr *ModelRouter) callProvider(ctx context.Context, provider *models.ModelP
 		model = provider.Models[0]
 	}
 
-	var resp *models.RouteResponse
-	var err error
-
-	switch provider.Kind {
-	case "openai", "azure-openai":
-		resp, err = mr.callOpenAI(ctx, provider, model, req.Messages)
-	case "anthropic":
-		resp, err = mr.callAnthropic(ctx, provider, model, req.Messages)
-	case "ollama":
-		resp, err = mr.callOllama(ctx, provider, model, req.Messages)
-	default:
-		// Generic OpenAI-compatible endpoint
-		resp, err = mr.callOpenAI(ctx, provider, model, req.Messages)
+	// Look up registered driver
+	driver := mr.GetDriver(provider.Kind)
+	if driver == nil {
+		// Fallback: try OpenAI-compatible driver for unknown kinds
+		driver = mr.GetDriver("openai")
+		if driver == nil {
+			return nil, fmt.Errorf("no driver registered for provider kind: %s", provider.Kind)
+		}
 	}
 
+	// Build a request with the resolved model
+	driverReq := *req
+	driverReq.Model = model
+
+	resp, err := driver.Call(ctx, provider, &driverReq)
 	if err != nil {
 		return nil, err
 	}
@@ -222,13 +468,15 @@ type openAIResponse struct {
 	ID      string `json:"id"`
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content,omitempty"` // OpenAI o-series reasoning
 		} `json:"message"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int64 `json:"prompt_tokens"`
 		CompletionTokens int64 `json:"completion_tokens"`
 		TotalTokens      int64 `json:"total_tokens"`
+		ReasoningTokens  int64 `json:"reasoning_tokens,omitempty"` // o-series reasoning token count
 	} `json:"usage"`
 }
 
@@ -276,8 +524,19 @@ func (mr *ModelRouter) callOpenAI(ctx context.Context, provider *models.ModelPro
 	}
 
 	content := ""
+	var thinkingBlocks []models.ThinkingBlock
 	if len(oaiResp.Choices) > 0 {
 		content = oaiResp.Choices[0].Message.Content
+		// Capture reasoning_content from OpenAI o-series models
+		if rc := oaiResp.Choices[0].Message.ReasoningContent; rc != "" {
+			thinkingBlocks = append(thinkingBlocks, models.ThinkingBlock{
+				Content:    rc,
+				TokenCount: oaiResp.Usage.ReasoningTokens,
+				Model:      model,
+				Provider:   provider.Name,
+				Timestamp:  time.Now().UTC(),
+			})
+		}
 	}
 
 	costPer1KInput := mr.getModelCost(provider, model, "input")
@@ -286,15 +545,17 @@ func (mr *ModelRouter) callOpenAI(ctx context.Context, provider *models.ModelPro
 		float64(oaiResp.Usage.CompletionTokens)/1000*costPer1KOutput
 
 	return &models.RouteResponse{
-		ID:       oaiResp.ID,
-		Provider: provider.Name,
-		Model:    model,
-		Content:  content,
+		ID:             oaiResp.ID,
+		Provider:       provider.Name,
+		Model:          model,
+		Content:        content,
+		ThinkingBlocks: thinkingBlocks,
 		Usage: models.TokenUsage{
-			InputTokens:   oaiResp.Usage.PromptTokens,
-			OutputTokens:  oaiResp.Usage.CompletionTokens,
-			TotalTokens:   oaiResp.Usage.TotalTokens,
-			EstimatedCost: estimatedCost,
+			InputTokens:    oaiResp.Usage.PromptTokens,
+			OutputTokens:   oaiResp.Usage.CompletionTokens,
+			TotalTokens:    oaiResp.Usage.TotalTokens,
+			ThinkingTokens: oaiResp.Usage.ReasoningTokens,
+			EstimatedCost:  estimatedCost,
 		},
 	}, nil
 }
@@ -310,8 +571,9 @@ type anthropicRequest struct {
 type anthropicResponse struct {
 	ID      string `json:"id"`
 	Content []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+		Type     string `json:"type"`      // "text", "thinking", "tool_use"
+		Text     string `json:"text"`
+		Thinking string `json:"thinking"` // Anthropic extended thinking content
 	} `json:"content"`
 	Usage struct {
 		InputTokens  int64 `json:"input_tokens"`
@@ -363,9 +625,19 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 	}
 
 	content := ""
+	var thinkingBlocks []models.ThinkingBlock
 	for _, c := range anthResp.Content {
-		if c.Type == "text" {
+		switch c.Type {
+		case "text":
 			content += c.Text
+		case "thinking":
+			// Anthropic extended thinking block
+			thinkingBlocks = append(thinkingBlocks, models.ThinkingBlock{
+				Content:   c.Thinking,
+				Model:     model,
+				Provider:  provider.Name,
+				Timestamp: time.Now().UTC(),
+			})
 		}
 	}
 
@@ -376,10 +648,11 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 		float64(anthResp.Usage.OutputTokens)/1000*costPer1KOutput
 
 	return &models.RouteResponse{
-		ID:       anthResp.ID,
-		Provider: provider.Name,
-		Model:    model,
-		Content:  content,
+		ID:             anthResp.ID,
+		Provider:       provider.Name,
+		Model:          model,
+		Content:        content,
+		ThinkingBlocks: thinkingBlocks,
 		Usage: models.TokenUsage{
 			InputTokens:   anthResp.Usage.InputTokens,
 			OutputTokens:  anthResp.Usage.OutputTokens,
@@ -628,17 +901,28 @@ func (mr *ModelRouter) callOpenAITest(ctx context.Context, provider *models.Mode
 		return nil, fmt.Errorf("api_key not configured for provider %s", provider.Name)
 	}
 
+	// Newer OpenAI models (gpt-4o, gpt-5, o-series) require max_completion_tokens
+	// instead of max_tokens. We send max_completion_tokens for OpenAI (not Azure)
+	// and fall back to max_tokens for Azure and older models.
 	type testReq struct {
-		Model     string               `json:"model"`
-		Messages  []models.ChatMessage `json:"messages"`
-		MaxTokens int                  `json:"max_tokens"`
+		Model               string               `json:"model"`
+		Messages            []models.ChatMessage  `json:"messages"`
+		MaxTokens           *int                  `json:"max_tokens,omitempty"`
+		MaxCompletionTokens *int                  `json:"max_completion_tokens,omitempty"`
 	}
 
-	body, _ := json.Marshal(testReq{
-		Model:     model,
-		Messages:  []models.ChatMessage{{Role: "user", Content: "Say OK"}},
-		MaxTokens: 1,
-	})
+	limit := 5
+	req := testReq{
+		Model:    model,
+		Messages: []models.ChatMessage{{Role: "user", Content: "Say OK"}},
+	}
+	if provider.Kind == "azure-openai" {
+		req.MaxTokens = &limit
+	} else {
+		req.MaxCompletionTokens = &limit
+	}
+
+	body, _ := json.Marshal(req)
 
 	url := endpoint + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
@@ -661,7 +945,12 @@ func (mr *ModelRouter) callOpenAITest(ctx context.Context, provider *models.Mode
 
 	if httpResp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(httpResp.Body)
-		return nil, fmt.Errorf("status %d: %s", httpResp.StatusCode, string(respBody))
+		errStr := string(respBody)
+		// A max_tokens truncation error means the model IS reachable — treat as healthy
+		if httpResp.StatusCode == 400 && (strings.Contains(errStr, "max_tokens") || strings.Contains(errStr, "max_completion_tokens")) {
+			return &models.RouteResponse{Provider: provider.Name, Model: model}, nil
+		}
+		return nil, fmt.Errorf("status %d: %s", httpResp.StatusCode, errStr)
 	}
 
 	return &models.RouteResponse{Provider: provider.Name, Model: model}, nil
@@ -726,17 +1015,19 @@ func (mr *ModelRouter) recordTrace(ctx context.Context, req *models.RouteRequest
 	}
 
 	trace := &models.Trace{
-		ID:          uuid.New().String(),
-		AgentName:   agentName,
-		Kitchen:     kitchen,
-		Status:      "completed",
-		DurationMs:  resp.LatencyMs,
-		TotalTokens: resp.Usage.TotalTokens,
-		CostUSD:     resp.Usage.EstimatedCost,
+		ID:             uuid.New().String(),
+		AgentName:      agentName,
+		Kitchen:        kitchen,
+		Status:         "completed",
+		DurationMs:     resp.LatencyMs,
+		TotalTokens:    resp.Usage.TotalTokens,
+		CostUSD:        resp.Usage.EstimatedCost,
+		ThinkingBlocks: resp.ThinkingBlocks,
 		Metadata: map[string]interface{}{
-			"provider": resp.Provider,
-			"model":    resp.Model,
-			"strategy": resp.Strategy,
+			"provider":        resp.Provider,
+			"model":           resp.Model,
+			"strategy":        resp.Strategy,
+			"thinking_tokens": resp.Usage.ThinkingTokens,
 		},
 		CreatedAt: time.Now().UTC(),
 	}
@@ -780,3 +1071,541 @@ func (mr *ModelRouter) getProviderCostPer1K(provider models.ModelProvider) float
 
 // Ensure rand is seeded (Go 1.20+ does this automatically)
 var _ = rand.Int
+
+// ══════════════════════════════════════════════════════════════
+// ── Built-in Provider Drivers ────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// registerBuiltinDrivers registers the four OSS community drivers.
+func (mr *ModelRouter) registerBuiltinDrivers() {
+	mr.RegisterDriver(&OpenAIDriver{router: mr})
+	mr.RegisterDriver(&AzureOpenAIDriver{router: mr})
+	mr.RegisterDriver(&AnthropicDriver{router: mr})
+	mr.RegisterDriver(&OllamaDriver{router: mr})
+	mr.RegisterDriver(&LiteLLMDriver{router: mr})
+}
+
+// ── OpenAI Driver ───────────────────────────────────────────
+
+type OpenAIDriver struct{ router *ModelRouter }
+
+func (d *OpenAIDriver) Kind() string { return "openai" }
+
+func (d *OpenAIDriver) Call(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) (*models.RouteResponse, error) {
+	return d.router.callOpenAI(ctx, provider, req.Model, req.Messages)
+}
+
+func (d *OpenAIDriver) HealthCheck(ctx context.Context, provider *models.ModelProvider) error {
+	model := ""
+	if len(provider.Models) > 0 {
+		model = provider.Models[0]
+	} else {
+		model = "gpt-4o-mini"
+	}
+	_, err := d.router.callOpenAITest(ctx, provider, model)
+	return err
+}
+
+// ── OpenAI Model Discovery ──────────────────────────────────
+
+func (d *OpenAIDriver) DiscoverModels(ctx context.Context, provider *models.ModelProvider) ([]models.DiscoveredModel, error) {
+	endpoint := provider.Endpoint
+	if endpoint == "" {
+		endpoint = "https://api.openai.com/v1"
+	}
+	apiKey, _ := provider.Config["api_key"].(string)
+	if apiKey == "" {
+		return nil, fmt.Errorf("openai discover: api_key not configured")
+	}
+
+	url := endpoint + "/models"
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+
+	httpResp, err := d.router.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("openai discover: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(httpResp.Body)
+		return nil, fmt.Errorf("openai discover: status %d: %s", httpResp.StatusCode, string(body))
+	}
+
+	var resp struct {
+		Data []struct {
+			ID        string `json:"id"`
+			OwnedBy   string `json:"owned_by"`
+			CreatedAt int64  `json:"created"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
+		return nil, fmt.Errorf("openai discover: decode: %w", err)
+	}
+
+	var result []models.DiscoveredModel
+	for _, m := range resp.Data {
+		result = append(result, models.DiscoveredModel{
+			ID:        m.ID,
+			Provider:  provider.Name,
+			Kind:      "openai",
+			OwnedBy:   m.OwnedBy,
+			CreatedAt: m.CreatedAt,
+		})
+	}
+	return result, nil
+}
+
+// Compile-time assertion: OpenAIDriver implements ModelDiscoveryDriver.
+var _ ModelDiscoveryDriver = (*OpenAIDriver)(nil)
+
+// ── OpenAI Embedding Capability ─────────────────────────────
+
+func (d *OpenAIDriver) EmbeddingModels() []EmbeddingModelInfo {
+	return []EmbeddingModelInfo{
+		{Model: "text-embedding-3-small", Dimensions: 1536, MaxBatch: 2048},
+		{Model: "text-embedding-3-large", Dimensions: 3072, MaxBatch: 2048},
+		{Model: "text-embedding-ada-002", Dimensions: 1536, MaxBatch: 2048},
+	}
+}
+
+func (d *OpenAIDriver) Embed(ctx context.Context, provider *models.ModelProvider, model string, texts []string) ([][]float64, error) {
+	endpoint := provider.Endpoint
+	if endpoint == "" {
+		endpoint = "https://api.openai.com/v1"
+	}
+	apiKey, _ := provider.Config["api_key"].(string)
+	if apiKey == "" {
+		return nil, fmt.Errorf("openai embed: api_key not configured for provider %s", provider.Name)
+	}
+
+	type embedReq struct {
+		Input []string `json:"input"`
+		Model string   `json:"model"`
+	}
+	type embedData struct {
+		Embedding []float64 `json:"embedding"`
+		Index     int       `json:"index"`
+	}
+	type embedResp struct {
+		Data  []embedData `json:"data"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error,omitempty"`
+	}
+
+	body, _ := json.Marshal(embedReq{Input: texts, Model: model})
+	url := endpoint + "/embeddings"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("openai embed: create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+
+	httpResp, err := d.router.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("openai embed: request failed: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	respBody, _ := io.ReadAll(httpResp.Body)
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("openai embed: status %d: %s", httpResp.StatusCode, string(respBody))
+	}
+
+	var result embedResp
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("openai embed: unmarshal: %w", err)
+	}
+	if result.Error != nil {
+		return nil, fmt.Errorf("openai embed: %s", result.Error.Message)
+	}
+
+	vectors := make([][]float64, len(texts))
+	for _, d := range result.Data {
+		if d.Index < len(vectors) {
+			vectors[d.Index] = d.Embedding
+		}
+	}
+	return vectors, nil
+}
+
+// Compile-time assertion: OpenAIDriver implements EmbeddingCapableDriver.
+var _ EmbeddingCapableDriver = (*OpenAIDriver)(nil)
+
+// ── Azure OpenAI Driver ─────────────────────────────────────
+
+type AzureOpenAIDriver struct{ router *ModelRouter }
+
+func (d *AzureOpenAIDriver) Kind() string { return "azure-openai" }
+
+func (d *AzureOpenAIDriver) Call(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) (*models.RouteResponse, error) {
+	return d.router.callOpenAI(ctx, provider, req.Model, req.Messages)
+}
+
+func (d *AzureOpenAIDriver) HealthCheck(ctx context.Context, provider *models.ModelProvider) error {
+	model := ""
+	if len(provider.Models) > 0 {
+		model = provider.Models[0]
+	} else {
+		model = "gpt-4o-mini"
+	}
+	_, err := d.router.callOpenAITest(ctx, provider, model)
+	return err
+}
+
+// ── Azure OpenAI Embedding Capability ───────────────────────
+
+func (d *AzureOpenAIDriver) EmbeddingModels() []EmbeddingModelInfo {
+	// Azure OpenAI deployments are custom; return common defaults.
+	// Users deploy specific models to their Azure OpenAI resource.
+	return []EmbeddingModelInfo{
+		{Model: "text-embedding-3-small", Dimensions: 1536, MaxBatch: 2048},
+		{Model: "text-embedding-3-large", Dimensions: 3072, MaxBatch: 2048},
+		{Model: "text-embedding-ada-002", Dimensions: 1536, MaxBatch: 2048},
+	}
+}
+
+func (d *AzureOpenAIDriver) Embed(ctx context.Context, provider *models.ModelProvider, model string, texts []string) ([][]float64, error) {
+	endpoint := provider.Endpoint
+	if endpoint == "" {
+		return nil, fmt.Errorf("azure-openai embed: endpoint required")
+	}
+	apiKey, _ := provider.Config["api_key"].(string)
+	if apiKey == "" {
+		return nil, fmt.Errorf("azure-openai embed: api_key not configured for provider %s", provider.Name)
+	}
+
+	type embedReq struct {
+		Input []string `json:"input"`
+	}
+	type embedData struct {
+		Embedding []float64 `json:"embedding"`
+		Index     int       `json:"index"`
+	}
+	type embedResp struct {
+		Data  []embedData `json:"data"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error,omitempty"`
+	}
+
+	body, _ := json.Marshal(embedReq{Input: texts})
+
+	// Azure OpenAI uses deployment-based URLs:
+	// {endpoint}/openai/deployments/{model}/embeddings?api-version=2024-02-01
+	apiVersion := "2024-02-01"
+	if v, ok := provider.Config["api_version"].(string); ok && v != "" {
+		apiVersion = v
+	}
+	url := fmt.Sprintf("%s/openai/deployments/%s/embeddings?api-version=%s", endpoint, model, apiVersion)
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("azure-openai embed: create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("api-key", apiKey)
+
+	httpResp, err := d.router.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("azure-openai embed: request failed: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	respBody, _ := io.ReadAll(httpResp.Body)
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("azure-openai embed: status %d: %s", httpResp.StatusCode, string(respBody))
+	}
+
+	var result embedResp
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("azure-openai embed: unmarshal: %w", err)
+	}
+	if result.Error != nil {
+		return nil, fmt.Errorf("azure-openai embed: %s", result.Error.Message)
+	}
+
+	vectors := make([][]float64, len(texts))
+	for _, d := range result.Data {
+		if d.Index < len(vectors) {
+			vectors[d.Index] = d.Embedding
+		}
+	}
+	return vectors, nil
+}
+
+// Compile-time assertion: AzureOpenAIDriver implements EmbeddingCapableDriver.
+var _ EmbeddingCapableDriver = (*AzureOpenAIDriver)(nil)
+
+// ── Anthropic Driver ────────────────────────────────────────
+
+type AnthropicDriver struct{ router *ModelRouter }
+
+func (d *AnthropicDriver) Kind() string { return "anthropic" }
+
+func (d *AnthropicDriver) Call(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) (*models.RouteResponse, error) {
+	return d.router.callAnthropic(ctx, provider, req.Model, req.Messages)
+}
+
+func (d *AnthropicDriver) HealthCheck(ctx context.Context, provider *models.ModelProvider) error {
+	model := ""
+	if len(provider.Models) > 0 {
+		model = provider.Models[0]
+	} else {
+		model = "claude-3-5-haiku-20241022"
+	}
+	_, err := d.router.callAnthropicTest(ctx, provider, model)
+	return err
+}
+
+// ── Ollama Driver ───────────────────────────────────────────
+
+type OllamaDriver struct{ router *ModelRouter }
+
+func (d *OllamaDriver) Kind() string { return "ollama" }
+
+func (d *OllamaDriver) Call(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) (*models.RouteResponse, error) {
+	return d.router.callOllama(ctx, provider, req.Model, req.Messages)
+}
+
+func (d *OllamaDriver) HealthCheck(ctx context.Context, provider *models.ModelProvider) error {
+	endpoint := provider.Endpoint
+	if endpoint == "" {
+		endpoint = "http://localhost:11434"
+	}
+	url := endpoint + "/api/tags"
+	httpReq, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	resp, err := d.router.client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("ollama unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ollama: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// ── Ollama Model Discovery ──────────────────────────────────
+
+func (d *OllamaDriver) DiscoverModels(ctx context.Context, provider *models.ModelProvider) ([]models.DiscoveredModel, error) {
+	endpoint := provider.Endpoint
+	if endpoint == "" {
+		endpoint = "http://localhost:11434"
+	}
+	url := endpoint + "/api/tags"
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	httpResp, err := d.router.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("ollama discover: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ollama discover: status %d", httpResp.StatusCode)
+	}
+
+	var resp struct {
+		Models []struct {
+			Name       string `json:"name"`
+			ModifiedAt string `json:"modified_at"`
+			Size       int64  `json:"size"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
+		return nil, fmt.Errorf("ollama discover: decode: %w", err)
+	}
+
+	var result []models.DiscoveredModel
+	for _, m := range resp.Models {
+		result = append(result, models.DiscoveredModel{
+			ID:       m.Name,
+			Provider: provider.Name,
+			Kind:     "ollama",
+			Metadata: map[string]string{"size": fmt.Sprintf("%d", m.Size)},
+		})
+	}
+	return result, nil
+}
+
+// Compile-time assertion: OllamaDriver implements ModelDiscoveryDriver.
+var _ ModelDiscoveryDriver = (*OllamaDriver)(nil)
+
+// ── Ollama Embedding Capability ─────────────────────────────
+
+func (d *OllamaDriver) EmbeddingModels() []EmbeddingModelInfo {
+	return []EmbeddingModelInfo{
+		{Model: "nomic-embed-text", Dimensions: 768, MaxBatch: 512},
+		{Model: "mxbai-embed-large", Dimensions: 1024, MaxBatch: 512},
+		{Model: "all-minilm", Dimensions: 384, MaxBatch: 512},
+		{Model: "snowflake-arctic-embed", Dimensions: 1024, MaxBatch: 512},
+	}
+}
+
+func (d *OllamaDriver) Embed(ctx context.Context, provider *models.ModelProvider, model string, texts []string) ([][]float64, error) {
+	endpoint := provider.Endpoint
+	if endpoint == "" {
+		endpoint = "http://localhost:11434"
+	}
+
+	type embedReq struct {
+		Model string `json:"model"`
+		Input any    `json:"input"`
+	}
+	type embedResp struct {
+		Embeddings [][]float64 `json:"embeddings"`
+	}
+
+	body, _ := json.Marshal(embedReq{Model: model, Input: texts})
+	url := endpoint + "/api/embed"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("ollama embed: create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	httpResp, err := d.router.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("ollama embed: request failed: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	respBody, _ := io.ReadAll(httpResp.Body)
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ollama embed: status %d: %s", httpResp.StatusCode, string(respBody))
+	}
+
+	var result embedResp
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("ollama embed: unmarshal: %w", err)
+	}
+	if len(result.Embeddings) != len(texts) {
+		return nil, fmt.Errorf("ollama embed: expected %d embeddings, got %d", len(texts), len(result.Embeddings))
+	}
+	return result.Embeddings, nil
+}
+
+// Compile-time assertion: OllamaDriver implements EmbeddingCapableDriver.
+var _ EmbeddingCapableDriver = (*OllamaDriver)(nil)
+
+// ══════════════════════════════════════════════════════════════
+// ── LiteLLM Proxy Driver ─────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// LiteLLMDriver forwards requests to a user's LiteLLM proxy using the
+// OpenAI-compatible API format. This lets AgentOven users who already run
+// LiteLLM get all the AgentOven value-add (lifecycle, versioning, recipes,
+// observability) on top of their existing proxy.
+//
+// Provider config:
+//
+//	{
+//	  "kind": "litellm",
+//	  "endpoint": "http://localhost:4000",
+//	  "config": {"api_key": "sk-optional-litellm-key"}
+//	}
+type LiteLLMDriver struct{ router *ModelRouter }
+
+func (d *LiteLLMDriver) Kind() string { return "litellm" }
+
+func (d *LiteLLMDriver) Call(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) (*models.RouteResponse, error) {
+	// LiteLLM exposes an OpenAI-compatible /chat/completions endpoint
+	return d.router.callOpenAI(ctx, provider, req.Model, req.Messages)
+}
+
+func (d *LiteLLMDriver) HealthCheck(ctx context.Context, provider *models.ModelProvider) error {
+	endpoint := provider.Endpoint
+	if endpoint == "" {
+		return fmt.Errorf("litellm: endpoint required (e.g. http://localhost:4000)")
+	}
+
+	// LiteLLM exposes GET /health
+	url := endpoint + "/health"
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+	apiKey, _ := provider.Config["api_key"].(string)
+	if apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	resp, err := d.router.client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("litellm unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("litellm: status %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// ── LiteLLM Model Discovery ─────────────────────────────────
+
+func (d *LiteLLMDriver) DiscoverModels(ctx context.Context, provider *models.ModelProvider) ([]models.DiscoveredModel, error) {
+	endpoint := provider.Endpoint
+	if endpoint == "" {
+		return nil, fmt.Errorf("litellm: endpoint required")
+	}
+
+	// LiteLLM exposes OpenAI-compatible GET /v1/models
+	url := endpoint + "/v1/models"
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	apiKey, _ := provider.Config["api_key"].(string)
+	if apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	httpResp, err := d.router.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("litellm discover: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(httpResp.Body)
+		return nil, fmt.Errorf("litellm discover: status %d: %s", httpResp.StatusCode, string(body))
+	}
+
+	var resp struct {
+		Data []struct {
+			ID      string `json:"id"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
+		return nil, fmt.Errorf("litellm discover: decode: %w", err)
+	}
+
+	var result []models.DiscoveredModel
+	for _, m := range resp.Data {
+		result = append(result, models.DiscoveredModel{
+			ID:       m.ID,
+			Provider: provider.Name,
+			Kind:     "litellm",
+			OwnedBy:  m.OwnedBy,
+		})
+	}
+	return result, nil
+}
+
+// Compile-time assertions for LiteLLMDriver.
+var (
+	_ ProviderDriver       = (*LiteLLMDriver)(nil)
+	_ ModelDiscoveryDriver = (*LiteLLMDriver)(nil)
+)

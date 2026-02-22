@@ -38,7 +38,7 @@ type AuthConfig struct {
 func Load() *Config {
 	return &Config{
 		Port:    envInt("AGENTOVEN_PORT", 8080),
-		Version: envStr("AGENTOVEN_VERSION", "0.2.2"),
+		Version: envStr("AGENTOVEN_VERSION", "0.3.0"),
 		Database: DatabaseConfig{
 			URL:            envStr("DATABASE_URL", "postgres://agentoven:agentoven@localhost:5432/agentoven?sslmode=disable"),
 			MaxConnections: envInt("DATABASE_MAX_CONNECTIONS", 25),

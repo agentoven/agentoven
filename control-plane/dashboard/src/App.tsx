@@ -3,10 +3,16 @@ import { Layout } from './components/Layout';
 import { AgentsPage } from './pages/Agents';
 import { AgentTestPage } from './pages/AgentTest';
 import { RecipesPage } from './pages/Recipes';
+import { PromptsPage } from './pages/Prompts';
 import { ProvidersPage } from './pages/Providers';
 import { ToolsPage } from './pages/Tools';
 import { TracesPage } from './pages/Traces';
 import { OverviewPage } from './pages/Overview';
+import { EmbeddingsPage } from './pages/Embeddings';
+import { VectorStoresPage } from './pages/VectorStores';
+import { RAGPipelinesPage } from './pages/RAGPipelines';
+import { ConnectorsPage } from './pages/Connectors';
+import { CatalogPage } from './pages/Catalog';
 
 function App() {
   return (
@@ -17,9 +23,15 @@ function App() {
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/agents/:name/test" element={<AgentTestPage />} />
           <Route path="/recipes" element={<RecipesPage />} />
+          <Route path="/prompts" element={<PromptsPage />} />
           <Route path="/providers" element={<ProvidersPage />} />
+          <Route path="/catalog" element={<CatalogPage />} />
           <Route path="/tools" element={<ToolsPage />} />
           <Route path="/traces" element={<TracesPage />} />
+          <Route path="/embeddings" element={<EmbeddingsPage />} />
+          <Route path="/vectorstores" element={<VectorStoresPage />} />
+          <Route path="/rag" element={<RAGPipelinesPage />} />
+          <Route path="/connectors" element={<ConnectorsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

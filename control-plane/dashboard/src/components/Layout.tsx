@@ -4,17 +4,29 @@ import {
   Bot,
   BookOpen,
   Cpu,
+  Library,
   Wrench,
   Activity,
+  FileText,
+  Boxes,
+  Database,
+  Search,
+  Plug,
 } from 'lucide-react';
 
 const nav = [
   { to: '/', label: 'Overview', icon: LayoutDashboard },
   { to: '/agents', label: 'Agents', icon: Bot },
   { to: '/recipes', label: 'Recipes', icon: BookOpen },
+  { to: '/prompts', label: 'Prompts', icon: FileText },
   { to: '/providers', label: 'Providers', icon: Cpu },
+  { to: '/catalog', label: 'Model Catalog', icon: Library },
   { to: '/tools', label: 'Tools', icon: Wrench },
   { to: '/traces', label: 'Traces', icon: Activity },
+  { to: '/embeddings', label: 'Embeddings', icon: Boxes },
+  { to: '/vectorstores', label: 'Vector Stores', icon: Database },
+  { to: '/rag', label: 'RAG Pipelines', icon: Search },
+  { to: '/connectors', label: 'Connectors', icon: Plug },
 ];
 
 export function Layout() {
@@ -24,7 +36,7 @@ export function Layout() {
       <aside className="w-60 flex flex-col border-r border-[var(--ao-border)] bg-[var(--ao-surface)]">
         {/* Logo */}
         <div className="flex items-center gap-2 px-5 py-5">
-          <span className="text-2xl">🏺</span>
+          <img src="/logo.png" alt="AgentOven" className="w-8 h-8" />
           <span className="text-lg font-bold text-[var(--ao-brand-light)]">
             AgentOven
           </span>

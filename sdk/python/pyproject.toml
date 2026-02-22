@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "agentoven"
-version = "0.1.0"
+version = "0.3.0"
 description = "AgentOven Python SDK — enterprise agent orchestration"
 readme = "README.md"
 license = { text = "MIT" }

@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Bot, Plus, Flame, Snowflake, Trash2, FlaskConical, AlertTriangle, X as XIcon, Sun } from 'lucide-react';
+import { Bot, Plus, Flame, Snowflake, Trash2, FlaskConical, AlertTriangle, X as XIcon, Sun, RefreshCw, Code, Copy, Check } from 'lucide-react';
 import { agents, providers, type Agent, type Ingredient, type IngredientKind, APIError } from '../api';
 import { useAPI } from '../hooks';
 import {
@@ -51,6 +51,7 @@ export function AgentsPage() {
 function AgentCard({ agent, onAction }: { agent: Agent; onAction: () => void }) {
   const [busy, setBusy] = useState(false);
   const [bakeError, setBakeError] = useState<string[] | null>(null);
+  const [showIntegration, setShowIntegration] = useState(false);
   const navigate = useNavigate();
 
   const doAction = async (fn: () => Promise<unknown>) => {
@@ -79,9 +80,19 @@ function AgentCard({ agent, onAction }: { agent: Agent; onAction: () => void }) 
       )}
 
       <div className="text-xs text-[var(--ao-text-muted)] space-y-1 mb-3">
+        <div className="flex items-center gap-2 mb-1">
+          <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
+            agent.mode === 'managed' ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'
+          }`}>
+            {agent.mode || 'managed'}
+          </span>
+          {agent.mode === 'managed' && (
+            <span className="text-[var(--ao-text-muted)]">max {agent.max_turns || 10} turns</span>
+          )}
+        </div>
         <p>Framework: {agent.framework || '—'}</p>
         <p>Model: {agent.model_provider ? `${agent.model_provider} / ${agent.model_name}` : '—'}</p>
-        <p>Version: {agent.version}</p>
+        <p>Version: <span className="font-mono text-[var(--ao-brand-light)]">{agent.version || '—'}</span></p>
         {agent.skills?.length > 0 && <p>Skills: {agent.skills.join(', ')}</p>}
         {agent.ingredients?.length > 0 && (
           <p>Ingredients: {agent.ingredients.map((i) => `${i.kind}:${i.name}`).join(', ')}</p>
@@ -106,6 +117,11 @@ function AgentCard({ agent, onAction }: { agent: Agent; onAction: () => void }) 
         </div>
       )}
 
+      {/* Integration panel */}
+      {showIntegration && agent.status === 'ready' && (
+        <IntegrationPanel agent={agent} onClose={() => setShowIntegration(false)} />
+      )}
+
       <div className="flex gap-2 flex-wrap">
         {agent.status === 'draft' && (
           <Button size="sm" onClick={() => doAction(() => agents.bake(agent.name))} disabled={busy}>
@@ -113,14 +129,25 @@ function AgentCard({ agent, onAction }: { agent: Agent; onAction: () => void }) 
           </Button>
         )}
         {agent.status === 'burnt' && (
-          <Button size="sm" onClick={() => doAction(() => agents.bake(agent.name))} disabled={busy}>
-            <Flame size={14} className="mr-1" /> Retry Bake
-          </Button>
+          <>
+            <Button size="sm" onClick={() => doAction(() => agents.bake(agent.name))} disabled={busy}>
+              <Flame size={14} className="mr-1" /> Retry Bake
+            </Button>
+            <Button size="sm" variant="secondary" onClick={() => doAction(() => agents.recook(agent.name))} disabled={busy}>
+              <RefreshCw size={14} className="mr-1" /> Re-cook
+            </Button>
+          </>
         )}
         {agent.status === 'ready' && (
           <>
-            <Button size="sm" onClick={() => navigate(`/agents/${agent.name}/test`)}>
+            <Button size="sm" onClick={() => setShowIntegration(!showIntegration)}>
+              <Code size={14} className="mr-1" /> Integrate
+            </Button>
+            <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${agent.name}/test`)}>
               <FlaskConical size={14} className="mr-1" /> Test
+            </Button>
+            <Button size="sm" variant="secondary" onClick={() => doAction(() => agents.recook(agent.name))} disabled={busy}>
+              <RefreshCw size={14} className="mr-1" /> Re-cook
             </Button>
             <Button size="sm" variant="secondary" onClick={() => doAction(() => agents.cool(agent.name))} disabled={busy}>
               <Snowflake size={14} className="mr-1" /> Cool
@@ -131,6 +158,9 @@ function AgentCard({ agent, onAction }: { agent: Agent; onAction: () => void }) 
           <>
             <Button size="sm" onClick={() => doAction(() => agents.rewarm(agent.name))} disabled={busy}>
               <Sun size={14} className="mr-1" /> Rewarm
+            </Button>
+            <Button size="sm" variant="secondary" onClick={() => doAction(() => agents.recook(agent.name))} disabled={busy}>
+              <RefreshCw size={14} className="mr-1" /> Re-cook
             </Button>
             <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${agent.name}/test`)}>
               <FlaskConical size={14} className="mr-1" /> Test
@@ -147,6 +177,183 @@ function AgentCard({ agent, onAction }: { agent: Agent; onAction: () => void }) 
         </Button>
       </div>
     </Card>
+  );
+}
+
+// ── Integration panel — shows curl, CLI, and Python commands ──
+
+type IntegrationTab = 'invoke' | 'session' | 'test' | 'card';
+
+function IntegrationPanel({ agent, onClose }: { agent: Agent; onClose: () => void }) {
+  const [tab, setTab] = useState<IntegrationTab>('invoke');
+  const [copied, setCopied] = useState(false);
+  const host = window.location.origin;
+  const name = agent.name;
+
+  const copy = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const snippets: Record<IntegrationTab, { label: string; description: string; curl: string; cli: string; python: string }> = {
+    invoke: {
+      label: 'Invoke',
+      description: 'Full agentic execution — uses resolved ingredients, prompt templates, tool calling loop.',
+      curl: `curl -X POST ${host}/api/v1/agents/${name}/invoke \\
+  -H "Content-Type: application/json" \\
+  -H "X-Kitchen-Id: default" \\
+  -d '{
+    "message": "Hello, translate this to French: Good morning!",
+    "variables": {}
+  }'`,
+      cli: `agentoven agent test ${name} --message "Hello, translate this to French: Good morning!"`,
+      python: `from agentoven import AgentOvenClient
+
+client = AgentOvenClient("${host}")
+result = client.invoke_agent("${name}", "Hello, translate this to French: Good morning!")
+print(result["response"])`,
+    },
+    session: {
+      label: 'Session',
+      description: 'Multi-turn conversations with memory — create a session, then send messages.',
+      curl: `# 1. Create a session
+curl -X POST ${host}/api/v1/agents/${name}/sessions \\
+  -H "Content-Type: application/json" \\
+  -H "X-Kitchen-Id: default" \\
+  -d '{"max_turns": 10}'
+
+# 2. Send messages (replace SESSION_ID)
+curl -X POST ${host}/api/v1/agents/${name}/sessions/SESSION_ID/messages \\
+  -H "Content-Type: application/json" \\
+  -H "X-Kitchen-Id: default" \\
+  -d '{"content": "Hello! What can you help me with?"}'
+
+# 3. Send follow-up (same session — agent remembers context)
+curl -X POST ${host}/api/v1/agents/${name}/sessions/SESSION_ID/messages \\
+  -H "Content-Type: application/json" \\
+  -H "X-Kitchen-Id: default" \\
+  -d '{"content": "Now translate that to Spanish"}'`,
+      cli: `# Sessions not yet in CLI — use curl or Python SDK`,
+      python: `from agentoven import AgentOvenClient
+
+client = AgentOvenClient("${host}")
+session = client.create_session("${name}", max_turns=10)
+
+r1 = client.send_message("${name}", session["id"], "Hello!")
+print(r1["content"])
+
+r2 = client.send_message("${name}", session["id"], "Now translate that to Spanish")
+print(r2["content"])`,
+    },
+    test: {
+      label: 'Test',
+      description: 'One-shot test — no memory, no executor, just routes a message through the model.',
+      curl: `curl -X POST ${host}/api/v1/agents/${name}/test \\
+  -H "Content-Type: application/json" \\
+  -H "X-Kitchen-Id: default" \\
+  -d '{"message": "Hello!"}'`,
+      cli: `agentoven agent test ${name} --message "Hello!"`,
+      python: `from agentoven import AgentOvenClient
+
+client = AgentOvenClient("${host}")
+result = client.test_agent("${name}", "Hello!")
+print(result["response"])`,
+    },
+    card: {
+      label: 'Agent Card',
+      description: 'A2A-compatible agent card — capabilities, skills, supported input/output modes.',
+      curl: `curl ${host}/api/v1/agents/${name}/card \\
+  -H "X-Kitchen-Id: default"`,
+      cli: `# Agent card not yet in CLI — use curl`,
+      python: `import requests
+
+card = requests.get("${host}/api/v1/agents/${name}/card",
+                     headers={"X-Kitchen-Id": "default"}).json()
+print(card)`,
+    },
+  };
+
+  const active = snippets[tab];
+
+  const tabs: IntegrationTab[] = ['invoke', 'session', 'test', 'card'];
+
+  return (
+    <div className="mb-3 rounded-lg border border-[var(--ao-border)] bg-[var(--ao-bg)] overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center justify-between px-3 py-2 bg-[var(--ao-surface)]">
+        <div className="flex items-center gap-1">
+          {tabs.map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                tab === t
+                  ? 'bg-[var(--ao-brand)] text-white'
+                  : 'text-[var(--ao-text-muted)] hover:text-[var(--ao-text)] hover:bg-[var(--ao-surface-hover)]'
+              }`}
+            >
+              {snippets[t].label}
+            </button>
+          ))}
+        </div>
+        <button onClick={onClose} className="text-[var(--ao-text-muted)] hover:text-[var(--ao-text)]">
+          <XIcon size={14} />
+        </button>
+      </div>
+
+      <div className="p-3">
+        <p className="text-xs text-[var(--ao-text-muted)] mb-2">{active.description}</p>
+
+        {/* curl */}
+        <div className="mb-2">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[10px] font-semibold text-[var(--ao-text-muted)] uppercase">curl</span>
+            <button
+              onClick={() => copy(active.curl)}
+              className="text-[var(--ao-text-muted)] hover:text-[var(--ao-brand-light)]"
+            >
+              {copied ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
+            </button>
+          </div>
+          <pre className="text-[11px] font-mono p-2 rounded bg-[var(--ao-surface)] border border-[var(--ao-border)] overflow-x-auto whitespace-pre text-[var(--ao-text-muted)]">
+            {active.curl}
+          </pre>
+        </div>
+
+        {/* CLI */}
+        <div className="mb-2">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[10px] font-semibold text-[var(--ao-text-muted)] uppercase">CLI</span>
+            <button
+              onClick={() => copy(active.cli)}
+              className="text-[var(--ao-text-muted)] hover:text-[var(--ao-brand-light)]"
+            >
+              <Copy size={12} />
+            </button>
+          </div>
+          <pre className="text-[11px] font-mono p-2 rounded bg-[var(--ao-surface)] border border-[var(--ao-border)] overflow-x-auto whitespace-pre text-[var(--ao-text-muted)]">
+            {active.cli}
+          </pre>
+        </div>
+
+        {/* Python */}
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[10px] font-semibold text-[var(--ao-text-muted)] uppercase">Python</span>
+            <button
+              onClick={() => copy(active.python)}
+              className="text-[var(--ao-text-muted)] hover:text-[var(--ao-brand-light)]"
+            >
+              <Copy size={12} />
+            </button>
+          </div>
+          <pre className="text-[11px] font-mono p-2 rounded bg-[var(--ao-surface)] border border-[var(--ao-border)] overflow-x-auto whitespace-pre text-[var(--ao-text-muted)]">
+            {active.python}
+          </pre>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -173,6 +380,8 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
     model_provider: '', model_name: '',
     system_prompt: '',
     skills: '',
+    mode: 'managed' as 'managed' | 'external',
+    max_turns: 10,
   });
   const [ingredients, setIngredients] = useState<IngredientRow[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -230,6 +439,8 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
         model_name: form.model_name,
         ingredients: builtIngredients as Ingredient[],
         skills,
+        mode: form.mode,
+        max_turns: form.mode === 'managed' ? form.max_turns : undefined,
       });
       onCreated();
     } catch (e) {
@@ -280,6 +491,30 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
               <option value="custom">Custom</option>
             </select>
           </div>
+          <div className="w-32">
+            <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Mode</label>
+            <select
+              value={form.mode}
+              onChange={(e) => setForm({ ...form, mode: e.target.value as 'managed' | 'external' })}
+              className={inputCls}
+            >
+              <option value="managed">Managed</option>
+              <option value="external">External</option>
+            </select>
+          </div>
+          {form.mode === 'managed' && (
+            <div className="w-24">
+              <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Max Turns</label>
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={form.max_turns}
+                onChange={(e) => setForm({ ...form, max_turns: parseInt(e.target.value) || 10 })}
+                className={inputCls}
+              />
+            </div>
+          )}
         </div>
 
         {/* Row 2: model provider, model name */}
@@ -371,6 +606,7 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
                   <option value="tool">Tool</option>
                   <option value="prompt">Prompt</option>
                   <option value="data">Data</option>
+                  <option value="observability">Observability</option>
                 </select>
                 <input
                   value={ing.name}

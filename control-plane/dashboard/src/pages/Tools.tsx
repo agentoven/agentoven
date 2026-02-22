@@ -43,6 +43,7 @@ export function ToolsPage() {
                   <th className="px-4 py-3 font-medium">Name</th>
                   <th className="px-4 py-3 font-medium">Transport</th>
                   <th className="px-4 py-3 font-medium">Endpoint</th>
+                  <th className="px-4 py-3 font-medium">Capabilities</th>
                   <th className="px-4 py-3 font-medium">Schema</th>
                   <th className="px-4 py-3 font-medium">Enabled</th>
                   <th className="px-4 py-3 font-medium w-24"></th>
@@ -104,6 +105,17 @@ function ToolRow({
       <td className="px-4 py-3 text-xs text-[var(--ao-text-muted)] truncate max-w-[200px]">
         {tool.endpoint}
       </td>
+      <td className="px-4 py-3">
+        <div className="flex flex-wrap gap-1">
+          {(tool.capabilities || ['tool']).map((cap) => (
+            <span key={cap} className={`text-xs px-1.5 py-0.5 rounded ${
+              cap === 'notify' ? 'bg-amber-500/20 text-amber-400' : 'bg-blue-500/20 text-blue-400'
+            }`}>
+              {cap}
+            </span>
+          ))}
+        </div>
+      </td>
       <td className="px-4 py-3 text-xs text-[var(--ao-text-muted)]">
         {schemaKeys.length > 0 ? `${schemaKeys.length} field(s)` : '—'}
       </td>
@@ -155,6 +167,8 @@ interface ToolFormState {
   auth_type: string;
   auth_token: string;
   enabled: boolean;
+  cap_tool: boolean;
+  cap_notify: boolean;
 }
 
 function ToolForm({
@@ -174,6 +188,8 @@ function ToolForm({
     auth_type: (existing?.auth_config?.type as string) ?? 'none',
     auth_token: '', // never pre-fill credentials
     enabled: existing?.enabled ?? true,
+    cap_tool: existing?.capabilities ? existing.capabilities.includes('tool') : true,
+    cap_notify: existing?.capabilities ? existing.capabilities.includes('notify') : false,
   });
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -204,6 +220,11 @@ function ToolForm({
       if (form.auth_token) auth_config.token = form.auth_token;
     }
 
+    const capabilities: string[] = [];
+    if (form.cap_tool) capabilities.push('tool');
+    if (form.cap_notify) capabilities.push('notify');
+    if (capabilities.length === 0) capabilities.push('tool');
+
     const payload: Partial<MCPTool> = {
       name: form.name,
       description: form.description,
@@ -212,6 +233,7 @@ function ToolForm({
       schema: form.schema.trim() ? JSON.parse(form.schema) : {},
       auth_config: Object.keys(auth_config).length > 0 ? auth_config : {},
       enabled: form.enabled,
+      capabilities,
     };
 
     try {
@@ -336,7 +358,34 @@ function ToolForm({
           )}
         </div>
 
-        {/* Row 5: enabled + submit */}
+        {/* Row 5: capabilities */}
+        <div>
+          <label className="block text-xs text-[var(--ao-text-muted)] mb-2">Capabilities</label>
+          <div className="flex gap-4">
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <input
+                type="checkbox"
+                checked={form.cap_tool}
+                onChange={(e) => setForm({ ...form, cap_tool: e.target.checked })}
+                className="rounded border-[var(--ao-border)]"
+              />
+              <span className="text-xs px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400">tool</span>
+              <span className="text-xs text-[var(--ao-text-muted)]">Can be called as MCP tool</span>
+            </label>
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <input
+                type="checkbox"
+                checked={form.cap_notify}
+                onChange={(e) => setForm({ ...form, cap_notify: e.target.checked })}
+                className="rounded border-[var(--ao-border)]"
+              />
+              <span className="text-xs px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400">notify</span>
+              <span className="text-xs text-[var(--ao-text-muted)]">Receives notification events</span>
+            </label>
+          </div>
+        </div>
+
+        {/* Row 6: enabled + submit */}
         <div className="flex items-center justify-between">
           <label className="flex items-center gap-2 text-sm cursor-pointer">
             <input

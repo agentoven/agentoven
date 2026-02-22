@@ -18,6 +18,10 @@ require (
 	github.com/go-logr/logr v1.4.2 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.22.0 // indirect
+	github.com/jackc/pgpassfile v1.0.0 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
+	github.com/jackc/pgx/v5 v5.8.0 // indirect
+	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.19 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
@@ -25,6 +29,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.31.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.3.1 // indirect
 	golang.org/x/net v0.30.0 // indirect
+	golang.org/x/sync v0.17.0 // indirect
 	golang.org/x/sys v0.26.0 // indirect
 	golang.org/x/text v0.29.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20241007155032-5fefd90f89a9 // indirect

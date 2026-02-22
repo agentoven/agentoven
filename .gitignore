@@ -56,4 +56,8 @@ htmlcov/
 # Logs
 *.log
 logs/
+
+# Internal planning docs
+.docs/
+
 .github/copilot-instructions.md

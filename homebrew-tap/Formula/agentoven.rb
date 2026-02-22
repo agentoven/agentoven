@@ -7,7 +7,7 @@
 class Agentoven < Formula
   desc "Open-source enterprise agent control plane — A2A & MCP native"
   homepage "https://agentoven.dev"
-  url "https://github.com/agentoven/agentoven/archive/refs/tags/v0.2.2.tar.gz"
+  url "https://github.com/agentoven/agentoven/archive/refs/tags/v0.3.0.tar.gz"
   sha256 "PLACEHOLDER_SHA256"
   license "MIT"
   head "https://github.com/agentoven/agentoven.git", branch: "main"
@@ -55,7 +55,7 @@ class Agentoven < Formula
   end
 
   test do
-    assert_match "agentoven 0.2.2", shell_output("#{bin}/agentoven --version")
+    assert_match "agentoven 0.3.0", shell_output("#{bin}/agentoven --version")
     assert_predicate bin/"agentoven-server", :exist?
     assert_predicate pkgshare/"dashboard/index.html", :exist?
   end

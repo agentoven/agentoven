@@ -20,6 +20,13 @@ type Store interface {
 	ModelProviderStore
 	RecipeRunStore
 	MCPToolStore
+	PromptStore
+	KitchenSettingsStore
+	AuditStore
+	ApprovalStore
+	NotificationChannelStore
+	VectorDocStore
+	DataConnectorStore
 
 	// Ping checks if the database is reachable.
 	Ping(ctx context.Context) error
@@ -39,6 +46,10 @@ type AgentStore interface {
 	CreateAgent(ctx context.Context, agent *models.Agent) error
 	UpdateAgent(ctx context.Context, agent *models.Agent) error
 	DeleteAgent(ctx context.Context, kitchen, name string) error
+
+	// Agent versioning — tracks historical versions of agents
+	ListAgentVersions(ctx context.Context, kitchen, name string) ([]models.Agent, error)
+	GetAgentVersion(ctx context.Context, kitchen, name, version string) (*models.Agent, error)
 }
 
 // ── Recipe Store ────────────────────────────────────────────
@@ -65,6 +76,7 @@ type TraceStore interface {
 	ListTraces(ctx context.Context, kitchen string, limit int) ([]models.Trace, error)
 	GetTrace(ctx context.Context, id string) (*models.Trace, error)
 	CreateTrace(ctx context.Context, trace *models.Trace) error
+	DeleteTrace(ctx context.Context, id string) error
 }
 
 // ── Model Provider Store ────────────────────────────────────
@@ -94,6 +106,99 @@ type MCPToolStore interface {
 	CreateTool(ctx context.Context, tool *models.MCPTool) error
 	UpdateTool(ctx context.Context, tool *models.MCPTool) error
 	DeleteTool(ctx context.Context, kitchen, name string) error
+}
+
+// ── Prompt Store ────────────────────────────────────────────
+
+type PromptStore interface {
+	ListPrompts(ctx context.Context, kitchen string) ([]models.Prompt, error)
+	GetPrompt(ctx context.Context, kitchen, name string) (*models.Prompt, error)
+	GetPromptVersion(ctx context.Context, kitchen, name string, version int) (*models.Prompt, error)
+	ListPromptVersions(ctx context.Context, kitchen, name string) ([]models.Prompt, error)
+	CreatePrompt(ctx context.Context, prompt *models.Prompt) error
+	UpdatePrompt(ctx context.Context, prompt *models.Prompt) error // auto-bumps version, keeps history
+	DeletePrompt(ctx context.Context, kitchen, name string) error
+}
+
+// ── Kitchen Settings Store ──────────────────────────────────
+
+type KitchenSettingsStore interface {
+	GetKitchenSettings(ctx context.Context, kitchenID string) (*models.KitchenSettings, error)
+	UpsertKitchenSettings(ctx context.Context, settings *models.KitchenSettings) error
+}
+
+// ── Audit Store ─────────────────────────────────────────────
+
+type AuditStore interface {
+	// CreateAuditEvent persists an audit event.
+	CreateAuditEvent(ctx context.Context, event *models.AuditEvent) error
+
+	// ListAuditEvents returns filtered audit events.
+	ListAuditEvents(ctx context.Context, filter models.AuditFilter) ([]models.AuditEvent, error)
+
+	// CountAuditEvents returns the count of events matching the filter.
+	CountAuditEvents(ctx context.Context, filter models.AuditFilter) (int64, error)
+
+	// DeleteAuditEvent removes an audit event by ID.
+	DeleteAuditEvent(ctx context.Context, id string) error
+}
+
+// ── Approval Store ──────────────────────────────────────────
+
+type ApprovalStore interface {
+	// CreateApproval persists a new approval record (status=waiting).
+	CreateApproval(ctx context.Context, record *models.ApprovalRecord) error
+
+	// GetApproval returns an approval by gate key.
+	GetApproval(ctx context.Context, gateKey string) (*models.ApprovalRecord, error)
+
+	// UpdateApproval updates an approval record (approve/reject).
+	UpdateApproval(ctx context.Context, record *models.ApprovalRecord) error
+
+	// ListApprovals returns approvals filtered by kitchen and status.
+	ListApprovals(ctx context.Context, kitchen, status string, limit int) ([]models.ApprovalRecord, error)
+}
+
+// ── Notification Channel Store ──────────────────────────────
+
+type NotificationChannelStore interface {
+	ListChannels(ctx context.Context, kitchen string) ([]models.NotificationChannel, error)
+	GetChannel(ctx context.Context, kitchen, name string) (*models.NotificationChannel, error)
+	CreateChannel(ctx context.Context, channel *models.NotificationChannel) error
+	UpdateChannel(ctx context.Context, channel *models.NotificationChannel) error
+	DeleteChannel(ctx context.Context, kitchen, name string) error
+}
+
+// ── Vector Doc Store ────────────────────────────────────────
+
+// VectorDocStore provides CRUD for vector documents used by RAG pipelines.
+// The in-memory store uses the embedded vector index; PostgreSQL uses pgvector.
+type VectorDocStore interface {
+	// UpsertVectorDocs inserts or updates documents in the vector index.
+	UpsertVectorDocs(ctx context.Context, kitchen string, docs []models.VectorDoc) error
+
+	// SearchVectorDocs performs similarity search returning top-k results.
+	SearchVectorDocs(ctx context.Context, kitchen string, vector []float64, topK int, namespace string) ([]models.SearchResult, error)
+
+	// DeleteVectorDocs removes documents by ID.
+	DeleteVectorDocs(ctx context.Context, kitchen string, ids []string) error
+
+	// CountVectorDocs returns the document count for a kitchen/namespace.
+	CountVectorDocs(ctx context.Context, kitchen, namespace string) (int64, error)
+
+	// ListVectorNamespaces returns distinct namespaces for a kitchen.
+	ListVectorNamespaces(ctx context.Context, kitchen string) ([]string, error)
+}
+
+// ── Data Connector Store ────────────────────────────────────
+
+// DataConnectorStore persists data connector configurations.
+type DataConnectorStore interface {
+	ListConnectors(ctx context.Context, kitchen string) ([]models.DataConnectorConfig, error)
+	GetConnector(ctx context.Context, kitchen, id string) (*models.DataConnectorConfig, error)
+	CreateConnector(ctx context.Context, connector *models.DataConnectorConfig) error
+	UpdateConnector(ctx context.Context, connector *models.DataConnectorConfig) error
+	DeleteConnector(ctx context.Context, kitchen, id string) error
 }
 
 // ── Errors ──────────────────────────────────────────────────

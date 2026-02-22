@@ -1,4 +1,4 @@
-.PHONY: all build test clean dev fmt lint
+.PHONY: all build test clean dev fmt lint dev-pro build-pro
 
 # ──────────────────────────────────────────────
 # 🏺 AgentOven — Bake production-ready AI agents
@@ -41,6 +41,28 @@ dev-server:
 
 dev-dashboard:
 	cd control-plane/dashboard && npm run dev
+
+# ── Enterprise (Pro) ─────────────────────────
+
+# Run the enterprise server (requires ../agentoven-pro)
+dev-pro:
+	@echo "🏺 Starting AgentOven Pro dev mode..."
+	@echo ""
+	@echo "  Pro API server → http://localhost:8080"
+	@echo "  Dashboard      → http://localhost:5173"
+	@echo ""
+	@$(MAKE) -j2 dev-pro-server dev-dashboard
+
+dev-pro-server:
+	cd ../agentoven-pro && go run ./cmd/server
+
+# Build the enterprise server binary
+build-pro:
+	cd ../agentoven-pro && go build -o bin/agentoven-pro ./cmd/server/
+
+# Test enterprise (Pro + OSS)
+test-pro:
+	cd ../agentoven-pro && go test ./... -v
 
 # ── Test ──────────────────────────────────────
 

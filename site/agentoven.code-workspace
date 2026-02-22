@@ -8,6 +8,9 @@
 		},
 		{
 			"path": "../../agentoven-pro"
+		},
+		{
+			"path": "../../AgentForge"
 		}
 	],
 	"settings": {}

@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 env:
   GO_VERSION: '1.24'
@@ -138,22 +139,170 @@ jobs:
           name: python-wheels-${{ matrix.os }}
           path: sdk/python/dist/
 
+  # ── Build & push Docker image to GHCR ─────────────────────────
+  docker:
+    name: Docker Image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: control-plane
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/agentoven/agentoven:${{ steps.version.outputs.version }}
+            ghcr.io/agentoven/agentoven:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Build TypeScript SDK native binaries ─────────────────────
+  typescript-sdk:
+    name: TypeScript SDK (${{ matrix.settings.target }})
+    runs-on: ${{ matrix.settings.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.settings.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sdk/typescript/native
+
+      - name: Install cross-compilation tools (Linux)
+        if: contains(matrix.settings.target, 'linux')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools
+
+      - name: Install dependencies
+        working-directory: sdk/typescript
+        run: npm ci
+
+      - name: Build native module
+        working-directory: sdk/typescript
+        run: |
+          npx napi build --platform --release --target ${{ matrix.settings.target }} ./native
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-bindings-${{ matrix.settings.target }}
+          path: sdk/typescript/*.node
+          if-no-files-found: error
+
+  # ── Publish @agentoven/sdk to npm ────────────────────────────
+  npm-publish:
+    name: Publish npm
+    needs: [typescript-sdk]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        working-directory: sdk/typescript
+        run: npm ci
+
+      - name: Download all native bindings
+        uses: actions/download-artifact@v4
+        with:
+          path: sdk/typescript/artifacts
+          pattern: sdk-bindings-*
+          merge-multiple: true
+
+      - name: Move artifacts
+        working-directory: sdk/typescript
+        run: npx napi artifacts --dir artifacts
+
+      - name: Build TypeScript
+        working-directory: sdk/typescript
+        run: npx tsc
+
+      - name: Publish
+        working-directory: sdk/typescript
+        run: |
+          npx napi prepublish -t npm
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
   # ── Create GitHub Release ────────────────────────────────────
   release:
     name: Create Release
-    needs: [cli, server, python-wheels]
+    needs: [cli, server, python-wheels, docker, npm-publish]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
           path: dist
 
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          # Extract the section for this version from CHANGELOG.md
+          NOTES=$(awk "/^## \[${VERSION}\]/{found=1; next} /^## \[/{if(found) exit} found{print}" CHANGELOG.md)
+          if [ -z "$NOTES" ]; then
+            echo "body=" >> "$GITHUB_OUTPUT"
+          else
+            # Use heredoc delimiter for multiline
+            EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+            echo "body<<$EOF" >> "$GITHUB_OUTPUT"
+            echo "$NOTES" >> "$GITHUB_OUTPUT"
+            echo "$EOF" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/**/*
-          generate_release_notes: true
+          body: ${{ steps.notes.outputs.body }}
+          generate_release_notes: ${{ steps.notes.outputs.body == '' }}
 
   # ── Update Homebrew tap ──────────────────────────────────────
   homebrew:

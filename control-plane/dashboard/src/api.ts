@@ -28,7 +28,7 @@ export class APIError extends Error {
 
 // ── Ingredients ───────────────────────────────────────────────
 
-export type IngredientKind = 'model' | 'tool' | 'prompt' | 'data';
+export type IngredientKind = 'model' | 'tool' | 'prompt' | 'data' | 'observability' | 'embedding' | 'vectorstore' | 'retriever';
 
 export interface Ingredient {
   id: string;
@@ -45,9 +45,11 @@ export interface Agent {
   name: string;
   description: string;
   framework: string;
+  mode: 'managed' | 'external';
   status: string;
   kitchen: string;
   version: string;
+  max_turns: number;
   a2a_endpoint: string;
   skills: string[];
   model_provider: string;
@@ -74,6 +76,30 @@ export interface TestAgentResponse {
   trace_id: string;
 }
 
+export interface InvokeAgentResponse {
+  agent: string;
+  response: string;
+  trace_id: string;
+  turns: number;
+  usage: {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    estimated_cost_usd: number;
+  };
+  latency_ms: number;
+}
+
+export interface AgentConfig {
+  agent: Agent;
+  ingredients: {
+    model?: { provider: string; kind: string; model: string; endpoint: string };
+    tools?: { name: string; endpoint: string; transport: string }[];
+    prompt?: { name: string; version: number; template: string };
+    data?: { name: string; uri: string }[];
+  };
+}
+
 export const agents = {
   list: () => request<Agent[]>('/agents'),
   get: (name: string) => request<Agent>(`/agents/${name}`),
@@ -85,6 +111,11 @@ export const agents = {
     request<void>(`/agents/${name}`, { method: 'DELETE' }),
   bake: (name: string) =>
     request<Agent>(`/agents/${name}/bake`, { method: 'POST' }),
+  recook: (name: string, edits?: Partial<Agent>) =>
+    request<Agent>(`/agents/${name}/recook`, {
+      method: 'POST',
+      body: edits ? JSON.stringify(edits) : undefined,
+    }),
   cool: (name: string) =>
     request<Agent>(`/agents/${name}/cool`, { method: 'POST' }),
   rewarm: (name: string) =>
@@ -94,6 +125,13 @@ export const agents = {
       method: 'POST',
       body: JSON.stringify({ message }),
     }),
+  invoke: (name: string, message: string, variables?: Record<string, string>) =>
+    request<InvokeAgentResponse>(`/agents/${name}/invoke`, {
+      method: 'POST',
+      body: JSON.stringify({ message, variables }),
+    }),
+  config: (name: string) =>
+    request<AgentConfig>(`/agents/${name}/config`),
 };
 
 // ── Recipes ───────────────────────────────────────────────────
@@ -185,6 +223,7 @@ export interface MCPTool {
   transport: string;
   schema: Record<string, unknown>;
   auth_config: Record<string, unknown>;
+  capabilities: string[];
   enabled: boolean;
   created_at: string;
   updated_at: string;
@@ -219,6 +258,203 @@ export interface Trace {
 export const traces = {
   list: () => request<Trace[]>('/traces'),
   get: (id: string) => request<Trace>(`/traces/${id}`),
+};
+
+// ── Prompts ───────────────────────────────────────────────────
+
+export interface Prompt {
+  id: string;
+  name: string;
+  version: number;
+  template: string;
+  variables: string[];
+  kitchen: string;
+  tags: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export const prompts = {
+  list: () => request<Prompt[]>('/prompts'),
+  get: (name: string) => request<Prompt>(`/prompts/${name}`),
+  create: (prompt: Partial<Prompt>) =>
+    request<Prompt>('/prompts', { method: 'POST', body: JSON.stringify(prompt) }),
+  update: (name: string, prompt: Partial<Prompt>) =>
+    request<Prompt>(`/prompts/${name}`, { method: 'PUT', body: JSON.stringify(prompt) }),
+  delete: (name: string) =>
+    request<void>(`/prompts/${name}`, { method: 'DELETE' }),
+  listVersions: (name: string) =>
+    request<Prompt[]>(`/prompts/${name}/versions`),
+  getVersion: (name: string, version: number) =>
+    request<Prompt>(`/prompts/${name}/versions/${version}`),
+};
+
+// ── Recipe Runs ───────────────────────────────────────────────
+
+export interface RecipeRun {
+  id: string;
+  recipe_id: string;
+  kitchen: string;
+  status: string;
+  input: Record<string, unknown>;
+  output: Record<string, unknown>;
+  step_results: StepResult[];
+  started_at: string;
+  completed_at?: string;
+  duration_ms: number;
+  error?: string;
+}
+
+export interface StepResult {
+  step_name: string;
+  step_kind: string;
+  status: string;
+  output: Record<string, unknown>;
+  agent_ref: string;
+  started_at: string;
+  duration_ms: number;
+  error?: string;
+  tokens: number;
+  cost_usd: number;
+  gate_status?: string;
+  branch_taken?: string;
+}
+
+export const recipeRuns = {
+  list: (recipeName: string) =>
+    request<RecipeRun[]>(`/recipes/${recipeName}/runs`),
+  get: (recipeName: string, runId: string) =>
+    request<RecipeRun>(`/recipes/${recipeName}/runs/${runId}`),
+  cancel: (recipeName: string, runId: string) =>
+    request<void>(`/recipes/${recipeName}/runs/${runId}/cancel`, { method: 'POST' }),
+  approveGate: (recipeName: string, runId: string, stepName: string) =>
+    request<void>(`/recipes/${recipeName}/runs/${runId}/gates/${stepName}/approve`, { method: 'POST' }),
+};
+
+// ── Embeddings ────────────────────────────────────────────────
+
+export interface EmbedResponse {
+  driver: string;
+  vectors: number[][];
+  dimensions: number;
+}
+
+export const embeddingsAPI = {
+  list: () => request<string[]>('/embeddings'),
+  health: () => request<Record<string, string>>('/embeddings/health'),
+  embed: (driver: string, texts: string[]) =>
+    request<EmbedResponse>(`/embeddings/${driver}/embed`, {
+      method: 'POST',
+      body: JSON.stringify({ texts }),
+    }),
+};
+
+// ── Vector Stores ─────────────────────────────────────────────
+
+export const vectorStoresAPI = {
+  list: () => request<string[]>('/vectorstores'),
+  health: () => request<Record<string, string>>('/vectorstores/health'),
+};
+
+// ── RAG ───────────────────────────────────────────────────────
+
+export interface RAGSearchResult {
+  id: string;
+  content: string;
+  score: number;
+  metadata?: Record<string, string>;
+}
+
+export interface RAGQueryResult {
+  strategy: string;
+  results: RAGSearchResult[];
+  total_chunks: number;
+}
+
+export interface RAGIngestResult {
+  documents_processed: number;
+  chunks_created: number;
+  vectors_stored: number;
+}
+
+export const ragAPI = {
+  query: (query: string, opts?: { namespace?: string; strategy?: string; top_k?: number }) =>
+    request<RAGQueryResult>('/rag/query', {
+      method: 'POST',
+      body: JSON.stringify({ query, kitchen_id: '', ...opts }),
+    }),
+  ingest: (documents: { id: string; content: string; metadata?: Record<string, string> }[], namespace?: string) =>
+    request<RAGIngestResult>('/rag/ingest', {
+      method: 'POST',
+      body: JSON.stringify({ kitchen_id: '', namespace: namespace || 'default', documents }),
+    }),
+};
+
+// ── Connectors ────────────────────────────────────────────────
+
+export interface DataConnector {
+  id: string;
+  name: string;
+  kind: string;
+  status: string;
+  config: Record<string, unknown>;
+  created_at: string;
+}
+
+export const connectorsAPI = {
+  list: () => request<DataConnector[]>('/connectors'),
+};
+
+// ── Model Catalog ─────────────────────────────────────────────
+
+export interface ModelCapability {
+  model_id: string;
+  provider_kind: string;
+  model_name: string;
+  display_name?: string;
+  context_window?: number;
+  max_output_tokens?: number;
+  input_cost_per_1k?: number;
+  output_cost_per_1k?: number;
+  supports_tools?: boolean;
+  supports_vision?: boolean;
+  supports_streaming?: boolean;
+  supports_thinking?: boolean;
+  supports_json?: boolean;
+  token_param_name?: string;
+  api_version?: string;
+  modalities?: string[];
+  deprecated_at?: string;
+  source?: string;
+}
+
+export interface DiscoveredModel {
+  id: string;
+  provider: string;
+  kind: string;
+  owned_by?: string;
+  created_at?: number;
+  metadata?: Record<string, string>;
+}
+
+export const catalog = {
+  list: (provider?: string) =>
+    request<{ models: ModelCapability[]; count: number }>(
+      `/models/catalog${provider ? `?provider=${provider}` : ''}`,
+    ),
+  get: (modelID: string, provider?: string) =>
+    request<ModelCapability>(
+      `/models/catalog/${encodeURIComponent(modelID)}${provider ? `?provider=${provider}` : ''}`,
+    ),
+  refresh: () =>
+    request<{ status: string; message: string }>('/models/catalog/refresh', { method: 'POST' }),
+  discover: (providerName: string) =>
+    request<{ provider: string; discovered: DiscoveredModel[]; count: number }>(
+      `/models/providers/${providerName}/discover`,
+      { method: 'POST' },
+    ),
+  discoveryDrivers: () =>
+    request<{ discovery_capable: string[] }>('/models/discovery/drivers'),
 };
 
 // ── Health ────────────────────────────────────────────────────

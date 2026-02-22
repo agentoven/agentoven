@@ -9,13 +9,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/agentoven/agentoven/control-plane/internal/api/middleware"
+	"github.com/agentoven/agentoven/control-plane/internal/catalog"
+	"github.com/agentoven/agentoven/control-plane/internal/executor"
 	"github.com/agentoven/agentoven/control-plane/internal/mcpgw"
+	"github.com/agentoven/agentoven/control-plane/internal/resolver"
 	"github.com/agentoven/agentoven/control-plane/internal/router"
 	"github.com/agentoven/agentoven/control-plane/internal/store"
 	"github.com/agentoven/agentoven/control-plane/internal/workflow"
+	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -24,19 +29,31 @@ import (
 
 // Handlers holds all handler dependencies.
 type Handlers struct {
-	Store      store.Store
-	Router     *router.ModelRouter
-	MCPGateway *mcpgw.Gateway
-	Workflow   *workflow.Engine
+	Store           store.Store
+	Router          *router.ModelRouter
+	MCPGateway      *mcpgw.Gateway
+	Workflow        *workflow.Engine
+	Resolver        *resolver.Resolver
+	Executor        *executor.Executor
+	PromptValidator contracts.PromptValidatorService
+	Catalog         *catalog.Catalog
+	Sessions        contracts.SessionStore
 }
 
 // New creates a new Handlers instance with all dependencies.
-func New(s store.Store, mr *router.ModelRouter, gw *mcpgw.Gateway, wf *workflow.Engine) *Handlers {
+func New(s store.Store, mr *router.ModelRouter, gw *mcpgw.Gateway, wf *workflow.Engine, cat *catalog.Catalog, sess contracts.SessionStore) *Handlers {
+	res := resolver.NewResolver(s)
+	exec := executor.NewExecutor(s, mr, gw)
 	return &Handlers{
-		Store:      s,
-		Router:     mr,
-		MCPGateway: gw,
-		Workflow:   wf,
+		Store:           s,
+		Router:          mr,
+		MCPGateway:      gw,
+		Workflow:        wf,
+		Resolver:        res,
+		Executor:        exec,
+		PromptValidator: &contracts.CommunityPromptValidator{},
+		Catalog:         cat,
+		Sessions:        sess,
 	}
 }
 
@@ -71,6 +88,14 @@ func (h *Handlers) RegisterAgent(w http.ResponseWriter, r *http.Request) {
 	req.CreatedAt = time.Now().UTC()
 	req.UpdatedAt = time.Now().UTC()
 	req.A2AEndpoint = "/agents/" + req.Name + "/a2a"
+
+	// Default mode to managed if not specified
+	if req.Mode == "" {
+		req.Mode = models.AgentModeManaged
+	}
+	if req.MaxTurns <= 0 {
+		req.MaxTurns = 10
+	}
 
 	if err := h.Store.CreateAgent(r.Context(), &req); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
@@ -129,6 +154,12 @@ func (h *Handlers) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if req.ModelName != "" {
 		agent.ModelName = req.ModelName
 	}
+	if req.Mode != "" {
+		agent.Mode = req.Mode
+	}
+	if req.MaxTurns > 0 {
+		agent.MaxTurns = req.MaxTurns
+	}
 	if len(req.Ingredients) > 0 {
 		agent.Ingredients = req.Ingredients
 	}
@@ -144,6 +175,7 @@ func (h *Handlers) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	agent.UpdatedAt = time.Now().UTC()
+	agent.VersionBump = "patch" // config edit → bump patch version
 
 	if err := h.Store.UpdateAgent(r.Context(), agent); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
@@ -183,59 +215,61 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 		Version     string `json:"version"`
 		Environment string `json:"environment"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
-
-	// ── Validate ingredients before baking ───────────────────────
-	var errors []string
-
-	// Must have a model provider configured (via top-level field or model ingredient)
-	hasModel := agent.ModelProvider != ""
-	for _, ing := range agent.Ingredients {
-		if ing.Kind == models.IngredientModel {
-			hasModel = true
-			break
-		}
-	}
-	if !hasModel {
-		errors = append(errors, "Agent must have a model provider configured (set model_provider or add a model ingredient)")
+	// ISS-023 fix: check decode error instead of silently discarding it.
+	// Allow io.EOF since the request body is optional for BakeAgent.
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
+		respondError(w, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
 	}
 
-	// Validate referenced provider exists and has an API key
+	// ── Validate & resolve ALL ingredients via the Resolver ──────
+	// This replaces the old manual checks with full ingredient resolution:
+	// model, tools, prompts, data, embeddings, vectorstores, retrievers.
+
+	// If agent has a top-level ModelProvider but no model ingredient, synthesize one
 	if agent.ModelProvider != "" {
-		provider, err := h.Store.GetProvider(r.Context(), agent.ModelProvider)
-		if err != nil {
-			errors = append(errors, fmt.Sprintf("Model provider '%s' not found — register it first", agent.ModelProvider))
-		} else if provider.Kind != "ollama" {
-			if provider.Config == nil || provider.Config["api_key"] == nil || provider.Config["api_key"] == "" {
-				errors = append(errors, fmt.Sprintf("Model provider '%s' has no API key configured", agent.ModelProvider))
+		hasModelIngredient := false
+		for _, ing := range agent.Ingredients {
+			if ing.Kind == models.IngredientModel {
+				hasModelIngredient = true
+				break
 			}
+		}
+		if !hasModelIngredient {
+			agent.Ingredients = append(agent.Ingredients, models.Ingredient{
+				ID:       "auto-model",
+				Name:     agent.ModelProvider,
+				Kind:     models.IngredientModel,
+				Required: true,
+				Config: map[string]interface{}{
+					"provider": agent.ModelProvider,
+					"model":    agent.ModelName,
+				},
+			})
 		}
 	}
 
-	// Validate referenced tools exist and are enabled
-	for _, ing := range agent.Ingredients {
-		if ing.Kind == models.IngredientTool {
-			tool, err := h.Store.GetTool(r.Context(), kitchen, ing.Name)
-			if err != nil {
-				errors = append(errors, fmt.Sprintf("Tool ingredient '%s' not found — register it first", ing.Name))
-			} else if !tool.Enabled {
-				errors = append(errors, fmt.Sprintf("Tool '%s' is disabled — enable it before baking", ing.Name))
-			}
-		}
-	}
-
-	if len(errors) > 0 {
+	resolved, err := h.Resolver.Resolve(r.Context(), agent)
+	if err != nil {
 		respondJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"error":   "Agent cannot be baked — missing or invalid ingredients",
-			"details": errors,
+			"error":   "Agent cannot be baked — ingredient resolution failed",
+			"details": err.Error(),
+			"partial": resolved,
 		})
 		return
 	}
 
+	// Cache resolved config on the agent
+	agent.ResolvedConfig = resolved
 	agent.Status = models.AgentStatusBaking
 	agent.UpdatedAt = time.Now().UTC()
 	if req.Version != "" {
+		// Caller explicitly set a version — use it directly
 		agent.Version = req.Version
+		agent.VersionBump = "" // no auto-bump, caller controls
+	} else {
+		// Auto-bump minor on bake (0.1.0 → 0.2.0)
+		agent.VersionBump = "minor"
 	}
 	agent.A2AEndpoint = "/agents/" + agentName + "/a2a"
 
@@ -243,6 +277,9 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	// Re-fetch agent from store to get the version the store computed
+	agent, _ = h.Store.GetAgent(r.Context(), kitchen, agentName)
 
 	log.Info().
 		Str("agent", agentName).
@@ -380,6 +417,185 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// RecookAgent edits a baked agent's configuration and re-bakes it.
+// POST /api/v1/agents/{agentName}/recook
+//
+// Accepts the same fields as UpdateAgent (description, framework, model_provider,
+// model_name, ingredients, skills, tags, max_turns) plus optionally "version".
+// After applying edits, runs the full bake pipeline (resolve + provider test).
+// Bumps the minor version automatically unless version is explicitly provided.
+func (h *Handlers) RecookAgent(w http.ResponseWriter, r *http.Request) {
+	agentName := chi.URLParam(r, "agentName")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	// Only allow re-cook on agents that have been baked at least once
+	if agent.Status == models.AgentStatusDraft {
+		respondError(w, http.StatusBadRequest,
+			"Agent is still a draft — use bake, not re-cook")
+		return
+	}
+
+	var req struct {
+		Description   string                 `json:"description"`
+		Framework     string                 `json:"framework"`
+		ModelProvider string                 `json:"model_provider"`
+		ModelName     string                 `json:"model_name"`
+		Mode          models.AgentMode       `json:"mode"`
+		MaxTurns      int                    `json:"max_turns"`
+		Ingredients   []models.Ingredient    `json:"ingredients"`
+		Skills        []string               `json:"skills"`
+		Tags          map[string]string      `json:"tags"`
+		Version       string                 `json:"version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
+		respondError(w, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	// ── Apply edits ──────────────────────────────────────────
+	if req.Description != "" {
+		agent.Description = req.Description
+	}
+	if req.Framework != "" {
+		agent.Framework = req.Framework
+	}
+	if req.ModelProvider != "" {
+		agent.ModelProvider = req.ModelProvider
+	}
+	if req.ModelName != "" {
+		agent.ModelName = req.ModelName
+	}
+	if req.Mode != "" {
+		agent.Mode = req.Mode
+	}
+	if req.MaxTurns > 0 {
+		agent.MaxTurns = req.MaxTurns
+	}
+	if len(req.Ingredients) > 0 {
+		agent.Ingredients = req.Ingredients
+	}
+	if len(req.Skills) > 0 {
+		agent.Skills = req.Skills
+	}
+	if len(req.Tags) > 0 {
+		if agent.Tags == nil {
+			agent.Tags = map[string]string{}
+		}
+		for k, v := range req.Tags {
+			agent.Tags[k] = v
+		}
+	}
+
+	// ── Resolve ingredients (same as BakeAgent) ──────────────
+	if agent.ModelProvider != "" {
+		hasModelIngredient := false
+		for _, ing := range agent.Ingredients {
+			if ing.Kind == models.IngredientModel {
+				hasModelIngredient = true
+				break
+			}
+		}
+		if !hasModelIngredient {
+			agent.Ingredients = append(agent.Ingredients, models.Ingredient{
+				ID:       "auto-model",
+				Name:     agent.ModelProvider,
+				Kind:     models.IngredientModel,
+				Required: true,
+				Config: map[string]interface{}{
+					"provider": agent.ModelProvider,
+					"model":    agent.ModelName,
+				},
+			})
+		}
+	}
+
+	resolved, err := h.Resolver.Resolve(r.Context(), agent)
+	if err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"error":   "Agent cannot be re-cooked — ingredient resolution failed",
+			"details": err.Error(),
+			"partial": resolved,
+		})
+		return
+	}
+
+	// ── Update agent with new config + baking status ─────────
+	agent.ResolvedConfig = resolved
+	agent.Status = models.AgentStatusBaking
+	agent.UpdatedAt = time.Now().UTC()
+	if req.Version != "" {
+		agent.Version = req.Version
+		agent.VersionBump = ""
+	} else {
+		agent.VersionBump = "minor"
+	}
+
+	if err := h.Store.UpdateAgent(r.Context(), agent); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Re-fetch to get the store-computed version
+	agent, _ = h.Store.GetAgent(r.Context(), kitchen, agentName)
+
+	log.Info().
+		Str("agent", agentName).
+		Str("version", agent.Version).
+		Msg("Agent re-cook started")
+
+	// ── Async provider test (same as BakeAgent) ──────────────
+	go func() {
+		time.Sleep(1 * time.Second)
+
+		if agent.ModelProvider != "" {
+			provider, err := h.Store.GetProvider(context.Background(), agent.ModelProvider)
+			if err == nil {
+				result := h.Router.TestProvider(context.Background(), provider)
+				if !result.Healthy {
+					agent.Status = models.AgentStatusBurnt
+					if agent.Tags == nil {
+						agent.Tags = map[string]string{}
+					}
+					agent.Tags["error"] = fmt.Sprintf("Provider '%s' test failed: %s", agent.ModelProvider, result.Error)
+					agent.UpdatedAt = time.Now().UTC()
+					h.Store.UpdateAgent(context.Background(), agent)
+					log.Warn().Str("agent", agentName).Msg("Agent burnt on re-cook — provider test failed")
+					return
+				}
+			}
+		}
+
+		agent.Status = models.AgentStatusReady
+		agent.UpdatedAt = time.Now().UTC()
+		if agent.Tags != nil {
+			delete(agent.Tags, "error")
+		}
+		if err := h.Store.UpdateAgent(context.Background(), agent); err != nil {
+			log.Warn().Err(err).Str("agent", agentName).Msg("Failed to update agent to ready after re-cook")
+		} else {
+			log.Info().Str("agent", agentName).Msg("Agent re-cooked and ready")
+		}
+	}()
+
+	respondJSON(w, http.StatusAccepted, map[string]interface{}{
+		"name":        agentName,
+		"version":     agent.Version,
+		"status":      string(models.AgentStatusBaking),
+		"re_cooked":   true,
+		"agent_card":  "/agents/" + agentName + "/a2a/.well-known/agent-card.json",
+	})
+}
+
 func (h *Handlers) CoolAgent(w http.ResponseWriter, r *http.Request) {
 	agentName := chi.URLParam(r, "agentName")
 	kitchen := middleware.GetKitchen(r.Context())
@@ -445,11 +661,32 @@ func (h *Handlers) RewarmAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) ListAgentVersions(w http.ResponseWriter, r *http.Request) {
-	respondJSON(w, http.StatusOK, []string{})
+	kitchen := middleware.GetKitchen(r.Context())
+	agentName := chi.URLParam(r, "agentName")
+
+	versions, err := h.Store.ListAgentVersions(r.Context(), kitchen, agentName)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, versions)
 }
 
 func (h *Handlers) GetAgentVersion(w http.ResponseWriter, r *http.Request) {
-	respondJSON(w, http.StatusOK, map[string]string{})
+	kitchen := middleware.GetKitchen(r.Context())
+	agentName := chi.URLParam(r, "agentName")
+	version := chi.URLParam(r, "version")
+
+	agent, err := h.Store.GetAgentVersion(r.Context(), kitchen, agentName, version)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, agent)
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -812,6 +1049,49 @@ func (h *Handlers) RouteModel(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, resp)
 }
 
+// RouteModelStream routes a model request with Server-Sent Events streaming.
+// POST /api/v1/models/route/stream
+func (h *Handlers) RouteModelStream(w http.ResponseWriter, r *http.Request) {
+	var req models.RouteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if req.Kitchen == "" {
+		req.Kitchen = middleware.GetKitchen(r.Context())
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		respondError(w, http.StatusInternalServerError, "Streaming not supported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	err := h.Router.RouteStream(r.Context(), &req, func(chunk *models.StreamChunk) error {
+		data, _ := json.Marshal(chunk)
+		_, writeErr := fmt.Fprintf(w, "data: %s\n\n", data)
+		if writeErr != nil {
+			return writeErr
+		}
+		flusher.Flush()
+		return nil
+	})
+
+	if err != nil {
+		errChunk, _ := json.Marshal(models.StreamChunk{Error: err.Error(), Done: true})
+		fmt.Fprintf(w, "data: %s\n\n", errChunk)
+		flusher.Flush()
+	}
+}
+
 func (h *Handlers) GetCostSummary(w http.ResponseWriter, r *http.Request) {
 	kitchen := middleware.GetKitchen(r.Context())
 	summary := h.Router.GetCostSummary(kitchen)
@@ -955,6 +1235,9 @@ func (h *Handlers) RegisterMCPTool(w http.ResponseWriter, r *http.Request) {
 	if req.Transport == "" {
 		req.Transport = "http"
 	}
+	if len(req.Capabilities) == 0 {
+		req.Capabilities = []string{"tool"}
+	}
 
 	if err := h.Store.CreateTool(r.Context(), &req); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
@@ -1026,6 +1309,9 @@ func (h *Handlers) UpdateMCPTool(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.AuthConfig != nil {
 		tool.AuthConfig = req.AuthConfig
+	}
+	if len(req.Capabilities) > 0 {
+		tool.Capabilities = req.Capabilities
 	}
 	// Always apply enabled (it's a boolean, false is meaningful)
 	tool.Enabled = req.Enabled
@@ -1176,6 +1462,10 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 				Text string `json:"text"`
 			} `json:"parts"`
 		} `json:"message"`
+		// Optional: specify which agent to invoke
+		Metadata struct {
+			AgentName string `json:"agent_name"`
+		} `json:"metadata"`
 	}
 	if err := json.Unmarshal(params, &taskReq); err != nil {
 		w.Header().Set("Content-Type", "application/a2a+json")
@@ -1188,11 +1478,130 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 	}
 
 	kitchen := middleware.GetKitchen(r.Context())
+
+	// Extract text from message parts
+	var userMessage string
+	for _, part := range taskReq.Message.Parts {
+		if part.Type == "text" || part.Type == "" {
+			userMessage += part.Text
+		}
+	}
+
+	taskID := taskReq.ID
+	if taskID == "" {
+		taskID = uuid.New().String()
+	}
+
+	// If an agent is specified, try to invoke it
+	agentName := taskReq.Metadata.AgentName
+	if agentName != "" && h.Executor != nil {
+		agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/a2a+json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"error": map[string]interface{}{
+					"code":    -32001,
+					"message": "Agent not found",
+					"data":    agentName,
+				},
+				"id": rpcID,
+			})
+			return
+		}
+
+		if agent.Status != models.AgentStatusReady {
+			w.Header().Set("Content-Type", "application/a2a+json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"error": map[string]interface{}{
+					"code":    -32002,
+					"message": "Agent not ready",
+					"data":    string(agent.Status),
+				},
+				"id": rpcID,
+			})
+			return
+		}
+
+		// Resolve agent ingredients before async execution
+		resolved, err := h.Resolver.Resolve(r.Context(), agent)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/a2a+json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"error": map[string]interface{}{
+					"code":    -32003,
+					"message": "Ingredient resolution failed",
+					"data":    err.Error(),
+				},
+				"id": rpcID,
+			})
+			return
+		}
+
+		// Execute agent asynchronously
+		go func() {
+			execCtx := context.Background()
+			response, execTrace, err := h.Executor.Execute(execCtx, agent, userMessage, resolved, nil)
+
+			// Record trace with result
+			status := "completed"
+			costUSD := 0.0
+			totalTokens := int64(0)
+			_ = response // final text response stored in trace metadata below
+			if err != nil {
+				status = "failed"
+				log.Warn().Err(err).Str("agent", agentName).Str("task_id", taskID).Msg("A2A agent execution failed")
+			} else if execTrace != nil {
+				costUSD = execTrace.Usage.EstimatedCost
+				totalTokens = execTrace.Usage.TotalTokens
+			}
+
+			trace := &models.Trace{
+				ID:          taskID,
+				AgentName:   agentName,
+				Kitchen:     kitchen,
+				Status:      status,
+				TotalTokens: totalTokens,
+				CostUSD:     costUSD,
+				Metadata: map[string]interface{}{
+					"source":   "a2a",
+					"task_id":  taskID,
+					"response": response,
+				},
+				CreatedAt: time.Now().UTC(),
+			}
+			h.Store.CreateTrace(execCtx, trace)
+		}()
+
+		// Return immediately with submitted status (async execution)
+		w.Header().Set("Content-Type", "application/a2a+json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"result": map[string]interface{}{
+				"id":     taskID,
+				"status": map[string]string{"state": "working"},
+				"metadata": map[string]string{
+					"agent_name": agentName,
+					"kitchen":    kitchen,
+				},
+			},
+			"id": rpcID,
+		})
+		return
+	}
+
+	// No specific agent — record trace and return submitted
 	trace := &models.Trace{
-		ID:        uuid.New().String(),
+		ID:        taskID,
 		AgentName: "a2a-gateway",
 		Kitchen:   kitchen,
 		Status:    "submitted",
+		Metadata: map[string]interface{}{
+			"source":  "a2a",
+			"message": userMessage,
+		},
 		CreatedAt: time.Now().UTC(),
 	}
 	h.Store.CreateTrace(r.Context(), trace)
@@ -1201,7 +1610,7 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"jsonrpc": "2.0",
 		"result": map[string]interface{}{
-			"id":     taskReq.ID,
+			"id":     taskID,
 			"status": map[string]string{"state": "submitted"},
 		},
 		"id": rpcID,
@@ -1351,6 +1760,681 @@ func (h *Handlers) ServeAgentSpecificCard(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(card)
 }
 
+// ══════════════════════════════════════════════════════════════
+// ── Prompt Handlers ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+func (h *Handlers) ListPrompts(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+	prompts, err := h.Store.ListPrompts(r.Context(), kitchen)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if prompts == nil {
+		prompts = []models.Prompt{}
+	}
+	respondJSON(w, http.StatusOK, prompts)
+}
+
+func (h *Handlers) CreatePrompt(w http.ResponseWriter, r *http.Request) {
+	var req models.Prompt
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if req.Name == "" || req.Template == "" {
+		respondError(w, http.StatusBadRequest, "name and template are required")
+		return
+	}
+
+	kitchen := middleware.GetKitchen(r.Context())
+	req.ID = uuid.New().String()
+	req.Kitchen = kitchen
+	req.CreatedAt = time.Now().UTC()
+	req.UpdatedAt = time.Now().UTC()
+
+	// Auto-extract variables from template
+	req.Variables = resolver.ExtractVariables(req.Template)
+
+	// Run prompt validation if auto-validate is enabled
+	settings, _ := h.Store.GetKitchenSettings(r.Context(), kitchen)
+	var report *models.ValidationReport
+	if settings != nil && settings.AutoValidate {
+		var err error
+		report, err = h.PromptValidator.Validate(r.Context(), &req, settings)
+		if err != nil {
+			log.Warn().Err(err).Str("prompt", req.Name).Msg("Validation failed")
+		}
+		// Block creation if there are validation errors
+		if report != nil {
+			for _, issue := range report.Issues {
+				if issue.Severity == models.ValidationError {
+					respondJSON(w, http.StatusBadRequest, map[string]interface{}{
+						"error":  "Prompt validation failed",
+						"report": report,
+					})
+					return
+				}
+			}
+		}
+	}
+
+	if err := h.Store.CreatePrompt(r.Context(), &req); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	log.Info().Str("prompt", req.Name).Int("version", req.Version).Str("kitchen", kitchen).Msg("Prompt created")
+
+	response := map[string]interface{}{"prompt": req}
+	if report != nil {
+		response["validation"] = report
+	}
+	respondJSON(w, http.StatusCreated, response)
+}
+
+func (h *Handlers) GetPrompt(w http.ResponseWriter, r *http.Request) {
+	promptName := chi.URLParam(r, "promptName")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	prompt, err := h.Store.GetPrompt(r.Context(), kitchen, promptName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	respondJSON(w, http.StatusOK, prompt)
+}
+
+func (h *Handlers) UpdatePrompt(w http.ResponseWriter, r *http.Request) {
+	promptName := chi.URLParam(r, "promptName")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	existing, err := h.Store.GetPrompt(r.Context(), kitchen, promptName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	var req models.Prompt
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if req.Template != "" {
+		existing.Template = req.Template
+		existing.Variables = resolver.ExtractVariables(req.Template)
+	}
+	if len(req.Tags) > 0 {
+		existing.Tags = req.Tags
+	}
+
+	// Run prompt validation if auto-validate is enabled
+	settings, _ := h.Store.GetKitchenSettings(r.Context(), kitchen)
+	var report *models.ValidationReport
+	if settings != nil && settings.AutoValidate {
+		var err error
+		report, err = h.PromptValidator.Validate(r.Context(), existing, settings)
+		if err != nil {
+			log.Warn().Err(err).Str("prompt", promptName).Msg("Validation failed")
+		}
+		if report != nil {
+			for _, issue := range report.Issues {
+				if issue.Severity == models.ValidationError {
+					respondJSON(w, http.StatusBadRequest, map[string]interface{}{
+						"error":  "Prompt validation failed",
+						"report": report,
+					})
+					return
+				}
+			}
+		}
+	}
+
+	if err := h.Store.UpdatePrompt(r.Context(), existing); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Re-fetch to get the new version
+	updated, _ := h.Store.GetPrompt(r.Context(), kitchen, promptName)
+	if updated != nil {
+		existing = updated
+	}
+
+	log.Info().Str("prompt", promptName).Int("version", existing.Version).Str("kitchen", kitchen).Msg("Prompt updated")
+
+	response := map[string]interface{}{"prompt": existing}
+	if report != nil {
+		response["validation"] = report
+	}
+	respondJSON(w, http.StatusOK, response)
+}
+
+func (h *Handlers) DeletePrompt(w http.ResponseWriter, r *http.Request) {
+	promptName := chi.URLParam(r, "promptName")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	if err := h.Store.DeletePrompt(r.Context(), kitchen, promptName); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	log.Info().Str("prompt", promptName).Str("kitchen", kitchen).Msg("Prompt deleted")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handlers) ListPromptVersions(w http.ResponseWriter, r *http.Request) {
+	promptName := chi.URLParam(r, "promptName")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	versions, err := h.Store.ListPromptVersions(r.Context(), kitchen, promptName)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if versions == nil {
+		versions = []models.Prompt{}
+	}
+	respondJSON(w, http.StatusOK, versions)
+}
+
+func (h *Handlers) GetPromptVersion(w http.ResponseWriter, r *http.Request) {
+	promptName := chi.URLParam(r, "promptName")
+	kitchen := middleware.GetKitchen(r.Context())
+	versionStr := chi.URLParam(r, "version")
+
+	version, err := strconv.Atoi(versionStr)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "version must be an integer")
+		return
+	}
+
+	prompt, err := h.Store.GetPromptVersion(r.Context(), kitchen, promptName, version)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	respondJSON(w, http.StatusOK, prompt)
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── Agent Config Handler ─────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// GetAgentConfig returns the fully resolved ingredient configuration for an agent.
+// This is the endpoint external agents call to fetch their runtime config.
+// GET /api/v1/agents/{agentName}/config
+func (h *Handlers) GetAgentConfig(w http.ResponseWriter, r *http.Request) {
+	agentName := chi.URLParam(r, "agentName")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	resolved, err := h.Resolver.Resolve(r.Context(), agent)
+	if err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"error":   "Ingredient resolution failed",
+			"details": err.Error(),
+			"partial": resolved,
+		})
+		return
+	}
+
+	respondJSON(w, http.StatusOK, models.AgentConfig{
+		Agent:       *agent,
+		Ingredients: *resolved,
+	})
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── Managed Agent Invoke Handler ─────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// InvokeAgent executes a managed-mode agent's agentic loop.
+// POST /api/v1/agents/{agentName}/invoke
+func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
+	agentName := chi.URLParam(r, "agentName")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	if agent.Mode != models.AgentModeManaged {
+		respondError(w, http.StatusBadRequest,
+			fmt.Sprintf("Agent '%s' is in '%s' mode — use the A2A endpoint for external agents", agentName, agent.Mode))
+		return
+	}
+
+	if agent.Status != models.AgentStatusReady {
+		respondError(w, http.StatusBadRequest,
+			fmt.Sprintf("Agent '%s' is not ready (status: %s) — bake it first", agentName, agent.Status))
+		return
+	}
+
+	var req struct {
+		Message   string            `json:"message"`
+		Variables map[string]string `json:"variables,omitempty"` // prompt template variables
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Message == "" {
+		respondError(w, http.StatusBadRequest, "Request must include a non-empty 'message' field")
+		return
+	}
+
+	// Use cached resolved config from bake time, or re-resolve live
+	var resolved *models.ResolvedIngredients
+	if agent.ResolvedConfig != nil {
+		resolved = agent.ResolvedConfig
+	} else {
+		resolved, err = h.Resolver.Resolve(r.Context(), agent)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, "Ingredient resolution failed: "+err.Error())
+			return
+		}
+	}
+
+	// Sanitize variable values before prompt rendering
+	sanitizedVars := req.Variables
+	if len(req.Variables) > 0 {
+		settings, _ := h.Store.GetKitchenSettings(r.Context(), kitchen)
+		var issues []models.ValidationIssue
+		sanitizedVars, issues, err = h.PromptValidator.SanitizeVariables(r.Context(), req.Variables, settings)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, "Variable sanitization failed: "+err.Error())
+			return
+		}
+		for _, issue := range issues {
+			if issue.Severity == models.ValidationError {
+				respondJSON(w, http.StatusBadRequest, map[string]interface{}{
+					"error":  "Variable injection detected",
+					"issues": issues,
+				})
+				return
+			}
+		}
+	}
+
+	// Execute the agentic loop
+	response, trace, err := h.Executor.Execute(r.Context(), agent, req.Message, resolved, sanitizedVars)
+	if err != nil {
+		respondError(w, http.StatusBadGateway, "Execution failed: "+err.Error())
+		return
+	}
+
+	// Record trace in store
+	traceRecord := &models.Trace{
+		ID:          trace.TraceID,
+		AgentName:   agentName,
+		Kitchen:     kitchen,
+		Status:      "completed",
+		DurationMs:  trace.TotalMs,
+		TotalTokens: trace.Usage.TotalTokens,
+		CostUSD:     trace.Usage.EstimatedCost,
+		Metadata: map[string]interface{}{
+			"mode":   "managed",
+			"turns":  len(trace.Turns),
+			"type":   "invoke",
+		},
+		CreatedAt: time.Now().UTC(),
+	}
+	h.Store.CreateTrace(r.Context(), traceRecord)
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"agent":      agentName,
+		"response":   response,
+		"trace_id":   trace.TraceID,
+		"turns":      len(trace.Turns),
+		"usage":      trace.Usage,
+		"latency_ms": trace.TotalMs,
+	})
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── Kitchen Settings Handlers ────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// GetKitchenSettings returns the settings for the current kitchen.
+// GET /api/v1/settings
+func (h *Handlers) GetKitchenSettings(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+	settings, err := h.Store.GetKitchenSettings(r.Context(), kitchen)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Mask the validation API key before returning
+	if settings.ValidationAPIKey != "" {
+		if len(settings.ValidationAPIKey) > 4 {
+			settings.ValidationAPIKey = settings.ValidationAPIKey[:4] + "****"
+		} else {
+			settings.ValidationAPIKey = "****"
+		}
+	}
+	respondJSON(w, http.StatusOK, settings)
+}
+
+// UpdateKitchenSettings updates the settings for the current kitchen.
+// PUT /api/v1/settings
+func (h *Handlers) UpdateKitchenSettings(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+
+	var req models.KitchenSettings
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	// Merge with existing settings (preserve API key if not sent)
+	existing, _ := h.Store.GetKitchenSettings(r.Context(), kitchen)
+	if existing != nil {
+		if req.ValidationAPIKey == "" {
+			req.ValidationAPIKey = existing.ValidationAPIKey
+		}
+		if req.ValidationProvider == "" {
+			req.ValidationProvider = existing.ValidationProvider
+		}
+		if req.ValidationModel == "" {
+			req.ValidationModel = existing.ValidationModel
+		}
+		if req.ValidationEndpoint == "" {
+			req.ValidationEndpoint = existing.ValidationEndpoint
+		}
+	}
+
+	req.KitchenID = kitchen
+	req.UpdatedAt = time.Now().UTC()
+
+	if err := h.Store.UpsertKitchenSettings(r.Context(), &req); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	log.Info().Str("kitchen", kitchen).Msg("Kitchen settings updated")
+
+	// Mask API key in response
+	if req.ValidationAPIKey != "" {
+		if len(req.ValidationAPIKey) > 4 {
+			req.ValidationAPIKey = req.ValidationAPIKey[:4] + "****"
+		} else {
+			req.ValidationAPIKey = "****"
+		}
+	}
+	respondJSON(w, http.StatusOK, req)
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── Prompt Validation Handler ────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// ValidatePrompt runs the prompt validator on a specific prompt.
+// POST /api/v1/prompts/{promptName}/validate
+func (h *Handlers) ValidatePrompt(w http.ResponseWriter, r *http.Request) {
+	promptName := chi.URLParam(r, "promptName")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	prompt, err := h.Store.GetPrompt(r.Context(), kitchen, promptName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	settings, _ := h.Store.GetKitchenSettings(r.Context(), kitchen)
+
+	report, err := h.PromptValidator.Validate(r.Context(), prompt, settings)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Validation failed: "+err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"report":  report,
+		"edition": h.PromptValidator.Edition(),
+	})
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── Approval Handlers ────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// ListApprovals returns approval records for the current kitchen.
+func (h *Handlers) ListApprovals(w http.ResponseWriter, r *http.Request) {
+	kitchen := r.Header.Get("X-Kitchen")
+	status := r.URL.Query().Get("status")
+	approvals, err := h.Store.ListApprovals(r.Context(), kitchen, status, 100)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if approvals == nil {
+		approvals = []models.ApprovalRecord{}
+	}
+	respondJSON(w, http.StatusOK, approvals)
+}
+
+// GetApproval returns a single approval record by gate key.
+func (h *Handlers) GetApproval(w http.ResponseWriter, r *http.Request) {
+	gateKey := chi.URLParam(r, "gateKey")
+	record, err := h.Store.GetApproval(r.Context(), gateKey)
+	if err != nil {
+		respondError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, record)
+}
+
+// ApproveGateWithMetadata approves or rejects a gate with full approver identity.
+func (h *Handlers) ApproveGateWithMetadata(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "runId")
+	stepName := chi.URLParam(r, "stepName")
+
+	var req struct {
+		Approved      bool   `json:"approved"`
+		ApproverID    string `json:"approver_id,omitempty"`
+		ApproverEmail string `json:"approver_email,omitempty"`
+		Channel       string `json:"channel,omitempty"`
+		Comments      string `json:"comments,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	ok := h.Workflow.ApproveGateWithMetadata(runID, stepName, req.Approved, req.ApproverID, req.ApproverEmail, req.Channel, req.Comments)
+	if !ok {
+		respondError(w, http.StatusNotFound, fmt.Sprintf("No pending gate '%s' for run '%s'", stepName, runID))
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"run_id":   runID,
+		"step":     stepName,
+		"approved": req.Approved,
+	})
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── Notification Channel Handlers ────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// ListChannels returns notification channels for the current kitchen.
+func (h *Handlers) ListChannels(w http.ResponseWriter, r *http.Request) {
+	kitchen := r.Header.Get("X-Kitchen")
+	channels, err := h.Store.ListChannels(r.Context(), kitchen)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if channels == nil {
+		channels = []models.NotificationChannel{}
+	}
+	respondJSON(w, http.StatusOK, channels)
+}
+
+// GetChannel returns a single notification channel.
+func (h *Handlers) GetChannel(w http.ResponseWriter, r *http.Request) {
+	kitchen := r.Header.Get("X-Kitchen")
+	name := chi.URLParam(r, "channelName")
+	channel, err := h.Store.GetChannel(r.Context(), kitchen, name)
+	if err != nil {
+		respondError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, channel)
+}
+
+// CreateChannel creates a new notification channel.
+func (h *Handlers) CreateChannel(w http.ResponseWriter, r *http.Request) {
+	var ch models.NotificationChannel
+	if err := json.NewDecoder(r.Body).Decode(&ch); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	ch.Kitchen = r.Header.Get("X-Kitchen")
+	if ch.Name == "" {
+		respondError(w, http.StatusBadRequest, "Channel name is required")
+		return
+	}
+	if ch.Kind == "" {
+		respondError(w, http.StatusBadRequest, "Channel kind is required")
+		return
+	}
+
+	ch.ID = uuid.New().String()
+	now := time.Now().UTC()
+	ch.CreatedAt = now
+	ch.UpdatedAt = now
+	ch.Active = true
+
+	if err := h.Store.CreateChannel(r.Context(), &ch); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusCreated, ch)
+}
+
+// UpdateChannel updates an existing notification channel.
+func (h *Handlers) UpdateChannel(w http.ResponseWriter, r *http.Request) {
+	kitchen := r.Header.Get("X-Kitchen")
+	name := chi.URLParam(r, "channelName")
+
+	existing, err := h.Store.GetChannel(r.Context(), kitchen, name)
+	if err != nil {
+		respondError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	var update models.NotificationChannel
+	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	existing.Kind = update.Kind
+	existing.URL = update.URL
+	existing.Secret = update.Secret
+	existing.Config = update.Config
+	existing.Events = update.Events
+	existing.Active = update.Active
+	existing.UpdatedAt = time.Now().UTC()
+
+	if err := h.Store.UpdateChannel(r.Context(), existing); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, existing)
+}
+
+// DeleteChannel removes a notification channel.
+func (h *Handlers) DeleteChannel(w http.ResponseWriter, r *http.Request) {
+	kitchen := r.Header.Get("X-Kitchen")
+	name := chi.URLParam(r, "channelName")
+
+	if err := h.Store.DeleteChannel(r.Context(), kitchen, name); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]string{"status": "deleted", "name": name})
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── Audit Event Handlers ─────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// ListAuditEvents returns audit events for the current kitchen.
+func (h *Handlers) ListAuditEvents(w http.ResponseWriter, r *http.Request) {
+	kitchen := r.Header.Get("X-Kitchen")
+	filter := models.AuditFilter{
+		Kitchen: kitchen,
+		Limit:   100,
+	}
+	if q := r.URL.Query().Get("action"); q != "" {
+		filter.Action = q
+	}
+	if q := r.URL.Query().Get("user_id"); q != "" {
+		filter.UserID = q
+	}
+	if q := r.URL.Query().Get("resource"); q != "" {
+		filter.Resource = q
+	}
+
+	events, err := h.Store.ListAuditEvents(r.Context(), filter)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if events == nil {
+		events = []models.AuditEvent{}
+	}
+	respondJSON(w, http.StatusOK, events)
+}
+
+// CountAuditEvents returns the count of audit events matching the filter.
+func (h *Handlers) CountAuditEvents(w http.ResponseWriter, r *http.Request) {
+	kitchen := r.Header.Get("X-Kitchen")
+	filter := models.AuditFilter{Kitchen: kitchen}
+
+	count, err := h.Store.CountAuditEvents(r.Context(), filter)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]int64{"count": count})
+}
+
 // ── Helpers ──────────────────────────────────────────────────
 
 func respondJSON(w http.ResponseWriter, status int, data interface{}) {
@@ -1382,4 +2466,419 @@ func maskProviderKeys(p *models.ModelProvider) *models.ModelProvider {
 		}
 	}
 	return &cp
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── Model Catalog Handlers (R8) ─────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// ListCatalog returns all known model capabilities from the catalog.
+func (h *Handlers) ListCatalog(w http.ResponseWriter, r *http.Request) {
+	if h.Catalog == nil {
+		respondError(w, http.StatusServiceUnavailable, "model catalog not initialized")
+		return
+	}
+
+	// Optional filter by provider kind
+	providerKind := r.URL.Query().Get("provider")
+	var caps []*models.ModelCapability
+	if providerKind != "" {
+		caps = h.Catalog.ListByProvider(providerKind)
+	} else {
+		caps = h.Catalog.ListAll()
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"models": caps,
+		"count":  len(caps),
+	})
+}
+
+// GetCatalogModel returns capability data for a specific model.
+func (h *Handlers) GetCatalogModel(w http.ResponseWriter, r *http.Request) {
+	if h.Catalog == nil {
+		respondError(w, http.StatusServiceUnavailable, "model catalog not initialized")
+		return
+	}
+
+	modelID := chi.URLParam(r, "modelID")
+	if modelID == "" {
+		respondError(w, http.StatusBadRequest, "modelID is required")
+		return
+	}
+
+	// URL-decode the modelID (it may contain slashes encoded as %2F)
+	cap := h.Catalog.LookupByID(modelID)
+	if cap == nil {
+		// Try with provider prefix
+		providerKind := r.URL.Query().Get("provider")
+		if providerKind != "" {
+			cap = h.Catalog.Lookup(providerKind, modelID)
+		}
+	}
+	if cap == nil {
+		respondError(w, http.StatusNotFound, "model not found in catalog: "+modelID)
+		return
+	}
+
+	respondJSON(w, http.StatusOK, cap)
+}
+
+// RefreshCatalog forces a refresh of the model catalog from LiteLLM.
+func (h *Handlers) RefreshCatalog(w http.ResponseWriter, r *http.Request) {
+	if h.Catalog == nil {
+		respondError(w, http.StatusServiceUnavailable, "model catalog not initialized")
+		return
+	}
+
+	go func() {
+		ctx := context.Background()
+		h.Catalog.Refresh(ctx)
+	}()
+
+	respondJSON(w, http.StatusAccepted, map[string]string{
+		"status":  "refreshing",
+		"message": "Catalog refresh started in background",
+	})
+}
+
+// DiscoverModels triggers model discovery for a specific provider.
+func (h *Handlers) DiscoverModels(w http.ResponseWriter, r *http.Request) {
+	providerName := chi.URLParam(r, "providerName")
+
+	// Look up the provider
+	provider, err := h.Store.GetProvider(r.Context(), providerName)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "provider not found: "+providerName)
+		return
+	}
+
+	// Call the discovery driver
+	discovered, err := h.Router.DiscoverModelsForProvider(r.Context(), provider)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "discovery failed: "+err.Error())
+		return
+	}
+
+	// Merge into catalog
+	if h.Catalog != nil {
+		h.Catalog.RegisterDiscovered(discovered)
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"provider":   providerName,
+		"discovered": discovered,
+		"count":      len(discovered),
+	})
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── Session Handlers (R8) ────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// CreateSession starts a new multi-turn conversation session with an agent.
+func (h *Handlers) CreateSession(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+	agentName := chi.URLParam(r, "agentName")
+
+	if h.Sessions == nil {
+		respondError(w, http.StatusServiceUnavailable, "session store not initialized")
+		return
+	}
+
+	// Verify agent exists
+	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "agent not found: "+agentName)
+		return
+	}
+	if agent.Status != models.AgentStatusReady {
+		respondError(w, http.StatusConflict, "agent must be in ready status to create sessions")
+		return
+	}
+
+	// Parse optional config from body
+	var req struct {
+		Metadata map[string]interface{} `json:"metadata,omitempty"`
+		MaxTurns int                    `json:"max_turns,omitempty"`
+	}
+	if r.Body != nil {
+		json.NewDecoder(r.Body).Decode(&req) // optional body
+	}
+
+	session := &models.Session{
+		ID:        uuid.New().String(),
+		Kitchen:   kitchen,
+		AgentName: agentName,
+		Status:    models.SessionActive,
+		Messages:  []models.ChatMessage{},
+		TurnCount: 0,
+		MaxTurns:  req.MaxTurns,
+		Metadata:  req.Metadata,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+
+	if err := h.Sessions.CreateSession(r.Context(), session); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusCreated, session)
+}
+
+// GetSession retrieves session details.
+func (h *Handlers) GetSession(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "sessionID")
+
+	if h.Sessions == nil {
+		respondError(w, http.StatusServiceUnavailable, "session store not initialized")
+		return
+	}
+
+	session, err := h.Sessions.GetSession(r.Context(), sessionID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, session)
+}
+
+// ListSessions lists all sessions for an agent.
+func (h *Handlers) ListSessions(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+	agentName := chi.URLParam(r, "agentName")
+
+	if h.Sessions == nil {
+		respondError(w, http.StatusServiceUnavailable, "session store not initialized")
+		return
+	}
+
+	sessions, err := h.Sessions.ListSessions(r.Context(), kitchen, agentName)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if sessions == nil {
+		sessions = []models.Session{}
+	}
+
+	respondJSON(w, http.StatusOK, sessions)
+}
+
+// DeleteSession removes a session.
+func (h *Handlers) DeleteSession(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "sessionID")
+
+	if h.Sessions == nil {
+		respondError(w, http.StatusServiceUnavailable, "session store not initialized")
+		return
+	}
+
+	if err := h.Sessions.DeleteSession(r.Context(), sessionID); err != nil {
+		respondError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// SendSessionMessage sends a user message to a session and gets the agent's response.
+func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+	agentName := chi.URLParam(r, "agentName")
+	sessionID := chi.URLParam(r, "sessionID")
+
+	if h.Sessions == nil {
+		respondError(w, http.StatusServiceUnavailable, "session store not initialized")
+		return
+	}
+
+	// Parse user message
+	var req models.SessionMessage
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Content == "" && len(req.ContentParts) == 0 {
+		respondError(w, http.StatusBadRequest, "content is required")
+		return
+	}
+
+	// Get existing session
+	session, err := h.Sessions.GetSession(r.Context(), sessionID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if session.Status != models.SessionActive {
+		respondError(w, http.StatusConflict, "session is not active (status: "+string(session.Status)+")")
+		return
+	}
+	if session.MaxTurns > 0 && session.TurnCount >= session.MaxTurns {
+		respondError(w, http.StatusConflict, "session has reached max turns")
+		return
+	}
+
+	// Verify agent
+	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "agent not found: "+agentName)
+		return
+	}
+
+	// Append user message to session history
+	userMsg := models.ChatMessage{
+		Role:    "user",
+		Content: req.Content,
+	}
+	session.Messages = append(session.Messages, userMsg)
+
+	// Route through model router with full conversation history
+	startTime := time.Now()
+	routeReq := &models.RouteRequest{
+		Kitchen:   kitchen,
+		Messages:  session.Messages,
+		SessionID: sessionID,
+		AgentRef:  agentName,
+	}
+	// Apply agent's model if configured
+	if agent.ModelName != "" {
+		routeReq.Model = agent.ModelName
+	}
+
+	routeResp, err := h.Router.Route(r.Context(), routeReq)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "model routing failed: "+err.Error())
+		return
+	}
+	latencyMs := time.Since(startTime).Milliseconds()
+
+	// Append assistant response to session
+	assistantMsg := models.ChatMessage{
+		Role:    "assistant",
+		Content: routeResp.Content,
+	}
+	session.Messages = append(session.Messages, assistantMsg)
+	session.TurnCount++
+	session.TotalTokens += routeResp.Usage.TotalTokens
+	session.TotalCost += routeResp.Usage.EstimatedCost
+	session.UpdatedAt = time.Now().UTC()
+
+	// Check if max turns reached
+	if session.MaxTurns > 0 && session.TurnCount >= session.MaxTurns {
+		session.Status = models.SessionCompleted
+	}
+
+	// Update session in store
+	if err := h.Sessions.UpdateSession(r.Context(), session); err != nil {
+		log.Error().Err(err).Str("session", sessionID).Msg("Failed to update session")
+	}
+
+	resp := models.SessionResponse{
+		SessionID:    sessionID,
+		TurnNumber:   session.TurnCount,
+		Content:      routeResp.Content,
+		FinishReason: routeResp.FinishReason,
+		Usage:        routeResp.Usage,
+		LatencyMs:    latencyMs,
+		Status:       session.Status,
+	}
+
+	respondJSON(w, http.StatusOK, resp)
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── Agent Card Handler (R8) ──────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// GetAgentCard returns an A2A-compatible agent card for a specific agent.
+func (h *Handlers) GetAgentCard(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+	agentName := chi.URLParam(r, "agentName")
+
+	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "agent not found: "+agentName)
+		return
+	}
+
+	// Build agent card from agent metadata
+	card := models.AgentCard{
+		Name:        agent.Name,
+		Description: agent.Description,
+		Version:     agent.Version,
+		Provider: models.AgentCardProvider{
+			Organization: "AgentOven",
+		},
+	}
+
+	// Build capabilities from agent's ingredients and status
+	card.Capabilities = models.AgentCapabilities{
+		Streaming: true,
+		Sessions:  true,
+	}
+
+	// Determine supported input/output modes
+	card.InputModes = []string{"text"}
+	card.OutputModes = []string{"text"}
+
+	// Check for tool use in ingredients
+	for _, ing := range agent.Ingredients {
+		if ing.Kind == "tool" {
+			card.Capabilities.ToolCalling = true
+			// Add as a skill
+			card.Skills = append(card.Skills, models.AgentSkill{
+				ID:          ing.Name,
+				Name:        ing.Name,
+				Description: "MCP tool: " + ing.Name,
+			})
+		}
+	}
+
+	// Check for vision support via catalog
+	if h.Catalog != nil && agent.ModelName != "" {
+		providerKind := ""
+		if agent.ModelProvider != "" {
+			if prov, err := h.Store.GetProvider(r.Context(), agent.ModelProvider); err == nil {
+				providerKind = prov.Kind
+			}
+		}
+		if cap := h.Catalog.Lookup(providerKind, agent.ModelName); cap != nil {
+			if cap.SupportsVision {
+				card.InputModes = append(card.InputModes, "image")
+				card.Capabilities.Vision = true
+			}
+			if cap.SupportsJSON {
+				card.Capabilities.StructuredOutput = true
+			}
+		}
+	}
+
+	// Set URL
+	if agent.A2AEndpoint != "" {
+		card.URL = agent.A2AEndpoint
+	}
+
+	respondJSON(w, http.StatusOK, card)
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── Discovery-Capable Providers Handler (R8) ────────────────
+// ══════════════════════════════════════════════════════════════
+
+// ListDiscoveryDrivers returns which provider kinds support model discovery.
+func (h *Handlers) ListDiscoveryDrivers(w http.ResponseWriter, r *http.Request) {
+	drivers := h.Router.ListDiscoveryCapableDrivers()
+	var kinds []string
+	for k := range drivers {
+		kinds = append(kinds, k)
+	}
+	if kinds == nil {
+		kinds = []string{}
+	}
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"discovery_capable": kinds,
+	})
 }

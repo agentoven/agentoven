@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/agentoven/agentoven/control-plane/internal/notify"
 	"github.com/agentoven/agentoven/control-plane/internal/store"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/google/uuid"
@@ -30,8 +31,9 @@ import (
 
 // Engine executes recipe workflows.
 type Engine struct {
-	store  store.Store
-	client *http.Client
+	store    store.Store
+	client   *http.Client
+	notifier *notify.Service
 
 	// Running executions: runID → cancel func
 	runsMu sync.RWMutex
@@ -43,14 +45,15 @@ type Engine struct {
 }
 
 // NewEngine creates a new workflow execution engine.
-func NewEngine(s store.Store) *Engine {
+func NewEngine(s store.Store, notifier *notify.Service) *Engine {
 	return &Engine{
 		store: s,
 		client: &http.Client{
 			Timeout: 120 * time.Second,
 		},
-		runs:  make(map[string]context.CancelFunc),
-		gates: make(map[string]chan bool),
+		notifier: notifier,
+		runs:     make(map[string]context.CancelFunc),
+		gates:    make(map[string]chan bool),
 	}
 }
 
@@ -103,15 +106,79 @@ func (e *Engine) CancelRun(runID string) bool {
 }
 
 // ApproveGate approves a human gate, allowing execution to continue.
+// Supports both the legacy in-memory channel approach and the durable
+// store-backed approach. It checks the store first, then falls back to
+// the in-memory channel for backward compatibility.
 func (e *Engine) ApproveGate(runID, stepName string, approved bool) bool {
-	key := runID + ":" + stepName
+	gateKey := runID + ":" + stepName
+
+	// Try store-backed approval first
+	record, err := e.store.GetApproval(context.Background(), gateKey)
+	if err == nil && record.Status == "pending" {
+		now := time.Now().UTC()
+		if approved {
+			record.Status = "approved"
+		} else {
+			record.Status = "rejected"
+		}
+		record.ResolvedAt = &now
+		if updateErr := e.store.UpdateApproval(context.Background(), record); updateErr != nil {
+			log.Error().Err(updateErr).Str("gate_key", gateKey).Msg("Failed to update approval record")
+		}
+		// Also signal the channel if the goroutine is waiting
+		e.gatesMu.RLock()
+		ch, ok := e.gates[gateKey]
+		e.gatesMu.RUnlock()
+		if ok {
+			ch <- approved
+		}
+		return true
+	}
+
+	// Fallback: legacy in-memory channel
 	e.gatesMu.RLock()
-	ch, ok := e.gates[key]
+	ch, ok := e.gates[gateKey]
 	e.gatesMu.RUnlock()
 	if !ok {
 		return false
 	}
 	ch <- approved
+	return true
+}
+
+// ApproveGateWithMetadata approves or rejects a gate with approver identity and comments.
+func (e *Engine) ApproveGateWithMetadata(runID, stepName string, approved bool, approverID, approverEmail, channel, comments string) bool {
+	gateKey := runID + ":" + stepName
+
+	record, err := e.store.GetApproval(context.Background(), gateKey)
+	if err != nil || record.Status != "pending" {
+		return false
+	}
+
+	now := time.Now().UTC()
+	if approved {
+		record.Status = "approved"
+	} else {
+		record.Status = "rejected"
+	}
+	record.ApproverID = approverID
+	record.ApproverEmail = approverEmail
+	record.ApproverChannel = channel
+	record.Comments = comments
+	record.ResolvedAt = &now
+
+	if updateErr := e.store.UpdateApproval(context.Background(), record); updateErr != nil {
+		log.Error().Err(updateErr).Str("gate_key", gateKey).Msg("Failed to update approval record")
+		return false
+	}
+
+	// Signal the waiting goroutine
+	e.gatesMu.RLock()
+	ch, ok := e.gates[gateKey]
+	e.gatesMu.RUnlock()
+	if ok {
+		ch <- approved
+	}
 	return true
 }
 
@@ -265,6 +332,28 @@ func (e *Engine) executeStep(ctx context.Context, run *models.RecipeRun, step *m
 		if err == nil {
 			result.Status = "completed"
 			result.DurationMs = time.Since(start).Milliseconds()
+
+			// Dispatch step_completed notifications
+			if len(step.NotifyTools) > 0 && e.notifier != nil {
+				evt := notify.Event{
+					Type:       string(notify.EventStepCompleted),
+					RunID:      run.ID,
+					RecipeName: run.RecipeID,
+					StepName:   step.Name,
+					Kitchen:    run.Kitchen,
+					Timestamp:  time.Now().UTC(),
+				}
+				result.NotifyResults = e.notifier.DispatchAll(ctx, run.Kitchen, step.NotifyTools, evt)
+			}
+
+			// Evaluate branches for routing
+			if len(step.Branches) > 0 {
+				branch := e.evaluateBranches(step, result)
+				if branch != "" {
+					result.BranchTaken = branch
+				}
+			}
+
 			log.Info().
 				Str("step", step.Name).
 				Str("kind", string(step.Kind)).
@@ -278,6 +367,21 @@ func (e *Engine) executeStep(ctx context.Context, run *models.RecipeRun, step *m
 	result.Status = "failed"
 	result.Error = lastErr.Error()
 	result.DurationMs = time.Since(start).Milliseconds()
+
+	// Dispatch step_failed notifications
+	if len(step.NotifyTools) > 0 && e.notifier != nil {
+		evt := notify.Event{
+			Type:       string(notify.EventStepFailed),
+			RunID:      run.ID,
+			RecipeName: run.RecipeID,
+			StepName:   step.Name,
+			Kitchen:    run.Kitchen,
+			Payload:    map[string]interface{}{"error": lastErr.Error()},
+			Timestamp:  time.Now().UTC(),
+		}
+		result.NotifyResults = e.notifier.DispatchAll(ctx, run.Kitchen, step.NotifyTools, evt)
+	}
+
 	log.Error().
 		Str("step", step.Name).
 		Err(lastErr).
@@ -404,46 +508,150 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 }
 
 // executeHumanGate waits for human approval.
+// Creates a durable ApprovalRecord in the store, then waits via both
+// in-memory channel (for immediate API-driven approvals) and periodic
+// store polling (for external approvals via Slack/Teams callbacks).
+// Supports SLA timeout via MaxGateWaitMinutes in step config.
 func (e *Engine) executeHumanGate(ctx context.Context, run *models.RecipeRun, step *models.Step, result *models.StepResult) error {
-	key := run.ID + ":" + step.Name
+	gateKey := run.ID + ":" + step.Name
 
+	// Parse SLA timeout from step config (default: 0 = no timeout, wait forever)
+	maxWaitMinutes := 0
+	if step.Config != nil {
+		if v, ok := step.Config["max_wait_minutes"]; ok {
+			switch val := v.(type) {
+			case float64:
+				maxWaitMinutes = int(val)
+			case int:
+				maxWaitMinutes = val
+			}
+		}
+	}
+
+	// Create durable approval record
+	approval := &models.ApprovalRecord{
+		ID:             uuid.New().String(),
+		GateKey:        gateKey,
+		RunID:          run.ID,
+		StepName:       step.Name,
+		Kitchen:        run.Kitchen,
+		Status:         "pending",
+		RequestedAt:    time.Now().UTC(),
+		MaxWaitMinutes: maxWaitMinutes,
+	}
+	if err := e.store.CreateApproval(ctx, approval); err != nil {
+		log.Warn().Err(err).Str("gate_key", gateKey).Msg("Failed to persist approval record, falling back to in-memory only")
+	}
+
+	// Register in-memory channel for fast signaling
 	ch := make(chan bool, 1)
 	e.gatesMu.Lock()
-	e.gates[key] = ch
+	e.gates[gateKey] = ch
 	e.gatesMu.Unlock()
 
 	defer func() {
 		e.gatesMu.Lock()
-		delete(e.gates, key)
+		delete(e.gates, gateKey)
 		e.gatesMu.Unlock()
 	}()
+
+	result.GateStatus = "waiting"
 
 	log.Info().
 		Str("run_id", run.ID).
 		Str("step", step.Name).
+		Int("max_wait_minutes", maxWaitMinutes).
 		Msg("⏸️  Human gate — waiting for approval")
+
+	// Dispatch gate_waiting notifications
+	if len(step.NotifyTools) > 0 && e.notifier != nil {
+		evt := notify.Event{
+			Type:       string(notify.EventGateWaiting),
+			RunID:      run.ID,
+			RecipeName: run.RecipeID,
+			StepName:   step.Name,
+			Kitchen:    run.Kitchen,
+			Timestamp:  time.Now().UTC(),
+		}
+		result.NotifyResults = e.notifier.DispatchAll(ctx, run.Kitchen, step.NotifyTools, evt)
+	}
 
 	// Update run status to paused
 	run.Status = models.RecipeRunPaused
 	e.store.UpdateRecipeRun(ctx, run)
 
-	select {
-	case approved := <-ch:
-		if !approved {
-			result.Output = map[string]interface{}{"approved": false}
-			return fmt.Errorf("human gate '%s' was rejected", step.Name)
-		}
-		result.Output = map[string]interface{}{"approved": true}
-
-		// Resume run
-		run.Status = models.RecipeRunRunning
-		e.store.UpdateRecipeRun(ctx, run)
-
-		return nil
-
-	case <-ctx.Done():
-		return fmt.Errorf("human gate '%s' timed out or was canceled", step.Name)
+	// Build SLA deadline context
+	var gateCtx context.Context
+	var gateCancel context.CancelFunc
+	if maxWaitMinutes > 0 {
+		gateCtx, gateCancel = context.WithTimeout(ctx, time.Duration(maxWaitMinutes)*time.Minute)
+	} else {
+		gateCtx, gateCancel = context.WithCancel(ctx)
 	}
+	defer gateCancel()
+
+	// Poll the store every 5 seconds for external approvals (Slack/Teams callbacks etc.)
+	pollTicker := time.NewTicker(5 * time.Second)
+	defer pollTicker.Stop()
+
+	for {
+		select {
+		case approved := <-ch:
+			// Direct API approval via ApproveGate / ApproveGateWithMetadata
+			return e.resolveGate(ctx, run, step, result, gateKey, approved)
+
+		case <-pollTicker.C:
+			// Check store for external approval
+			record, err := e.store.GetApproval(gateCtx, gateKey)
+			if err == nil && record.Status != "pending" {
+				return e.resolveGate(ctx, run, step, result, gateKey, record.Status == "approved")
+			}
+
+		case <-gateCtx.Done():
+			// SLA timeout or parent cancellation
+			if maxWaitMinutes > 0 {
+				// SLA breach — mark as timed_out
+				now := time.Now().UTC()
+				if record, err := e.store.GetApproval(ctx, gateKey); err == nil && record.Status == "pending" {
+					record.Status = "timed_out"
+					record.ResolvedAt = &now
+					record.Comments = fmt.Sprintf("SLA breach: gate not resolved within %d minutes", maxWaitMinutes)
+					e.store.UpdateApproval(ctx, record)
+				}
+				result.GateStatus = "timed_out"
+				return fmt.Errorf("human gate '%s' exceeded SLA of %d minutes", step.Name, maxWaitMinutes)
+			}
+			return fmt.Errorf("human gate '%s' was canceled", step.Name)
+		}
+	}
+}
+
+// resolveGate handles the approval/rejection outcome of a human gate.
+func (e *Engine) resolveGate(ctx context.Context, run *models.RecipeRun, step *models.Step, result *models.StepResult, gateKey string, approved bool) error {
+	if !approved {
+		result.GateStatus = "rejected"
+		result.Output = map[string]interface{}{"approved": false}
+		return fmt.Errorf("human gate '%s' was rejected", step.Name)
+	}
+	result.GateStatus = "approved"
+	result.Output = map[string]interface{}{"approved": true}
+
+	// Attach approver info to result if available
+	if record, err := e.store.GetApproval(ctx, gateKey); err == nil {
+		result.Output = map[string]interface{}{
+			"approved":       true,
+			"approver_id":    record.ApproverID,
+			"approver_email": record.ApproverEmail,
+			"channel":        record.ApproverChannel,
+			"comments":       record.Comments,
+			"resolved_at":    record.ResolvedAt,
+		}
+	}
+
+	// Resume run
+	run.Status = models.RecipeRunRunning
+	e.store.UpdateRecipeRun(ctx, run)
+	return nil
 }
 
 // executeCondition evaluates a condition and records which branch to take.
@@ -553,4 +761,106 @@ func (e *Engine) GetPendingGates(runID string) []string {
 		}
 	}
 	return pending
+}
+
+// evaluateBranches checks step branches against the step's output.
+// Uses simple JSON-path-style matching: each branch condition is
+// "output_key == value" or "output_key != value".
+// Returns the next step name from the first matching branch,
+// or the step's DefaultNext if no branch matches.
+func (e *Engine) evaluateBranches(step *models.Step, result *models.StepResult) string {
+	if result.Output == nil {
+		if step.DefaultNext != "" {
+			return step.DefaultNext
+		}
+		return ""
+	}
+
+	for _, branch := range step.Branches {
+		if matchCondition(branch.Condition, result.Output) {
+			log.Debug().
+				Str("step", step.Name).
+				Str("condition", branch.Condition).
+				Str("next", branch.NextStep).
+				Msg("Branch matched")
+			return branch.NextStep
+		}
+	}
+
+	if step.DefaultNext != "" {
+		return step.DefaultNext
+	}
+	return ""
+}
+
+// matchCondition evaluates a simple condition against output data.
+// Supports:
+//   - "key == value"    (string equality)
+//   - "key != value"    (string inequality)
+//   - "key"             (key exists and is truthy)
+//   - "status == completed"
+//
+// For more complex conditions, we can integrate expr-lang/expr later.
+func matchCondition(condition string, output map[string]interface{}) bool {
+	// Try "key == value"
+	for _, op := range []string{"==", "!="} {
+		parts := splitCondition(condition, op)
+		if len(parts) == 2 {
+			key := trimSpace(parts[0])
+			expected := trimSpace(parts[1])
+
+			actual, ok := output[key]
+			if !ok {
+				return op == "!="
+			}
+
+			actualStr := fmt.Sprintf("%v", actual)
+			if op == "==" {
+				return actualStr == expected
+			}
+			return actualStr != expected
+		}
+	}
+
+	// Simple truthy check — key exists and is not false/nil/empty
+	key := trimSpace(condition)
+	val, ok := output[key]
+	if !ok {
+		return false
+	}
+	switch v := val.(type) {
+	case bool:
+		return v
+	case string:
+		return v != ""
+	case nil:
+		return false
+	default:
+		return true
+	}
+}
+
+func splitCondition(s, sep string) []string {
+	idx := -1
+	for i := 0; i <= len(s)-len(sep); i++ {
+		if s[i:i+len(sep)] == sep {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil
+	}
+	return []string{s[:idx], s[idx+len(sep):]}
+}
+
+func trimSpace(s string) string {
+	start, end := 0, len(s)
+	for start < end && (s[start] == ' ' || s[start] == '\t') {
+		start++
+	}
+	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
+		end--
+	}
+	return s[start:end]
 }

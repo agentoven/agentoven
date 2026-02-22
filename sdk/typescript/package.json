@@ -1,6 +1,6 @@
 {
   "name": "@agentoven/sdk",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "AgentOven TypeScript SDK — enterprise agent orchestration",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -24,16 +24,25 @@
   },
   "scripts": {
     "artifacts": "napi artifacts",
-    "build": "napi build --platform --release ./native",
-    "build:debug": "napi build --platform ./native",
+    "build": "napi build --platform --release ./native && tsc",
+    "build:debug": "napi build --platform ./native && tsc",
     "prepublishOnly": "napi prepublish -t npm",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "version": "napi version"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.0",
     "typescript": "^5.5.0",
     "vitest": "^2.0.0"
+  },
+  "optionalDependencies": {
+    "@agentoven/sdk-win32-x64-msvc": "0.3.0",
+    "@agentoven/sdk-darwin-x64": "0.3.0",
+    "@agentoven/sdk-darwin-arm64": "0.3.0",
+    "@agentoven/sdk-linux-x64-gnu": "0.3.0",
+    "@agentoven/sdk-linux-x64-musl": "0.3.0",
+    "@agentoven/sdk-linux-arm64-gnu": "0.3.0"
   },
   "engines": {
     "node": ">= 18"
