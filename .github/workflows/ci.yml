@@ -225,7 +225,6 @@ jobs:
         run: maturin build --release
 
       - name: Install and test
-        working-directory: sdk/python
         run: |
           pip install target/wheels/*.whl
           python -c "import agentoven; print(agentoven.__version__)"

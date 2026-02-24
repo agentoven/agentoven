@@ -8,6 +8,7 @@ use napi_derive::napi;
 // ── Agent Status ─────────────────────────────────────────────
 
 #[napi(string_enum)]
+#[derive(Debug)]
 pub enum AgentStatus {
     Draft,
     Baking,
@@ -48,6 +49,7 @@ pub fn create_agent(
 // ── Ingredient Kind ──────────────────────────────────────────
 
 #[napi(string_enum)]
+#[derive(Debug)]
 pub enum IngredientKind {
     Model,
     Tool,

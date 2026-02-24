@@ -24,8 +24,8 @@
   },
   "scripts": {
     "artifacts": "napi artifacts",
-    "build": "napi build --platform --release ./native && tsc",
-    "build:debug": "napi build --platform ./native && tsc",
+    "build": "napi build --platform --release --cargo-cwd ./native && tsc",
+    "build:debug": "napi build --platform --cargo-cwd ./native && tsc",
     "prepublishOnly": "napi prepublish -t npm",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
