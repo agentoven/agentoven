@@ -10,19 +10,14 @@ use uuid::Uuid;
 use crate::ingredient::Ingredient;
 
 /// Agent execution mode.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentMode {
     /// AgentOven runs the agentic loop (built-in executor).
+    #[default]
     Managed,
     /// Agent is external, proxied via A2A endpoint.
     External,
-}
-
-impl Default for AgentMode {
-    fn default() -> Self {
-        AgentMode::Managed
-    }
 }
 
 impl std::fmt::Display for AgentMode {

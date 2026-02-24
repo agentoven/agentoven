@@ -20,7 +20,7 @@
 //! use a2a_ao::{A2AClient, AgentCard};
 //!
 //! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Discover a remote agent
 //!     let card = AgentCard::discover("https://agent.example.com").await?;
 //!     println!("Found: {}", card.name);
@@ -44,13 +44,13 @@ pub mod transport;
 
 // Re-export primary types
 pub use agent_card::{
-    AgentCard, AgentCapabilities, AgentProvider, AgentSkill, ContentType, SecurityScheme,
+    AgentCapabilities, AgentCard, AgentProvider, AgentSkill, ContentType, SecurityScheme,
 };
 pub use artifact::Artifact;
 pub use client::{A2AClient, SendMessageRequest};
 pub use error::A2AError;
-pub use message::{Message, MessagePart, MessageRole, FilePart, DataPart};
+pub use message::{DataPart, FilePart, Message, MessagePart, MessageRole};
 pub use notification::{PushNotificationConfig, PushNotificationEvent};
-pub use task::{Task, TaskState, TaskEvent, TaskQueryParams};
-pub use transport::jsonrpc::{JsonRpcRequest, JsonRpcResponse, JsonRpcError};
+pub use task::{Task, TaskEvent, TaskQueryParams, TaskState};
+pub use transport::jsonrpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 pub use transport::sse::TaskEventStream;

@@ -57,7 +57,7 @@ pub enum Commands {
 
     /// 🍞 Manage agents in the oven (register, list, bake, invoke, retire).
     #[command(subcommand)]
-    Agent(agent::AgentCommands),
+    Agent(Box<agent::AgentCommands>),
 
     /// 🔌 Manage model providers (OpenAI, Anthropic, Ollama, etc.).
     #[command(subcommand)]
@@ -112,7 +112,7 @@ pub enum OutputFormat {
 pub async fn execute(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Init(args) => init::execute(args).await,
-        Commands::Agent(cmd) => agent::execute(cmd).await,
+        Commands::Agent(cmd) => agent::execute(*cmd).await,
         Commands::Provider(cmd) => provider::execute(cmd).await,
         Commands::Tool(cmd) => tool::execute(cmd).await,
         Commands::Prompt(cmd) => prompt::execute(cmd).await,

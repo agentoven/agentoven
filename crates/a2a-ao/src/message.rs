@@ -4,8 +4,8 @@
 //! and has a role indicating whether it's from the user (client agent) or
 //! the remote agent.
 
-use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// A message exchanged between agents during a task.
@@ -96,15 +96,11 @@ pub enum MessagePart {
 
     /// File content (inline or by reference).
     #[serde(rename = "file")]
-    File {
-        file: FilePart,
-    },
+    File { file: FilePart },
 
     /// Structured data (JSON or other).
     #[serde(rename = "data")]
-    Data {
-        data: DataPart,
-    },
+    Data { data: DataPart },
 }
 
 impl MessagePart {

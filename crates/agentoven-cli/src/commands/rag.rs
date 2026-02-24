@@ -49,7 +49,7 @@ pub async fn execute(cmd: RagCommands) -> anyhow::Result<()> {
 }
 
 async fn query(args: QueryArgs) -> anyhow::Result<()> {
-    println!("\n  {} RAG Query (strategy: {})\n", "🔍".to_string(), args.strategy.bold());
+    println!("\n  🔍 RAG Query (strategy: {})\n", args.strategy.bold());
 
     let body = serde_json::json!({
         "query": args.query,
@@ -61,10 +61,11 @@ async fn query(args: QueryArgs) -> anyhow::Result<()> {
     match client.rag_query(body).await {
         Ok(result) => {
             // Display answer
-            if let Some(answer) = result["answer"].as_str()
+            if let Some(answer) = result["answer"]
+                .as_str()
                 .or_else(|| result["response"].as_str())
             {
-                println!("  {} {}:\n", "🤖".to_string(), "Answer".green().bold());
+                println!("  🤖 {}:\n", "Answer".green().bold());
                 for line in answer.lines() {
                     println!("    {}", line);
                 }
@@ -73,7 +74,8 @@ async fn query(args: QueryArgs) -> anyhow::Result<()> {
 
             // Display sources if requested
             if args.sources {
-                if let Some(sources) = result["sources"].as_array()
+                if let Some(sources) = result["sources"]
+                    .as_array()
                     .or_else(|| result["documents"].as_array())
                     .or_else(|| result["context"].as_array())
                 {
@@ -81,13 +83,14 @@ async fn query(args: QueryArgs) -> anyhow::Result<()> {
                         println!("  {} ({}):", "Sources".bold(), sources.len());
                         println!("  {}", "─".repeat(60).dimmed());
                         for (i, src) in sources.iter().enumerate() {
-                            let title = src["title"].as_str()
+                            let title = src["title"]
+                                .as_str()
                                 .or_else(|| src["source"].as_str())
                                 .unwrap_or("(untitled)");
                             let score = src["score"].as_f64().unwrap_or(0.0);
                             println!("  {}. {} (score: {:.3})", i + 1, title.cyan(), score);
-                            if let Some(chunk) = src["content"].as_str()
-                                .or_else(|| src["text"].as_str())
+                            if let Some(chunk) =
+                                src["content"].as_str().or_else(|| src["text"].as_str())
                             {
                                 let preview = if chunk.len() > 120 {
                                     format!("{}...", &chunk[..120])
@@ -104,7 +107,8 @@ async fn query(args: QueryArgs) -> anyhow::Result<()> {
 
             // Display metrics if present
             if let Some(metrics) = result.get("metrics") {
-                println!("  {} Latency: {}ms | Tokens: {}",
+                println!(
+                    "  {} Latency: {}ms | Tokens: {}",
                     "→".dimmed(),
                     metrics["latency_ms"].as_u64().unwrap_or(0),
                     metrics["tokens"].as_u64().unwrap_or(0),
@@ -112,14 +116,18 @@ async fn query(args: QueryArgs) -> anyhow::Result<()> {
             }
         }
         Err(e) => {
-            println!("  {} Query failed: {}", "✗".red().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Query failed: {}",
+                "✗".red().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
 }
 
 async fn ingest(args: IngestArgs) -> anyhow::Result<()> {
-    println!("\n  {} Ingesting: {}\n", "📥".to_string(), args.path.bold());
+    println!("\n  📥 Ingesting: {}\n", args.path.bold());
 
     // Read file(s)
     let path = std::path::Path::new(&args.path);
@@ -148,7 +156,11 @@ async fn ingest(args: IngestArgs) -> anyhow::Result<()> {
         anyhow::bail!("Path '{}' not found or not a file/directory", args.path);
     };
 
-    println!("  {} {} document(s) to ingest", "→".dimmed(), documents.len());
+    println!(
+        "  {} {} document(s) to ingest",
+        "→".dimmed(),
+        documents.len()
+    );
 
     let body = serde_json::json!({
         "documents": documents,
@@ -159,24 +171,38 @@ async fn ingest(args: IngestArgs) -> anyhow::Result<()> {
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     let pb = indicatif::ProgressBar::new(documents.len() as u64);
-    pb.set_style(indicatif::ProgressStyle::default_bar()
-        .template("  {spinner:.green} [{bar:40.cyan/dim}] {pos}/{len} documents")
-        .unwrap()
-        .progress_chars("█▓░"));
+    pb.set_style(
+        indicatif::ProgressStyle::default_bar()
+            .template("  {spinner:.green} [{bar:40.cyan/dim}] {pos}/{len} documents")
+            .unwrap()
+            .progress_chars("█▓░"),
+    );
 
     match client.rag_ingest(body).await {
         Ok(result) => {
             pb.finish_and_clear();
-            let chunks = result["chunks_created"].as_u64()
+            let chunks = result["chunks_created"]
+                .as_u64()
                 .or_else(|| result["total_chunks"].as_u64())
                 .unwrap_or(0);
-            let docs = result["documents_processed"].as_u64().unwrap_or(documents.len() as u64);
-            println!("  {} Ingested {} document(s), {} chunk(s) in collection '{}'.",
-                "✓".green().bold(), docs, chunks, args.collection);
+            let docs = result["documents_processed"]
+                .as_u64()
+                .unwrap_or(documents.len() as u64);
+            println!(
+                "  {} Ingested {} document(s), {} chunk(s) in collection '{}'.",
+                "✓".green().bold(),
+                docs,
+                chunks,
+                args.collection
+            );
         }
         Err(e) => {
             pb.finish_and_clear();
-            println!("  {} Ingestion failed: {}", "✗".red().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Ingestion failed: {}",
+                "✗".red().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())

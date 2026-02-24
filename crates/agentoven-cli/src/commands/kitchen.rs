@@ -53,7 +53,7 @@ pub async fn execute(cmd: KitchenCommands) -> anyhow::Result<()> {
 }
 
 async fn list() -> anyhow::Result<()> {
-    println!("\n  {} Kitchens:\n", "🏠".to_string());
+    println!("\n  🏠 Kitchens:\n");
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.list_kitchens().await {
@@ -63,37 +63,65 @@ async fn list() -> anyhow::Result<()> {
             } else {
                 println!(
                     "  {:<24} {:<12} {:<16} {:<12}",
-                    "NAME".bold(), "PLAN".bold(), "CREATED".bold(), "AGENTS".bold()
+                    "NAME".bold(),
+                    "PLAN".bold(),
+                    "CREATED".bold(),
+                    "AGENTS".bold()
                 );
                 println!("  {}", "─".repeat(68).dimmed());
                 for k in &kitchens {
-                    let name = k["name"].as_str().unwrap_or(k["id"].as_str().unwrap_or("-"));
+                    let name = k["name"]
+                        .as_str()
+                        .unwrap_or(k["id"].as_str().unwrap_or("-"));
                     let plan = k["plan"].as_str().unwrap_or("community");
                     let created = k["created_at"].as_str().unwrap_or("-");
-                    let created_short = if created.len() > 10 { &created[..10] } else { created };
+                    let created_short = if created.len() > 10 {
+                        &created[..10]
+                    } else {
+                        created
+                    };
                     let agents = k["agent_count"].as_u64().unwrap_or(0);
-                    println!("  {:<24} {:<12} {:<16} {}", name, plan, created_short, agents);
+                    println!(
+                        "  {:<24} {:<12} {:<16} {}",
+                        name, plan, created_short, agents
+                    );
                 }
                 println!("\n  {} {} kitchen(s)", "→".dimmed(), kitchens.len());
             }
         }
         Err(e) => {
-            println!("  {} Could not list kitchens: {}", "⚠".yellow().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Could not list kitchens: {}",
+                "⚠".yellow().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
 }
 
 async fn get(args: GetArgs) -> anyhow::Result<()> {
-    println!("\n  {} Kitchen: {}\n", "🏠".to_string(), args.id.bold());
+    println!("\n  🏠 Kitchen: {}\n", args.id.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.get_kitchen(&args.id).await {
         Ok(k) => {
             println!("  {:<16} {}", "ID:".bold(), k["id"].as_str().unwrap_or("-"));
-            println!("  {:<16} {}", "Name:".bold(), k["name"].as_str().unwrap_or("-"));
-            println!("  {:<16} {}", "Plan:".bold(), k["plan"].as_str().unwrap_or("community"));
-            println!("  {:<16} {}", "Created:".bold(), k["created_at"].as_str().unwrap_or("-"));
+            println!(
+                "  {:<16} {}",
+                "Name:".bold(),
+                k["name"].as_str().unwrap_or("-")
+            );
+            println!(
+                "  {:<16} {}",
+                "Plan:".bold(),
+                k["plan"].as_str().unwrap_or("community")
+            );
+            println!(
+                "  {:<16} {}",
+                "Created:".bold(),
+                k["created_at"].as_str().unwrap_or("-")
+            );
 
             if let Some(limits) = k.get("plan_limits") {
                 println!("\n  {}:", "Plan Limits".bold());
@@ -112,14 +140,18 @@ async fn get(args: GetArgs) -> anyhow::Result<()> {
             }
         }
         Err(e) => {
-            println!("  {} Not found: {}", "⚠".yellow().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Not found: {}",
+                "⚠".yellow().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
 }
 
 async fn settings() -> anyhow::Result<()> {
-    println!("\n  {} Kitchen Settings:\n", "⚙️ ".to_string());
+    println!("\n  ⚙️  Kitchen Settings:\n");
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.get_settings().await {
@@ -130,14 +162,18 @@ async fn settings() -> anyhow::Result<()> {
             }
         }
         Err(e) => {
-            println!("  {} Could not fetch settings: {}", "⚠".yellow().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Could not fetch settings: {}",
+                "⚠".yellow().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
 }
 
 async fn update_settings(args: UpdateSettingsArgs) -> anyhow::Result<()> {
-    println!("\n  {} Updating settings...\n", "⚙️ ".to_string());
+    println!("\n  ⚙️  Updating settings...\n");
 
     let body = if let Some(ref raw) = args.json {
         serde_json::from_str(raw)?

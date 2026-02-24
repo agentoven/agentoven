@@ -142,7 +142,7 @@ func TestAgentVersioning(t *testing.T) {
 		Status:  models.AgentStatusDraft,
 	})
 
-	// Version 1 should exist
+	// Initial version should be semver "0.1.0"
 	versions, err := s.ListAgentVersions(ctx, "default", "versioned")
 	if err != nil {
 		t.Fatalf("ListAgentVersions() error = %v", err)
@@ -150,15 +150,16 @@ func TestAgentVersioning(t *testing.T) {
 	if len(versions) != 1 {
 		t.Fatalf("ListAgentVersions() returned %d, want 1", len(versions))
 	}
-	if versions[0].Version != "1" {
-		t.Errorf("Initial version = %q, want %q", versions[0].Version, "1")
+	if versions[0].Version != models.DefaultAgentVersion {
+		t.Errorf("Initial version = %q, want %q", versions[0].Version, models.DefaultAgentVersion)
 	}
 
-	// Update to create version 2
+	// Update with VersionBump to create a new version entry
 	s.UpdateAgent(ctx, &models.Agent{
-		Name:    "versioned",
-		Kitchen: "default",
-		Status:  models.AgentStatusReady,
+		Name:        "versioned",
+		Kitchen:     "default",
+		Status:      models.AgentStatusReady,
+		VersionBump: "patch",
 	})
 
 	versions, _ = s.ListAgentVersions(ctx, "default", "versioned")
@@ -166,21 +167,22 @@ func TestAgentVersioning(t *testing.T) {
 		t.Fatalf("ListAgentVersions() after update returned %d, want 2", len(versions))
 	}
 
-	// Get specific version
-	v1, err := s.GetAgentVersion(ctx, "default", "versioned", "1")
+	// Get specific version — v1 is the initial "0.1.0"
+	v1, err := s.GetAgentVersion(ctx, "default", "versioned", "0.1.0")
 	if err != nil {
-		t.Fatalf("GetAgentVersion(1) error = %v", err)
+		t.Fatalf("GetAgentVersion(0.1.0) error = %v", err)
 	}
 	if v1.Status != models.AgentStatusDraft {
-		t.Errorf("Version 1 status = %q, want %q", v1.Status, models.AgentStatusDraft)
+		t.Errorf("Version 0.1.0 status = %q, want %q", v1.Status, models.AgentStatusDraft)
 	}
 
-	v2, err := s.GetAgentVersion(ctx, "default", "versioned", "2")
+	// v2 is the patch bump "0.1.1"
+	v2, err := s.GetAgentVersion(ctx, "default", "versioned", "0.1.1")
 	if err != nil {
-		t.Fatalf("GetAgentVersion(2) error = %v", err)
+		t.Fatalf("GetAgentVersion(0.1.1) error = %v", err)
 	}
 	if v2.Status != models.AgentStatusReady {
-		t.Errorf("Version 2 status = %q, want %q", v2.Status, models.AgentStatusReady)
+		t.Errorf("Version 0.1.1 status = %q, want %q", v2.Status, models.AgentStatusReady)
 	}
 }
 

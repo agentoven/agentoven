@@ -87,7 +87,7 @@ pub async fn execute(cmd: SessionCommands) -> anyhow::Result<()> {
 }
 
 async fn list(args: ListArgs) -> anyhow::Result<()> {
-    println!("\n  {} Sessions for '{}':\n", "💬".to_string(), args.agent.bold());
+    println!("\n  💬 Sessions for '{}':\n", args.agent.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.list_sessions(&args.agent).await {
@@ -97,12 +97,15 @@ async fn list(args: ListArgs) -> anyhow::Result<()> {
             } else {
                 println!(
                     "  {:<38} {:<12} {:<20}",
-                    "SESSION ID".bold(), "MESSAGES".bold(), "LAST ACTIVITY".bold()
+                    "SESSION ID".bold(),
+                    "MESSAGES".bold(),
+                    "LAST ACTIVITY".bold()
                 );
                 println!("  {}", "─".repeat(72).dimmed());
                 for s in &sessions {
                     let id = s["id"].as_str().unwrap_or("-");
-                    let msgs = s["message_count"].as_u64()
+                    let msgs = s["message_count"]
+                        .as_u64()
                         .or_else(|| s["messages"].as_array().map(|a| a.len() as u64))
                         .unwrap_or(0);
                     let last = s["updated_at"].as_str().unwrap_or("-");
@@ -113,14 +116,18 @@ async fn list(args: ListArgs) -> anyhow::Result<()> {
             }
         }
         Err(e) => {
-            println!("  {} Failed: {}", "⚠".yellow().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Failed: {}",
+                "⚠".yellow().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
 }
 
 async fn create(args: CreateArgs) -> anyhow::Result<()> {
-    println!("\n  {} Creating session for '{}'...\n", "💬".to_string(), args.agent.bold());
+    println!("\n  💬 Creating session for '{}'...\n", args.agent.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.create_session(&args.agent).await {
@@ -138,22 +145,35 @@ async fn create(args: CreateArgs) -> anyhow::Result<()> {
 }
 
 async fn get(args: GetArgs) -> anyhow::Result<()> {
-    println!("\n  {} Session: {}\n", "💬".to_string(), args.session_id.bold());
+    println!("\n  💬 Session: {}\n", args.session_id.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.get_session(&args.agent, &args.session_id).await {
         Ok(s) => {
             println!("  {:<16} {}", "Agent:".bold(), args.agent);
-            println!("  {:<16} {}", "Session:".bold(), s["id"].as_str().unwrap_or("-"));
-            println!("  {:<16} {}", "Created:".bold(), s["created_at"].as_str().unwrap_or("-"));
-            println!("  {:<16} {}", "Updated:".bold(), s["updated_at"].as_str().unwrap_or("-"));
+            println!(
+                "  {:<16} {}",
+                "Session:".bold(),
+                s["id"].as_str().unwrap_or("-")
+            );
+            println!(
+                "  {:<16} {}",
+                "Created:".bold(),
+                s["created_at"].as_str().unwrap_or("-")
+            );
+            println!(
+                "  {:<16} {}",
+                "Updated:".bold(),
+                s["updated_at"].as_str().unwrap_or("-")
+            );
 
             if let Some(messages) = s["messages"].as_array() {
                 println!("\n  {} ({} messages):", "Messages".bold(), messages.len());
                 println!("  {}", "─".repeat(60).dimmed());
                 for msg in messages {
                     let role = msg["role"].as_str().unwrap_or("?");
-                    let text = msg["content"].as_str()
+                    let text = msg["content"]
+                        .as_str()
                         .or_else(|| msg["text"].as_str())
                         .unwrap_or("");
                     let icon = match role {
@@ -176,7 +196,11 @@ async fn get(args: GetArgs) -> anyhow::Result<()> {
             }
         }
         Err(e) => {
-            println!("  {} Not found: {}", "⚠".yellow().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Not found: {}",
+                "⚠".yellow().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
@@ -204,13 +228,17 @@ async fn delete(args: DeleteArgs) -> anyhow::Result<()> {
 
 async fn send(args: SendArgs) -> anyhow::Result<()> {
     let client = agentoven_core::AgentOvenClient::from_env()?;
-    match client.send_session_message(&args.agent, &args.session_id, &args.message, args.thinking).await {
+    match client
+        .send_session_message(&args.agent, &args.session_id, &args.message, args.thinking)
+        .await
+    {
         Ok(result) => {
-            if let Some(reply) = result["reply"].as_str()
+            if let Some(reply) = result["reply"]
+                .as_str()
                 .or_else(|| result["content"].as_str())
                 .or_else(|| result["message"].as_str())
             {
-                println!("\n  {} {}:\n", "🤖".to_string(), "Agent".green().bold());
+                println!("\n  🤖 {}:\n", "Agent".green().bold());
                 for line in reply.lines() {
                     println!("    {}", line);
                 }
@@ -223,7 +251,7 @@ async fn send(args: SendArgs) -> anyhow::Result<()> {
             if args.thinking {
                 if let Some(thinking) = result.get("thinking") {
                     if let Some(t) = thinking.as_str() {
-                        println!("  {} {}:", "💭".to_string(), "Thinking".dimmed());
+                        println!("  💭 {}:", "Thinking".dimmed());
                         for line in t.lines() {
                             println!("    {}", line.dimmed());
                         }
@@ -254,33 +282,39 @@ async fn chat(args: ChatArgs) -> anyhow::Result<()> {
         }
     };
 
-    println!("\n  {} Chat session: {} → {}", "💬".to_string(), args.agent.bold(), session_id.dimmed());
-    println!("  {} Type your message (Ctrl+D or 'quit' to exit)\n", "→".dimmed());
+    println!(
+        "\n  💬 Chat session: {} → {}",
+        args.agent.bold(),
+        session_id.dimmed()
+    );
+    println!(
+        "  {} Type your message (Ctrl+D or 'quit' to exit)\n",
+        "→".dimmed()
+    );
 
-    loop {
-        let input: String = match dialoguer::Input::<String>::new()
-            .with_prompt(format!("  {}", "You".cyan().bold()))
-            .allow_empty(false)
-            .interact_text()
-        {
-            Ok(v) => v,
-            Err(_) => break,
-        };
-
+    while let Ok(input) = dialoguer::Input::<String>::new()
+        .with_prompt(format!("  {}", "You".cyan().bold()))
+        .allow_empty(false)
+        .interact_text()
+    {
         if input.trim().eq_ignore_ascii_case("quit") || input.trim().eq_ignore_ascii_case("exit") {
             break;
         }
 
-        match client.send_session_message(&args.agent, &session_id, &input, args.thinking).await {
+        match client
+            .send_session_message(&args.agent, &session_id, &input, args.thinking)
+            .await
+        {
             Ok(result) => {
-                let reply = result["reply"].as_str()
+                let reply = result["reply"]
+                    .as_str()
                     .or_else(|| result["content"].as_str())
                     .or_else(|| result["message"].as_str())
                     .unwrap_or("(no response)");
 
-                println!("\n  {} {}:\n", "🤖".to_string(), "Agent".green().bold());
+                println!("\n  🤖 {}:\n", "Agent".green().bold());
                 for line in reply.lines() {
-                    println!("    {}", line);
+                    println!("    {line}");
                 }
                 println!();
             }

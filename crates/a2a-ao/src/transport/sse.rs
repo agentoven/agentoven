@@ -35,9 +35,8 @@ impl Stream for TaskEventStream {
 
 /// Parse an SSE event data line into a TaskEvent.
 pub fn parse_sse_event(data: &str) -> Result<TaskEvent, A2AError> {
-    serde_json::from_str(data).map_err(|e| {
-        A2AError::StreamingError(format!("Failed to parse SSE event: {e}"))
-    })
+    serde_json::from_str(data)
+        .map_err(|e| A2AError::StreamingError(format!("Failed to parse SSE event: {e}")))
 }
 
 /// SSE event type constants.

@@ -13,8 +13,8 @@
 //! ```
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::artifact::Artifact;
@@ -82,10 +82,7 @@ impl Task {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self.state,
-            TaskState::Completed
-                | TaskState::Failed
-                | TaskState::Canceled
-                | TaskState::Rejected
+            TaskState::Completed | TaskState::Failed | TaskState::Canceled | TaskState::Rejected
         )
     }
 
@@ -218,22 +215,13 @@ pub struct TaskQueryParams {
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum TaskEvent {
     /// Task state changed.
-    StateChanged {
-        task_id: String,
-        state: TaskState,
-    },
+    StateChanged { task_id: String, state: TaskState },
 
     /// New message added to the task.
-    MessageAdded {
-        task_id: String,
-        message: Message,
-    },
+    MessageAdded { task_id: String, message: Message },
 
     /// New artifact produced.
-    ArtifactAdded {
-        task_id: String,
-        artifact: Artifact,
-    },
+    ArtifactAdded { task_id: String, artifact: Artifact },
 
     /// Partial artifact data (streaming).
     ArtifactChunk {

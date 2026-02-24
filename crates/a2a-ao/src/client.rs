@@ -13,9 +13,7 @@ use crate::error::{A2AError, A2AResult};
 use crate::message::Message;
 use crate::notification::PushNotificationConfig;
 use crate::task::{Task, TaskQueryParams};
-use crate::transport::jsonrpc::{
-    self, JsonRpcRequest, JsonRpcResponse, A2A_MEDIA_TYPE,
-};
+use crate::transport::jsonrpc::{self, JsonRpcRequest, JsonRpcResponse, A2A_MEDIA_TYPE};
 use crate::transport::sse::TaskEventStream;
 
 /// High-level A2A client for communicating with remote agents.
@@ -77,8 +75,7 @@ impl A2AClient {
 
     /// Send a message to the remote agent, creating or continuing a task.
     pub async fn send_message(&self, request: SendMessageRequest) -> A2AResult<Task> {
-        let params = serde_json::to_value(&request)
-            .map_err(|e| A2AError::Serialization(e))?;
+        let params = serde_json::to_value(&request).map_err(A2AError::Serialization)?;
 
         let rpc_request = JsonRpcRequest::send_message(params);
         let response = self.send_rpc(rpc_request).await?;
@@ -167,8 +164,7 @@ impl A2AClient {
         &self,
         request: SendMessageRequest,
     ) -> A2AResult<TaskEventStream> {
-        let params =
-            serde_json::to_value(&request).map_err(|e| A2AError::Serialization(e))?;
+        let params = serde_json::to_value(&request).map_err(A2AError::Serialization)?;
 
         let rpc_request = JsonRpcRequest::send_streaming_message(params);
 
@@ -214,11 +210,9 @@ impl A2AClient {
                         }
                         futures::stream::iter(events)
                     }
-                    Err(e) => {
-                        futures::stream::iter(vec![Err(A2AError::StreamingError(
-                            format!("Stream read error: {e}"),
-                        ))])
-                    }
+                    Err(e) => futures::stream::iter(vec![Err(A2AError::StreamingError(format!(
+                        "Stream read error: {e}"
+                    )))]),
                 })
                 .flatten(),
         );
@@ -227,10 +221,7 @@ impl A2AClient {
     }
 
     /// Convenience: send a streaming text message.
-    pub async fn send_streaming_text(
-        &self,
-        text: &str,
-    ) -> A2AResult<TaskEventStream> {
+    pub async fn send_streaming_text(&self, text: &str) -> A2AResult<TaskEventStream> {
         self.send_streaming_message(SendMessageRequest {
             message: Message::user_text(text),
             task_id: None,
@@ -241,10 +232,7 @@ impl A2AClient {
     }
 
     /// Subscribe to an existing task's updates via SSE.
-    pub async fn subscribe_task(
-        &self,
-        task_id: &str,
-    ) -> A2AResult<TaskEventStream> {
+    pub async fn subscribe_task(&self, task_id: &str) -> A2AResult<TaskEventStream> {
         let rpc_request = JsonRpcRequest::new(
             jsonrpc::methods::SUBSCRIBE_TASK,
             Some(serde_json::json!({ "taskId": task_id })),
@@ -289,11 +277,9 @@ impl A2AClient {
                         }
                         futures::stream::iter(events)
                     }
-                    Err(e) => {
-                        futures::stream::iter(vec![Err(A2AError::StreamingError(
-                            format!("Stream read error: {e}"),
-                        ))])
-                    }
+                    Err(e) => futures::stream::iter(vec![Err(A2AError::StreamingError(format!(
+                        "Stream read error: {e}"
+                    )))]),
                 })
                 .flatten(),
         );
@@ -309,10 +295,8 @@ impl A2AClient {
         config: &PushNotificationConfig,
     ) -> A2AResult<PushNotificationConfig> {
         let params = serde_json::to_value(config)?;
-        let rpc_request = JsonRpcRequest::new(
-            jsonrpc::methods::CREATE_PUSH_NOTIFICATION,
-            Some(params),
-        );
+        let rpc_request =
+            JsonRpcRequest::new(jsonrpc::methods::CREATE_PUSH_NOTIFICATION, Some(params));
         let response = self.send_rpc(rpc_request).await?;
         let result = response.into_result().map_err(|e| A2AError::JsonRpc {
             code: e.code,
@@ -360,11 +344,7 @@ impl A2AClient {
     }
 
     /// Delete a push notification configuration.
-    pub async fn delete_push_notification(
-        &self,
-        config_id: &str,
-        task_id: &str,
-    ) -> A2AResult<()> {
+    pub async fn delete_push_notification(&self, config_id: &str, task_id: &str) -> A2AResult<()> {
         let rpc_request = JsonRpcRequest::new(
             jsonrpc::methods::DELETE_PUSH_NOTIFICATION,
             Some(serde_json::json!({ "configId": config_id, "taskId": task_id })),
@@ -380,8 +360,7 @@ impl A2AClient {
 
     /// Get the extended agent card (post-authentication).
     pub async fn get_extended_agent_card(&self) -> A2AResult<AgentCard> {
-        let rpc_request =
-            JsonRpcRequest::new(jsonrpc::methods::GET_EXTENDED_AGENT_CARD, None);
+        let rpc_request = JsonRpcRequest::new(jsonrpc::methods::GET_EXTENDED_AGENT_CARD, None);
         let response = self.send_rpc(rpc_request).await?;
         let result = response.into_result().map_err(|e| A2AError::JsonRpc {
             code: e.code,

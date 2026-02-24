@@ -88,7 +88,7 @@ pub async fn execute(cmd: PromptCommands) -> anyhow::Result<()> {
 }
 
 async fn list() -> anyhow::Result<()> {
-    println!("\n  {} Prompt Templates:\n", "📝".to_string());
+    println!("\n  📝 Prompt Templates:\n");
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.list_prompts().await {
@@ -98,14 +98,21 @@ async fn list() -> anyhow::Result<()> {
             } else {
                 println!(
                     "  {:<24} {:<8} {:<20} {:<8}",
-                    "NAME".bold(), "VERSION".bold(), "UPDATED".bold(), "VARS".bold()
+                    "NAME".bold(),
+                    "VERSION".bold(),
+                    "UPDATED".bold(),
+                    "VARS".bold()
                 );
                 println!("  {}", "─".repeat(64).dimmed());
                 for p in &prompts {
                     let name = p["name"].as_str().unwrap_or("-");
                     let ver = p["version"].as_u64().unwrap_or(0);
                     let updated = p["updated_at"].as_str().unwrap_or("-");
-                    let updated_short = if updated.len() > 16 { &updated[..16] } else { updated };
+                    let updated_short = if updated.len() > 16 {
+                        &updated[..16]
+                    } else {
+                        updated
+                    };
                     let vars = p["variables"].as_array().map(|a| a.len()).unwrap_or(0);
                     println!("  {:<24} v{:<7} {:<20} {}", name, ver, updated_short, vars);
                 }
@@ -113,14 +120,18 @@ async fn list() -> anyhow::Result<()> {
             }
         }
         Err(e) => {
-            println!("  {} Could not reach control plane: {}", "⚠".yellow().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Could not reach control plane: {}",
+                "⚠".yellow().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
 }
 
 async fn add(args: AddArgs) -> anyhow::Result<()> {
-    println!("\n  {} Adding prompt: {}\n", "📝".to_string(), args.name.bold());
+    println!("\n  📝 Adding prompt: {}\n", args.name.bold());
 
     let template = if let Some(ref t) = args.template {
         t.clone()
@@ -143,7 +154,12 @@ async fn add(args: AddArgs) -> anyhow::Result<()> {
     match client.add_prompt(body).await {
         Ok(result) => {
             let ver = result["version"].as_u64().unwrap_or(1);
-            println!("  {} Prompt '{}' v{} created!", "✓".green().bold(), args.name, ver);
+            println!(
+                "  {} Prompt '{}' v{} created!",
+                "✓".green().bold(),
+                args.name,
+                ver
+            );
         }
         Err(e) => {
             println!("  {} Failed: {}", "✗".red().bold(), e.to_string().dimmed());
@@ -153,14 +169,26 @@ async fn add(args: AddArgs) -> anyhow::Result<()> {
 }
 
 async fn get(args: GetArgs) -> anyhow::Result<()> {
-    println!("\n  {} Prompt: {}\n", "📝".to_string(), args.name.bold());
+    println!("\n  📝 Prompt: {}\n", args.name.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.get_prompt(&args.name).await {
         Ok(p) => {
-            println!("  {:<16} {}", "Name:".bold(), p["name"].as_str().unwrap_or("-"));
-            println!("  {:<16} v{}", "Version:".bold(), p["version"].as_u64().unwrap_or(0));
-            println!("  {:<16} {}", "Updated:".bold(), p["updated_at"].as_str().unwrap_or("-"));
+            println!(
+                "  {:<16} {}",
+                "Name:".bold(),
+                p["name"].as_str().unwrap_or("-")
+            );
+            println!(
+                "  {:<16} v{}",
+                "Version:".bold(),
+                p["version"].as_u64().unwrap_or(0)
+            );
+            println!(
+                "  {:<16} {}",
+                "Updated:".bold(),
+                p["updated_at"].as_str().unwrap_or("-")
+            );
             if let Some(vars) = p["variables"].as_array() {
                 let var_names: Vec<&str> = vars.iter().filter_map(|v| v.as_str()).collect();
                 println!("  {:<16} {}", "Variables:".bold(), var_names.join(", "));
@@ -173,14 +201,18 @@ async fn get(args: GetArgs) -> anyhow::Result<()> {
             }
         }
         Err(e) => {
-            println!("  {} Not found: {}", "⚠".yellow().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Not found: {}",
+                "⚠".yellow().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
 }
 
 async fn update(args: UpdateArgs) -> anyhow::Result<()> {
-    println!("\n  {} Updating prompt: {}\n", "📝".to_string(), args.name.bold());
+    println!("\n  📝 Updating prompt: {}\n", args.name.bold());
 
     let template = if let Some(ref t) = args.template {
         Some(t.clone())
@@ -199,7 +231,12 @@ async fn update(args: UpdateArgs) -> anyhow::Result<()> {
     match client.update_prompt(&args.name, body).await {
         Ok(result) => {
             let ver = result["version"].as_u64().unwrap_or(0);
-            println!("  {} Prompt '{}' updated to v{}.", "✓".green().bold(), args.name, ver);
+            println!(
+                "  {} Prompt '{}' updated to v{}.",
+                "✓".green().bold(),
+                args.name,
+                ver
+            );
         }
         Err(e) => {
             println!("  {} Failed: {}", "✗".red().bold(), e.to_string().dimmed());
@@ -229,7 +266,7 @@ async fn remove(args: RemoveArgs) -> anyhow::Result<()> {
 }
 
 async fn validate(args: ValidateArgs) -> anyhow::Result<()> {
-    println!("\n  {} Validating prompt: {}...\n", "✅".to_string(), args.name.bold());
+    println!("\n  ✅ Validating prompt: {}...\n", args.name.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.validate_prompt(&args.name).await {
@@ -261,7 +298,7 @@ async fn validate(args: ValidateArgs) -> anyhow::Result<()> {
 }
 
 async fn versions(args: VersionsArgs) -> anyhow::Result<()> {
-    println!("\n  {} Versions for prompt: {}\n", "📝".to_string(), args.name.bold());
+    println!("\n  📝 Versions for prompt: {}\n", args.name.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.prompt_versions(&args.name).await {
@@ -271,7 +308,9 @@ async fn versions(args: VersionsArgs) -> anyhow::Result<()> {
             } else {
                 println!(
                     "  {:<8} {:<24} {:<8}",
-                    "VERSION".bold(), "UPDATED".bold(), "VARS".bold()
+                    "VERSION".bold(),
+                    "UPDATED".bold(),
+                    "VARS".bold()
                 );
                 println!("  {}", "─".repeat(42).dimmed());
                 for v in &versions {

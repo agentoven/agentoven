@@ -97,7 +97,7 @@ pub async fn execute(cmd: ProviderCommands) -> anyhow::Result<()> {
 }
 
 async fn list() -> anyhow::Result<()> {
-    println!("\n  {} Model Providers:\n", "⚙️".to_string());
+    println!("\n  ⚙️ Model Providers:\n");
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.list_providers().await {
@@ -107,7 +107,10 @@ async fn list() -> anyhow::Result<()> {
             } else {
                 println!(
                     "  {:<20} {:<16} {:<12} {:<8}",
-                    "NAME".bold(), "KIND".bold(), "DEFAULT MODEL".bold(), "STATUS".bold()
+                    "NAME".bold(),
+                    "KIND".bold(),
+                    "DEFAULT MODEL".bold(),
+                    "STATUS".bold()
                 );
                 println!("  {}", "─".repeat(60).dimmed());
                 for p in &providers {
@@ -122,14 +125,18 @@ async fn list() -> anyhow::Result<()> {
             }
         }
         Err(e) => {
-            println!("  {} Could not reach control plane: {}", "⚠".yellow().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Could not reach control plane: {}",
+                "⚠".yellow().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
 }
 
 async fn add(args: AddArgs) -> anyhow::Result<()> {
-    println!("\n  {} Adding provider: {}\n", "⚙️".to_string(), args.name.bold());
+    println!("\n  ⚙️ Adding provider: {}\n", args.name.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     let mut body = serde_json::json!({
@@ -152,7 +159,11 @@ async fn add(args: AddArgs) -> anyhow::Result<()> {
             if let Some(model) = result["default_model"].as_str() {
                 println!("  {} Default model: {}", "→".dimmed(), model.cyan());
             }
-            println!("  {} Test with: {}", "→".dimmed(), format!("agentoven provider test {}", args.name).green());
+            println!(
+                "  {} Test with: {}",
+                "→".dimmed(),
+                format!("agentoven provider test {}", args.name).green()
+            );
         }
         Err(e) => {
             println!("  {} Failed: {}", "✗".red().bold(), e.to_string().dimmed());
@@ -162,17 +173,41 @@ async fn add(args: AddArgs) -> anyhow::Result<()> {
 }
 
 async fn get(args: GetArgs) -> anyhow::Result<()> {
-    println!("\n  {} Provider: {}\n", "⚙️".to_string(), args.name.bold());
+    println!("\n  ⚙️ Provider: {}\n", args.name.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.get_provider(&args.name).await {
         Ok(p) => {
-            println!("  {:<16} {}", "Name:".bold(), p["name"].as_str().unwrap_or("-"));
-            println!("  {:<16} {}", "Kind:".bold(), p["kind"].as_str().unwrap_or("-"));
-            println!("  {:<16} {}", "Default Model:".bold(), p["default_model"].as_str().unwrap_or("-"));
-            println!("  {:<16} {}", "Base URL:".bold(), p["base_url"].as_str().unwrap_or("-"));
+            println!(
+                "  {:<16} {}",
+                "Name:".bold(),
+                p["name"].as_str().unwrap_or("-")
+            );
+            println!(
+                "  {:<16} {}",
+                "Kind:".bold(),
+                p["kind"].as_str().unwrap_or("-")
+            );
+            println!(
+                "  {:<16} {}",
+                "Default Model:".bold(),
+                p["default_model"].as_str().unwrap_or("-")
+            );
+            println!(
+                "  {:<16} {}",
+                "Base URL:".bold(),
+                p["base_url"].as_str().unwrap_or("-")
+            );
             let enabled = p["enabled"].as_bool().unwrap_or(true);
-            println!("  {:<16} {}", "Enabled:".bold(), if enabled { "yes".green().to_string() } else { "no".red().to_string() });
+            println!(
+                "  {:<16} {}",
+                "Enabled:".bold(),
+                if enabled {
+                    "yes".green().to_string()
+                } else {
+                    "no".red().to_string()
+                }
+            );
             if let Some(models) = p["discovered_models"].as_array() {
                 if !models.is_empty() {
                     println!("\n  {}:", "Discovered Models".bold());
@@ -184,14 +219,18 @@ async fn get(args: GetArgs) -> anyhow::Result<()> {
             }
         }
         Err(e) => {
-            println!("  {} Not found: {}", "⚠".yellow().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Not found: {}",
+                "⚠".yellow().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
 }
 
 async fn update(args: UpdateArgs) -> anyhow::Result<()> {
-    println!("\n  {} Updating provider: {}\n", "⚙️".to_string(), args.name.bold());
+    println!("\n  ⚙️ Updating provider: {}\n", args.name.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     let mut body = serde_json::json!({});
@@ -240,7 +279,7 @@ async fn remove(args: RemoveArgs) -> anyhow::Result<()> {
 }
 
 async fn test(args: TestArgs) -> anyhow::Result<()> {
-    println!("\n  {} Testing provider: {}...\n", "🧪".to_string(), args.name.bold());
+    println!("\n  🧪 Testing provider: {}...\n", args.name.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.test_provider(&args.name).await {
@@ -267,7 +306,7 @@ async fn test(args: TestArgs) -> anyhow::Result<()> {
 }
 
 async fn discover(args: DiscoverArgs) -> anyhow::Result<()> {
-    println!("\n  {} Discovering models from: {}...\n", "🔍".to_string(), args.name.bold());
+    println!("\n  🔍 Discovering models from: {}...\n", args.name.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.discover_provider(&args.name).await {
@@ -280,15 +319,25 @@ async fn discover(args: DiscoverArgs) -> anyhow::Result<()> {
                     println!("  {}", "─".repeat(50).dimmed());
                     for m in models {
                         let id = m["id"].as_str().unwrap_or("-");
-                        let caps = m["capabilities"].as_array()
-                            .map(|c| c.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
+                        let caps = m["capabilities"]
+                            .as_array()
+                            .map(|c| {
+                                c.iter()
+                                    .filter_map(|v| v.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
                             .unwrap_or_default();
                         println!("  {:<30} {:<16}", id, caps);
                     }
                     println!("\n  {} {} model(s) found", "→".dimmed(), models.len());
                 }
             } else {
-                println!("  {} {}", "→".dimmed(), serde_json::to_string_pretty(&result)?);
+                println!(
+                    "  {} {}",
+                    "→".dimmed(),
+                    serde_json::to_string_pretty(&result)?
+                );
             }
         }
         Err(e) => {

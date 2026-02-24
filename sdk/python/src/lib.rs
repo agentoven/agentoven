@@ -1,10 +1,13 @@
-use pyo3::prelude::*;
-use pyo3::exceptions::PyRuntimeError;
+// PyO3 macro expansion triggers false-positive clippy::useless_conversion
+#![allow(clippy::useless_conversion)]
 
-/// AgentOven Python SDK — native Rust bindings via PyO3.
-///
-/// This module exposes the core AgentOven types and client
-/// to Python with zero-copy performance where possible.
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::prelude::*;
+
+// AgentOven Python SDK — native Rust bindings via PyO3.
+//
+// This module exposes the core AgentOven types and client
+// to Python with zero-copy performance where possible.
 
 // ── Agent Types ──────────────────────────────────────────────
 
@@ -172,7 +175,10 @@ impl AgentOvenClient {
                 .register(&core_agent)
                 .await
                 .map_err(|e| PyRuntimeError::new_err(format!("API error: {e}")))?;
-            Ok(format!("Agent '{}' registered (id={})", registered.name, registered.id))
+            Ok(format!(
+                "Agent '{}' registered (id={})",
+                registered.name, registered.id
+            ))
         })
     }
 
@@ -216,7 +222,10 @@ impl AgentOvenClient {
 
     /// Deploy (bake) an agent.
     fn bake(&self, agent_name: &str) -> PyResult<String> {
-        Ok(format!("🔥 Baking agent '{}' in kitchen '{}'", agent_name, self.kitchen))
+        Ok(format!(
+            "🔥 Baking agent '{}' in kitchen '{}'",
+            agent_name, self.kitchen
+        ))
     }
 
     /// Pause (cool) an agent.
@@ -225,7 +234,10 @@ impl AgentOvenClient {
     }
 
     fn __repr__(&self) -> String {
-        format!("AgentOvenClient(url='{}', kitchen='{}')", self.url, self.kitchen)
+        format!(
+            "AgentOvenClient(url='{}', kitchen='{}')",
+            self.url, self.kitchen
+        )
     }
 }
 

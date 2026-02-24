@@ -311,10 +311,8 @@ mod tests {
 
     #[test]
     fn test_response_error() {
-        let resp = JsonRpcResponse::error(
-            RequestId::Number(1),
-            JsonRpcError::task_not_found("abc123"),
-        );
+        let resp =
+            JsonRpcResponse::error(RequestId::Number(1), JsonRpcError::task_not_found("abc123"));
         assert!(resp.is_error());
         assert!(resp.into_result().is_err());
     }

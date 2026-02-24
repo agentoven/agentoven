@@ -5,7 +5,7 @@
 mod commands;
 
 use clap::Parser;
-use commands::{Cli, execute};
+use commands::{execute, Cli};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

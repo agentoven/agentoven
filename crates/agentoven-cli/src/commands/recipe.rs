@@ -98,7 +98,7 @@ pub async fn execute(cmd: RecipeCommands) -> anyhow::Result<()> {
 }
 
 async fn create(args: CreateArgs) -> anyhow::Result<()> {
-    println!("\n  {} Creating recipe: {}\n", "📖".to_string(), args.name.bold());
+    println!("\n  📖 Creating recipe: {}\n", args.name.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
 
@@ -118,7 +118,12 @@ async fn create(args: CreateArgs) -> anyhow::Result<()> {
     let recipe = agentoven_core::Recipe::new(&args.name, steps);
     match client.create_recipe(&recipe).await {
         Ok(created) => {
-            println!("  {} Recipe '{}' created (ID: {}).", "✓".green().bold(), args.name, created.id.dimmed());
+            println!(
+                "  {} Recipe '{}' created (ID: {}).",
+                "✓".green().bold(),
+                args.name,
+                created.id.dimmed()
+            );
             println!(
                 "  {} Execute with: {}",
                 "→".dimmed(),
@@ -126,15 +131,23 @@ async fn create(args: CreateArgs) -> anyhow::Result<()> {
             );
         }
         Err(e) => {
-            println!("  {} Could not create recipe: {}", "⚠".yellow().bold(), e.to_string().dimmed());
-            println!("  {} Recipe validated locally. ID: {}", "✓".green().bold(), recipe.id.dimmed());
+            println!(
+                "  {} Could not create recipe: {}",
+                "⚠".yellow().bold(),
+                e.to_string().dimmed()
+            );
+            println!(
+                "  {} Recipe validated locally. ID: {}",
+                "✓".green().bold(),
+                recipe.id.dimmed()
+            );
         }
     }
     Ok(())
 }
 
 async fn list() -> anyhow::Result<()> {
-    println!("\n  {} Recipes:\n", "📖".to_string());
+    println!("\n  📖 Recipes:\n");
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.list_recipes().await {
@@ -144,7 +157,10 @@ async fn list() -> anyhow::Result<()> {
             } else {
                 println!(
                     "  {:<24} {:<12} {:<8} {:<20}",
-                    "NAME".bold(), "STATUS".bold(), "STEPS".bold(), "CREATED".bold()
+                    "NAME".bold(),
+                    "STATUS".bold(),
+                    "STEPS".bold(),
+                    "CREATED".bold()
                 );
                 println!("  {}", "─".repeat(66).dimmed());
                 for r in &recipes {
@@ -152,21 +168,32 @@ async fn list() -> anyhow::Result<()> {
                     let status = r["status"].as_str().unwrap_or("-");
                     let steps = r["steps"].as_array().map(|a| a.len()).unwrap_or(0);
                     let created = r["created_at"].as_str().unwrap_or("-");
-                    let created_short = if created.len() > 16 { &created[..16] } else { created };
-                    println!("  {:<24} {:<12} {:<8} {}", name, status, steps, created_short);
+                    let created_short = if created.len() > 16 {
+                        &created[..16]
+                    } else {
+                        created
+                    };
+                    println!(
+                        "  {:<24} {:<12} {:<8} {}",
+                        name, status, steps, created_short
+                    );
                 }
                 println!("\n  {} {} recipe(s)", "→".dimmed(), recipes.len());
             }
         }
         Err(e) => {
-            println!("  {} Could not list recipes: {}", "⚠".yellow().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Could not list recipes: {}",
+                "⚠".yellow().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
 }
 
 async fn get(args: GetArgs) -> anyhow::Result<()> {
-    println!("\n  {} Recipe: {}\n", "📖".to_string(), args.name.bold());
+    println!("\n  📖 Recipe: {}\n", args.name.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.get_recipe(&args.name).await {
@@ -177,7 +204,11 @@ async fn get(args: GetArgs) -> anyhow::Result<()> {
             }
         }
         Err(e) => {
-            println!("  {} Not found: {}", "⚠".yellow().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Not found: {}",
+                "⚠".yellow().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
@@ -198,13 +229,17 @@ async fn delete(args: DeleteArgs) -> anyhow::Result<()> {
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.delete_recipe(&args.name).await {
         Ok(()) => println!("  {} Recipe '{}' deleted.", "✓".green().bold(), args.name),
-        Err(e) => println!("  {} Delete failed: {}", "✗".red().bold(), e.to_string().dimmed()),
+        Err(e) => println!(
+            "  {} Delete failed: {}",
+            "✗".red().bold(),
+            e.to_string().dimmed()
+        ),
     }
     Ok(())
 }
 
 async fn bake(args: RecipeBakeArgs) -> anyhow::Result<()> {
-    println!("\n  {} Baking recipe: {}\n", "🔥".to_string(), args.name.bold());
+    println!("\n  🔥 Baking recipe: {}\n", args.name.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
 
@@ -221,29 +256,51 @@ async fn bake(args: RecipeBakeArgs) -> anyhow::Result<()> {
         Ok(result) => {
             println!("  {} Recipe baking started!", "✓".green().bold());
             if let Some(run_id) = result.get("run_id").or(result.get("task_id")) {
-                println!("  {} Run ID: {}", "→".dimmed(), run_id.as_str().unwrap_or("?").cyan());
+                println!(
+                    "  {} Run ID: {}",
+                    "→".dimmed(),
+                    run_id.as_str().unwrap_or("?").cyan()
+                );
             }
-            println!("  {} Monitor with: {}", "→".dimmed(), format!("agentoven recipe runs {}", args.name).green());
+            println!(
+                "  {} Monitor with: {}",
+                "→".dimmed(),
+                format!("agentoven recipe runs {}", args.name).green()
+            );
         }
         Err(e) => {
-            println!("  {} Recipe bake failed: {}", "✗".red().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Recipe bake failed: {}",
+                "✗".red().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
 }
 
 async fn runs(args: RunsArgs) -> anyhow::Result<()> {
-    println!("\n  {} Runs for recipe: {} (last {})\n", "📊".to_string(), args.name.bold(), args.limit);
+    println!(
+        "\n  📊 Runs for recipe: {} (last {})\n",
+        args.name.bold(),
+        args.limit
+    );
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.recipe_runs(&args.name).await {
         Ok(runs_list) => {
             if runs_list.is_empty() {
-                println!("  (no runs yet — use `agentoven recipe bake {}` to start)", args.name);
+                println!(
+                    "  (no runs yet — use `agentoven recipe bake {}` to start)",
+                    args.name
+                );
             } else {
                 println!(
                     "  {:<36} {:<12} {:<12} {:<20}",
-                    "RUN ID".bold(), "STATUS".bold(), "DURATION".bold(), "STARTED".bold()
+                    "RUN ID".bold(),
+                    "STATUS".bold(),
+                    "DURATION".bold(),
+                    "STARTED".bold()
                 );
                 println!("  {}", "─".repeat(82).dimmed());
                 for run in runs_list.iter().take(args.limit as usize) {
@@ -251,28 +308,65 @@ async fn runs(args: RunsArgs) -> anyhow::Result<()> {
                     let status = run["status"].as_str().unwrap_or("-");
                     let duration = run["duration"].as_str().unwrap_or("-");
                     let started = run["started_at"].as_str().unwrap_or("-");
-                    let started_short = if started.len() > 16 { &started[..16] } else { started };
-                    println!("  {:<36} {:<12} {:<12} {}", id, status, duration, started_short);
+                    let started_short = if started.len() > 16 {
+                        &started[..16]
+                    } else {
+                        started
+                    };
+                    println!(
+                        "  {:<36} {:<12} {:<12} {}",
+                        id, status, duration, started_short
+                    );
                 }
                 println!("\n  {} {} run(s)", "→".dimmed(), runs_list.len());
             }
         }
         Err(e) => {
-            println!("  {} Could not fetch runs: {}", "⚠".yellow().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Could not fetch runs: {}",
+                "⚠".yellow().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
 }
 
 async fn approve(args: ApproveArgs) -> anyhow::Result<()> {
-    let action = if args.approved { "Approving" } else { "Rejecting" };
-    println!("\n  {} {} gate {} in run {}...\n", "✅".to_string(), action, args.gate_id.bold(), args.run_id.dimmed());
+    let action = if args.approved {
+        "Approving"
+    } else {
+        "Rejecting"
+    };
+    println!(
+        "\n  ✅ {} gate {} in run {}...\n",
+        action,
+        args.gate_id.bold(),
+        args.run_id.dimmed()
+    );
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
-    match client.approve_gate(&args.name, &args.run_id, &args.gate_id, args.approved, args.comment.as_deref()).await {
+    match client
+        .approve_gate(
+            &args.name,
+            &args.run_id,
+            &args.gate_id,
+            args.approved,
+            args.comment.as_deref(),
+        )
+        .await
+    {
         Ok(_) => {
-            println!("  {} Gate {} {}.", "✓".green().bold(), args.gate_id,
-                if args.approved { "approved" } else { "rejected" });
+            println!(
+                "  {} Gate {} {}.",
+                "✓".green().bold(),
+                args.gate_id,
+                if args.approved {
+                    "approved"
+                } else {
+                    "rejected"
+                }
+            );
         }
         Err(e) => {
             println!("  {} Failed: {}", "✗".red().bold(), e.to_string().dimmed());

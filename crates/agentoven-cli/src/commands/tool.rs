@@ -70,7 +70,7 @@ pub async fn execute(cmd: ToolCommands) -> anyhow::Result<()> {
 }
 
 async fn list() -> anyhow::Result<()> {
-    println!("\n  {} MCP Tools:\n", "🔧".to_string());
+    println!("\n  🔧 MCP Tools:\n");
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.list_tools().await {
@@ -80,7 +80,9 @@ async fn list() -> anyhow::Result<()> {
             } else {
                 println!(
                     "  {:<24} {:<40} {:<20}",
-                    "NAME".bold(), "DESCRIPTION".bold(), "UPDATED".bold()
+                    "NAME".bold(),
+                    "DESCRIPTION".bold(),
+                    "UPDATED".bold()
                 );
                 println!("  {}", "─".repeat(84).dimmed());
                 for t in &tools {
@@ -88,21 +90,29 @@ async fn list() -> anyhow::Result<()> {
                     let desc = t["description"].as_str().unwrap_or("-");
                     let desc_trunc = if desc.len() > 38 { &desc[..38] } else { desc };
                     let updated = t["updated_at"].as_str().unwrap_or("-");
-                    let updated_short = if updated.len() > 16 { &updated[..16] } else { updated };
+                    let updated_short = if updated.len() > 16 {
+                        &updated[..16]
+                    } else {
+                        updated
+                    };
                     println!("  {:<24} {:<40} {:<20}", name, desc_trunc, updated_short);
                 }
                 println!("\n  {} {} tool(s)", "→".dimmed(), tools.len());
             }
         }
         Err(e) => {
-            println!("  {} Could not reach control plane: {}", "⚠".yellow().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Could not reach control plane: {}",
+                "⚠".yellow().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
 }
 
 async fn add(args: AddArgs) -> anyhow::Result<()> {
-    println!("\n  {} Adding tool: {}\n", "🔧".to_string(), args.name.bold());
+    println!("\n  🔧 Adding tool: {}\n", args.name.bold());
 
     let schema = if let Some(ref s) = args.schema {
         Some(serde_json::from_str::<serde_json::Value>(s)?)
@@ -134,28 +144,44 @@ async fn add(args: AddArgs) -> anyhow::Result<()> {
 }
 
 async fn get(args: GetArgs) -> anyhow::Result<()> {
-    println!("\n  {} Tool: {}\n", "🔧".to_string(), args.name.bold());
+    println!("\n  🔧 Tool: {}\n", args.name.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.get_tool(&args.name).await {
         Ok(t) => {
-            println!("  {:<16} {}", "Name:".bold(), t["name"].as_str().unwrap_or("-"));
-            println!("  {:<16} {}", "Description:".bold(), t["description"].as_str().unwrap_or("-"));
-            println!("  {:<16} {}", "Updated:".bold(), t["updated_at"].as_str().unwrap_or("-"));
+            println!(
+                "  {:<16} {}",
+                "Name:".bold(),
+                t["name"].as_str().unwrap_or("-")
+            );
+            println!(
+                "  {:<16} {}",
+                "Description:".bold(),
+                t["description"].as_str().unwrap_or("-")
+            );
+            println!(
+                "  {:<16} {}",
+                "Updated:".bold(),
+                t["updated_at"].as_str().unwrap_or("-")
+            );
             if let Some(schema) = t.get("input_schema") {
                 println!("\n  {}:", "Input Schema".bold());
                 println!("  {}", serde_json::to_string_pretty(schema)?.dimmed());
             }
         }
         Err(e) => {
-            println!("  {} Not found: {}", "⚠".yellow().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Not found: {}",
+                "⚠".yellow().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
 }
 
 async fn update(args: UpdateArgs) -> anyhow::Result<()> {
-    println!("\n  {} Updating tool: {}\n", "🔧".to_string(), args.name.bold());
+    println!("\n  🔧 Updating tool: {}\n", args.name.bold());
 
     let mut body = serde_json::json!({});
     if let Some(desc) = &args.description {

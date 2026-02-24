@@ -15,7 +15,7 @@ pub struct LoginArgs {
 }
 
 pub async fn execute(args: LoginArgs) -> anyhow::Result<()> {
-    println!("\n  {} Authenticating with AgentOven...\n", "🔑".to_string());
+    println!("\n  🔑 Authenticating with AgentOven...\n");
 
     let api_key = if let Some(key) = args.api_key {
         key
@@ -26,9 +26,7 @@ pub async fn execute(args: LoginArgs) -> anyhow::Result<()> {
             .interact()?
     };
 
-    let url = args
-        .url
-        .unwrap_or_else(|| "http://localhost:8080".into());
+    let url = args.url.unwrap_or_else(|| "http://localhost:8080".into());
 
     // Store in config file
     let config_dir = dirs::home_dir()
@@ -54,10 +52,6 @@ api_key = "{api_key}"
         "✓".green().bold(),
         config_path.display().to_string().cyan()
     );
-    println!(
-        "  {} Connected to: {}",
-        "→".dimmed(),
-        url.cyan()
-    );
+    println!("  {} Connected to: {}", "→".dimmed(), url.cyan());
     Ok(())
 }

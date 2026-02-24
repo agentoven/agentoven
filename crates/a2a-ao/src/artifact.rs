@@ -1,7 +1,7 @@
 //! Artifact — outputs/deliverables produced by a task.
 
-use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::message::MessagePart;

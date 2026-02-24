@@ -6,8 +6,8 @@
 //! The card describes the agent's capabilities, skills, supported interfaces,
 //! security schemes, and input/output modes.
 
-use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::error::{A2AError, A2AResult};
@@ -80,9 +80,9 @@ impl AgentCard {
 
         tracing::info!(url = %url, "Discovering A2A agent");
 
-        let response = reqwest::get(&url).await.map_err(|e| {
-            A2AError::DiscoveryFailed(format!("Failed to fetch agent card: {e}"))
-        })?;
+        let response = reqwest::get(&url)
+            .await
+            .map_err(|e| A2AError::DiscoveryFailed(format!("Failed to fetch agent card: {e}")))?;
 
         if !response.status().is_success() {
             return Err(A2AError::DiscoveryFailed(format!(
@@ -91,9 +91,10 @@ impl AgentCard {
             )));
         }
 
-        let card: AgentCard = response.json().await.map_err(|e| {
-            A2AError::InvalidAgentCard(format!("Failed to parse agent card: {e}"))
-        })?;
+        let card: AgentCard = response
+            .json()
+            .await
+            .map_err(|e| A2AError::InvalidAgentCard(format!("Failed to parse agent card: {e}")))?;
 
         card.validate()?;
 
@@ -112,9 +113,7 @@ impl AgentCard {
             return Err(A2AError::InvalidAgentCard("name is required".into()));
         }
         if self.description.is_empty() {
-            return Err(A2AError::InvalidAgentCard(
-                "description is required".into(),
-            ));
+            return Err(A2AError::InvalidAgentCard("description is required".into()));
         }
         if self.supported_interfaces.is_empty() {
             return Err(A2AError::InvalidAgentCard(

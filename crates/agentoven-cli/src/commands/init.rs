@@ -31,8 +31,7 @@ pub async fn execute(args: InitArgs) -> anyhow::Result<()> {
 
     println!();
     println!(
-        "  {} Initializing AgentOven project: {}",
-        "🏺".to_string(),
+        "  🏺 Initializing AgentOven project: {}",
         project_name.bold()
     );
     println!();
@@ -110,15 +109,11 @@ framework = "{framework}"
     let gitignore_path = project_dir.join(".gitignore");
     if !gitignore_path.exists() {
         tokio::fs::write(&gitignore_path, gitignore).await?;
-        println!(
-            "  {} Created {}",
-            "✓".green().bold(),
-            ".gitignore".cyan()
-        );
+        println!("  {} Created {}", "✓".green().bold(), ".gitignore".cyan());
     }
 
     println!();
-    println!("  {} Project initialized!", "🔥".to_string());
+    println!("  🔥 Project initialized!");
     println!();
     println!("  Next steps:");
     println!(
@@ -129,10 +124,7 @@ framework = "{framework}"
         "    2. Run {} to register with the oven",
         "agentoven agent register".green()
     );
-    println!(
-        "    3. Run {} to deploy",
-        "agentoven agent bake".green()
-    );
+    println!("    3. Run {} to deploy", "agentoven agent bake".green());
     println!();
 
     Ok(())

@@ -1,7 +1,7 @@
 //! Push notification types for A2A webhook-based async delivery.
 
-use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::task::TaskEvent;

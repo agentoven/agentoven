@@ -22,11 +22,7 @@ pub struct DashboardArgs {
 
 pub async fn execute(args: DashboardArgs) -> anyhow::Result<()> {
     println!();
-    println!(
-        "  {} {}",
-        "🏺".to_string(),
-        "AgentOven Dashboard".bold()
-    );
+    println!("  🏺 {}", "AgentOven Dashboard".bold());
     println!();
 
     let port = args.port;
@@ -34,14 +30,12 @@ pub async fn execute(args: DashboardArgs) -> anyhow::Result<()> {
     // Check if the control plane is already running on this port
     if is_server_running(port).await {
         println!(
-            "  {} Control plane already running on port {}",
-            "✅".to_string(),
+            "  ✅ Control plane already running on port {}",
             port.to_string().cyan()
         );
         open_dashboard(port, args.no_open);
         println!(
-            "  {} Dashboard: {}",
-            "🌐".to_string(),
+            "  🌐 Dashboard: {}",
             format!("http://localhost:{port}").underline().cyan()
         );
         println!();
@@ -55,8 +49,7 @@ pub async fn execute(args: DashboardArgs) -> anyhow::Result<()> {
     };
 
     println!(
-        "  {} Starting control plane on port {}...",
-        "🚀".to_string(),
+        "  🚀 Starting control plane on port {}...",
         port.to_string().cyan()
     );
 
@@ -71,9 +64,9 @@ pub async fn execute(args: DashboardArgs) -> anyhow::Result<()> {
         }
     }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("Failed to start control plane: {e}\n  Binary: {server_bin}"))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        anyhow::anyhow!("Failed to start control plane: {e}\n  Binary: {server_bin}")
+    })?;
 
     // Wait for the server to become ready (up to 15 seconds)
     let ready = wait_for_server(port, 15).await;
@@ -85,16 +78,12 @@ pub async fn execute(args: DashboardArgs) -> anyhow::Result<()> {
         );
     }
 
-    println!(
-        "  {} Control plane is hot and ready!",
-        "🔥".to_string()
-    );
+    println!("  🔥 Control plane is hot and ready!");
 
     open_dashboard(port, args.no_open);
 
     println!(
-        "  {} Dashboard: {}",
-        "🌐".to_string(),
+        "  🌐 Dashboard: {}",
         format!("http://localhost:{port}").underline().cyan()
     );
     println!();
@@ -105,18 +94,12 @@ pub async fn execute(args: DashboardArgs) -> anyhow::Result<()> {
     signal::ctrl_c().await?;
 
     println!();
-    println!(
-        "  {} Shutting down control plane...",
-        "🛑".to_string()
-    );
+    println!("  🛑 Shutting down control plane...");
 
     child.kill().ok();
     child.wait().ok();
 
-    println!(
-        "  {} AgentOven stopped. Goodbye!",
-        "👋".to_string()
-    );
+    println!("  👋 AgentOven stopped. Goodbye!");
     println!();
 
     Ok(())
@@ -155,10 +138,7 @@ fn open_dashboard(port: u16, no_open: bool) {
     }
     let url = format!("http://localhost:{port}");
     if let Err(e) = open_url(&url) {
-        eprintln!(
-            "  {} Could not open browser: {e}",
-            "⚠️".to_string()
-        );
+        eprintln!("  ⚠️ Could not open browser: {e}");
     }
 }
 
@@ -212,15 +192,16 @@ fn find_server_binary() -> anyhow::Result<String> {
             let path = std::path::Path::new(candidate);
             if path.join("main.go").exists() {
                 // Use `go run` with the package path
-                let abs = std::fs::canonicalize(path)
-                    .unwrap_or_else(|_| path.to_path_buf());
+                let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
                 // Build the binary first for faster startup
-                println!(
-                    "  {} Building control plane...",
-                    "🔨".to_string()
-                );
+                println!("  🔨 Building control plane...");
                 let build_status = StdCommand::new("go")
-                    .args(["build", "-o", "/tmp/agentoven-server", &format!("./{}", candidate)])
+                    .args([
+                        "build",
+                        "-o",
+                        "/tmp/agentoven-server",
+                        &format!("./{}", candidate),
+                    ])
                     .status();
                 match build_status {
                     Ok(s) if s.success() => return Ok("/tmp/agentoven-server".to_string()),
@@ -265,12 +246,24 @@ fn find_dashboard_dir() -> Option<String> {
     // 1. Relative to the CLI binary (handles both symlink and resolved paths)
     if let Ok(exe) = std::env::current_exe() {
         let raw_dir = exe.parent().unwrap_or(&exe).to_path_buf();
-        candidates.push(raw_dir.join("..").join("share").join("agentoven").join("dashboard"));
+        candidates.push(
+            raw_dir
+                .join("..")
+                .join("share")
+                .join("agentoven")
+                .join("dashboard"),
+        );
 
         // Also try the symlink-resolved path
         if let Ok(resolved) = std::fs::canonicalize(&exe) {
             let resolved_dir = resolved.parent().unwrap_or(&resolved).to_path_buf();
-            candidates.push(resolved_dir.join("..").join("share").join("agentoven").join("dashboard"));
+            candidates.push(
+                resolved_dir
+                    .join("..")
+                    .join("share")
+                    .join("agentoven")
+                    .join("dashboard"),
+            );
         }
     }
 

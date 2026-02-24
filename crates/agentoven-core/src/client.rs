@@ -39,8 +39,8 @@ impl AgentOvenClient {
     ///
     /// Reads `AGENTOVEN_URL`, `AGENTOVEN_API_KEY`, `AGENTOVEN_KITCHEN`.
     pub fn from_env() -> anyhow::Result<Self> {
-        let base_url = std::env::var("AGENTOVEN_URL")
-            .unwrap_or_else(|_| "http://localhost:8080".into());
+        let base_url =
+            std::env::var("AGENTOVEN_URL").unwrap_or_else(|_| "http://localhost:8080".into());
         let api_key = std::env::var("AGENTOVEN_API_KEY").ok();
         let kitchen_id = std::env::var("AGENTOVEN_KITCHEN").ok();
 
@@ -67,7 +67,8 @@ impl AgentOvenClient {
     /// Register a new agent in the oven (menu).
     pub async fn register(&self, agent: &Agent) -> anyhow::Result<Agent> {
         let url = self.url("/api/v1/agents");
-        let resp = self.authed_request(self.http.post(url))
+        let resp = self
+            .authed_request(self.http.post(url))
             .json(agent)
             .send()
             .await?
@@ -82,7 +83,8 @@ impl AgentOvenClient {
             None => format!("/api/v1/agents/{name}"),
         };
         let url = self.url(&path);
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -92,7 +94,8 @@ impl AgentOvenClient {
     /// List all agents in the current kitchen.
     pub async fn list_agents(&self) -> anyhow::Result<Vec<Agent>> {
         let url = self.url("/api/v1/agents");
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -101,11 +104,9 @@ impl AgentOvenClient {
 
     /// Bake (deploy) an agent to an environment.
     pub async fn bake(&self, agent: &Agent, environment: &str) -> anyhow::Result<Agent> {
-        let url = self.url(&format!(
-            "/api/v1/agents/{}/bake",
-            agent.name
-        ));
-        let resp = self.authed_request(self.http.post(url))
+        let url = self.url(&format!("/api/v1/agents/{}/bake", agent.name));
+        let resp = self
+            .authed_request(self.http.post(url))
             .json(&serde_json::json!({
                 "version": agent.version,
                 "environment": environment,
@@ -119,7 +120,8 @@ impl AgentOvenClient {
     /// Rewarm a cooled agent (transition back to ready).
     pub async fn rewarm(&self, name: &str) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/agents/{name}/rewarm"));
-        let resp = self.authed_request(self.http.post(url))
+        let resp = self
+            .authed_request(self.http.post(url))
             .send()
             .await?
             .error_for_status()?;
@@ -131,7 +133,8 @@ impl AgentOvenClient {
     /// Create a new recipe (workflow).
     pub async fn create_recipe(&self, recipe: &Recipe) -> anyhow::Result<Recipe> {
         let url = self.url("/api/v1/recipes");
-        let resp = self.authed_request(self.http.post(url))
+        let resp = self
+            .authed_request(self.http.post(url))
             .json(recipe)
             .send()
             .await?
@@ -146,7 +149,8 @@ impl AgentOvenClient {
         input: serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/recipes/{recipe_name}/bake"));
-        let resp = self.authed_request(self.http.post(url))
+        let resp = self
+            .authed_request(self.http.post(url))
             .json(&input)
             .send()
             .await?
@@ -157,9 +161,14 @@ impl AgentOvenClient {
     // ── Agent Lifecycle ──────────────────────────────────────
 
     /// Update an existing agent.
-    pub async fn update_agent(&self, name: &str, updates: serde_json::Value) -> anyhow::Result<Agent> {
+    pub async fn update_agent(
+        &self,
+        name: &str,
+        updates: serde_json::Value,
+    ) -> anyhow::Result<Agent> {
         let url = self.url(&format!("/api/v1/agents/{name}"));
-        let resp = self.authed_request(self.http.put(url))
+        let resp = self
+            .authed_request(self.http.put(url))
             .json(&updates)
             .send()
             .await?
@@ -178,9 +187,14 @@ impl AgentOvenClient {
     }
 
     /// Re-cook an agent with edits.
-    pub async fn recook_agent(&self, name: &str, edits: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    pub async fn recook_agent(
+        &self,
+        name: &str,
+        edits: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/agents/{name}/recook"));
-        let resp = self.authed_request(self.http.post(url))
+        let resp = self
+            .authed_request(self.http.post(url))
             .json(&edits)
             .send()
             .await?
@@ -191,7 +205,8 @@ impl AgentOvenClient {
     /// Cool (pause) an agent.
     pub async fn cool_agent(&self, name: &str) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/agents/{name}/cool"));
-        let resp = self.authed_request(self.http.post(url))
+        let resp = self
+            .authed_request(self.http.post(url))
             .send()
             .await?
             .error_for_status()?;
@@ -201,7 +216,8 @@ impl AgentOvenClient {
     /// Retire an agent permanently.
     pub async fn retire_agent(&self, name: &str) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/agents/{name}/retire"));
-        let resp = self.authed_request(self.http.post(url))
+        let resp = self
+            .authed_request(self.http.post(url))
             .send()
             .await?
             .error_for_status()?;
@@ -216,7 +232,8 @@ impl AgentOvenClient {
         thinking: bool,
     ) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/agents/{name}/test"));
-        let resp = self.authed_request(self.http.post(url))
+        let resp = self
+            .authed_request(self.http.post(url))
             .json(&serde_json::json!({
                 "message": message,
                 "thinking_enabled": thinking,
@@ -243,7 +260,8 @@ impl AgentOvenClient {
         if let Some(vars) = variables {
             body["variables"] = vars;
         }
-        let resp = self.authed_request(self.http.post(url))
+        let resp = self
+            .authed_request(self.http.post(url))
             .json(&body)
             .send()
             .await?
@@ -254,7 +272,8 @@ impl AgentOvenClient {
     /// Get the resolved configuration for a baked agent.
     pub async fn agent_config(&self, name: &str) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/agents/{name}/config"));
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -264,7 +283,8 @@ impl AgentOvenClient {
     /// Get the A2A Agent Card for an agent.
     pub async fn agent_card(&self, name: &str) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/agents/{name}/card"));
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -274,7 +294,8 @@ impl AgentOvenClient {
     /// List version history for an agent.
     pub async fn agent_versions(&self, name: &str) -> anyhow::Result<Vec<serde_json::Value>> {
         let url = self.url(&format!("/api/v1/agents/{name}/versions"));
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -286,7 +307,8 @@ impl AgentOvenClient {
     /// List all model providers.
     pub async fn list_providers(&self) -> anyhow::Result<Vec<serde_json::Value>> {
         let url = self.url("/api/v1/models/providers");
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -294,9 +316,13 @@ impl AgentOvenClient {
     }
 
     /// Add a new model provider.
-    pub async fn add_provider(&self, provider: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    pub async fn add_provider(
+        &self,
+        provider: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
         let url = self.url("/api/v1/models/providers");
-        let resp = self.authed_request(self.http.post(url))
+        let resp = self
+            .authed_request(self.http.post(url))
             .json(&provider)
             .send()
             .await?
@@ -307,7 +333,8 @@ impl AgentOvenClient {
     /// Get a specific model provider.
     pub async fn get_provider(&self, name: &str) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/models/providers/{name}"));
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -315,9 +342,14 @@ impl AgentOvenClient {
     }
 
     /// Update a model provider.
-    pub async fn update_provider(&self, name: &str, provider: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    pub async fn update_provider(
+        &self,
+        name: &str,
+        provider: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/models/providers/{name}"));
-        let resp = self.authed_request(self.http.put(url))
+        let resp = self
+            .authed_request(self.http.put(url))
             .json(&provider)
             .send()
             .await?
@@ -338,7 +370,8 @@ impl AgentOvenClient {
     /// Test a provider's connectivity and credentials.
     pub async fn test_provider(&self, name: &str) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/models/providers/{name}/test"));
-        let resp = self.authed_request(self.http.post(url))
+        let resp = self
+            .authed_request(self.http.post(url))
             .send()
             .await?
             .error_for_status()?;
@@ -348,7 +381,8 @@ impl AgentOvenClient {
     /// Discover models available from a provider.
     pub async fn discover_provider(&self, name: &str) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/models/providers/{name}/discover"));
-        let resp = self.authed_request(self.http.post(url))
+        let resp = self
+            .authed_request(self.http.post(url))
             .send()
             .await?
             .error_for_status()?;
@@ -360,7 +394,8 @@ impl AgentOvenClient {
     /// List all MCP tools.
     pub async fn list_tools(&self) -> anyhow::Result<Vec<serde_json::Value>> {
         let url = self.url("/api/v1/tools");
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -370,7 +405,8 @@ impl AgentOvenClient {
     /// Add a new MCP tool.
     pub async fn add_tool(&self, tool: serde_json::Value) -> anyhow::Result<serde_json::Value> {
         let url = self.url("/api/v1/tools");
-        let resp = self.authed_request(self.http.post(url))
+        let resp = self
+            .authed_request(self.http.post(url))
             .json(&tool)
             .send()
             .await?
@@ -381,7 +417,8 @@ impl AgentOvenClient {
     /// Get a specific tool.
     pub async fn get_tool(&self, name: &str) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/tools/{name}"));
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -389,9 +426,14 @@ impl AgentOvenClient {
     }
 
     /// Update a tool.
-    pub async fn update_tool(&self, name: &str, tool: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    pub async fn update_tool(
+        &self,
+        name: &str,
+        tool: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/tools/{name}"));
-        let resp = self.authed_request(self.http.put(url))
+        let resp = self
+            .authed_request(self.http.put(url))
             .json(&tool)
             .send()
             .await?
@@ -414,7 +456,8 @@ impl AgentOvenClient {
     /// List all prompt templates.
     pub async fn list_prompts(&self) -> anyhow::Result<Vec<serde_json::Value>> {
         let url = self.url("/api/v1/prompts");
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -424,7 +467,8 @@ impl AgentOvenClient {
     /// Add a new prompt template.
     pub async fn add_prompt(&self, prompt: serde_json::Value) -> anyhow::Result<serde_json::Value> {
         let url = self.url("/api/v1/prompts");
-        let resp = self.authed_request(self.http.post(url))
+        let resp = self
+            .authed_request(self.http.post(url))
             .json(&prompt)
             .send()
             .await?
@@ -435,7 +479,8 @@ impl AgentOvenClient {
     /// Get a specific prompt template.
     pub async fn get_prompt(&self, name: &str) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/prompts/{name}"));
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -443,9 +488,14 @@ impl AgentOvenClient {
     }
 
     /// Update a prompt template.
-    pub async fn update_prompt(&self, name: &str, prompt: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    pub async fn update_prompt(
+        &self,
+        name: &str,
+        prompt: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/prompts/{name}"));
-        let resp = self.authed_request(self.http.put(url))
+        let resp = self
+            .authed_request(self.http.put(url))
             .json(&prompt)
             .send()
             .await?
@@ -466,7 +516,8 @@ impl AgentOvenClient {
     /// Validate a prompt template.
     pub async fn validate_prompt(&self, name: &str) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/prompts/{name}/validate"));
-        let resp = self.authed_request(self.http.post(url))
+        let resp = self
+            .authed_request(self.http.post(url))
             .send()
             .await?
             .error_for_status()?;
@@ -476,7 +527,8 @@ impl AgentOvenClient {
     /// List version history for a prompt.
     pub async fn prompt_versions(&self, name: &str) -> anyhow::Result<Vec<serde_json::Value>> {
         let url = self.url(&format!("/api/v1/prompts/{name}/versions"));
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -488,7 +540,8 @@ impl AgentOvenClient {
     /// List all kitchens.
     pub async fn list_kitchens(&self) -> anyhow::Result<Vec<serde_json::Value>> {
         let url = self.url("/api/v1/kitchens");
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -498,7 +551,8 @@ impl AgentOvenClient {
     /// Get a specific kitchen.
     pub async fn get_kitchen(&self, id: &str) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/kitchens/{id}"));
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -508,7 +562,8 @@ impl AgentOvenClient {
     /// Get kitchen settings.
     pub async fn get_settings(&self) -> anyhow::Result<serde_json::Value> {
         let url = self.url("/api/v1/settings");
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -516,9 +571,13 @@ impl AgentOvenClient {
     }
 
     /// Update kitchen settings.
-    pub async fn update_settings(&self, settings: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    pub async fn update_settings(
+        &self,
+        settings: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
         let url = self.url("/api/v1/settings");
-        let resp = self.authed_request(self.http.put(url))
+        let resp = self
+            .authed_request(self.http.put(url))
             .json(&settings)
             .send()
             .await?
@@ -531,7 +590,8 @@ impl AgentOvenClient {
     /// List sessions for an agent.
     pub async fn list_sessions(&self, agent_name: &str) -> anyhow::Result<Vec<serde_json::Value>> {
         let url = self.url(&format!("/api/v1/agents/{agent_name}/sessions"));
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -541,7 +601,8 @@ impl AgentOvenClient {
     /// Create a new session for an agent.
     pub async fn create_session(&self, agent_name: &str) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/agents/{agent_name}/sessions"));
-        let resp = self.authed_request(self.http.post(url))
+        let resp = self
+            .authed_request(self.http.post(url))
             .json(&serde_json::json!({}))
             .send()
             .await?
@@ -550,9 +611,16 @@ impl AgentOvenClient {
     }
 
     /// Get a specific session.
-    pub async fn get_session(&self, agent_name: &str, session_id: &str) -> anyhow::Result<serde_json::Value> {
-        let url = self.url(&format!("/api/v1/agents/{agent_name}/sessions/{session_id}"));
-        let resp = self.authed_request(self.http.get(url))
+    pub async fn get_session(
+        &self,
+        agent_name: &str,
+        session_id: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let url = self.url(&format!(
+            "/api/v1/agents/{agent_name}/sessions/{session_id}"
+        ));
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -561,7 +629,9 @@ impl AgentOvenClient {
 
     /// Delete a session.
     pub async fn delete_session(&self, agent_name: &str, session_id: &str) -> anyhow::Result<()> {
-        let url = self.url(&format!("/api/v1/agents/{agent_name}/sessions/{session_id}"));
+        let url = self.url(&format!(
+            "/api/v1/agents/{agent_name}/sessions/{session_id}"
+        ));
         self.authed_request(self.http.delete(url))
             .send()
             .await?
@@ -577,8 +647,11 @@ impl AgentOvenClient {
         message: &str,
         thinking: bool,
     ) -> anyhow::Result<serde_json::Value> {
-        let url = self.url(&format!("/api/v1/agents/{agent_name}/sessions/{session_id}/messages"));
-        let resp = self.authed_request(self.http.post(url))
+        let url = self.url(&format!(
+            "/api/v1/agents/{agent_name}/sessions/{session_id}/messages"
+        ));
+        let resp = self
+            .authed_request(self.http.post(url))
             .json(&serde_json::json!({
                 "message": message,
                 "thinking_enabled": thinking,
@@ -594,7 +667,8 @@ impl AgentOvenClient {
     /// Query the RAG pipeline.
     pub async fn rag_query(&self, query: serde_json::Value) -> anyhow::Result<serde_json::Value> {
         let url = self.url("/api/v1/rag/query");
-        let resp = self.authed_request(self.http.post(url))
+        let resp = self
+            .authed_request(self.http.post(url))
             .json(&query)
             .send()
             .await?
@@ -603,9 +677,13 @@ impl AgentOvenClient {
     }
 
     /// Ingest documents into the RAG pipeline.
-    pub async fn rag_ingest(&self, request: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    pub async fn rag_ingest(
+        &self,
+        request: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
         let url = self.url("/api/v1/rag/ingest");
-        let resp = self.authed_request(self.http.post(url))
+        let resp = self
+            .authed_request(self.http.post(url))
             .json(&request)
             .send()
             .await?
@@ -616,7 +694,11 @@ impl AgentOvenClient {
     // ── Trace Operations ─────────────────────────────────────
 
     /// List recent traces.
-    pub async fn list_traces(&self, agent: Option<&str>, limit: u32) -> anyhow::Result<Vec<serde_json::Value>> {
+    pub async fn list_traces(
+        &self,
+        agent: Option<&str>,
+        limit: u32,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
         let mut url = self.url("/api/v1/traces");
         {
             let mut query = url.query_pairs_mut();
@@ -625,7 +707,8 @@ impl AgentOvenClient {
                 query.append_pair("agent", a);
             }
         }
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -635,7 +718,8 @@ impl AgentOvenClient {
     /// Get a specific trace.
     pub async fn get_trace(&self, trace_id: &str) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/traces/{trace_id}"));
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -647,7 +731,8 @@ impl AgentOvenClient {
     /// List model catalog.
     pub async fn model_catalog(&self) -> anyhow::Result<Vec<serde_json::Value>> {
         let url = self.url("/api/v1/models/catalog");
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -657,7 +742,8 @@ impl AgentOvenClient {
     /// Refresh model catalog from providers.
     pub async fn catalog_refresh(&self) -> anyhow::Result<serde_json::Value> {
         let url = self.url("/api/v1/models/catalog/refresh");
-        let resp = self.authed_request(self.http.post(url))
+        let resp = self
+            .authed_request(self.http.post(url))
             .send()
             .await?
             .error_for_status()?;
@@ -667,7 +753,8 @@ impl AgentOvenClient {
     /// Get cost summary.
     pub async fn model_cost(&self) -> anyhow::Result<serde_json::Value> {
         let url = self.url("/api/v1/models/cost");
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -679,7 +766,8 @@ impl AgentOvenClient {
     /// Get a specific recipe.
     pub async fn get_recipe(&self, name: &str) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/recipes/{name}"));
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -689,7 +777,8 @@ impl AgentOvenClient {
     /// List all recipes.
     pub async fn list_recipes(&self) -> anyhow::Result<Vec<serde_json::Value>> {
         let url = self.url("/api/v1/recipes");
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -709,7 +798,8 @@ impl AgentOvenClient {
     /// List runs for a recipe.
     pub async fn recipe_runs(&self, name: &str) -> anyhow::Result<Vec<serde_json::Value>> {
         let url = self.url(&format!("/api/v1/recipes/{name}/runs"));
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -725,12 +815,15 @@ impl AgentOvenClient {
         approved: bool,
         comment: Option<&str>,
     ) -> anyhow::Result<serde_json::Value> {
-        let url = self.url(&format!("/api/v1/recipes/{recipe}/runs/{run_id}/gates/{step_name}/approve"));
+        let url = self.url(&format!(
+            "/api/v1/recipes/{recipe}/runs/{run_id}/gates/{step_name}/approve"
+        ));
         let mut body = serde_json::json!({ "approved": approved });
         if let Some(c) = comment {
             body["comment"] = serde_json::json!(c);
         }
-        let resp = self.authed_request(self.http.post(url))
+        let resp = self
+            .authed_request(self.http.post(url))
             .json(&body)
             .send()
             .await?
@@ -743,8 +836,10 @@ impl AgentOvenClient {
     /// List audit events.
     pub async fn list_audit(&self, limit: u32) -> anyhow::Result<Vec<serde_json::Value>> {
         let mut url = self.url("/api/v1/audit");
-        url.query_pairs_mut().append_pair("limit", &limit.to_string());
-        let resp = self.authed_request(self.http.get(url))
+        url.query_pairs_mut()
+            .append_pair("limit", &limit.to_string());
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;
@@ -756,7 +851,8 @@ impl AgentOvenClient {
     /// List available guardrail kinds.
     pub async fn guardrail_kinds(&self) -> anyhow::Result<Vec<serde_json::Value>> {
         let url = self.url("/api/v1/guardrails/kinds");
-        let resp = self.authed_request(self.http.get(url))
+        let resp = self
+            .authed_request(self.http.get(url))
             .send()
             .await?
             .error_for_status()?;

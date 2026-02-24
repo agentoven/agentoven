@@ -3,8 +3,8 @@
 use clap::{Args, Subcommand};
 use colored::Colorize;
 
-use agentoven_core::ingredient::Ingredient;
 use agentoven_core::agent::{Agent, AgentFramework, AgentMode};
+use agentoven_core::ingredient::Ingredient;
 
 fn framework_display(f: &AgentFramework) -> &'static str {
     match f {
@@ -76,7 +76,6 @@ pub struct RegisterArgs {
     pub config: Option<String>,
 
     // ── Direct flags (used when not using --config) ──
-
     /// Agent description.
     #[arg(long)]
     pub description: Option<String>,
@@ -328,14 +327,13 @@ pub async fn execute(cmd: AgentCommands) -> anyhow::Result<()> {
 
 async fn register(args: RegisterArgs) -> anyhow::Result<()> {
     // Determine if we're using TOML config or direct flags
-    let use_config = args.config.is_some()
-        || (args.name.is_none() && args.model_provider.is_none());
+    let use_config =
+        args.config.is_some() || (args.name.is_none() && args.model_provider.is_none());
 
     if use_config {
         let config_path = args.config.as_deref().unwrap_or("agentoven.toml");
         println!(
-            "\n  {} Reading configuration from {}...",
-            "🏺".to_string(),
+            "\n  🏺 Reading configuration from {}...",
             config_path.cyan()
         );
 
@@ -376,7 +374,11 @@ async fn register(args: RegisterArgs) -> anyhow::Result<()> {
             .get("mode")
             .and_then(|v| v.as_str())
             .unwrap_or("managed");
-        let mode = if mode_str == "external" { AgentMode::External } else { AgentMode::Managed };
+        let mode = if mode_str == "external" {
+            AgentMode::External
+        } else {
+            AgentMode::Managed
+        };
 
         // Parse ingredients
         let mut ingredients = Vec::new();
@@ -387,8 +389,12 @@ async fn register(args: RegisterArgs) -> anyhow::Result<()> {
                     let provider = m.get("provider").and_then(|v| v.as_str());
                     let role = m.get("role").and_then(|v| v.as_str());
                     let mut builder = Ingredient::model(ing_name);
-                    if let Some(p) = provider { builder = builder.provider(p); }
-                    if let Some(r) = role { builder = builder.role(r); }
+                    if let Some(p) = provider {
+                        builder = builder.provider(p);
+                    }
+                    if let Some(r) = role {
+                        builder = builder.role(r);
+                    }
                     ingredients.push(builder.build());
                 }
             }
@@ -397,14 +403,22 @@ async fn register(args: RegisterArgs) -> anyhow::Result<()> {
                     let ing_name = t.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
                     let protocol = t.get("protocol").and_then(|v| v.as_str());
                     let mut builder = Ingredient::tool(ing_name);
-                    if let Some(p) = protocol { builder = builder.provider(p); }
+                    if let Some(p) = protocol {
+                        builder = builder.provider(p);
+                    }
                     ingredients.push(builder.build());
                 }
             }
         }
 
-        let model_provider = agent_table.get("model_provider").and_then(|v| v.as_str()).unwrap_or("");
-        let model_name = agent_table.get("model_name").and_then(|v| v.as_str()).unwrap_or("");
+        let model_provider = agent_table
+            .get("model_provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let model_name = agent_table
+            .get("model_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
         let mut builder = Agent::builder(name)
             .version(version)
@@ -446,11 +460,18 @@ async fn register(args: RegisterArgs) -> anyhow::Result<()> {
         register_agent_with_client(&agent).await
     } else {
         // Direct flag registration
-        let name = args.name.as_deref().ok_or_else(|| anyhow::anyhow!("Agent name required"))?;
-        println!("\n  {} Registering agent: {}\n", "🏺".to_string(), name.bold());
+        let name = args
+            .name
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Agent name required"))?;
+        println!("\n  🏺 Registering agent: {}\n", name.bold());
 
         let framework = parse_framework(args.framework.as_deref().unwrap_or("managed"));
-        let mode = if args.mode == "external" { AgentMode::External } else { AgentMode::Managed };
+        let mode = if args.mode == "external" {
+            AgentMode::External
+        } else {
+            AgentMode::Managed
+        };
 
         let mut builder = Agent::builder(name)
             .description(args.description.as_deref().unwrap_or(""))
@@ -459,20 +480,42 @@ async fn register(args: RegisterArgs) -> anyhow::Result<()> {
             .model_provider(args.model_provider.as_deref().unwrap_or(""))
             .model_name(args.model_name.as_deref().unwrap_or(""));
 
-        if let Some(ref bp) = args.backup_provider { builder = builder.backup_provider(bp.as_str()); }
-        if let Some(ref bm) = args.backup_model { builder = builder.backup_model(bm.as_str()); }
-        if let Some(ref sp) = args.system_prompt { builder = builder.system_prompt(sp.as_str()); }
-        if let Some(mt) = args.max_turns { builder = builder.max_turns(mt); }
-        if let Some(ref ep) = args.a2a_endpoint { builder = builder.a2a_endpoint(ep.as_str()); }
+        if let Some(ref bp) = args.backup_provider {
+            builder = builder.backup_provider(bp.as_str());
+        }
+        if let Some(ref bm) = args.backup_model {
+            builder = builder.backup_model(bm.as_str());
+        }
+        if let Some(ref sp) = args.system_prompt {
+            builder = builder.system_prompt(sp.as_str());
+        }
+        if let Some(mt) = args.max_turns {
+            builder = builder.max_turns(mt);
+        }
+        if let Some(ref ep) = args.a2a_endpoint {
+            builder = builder.a2a_endpoint(ep.as_str());
+        }
 
-        for s in &args.skill { builder = builder.skill(s.as_str()); }
-        for t in &args.tag { builder = builder.tag(t.as_str()); }
+        for s in &args.skill {
+            builder = builder.skill(s.as_str());
+        }
+        for t in &args.tag {
+            builder = builder.tag(t.as_str());
+        }
 
         for g in &args.guardrail {
             let parts: Vec<&str> = g.splitn(2, ':').collect();
             let kind = parts[0].to_string();
-            let stage = if parts.len() > 1 { parts[1].to_string() } else { "pre".to_string() };
-            builder = builder.guardrail(agentoven_core::Guardrail { kind, stage, config: None });
+            let stage = if parts.len() > 1 {
+                parts[1].to_string()
+            } else {
+                "pre".to_string()
+            };
+            builder = builder.guardrail(agentoven_core::Guardrail {
+                kind,
+                stage,
+                config: None,
+            });
         }
 
         let agent = builder.build();
@@ -520,7 +563,7 @@ fn parse_framework(s: &str) -> AgentFramework {
 }
 
 async fn list(_args: ListArgs) -> anyhow::Result<()> {
-    println!("\n  {} Agents in the kitchen:\n", "📋".to_string());
+    println!("\n  📋 Agents in the kitchen:\n");
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
 
@@ -551,7 +594,11 @@ async fn list(_args: ListArgs) -> anyhow::Result<()> {
                         agent.version,
                         agent.status.to_string(),
                         agent.mode.to_string(),
-                        if provider_col.len() > 15 { format!("{}…", &provider_col[..14]) } else { provider_col },
+                        if provider_col.len() > 15 {
+                            format!("{}…", &provider_col[..14])
+                        } else {
+                            provider_col
+                        },
                         framework_display(&agent.framework),
                     );
                 }
@@ -571,7 +618,7 @@ async fn list(_args: ListArgs) -> anyhow::Result<()> {
 }
 
 async fn get(args: GetArgs) -> anyhow::Result<()> {
-    println!("\n  {} Agent: {}\n", "🍞".to_string(), args.name.bold());
+    println!("\n  🍞 Agent: {}\n", args.name.bold());
 
     // Parse "name@version" syntax
     let (name, version) = if let Some(at_pos) = args.name.find('@') {
@@ -587,12 +634,20 @@ async fn get(args: GetArgs) -> anyhow::Result<()> {
             println!("  {:<16} {}", "Version:".bold(), agent.version);
             println!("  {:<16} {}", "Status:".bold(), agent.status);
             println!("  {:<16} {}", "Mode:".bold(), agent.mode);
-            println!("  {:<16} {}", "Framework:".bold(), framework_display(&agent.framework));
+            println!(
+                "  {:<16} {}",
+                "Framework:".bold(),
+                framework_display(&agent.framework)
+            );
             if !agent.description.is_empty() {
                 println!("  {:<16} {}", "Description:".bold(), agent.description);
             }
             if !agent.model_provider.is_empty() {
-                println!("  {:<16} {}", "Provider:".bold(), agent.model_provider.cyan());
+                println!(
+                    "  {:<16} {}",
+                    "Provider:".bold(),
+                    agent.model_provider.cyan()
+                );
                 println!("  {:<16} {}", "Model:".bold(), agent.model_name.cyan());
             }
             if let Some(ref bp) = agent.backup_provider {
@@ -600,7 +655,11 @@ async fn get(args: GetArgs) -> anyhow::Result<()> {
                 println!("  {:<16} {}/{}", "Backup:".bold(), bp, bm);
             }
             if let Some(ref sp) = agent.system_prompt {
-                let preview = if sp.len() > 60 { format!("{}...", &sp[..60]) } else { sp.clone() };
+                let preview = if sp.len() > 60 {
+                    format!("{}...", &sp[..60])
+                } else {
+                    sp.clone()
+                };
                 println!("  {:<16} {}", "System Prompt:".bold(), preview.dimmed());
             }
             if let Some(mt) = agent.max_turns {
@@ -618,8 +677,7 @@ async fn get(args: GetArgs) -> anyhow::Result<()> {
             if !agent.guardrails.is_empty() {
                 println!("\n  {}:", "Guardrails".bold());
                 for g in &agent.guardrails {
-                    println!("    {} {} (stage: {})",
-                        "🛡️".to_string(), g.kind.cyan(), g.stage);
+                    println!("    🛡️ {} (stage: {})", g.kind.cyan(), g.stage);
                 }
             }
             if !agent.ingredients.is_empty() {
@@ -637,7 +695,11 @@ async fn get(args: GetArgs) -> anyhow::Result<()> {
                     );
                 }
             }
-            println!("\n  {:<16} {}", "Created:".bold(), agent.created_at.format("%Y-%m-%d %H:%M UTC"));
+            println!(
+                "\n  {:<16} {}",
+                "Created:".bold(),
+                agent.created_at.format("%Y-%m-%d %H:%M UTC")
+            );
         }
         Err(e) => {
             println!(
@@ -651,29 +713,52 @@ async fn get(args: GetArgs) -> anyhow::Result<()> {
 }
 
 async fn update(args: UpdateArgs) -> anyhow::Result<()> {
-    println!("\n  {} Updating agent: {}\n", "📝".to_string(), args.name.bold());
+    println!("\n  📝 Updating agent: {}\n", args.name.bold());
 
     let body = if let Some(ref raw) = args.json {
         serde_json::from_str(raw)?
     } else {
         let mut obj = serde_json::Map::new();
-        if let Some(ref v) = args.description { obj.insert("description".into(), serde_json::json!(v)); }
-        if let Some(ref v) = args.model_provider { obj.insert("model_provider".into(), serde_json::json!(v)); }
-        if let Some(ref v) = args.model_name { obj.insert("model_name".into(), serde_json::json!(v)); }
-        if let Some(ref v) = args.system_prompt { obj.insert("system_prompt".into(), serde_json::json!(v)); }
-        if let Some(v) = args.max_turns { obj.insert("max_turns".into(), serde_json::json!(v)); }
-        if let Some(ref v) = args.backup_provider { obj.insert("backup_provider".into(), serde_json::json!(v)); }
-        if let Some(ref v) = args.backup_model { obj.insert("backup_model".into(), serde_json::json!(v)); }
+        if let Some(ref v) = args.description {
+            obj.insert("description".into(), serde_json::json!(v));
+        }
+        if let Some(ref v) = args.model_provider {
+            obj.insert("model_provider".into(), serde_json::json!(v));
+        }
+        if let Some(ref v) = args.model_name {
+            obj.insert("model_name".into(), serde_json::json!(v));
+        }
+        if let Some(ref v) = args.system_prompt {
+            obj.insert("system_prompt".into(), serde_json::json!(v));
+        }
+        if let Some(v) = args.max_turns {
+            obj.insert("max_turns".into(), serde_json::json!(v));
+        }
+        if let Some(ref v) = args.backup_provider {
+            obj.insert("backup_provider".into(), serde_json::json!(v));
+        }
+        if let Some(ref v) = args.backup_model {
+            obj.insert("backup_model".into(), serde_json::json!(v));
+        }
         serde_json::Value::Object(obj)
     };
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.update_agent(&args.name, body).await {
         Ok(agent) => {
-            println!("  {} Agent '{}' updated (v{}).", "✓".green().bold(), agent.name, agent.version);
+            println!(
+                "  {} Agent '{}' updated (v{}).",
+                "✓".green().bold(),
+                agent.name,
+                agent.version
+            );
         }
         Err(e) => {
-            println!("  {} Update failed: {}", "✗".red().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Update failed: {}",
+                "✗".red().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
@@ -682,7 +767,10 @@ async fn update(args: UpdateArgs) -> anyhow::Result<()> {
 async fn delete(args: DeleteArgs) -> anyhow::Result<()> {
     if !args.force {
         let confirm = dialoguer::Confirm::new()
-            .with_prompt(format!("  Delete agent '{}'? This cannot be undone.", args.name))
+            .with_prompt(format!(
+                "  Delete agent '{}'? This cannot be undone.",
+                args.name
+            ))
             .default(false)
             .interact()?;
         if !confirm {
@@ -694,15 +782,18 @@ async fn delete(args: DeleteArgs) -> anyhow::Result<()> {
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.delete_agent(&args.name).await {
         Ok(()) => println!("  {} Agent '{}' deleted.", "✓".green().bold(), args.name),
-        Err(e) => println!("  {} Delete failed: {}", "✗".red().bold(), e.to_string().dimmed()),
+        Err(e) => println!(
+            "  {} Delete failed: {}",
+            "✗".red().bold(),
+            e.to_string().dimmed()
+        ),
     }
     Ok(())
 }
 
 async fn bake(args: BakeArgs) -> anyhow::Result<()> {
     println!(
-        "\n  {} Baking {} to {}...\n",
-        "🔥".to_string(),
+        "\n  🔥 Baking {} to {}...\n",
         args.name.bold(),
         args.environment.cyan()
     );
@@ -729,22 +820,32 @@ async fn bake(args: BakeArgs) -> anyhow::Result<()> {
             println!("  {} Status: {}", "→".dimmed(), deployed.status);
         }
         Err(e) => {
-            println!("  {} Bake failed: {}", "✗".red().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Bake failed: {}",
+                "✗".red().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
 }
 
 async fn recook(args: RecookArgs) -> anyhow::Result<()> {
-    println!("\n  {} Re-cooking {}...\n", "🔄".to_string(), args.name.bold());
+    println!("\n  🔄 Re-cooking {}...\n", args.name.bold());
 
     let edits = if let Some(ref raw) = args.json {
         serde_json::from_str(raw)?
     } else {
         let mut obj = serde_json::Map::new();
-        if let Some(ref v) = args.model_provider { obj.insert("model_provider".into(), serde_json::json!(v)); }
-        if let Some(ref v) = args.model_name { obj.insert("model_name".into(), serde_json::json!(v)); }
-        if let Some(ref v) = args.system_prompt { obj.insert("system_prompt".into(), serde_json::json!(v)); }
+        if let Some(ref v) = args.model_provider {
+            obj.insert("model_provider".into(), serde_json::json!(v));
+        }
+        if let Some(ref v) = args.model_name {
+            obj.insert("model_name".into(), serde_json::json!(v));
+        }
+        if let Some(ref v) = args.system_prompt {
+            obj.insert("system_prompt".into(), serde_json::json!(v));
+        }
         serde_json::Value::Object(obj)
     };
 
@@ -752,23 +853,37 @@ async fn recook(args: RecookArgs) -> anyhow::Result<()> {
     match client.recook_agent(&args.name, edits).await {
         Ok(result) => {
             let status = result["status"].as_str().unwrap_or("ready");
-            println!("  {} Agent '{}' re-cooked (status: {}).", "✓".green().bold(), args.name, status);
+            println!(
+                "  {} Agent '{}' re-cooked (status: {}).",
+                "✓".green().bold(),
+                args.name,
+                status
+            );
         }
         Err(e) => {
-            println!("  {} Re-cook failed: {}", "✗".red().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Re-cook failed: {}",
+                "✗".red().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
 }
 
 async fn cool(args: CoolArgs) -> anyhow::Result<()> {
-    println!("\n  {} Cooling down {}...", "❄️".to_string(), args.name.bold());
+    println!("\n  ❄️ Cooling down {}...", args.name.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.cool_agent(&args.name).await {
         Ok(result) => {
             let status = result["status"].as_str().unwrap_or("cooled");
-            println!("  {} Agent '{}' cooled (status: ⏸️  {}).", "✓".green().bold(), args.name, status);
+            println!(
+                "  {} Agent '{}' cooled (status: ⏸️  {}).",
+                "✓".green().bold(),
+                args.name,
+                status
+            );
             println!(
                 "  {} Re-activate with: {}",
                 "→".dimmed(),
@@ -776,24 +891,32 @@ async fn cool(args: CoolArgs) -> anyhow::Result<()> {
             );
         }
         Err(e) => {
-            println!("  {} Cool failed: {}", "✗".red().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Cool failed: {}",
+                "✗".red().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
 }
 
 async fn rewarm(args: RewarmArgs) -> anyhow::Result<()> {
-    println!(
-        "\n  {} Rewarming {}...\n",
-        "☀️".to_string(),
-        args.name.bold()
-    );
+    println!("\n  ☀️ Rewarming {}...\n", args.name.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.rewarm(&args.name).await {
         Ok(resp) => {
-            let status = resp.get("status").and_then(|v| v.as_str()).unwrap_or("ready");
-            println!("  {} Agent '{}' rewarmed (status: {} {}).", "✓".green().bold(), args.name, "🟢", status);
+            let status = resp
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("ready");
+            println!(
+                "  {} Agent '{}' rewarmed (status: 🟢 {}).",
+                "✓".green().bold(),
+                args.name,
+                status
+            );
             println!(
                 "  {} Test with: {}",
                 "→".dimmed(),
@@ -801,7 +924,11 @@ async fn rewarm(args: RewarmArgs) -> anyhow::Result<()> {
             );
         }
         Err(e) => {
-            println!("  {} Rewarm failed: {}", "✗".red().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Rewarm failed: {}",
+                "✗".red().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
@@ -810,7 +937,10 @@ async fn rewarm(args: RewarmArgs) -> anyhow::Result<()> {
 async fn retire(args: RetireArgs) -> anyhow::Result<()> {
     if !args.force {
         let confirm = dialoguer::Confirm::new()
-            .with_prompt(format!("  Are you sure you want to retire '{}'?", args.name))
+            .with_prompt(format!(
+                "  Are you sure you want to retire '{}'?",
+                args.name
+            ))
             .default(false)
             .interact()?;
         if !confirm {
@@ -819,28 +949,36 @@ async fn retire(args: RetireArgs) -> anyhow::Result<()> {
         }
     }
 
-    println!("\n  {} Retiring {}...", "⚫".to_string(), args.name.bold());
+    println!("\n  ⚫ Retiring {}...", args.name.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.retire_agent(&args.name).await {
         Ok(result) => {
             let status = result["status"].as_str().unwrap_or("retired");
-            println!("  {} Agent '{}' retired ({}).", "✓".green().bold(), args.name, status);
-            println!("  {} This action is permanent. The agent will no longer serve requests.", "⚠".yellow());
+            println!(
+                "  {} Agent '{}' retired ({}).",
+                "✓".green().bold(),
+                args.name,
+                status
+            );
+            println!(
+                "  {} This action is permanent. The agent will no longer serve requests.",
+                "⚠".yellow()
+            );
         }
         Err(e) => {
-            println!("  {} Could not retire agent: {}", "✗".red().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Could not retire agent: {}",
+                "✗".red().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
 }
 
 async fn test(args: TestArgs) -> anyhow::Result<()> {
-    println!(
-        "\n  {} Testing {} in the playground...\n",
-        "🧪".to_string(),
-        args.name.bold()
-    );
+    println!("\n  🧪 Testing {} in the playground...\n", args.name.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
 
@@ -870,18 +1008,19 @@ async fn test(args: TestArgs) -> anyhow::Result<()> {
             println!("  {} {}", "You:".bold(), msg);
             match client.test_agent(&args.name, msg, args.thinking).await {
                 Ok(result) => {
-                    let reply = result["reply"].as_str()
+                    let reply = result["reply"]
+                        .as_str()
                         .or_else(|| result["content"].as_str())
                         .or_else(|| result["message"].as_str());
                     if let Some(text) = reply {
-                        println!("\n  {} {}:\n", "🤖".to_string(), "Agent".green().bold());
+                        println!("\n  🤖 {}:\n", "Agent".green().bold());
                         for line in text.lines() {
                             println!("    {}", line);
                         }
                     }
                     if args.thinking {
                         if let Some(t) = result.get("thinking").and_then(|v| v.as_str()) {
-                            println!("\n  {} {}:", "💭".to_string(), "Thinking".dimmed());
+                            println!("\n  💭 {}:", "Thinking".dimmed());
                             for line in t.lines() {
                                 println!("    {}", line.dimmed());
                             }
@@ -897,7 +1036,10 @@ async fn test(args: TestArgs) -> anyhow::Result<()> {
     }
 
     // Interactive A2A REPL
-    println!("  Type a message and press Enter. Type {} to quit.\n", "/exit".dimmed());
+    println!(
+        "  Type a message and press Enter. Type {} to quit.\n",
+        "/exit".dimmed()
+    );
 
     if let Some(msg) = &args.message {
         println!("  {} {}", "You:".bold(), msg);
@@ -905,13 +1047,22 @@ async fn test(args: TestArgs) -> anyhow::Result<()> {
         let a2a_client = a2a_ao::A2AClient::new(&a2a_base);
         match a2a_client.send_message_text(msg).await {
             Ok(task) => {
-                println!("  {} Task created: {} ({})", "Agent:".bold().cyan(), task.id.dimmed(), task.state);
+                println!(
+                    "  {} Task created: {} ({})",
+                    "Agent:".bold().cyan(),
+                    task.id.dimmed(),
+                    task.state
+                );
                 for artifact in &task.artifacts {
                     println!("  {} {}", "→".dimmed(), artifact.text_content());
                 }
             }
             Err(e) => {
-                println!("  {} Error: {}", "Agent:".bold().red(), e.to_string().dimmed());
+                println!(
+                    "  {} Error: {}",
+                    "Agent:".bold().red(),
+                    e.to_string().dimmed()
+                );
             }
         }
     }
@@ -920,21 +1071,18 @@ async fn test(args: TestArgs) -> anyhow::Result<()> {
     let a2a_client = a2a_ao::A2AClient::new(&a2a_base);
     let mut current_task_id: Option<String> = None;
 
-    loop {
-        let input: String = match dialoguer::Input::<String>::new()
-            .with_prompt("  You")
-            .interact_text()
-        {
-            Ok(s) => s,
-            Err(_) => break,
-        };
-
+    while let Ok(input) = dialoguer::Input::<String>::new()
+        .with_prompt("  You")
+        .interact_text()
+    {
         let trimmed = input.trim();
         if trimmed == "/exit" || trimmed == "/quit" || trimmed == "/q" {
             println!("\n  {} Goodbye! 🏺\n", "→".dimmed());
             break;
         }
-        if trimmed.is_empty() { continue; }
+        if trimmed.is_empty() {
+            continue;
+        }
 
         let result = if let Some(ref task_id) = current_task_id {
             a2a_client.continue_task(task_id, trimmed).await
@@ -950,16 +1098,27 @@ async fn test(args: TestArgs) -> anyhow::Result<()> {
                     "Agent:".bold().cyan(),
                     task.state.to_string().dimmed(),
                     if !task.artifacts.is_empty() {
-                        task.artifacts.iter().map(|a| a.text_content()).collect::<Vec<_>>().join("\n")
+                        task.artifacts
+                            .iter()
+                            .map(|a| a.text_content())
+                            .collect::<Vec<_>>()
+                            .join("\n")
                     } else if !task.messages.is_empty() {
-                        task.messages.last().map(|m| m.text_content()).unwrap_or_default()
+                        task.messages
+                            .last()
+                            .map(|m| m.text_content())
+                            .unwrap_or_default()
                     } else {
                         "(no response yet — task is processing)".to_string()
                     }
                 );
             }
             Err(e) => {
-                println!("  {} Error: {}", "Agent:".bold().red(), e.to_string().dimmed());
+                println!(
+                    "  {} Error: {}",
+                    "Agent:".bold().red(),
+                    e.to_string().dimmed()
+                );
             }
         }
     }
@@ -967,7 +1126,10 @@ async fn test(args: TestArgs) -> anyhow::Result<()> {
 }
 
 async fn invoke(args: InvokeArgs) -> anyhow::Result<()> {
-    println!("\n  {} Invoking {} (managed agentic loop)...\n", "⚡".to_string(), args.name.bold());
+    println!(
+        "\n  ⚡ Invoking {} (managed agentic loop)...\n",
+        args.name.bold()
+    );
 
     let variables = if let Some(ref raw) = args.variables {
         Some(serde_json::from_str(raw)?)
@@ -976,14 +1138,18 @@ async fn invoke(args: InvokeArgs) -> anyhow::Result<()> {
     };
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
-    match client.invoke_agent(&args.name, &args.message, variables, args.thinking).await {
+    match client
+        .invoke_agent(&args.name, &args.message, variables, args.thinking)
+        .await
+    {
         Ok(result) => {
             // Display reply
-            let reply = result["reply"].as_str()
+            let reply = result["reply"]
+                .as_str()
                 .or_else(|| result["content"].as_str())
                 .or_else(|| result["final_answer"].as_str());
             if let Some(text) = reply {
-                println!("  {} {}:\n", "🤖".to_string(), "Agent".green().bold());
+                println!("  🤖 {}:\n", "Agent".green().bold());
                 for line in text.lines() {
                     println!("    {}", line);
                 }
@@ -992,7 +1158,7 @@ async fn invoke(args: InvokeArgs) -> anyhow::Result<()> {
             // Display thinking
             if args.thinking {
                 if let Some(t) = result.get("thinking").and_then(|v| v.as_str()) {
-                    println!("\n  {} {}:", "💭".to_string(), "Thinking".dimmed());
+                    println!("\n  💭 {}:", "Thinking".dimmed());
                     for line in t.lines() {
                         println!("    {}", line.dimmed());
                     }
@@ -1013,19 +1179,22 @@ async fn invoke(args: InvokeArgs) -> anyhow::Result<()> {
 
             // Display cost
             if let Some(cost) = result.get("cost") {
-                println!("\n  {} Cost: ${:.6}", "💰".to_string(),
-                    cost["total"].as_f64().unwrap_or(0.0));
+                println!("\n  💰 Cost: ${:.6}", cost["total"].as_f64().unwrap_or(0.0));
             }
         }
         Err(e) => {
-            println!("  {} Invoke failed: {}", "✗".red().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Invoke failed: {}",
+                "✗".red().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())
 }
 
 async fn config(args: ConfigArgs) -> anyhow::Result<()> {
-    println!("\n  {} Resolved config for: {}\n", "⚙️ ".to_string(), args.name.bold());
+    println!("\n  ⚙️  Resolved config for: {}\n", args.name.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.agent_config(&args.name).await {
@@ -1036,7 +1205,11 @@ async fn config(args: ConfigArgs) -> anyhow::Result<()> {
             }
         }
         Err(e) => {
-            println!("  {} Could not fetch config: {}", "⚠".yellow().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Could not fetch config: {}",
+                "⚠".yellow().bold(),
+                e.to_string().dimmed()
+            );
             println!("  {} Make sure the agent is baked first.", "→".dimmed());
         }
     }
@@ -1044,7 +1217,7 @@ async fn config(args: ConfigArgs) -> anyhow::Result<()> {
 }
 
 async fn card(args: CardArgs) -> anyhow::Result<()> {
-    println!("\n  {} A2A Agent Card for: {}\n", "🪪".to_string(), args.name.bold());
+    println!("\n  🪪 A2A Agent Card for: {}\n", args.name.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.agent_card(&args.name).await {
@@ -1089,7 +1262,11 @@ async fn card(args: CardArgs) -> anyhow::Result<()> {
             }
         }
         Err(e) => {
-            println!("  {} Could not fetch agent card: {}", "⚠".yellow().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Could not fetch agent card: {}",
+                "⚠".yellow().bold(),
+                e.to_string().dimmed()
+            );
             println!("  {} Make sure the agent is baked first.", "→".dimmed());
         }
     }
@@ -1097,7 +1274,7 @@ async fn card(args: CardArgs) -> anyhow::Result<()> {
 }
 
 async fn versions(args: VersionsArgs) -> anyhow::Result<()> {
-    println!("\n  {} Version history for: {}\n", "📜".to_string(), args.name.bold());
+    println!("\n  📜 Version history for: {}\n", args.name.bold());
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.agent_versions(&args.name).await {
@@ -1107,16 +1284,26 @@ async fn versions(args: VersionsArgs) -> anyhow::Result<()> {
             } else {
                 println!(
                     "  {:<10} {:<14} {:<20} {:<12}",
-                    "VERSION".bold(), "STATUS".bold(), "CREATED".bold(), "CHANGES".bold()
+                    "VERSION".bold(),
+                    "STATUS".bold(),
+                    "CREATED".bold(),
+                    "CHANGES".bold()
                 );
                 println!("  {}", "─".repeat(58).dimmed());
                 for v in &versions {
                     let ver = v["version"].as_str().unwrap_or("-");
                     let status = v["status"].as_str().unwrap_or("-");
                     let created = v["created_at"].as_str().unwrap_or("-");
-                    let created_short = if created.len() > 16 { &created[..16] } else { created };
+                    let created_short = if created.len() > 16 {
+                        &created[..16]
+                    } else {
+                        created
+                    };
                     let changes = v["change_summary"].as_str().unwrap_or("-");
-                    println!("  {:<10} {:<14} {:<20} {}", ver, status, created_short, changes);
+                    println!(
+                        "  {:<10} {:<14} {:<20} {}",
+                        ver, status, created_short, changes
+                    );
                 }
                 println!("\n  {} {} version(s)", "→".dimmed(), versions.len());
             }

@@ -15,15 +15,15 @@
 //! use agentoven_core::{Agent, Ingredient, AgentOvenClient};
 //!
 //! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let client = AgentOvenClient::new("http://localhost:8080")?;
 //!
 //!     let agent = Agent::builder("summarizer")
 //!         .version("1.0.0")
 //!         .description("Summarizes documents with citations")
-//!         .ingredient(Ingredient::model("gpt-4o").provider("azure-openai"))
-//!         .ingredient(Ingredient::model("claude-sonnet").provider("anthropic").role("fallback"))
-//!         .ingredient(Ingredient::tool("doc-reader").protocol("mcp"))
+//!         .ingredient(Ingredient::model("gpt-4o").provider("azure-openai").build())
+//!         .ingredient(Ingredient::model("claude-sonnet").provider("anthropic").role("fallback").build())
+//!         .ingredient(Ingredient::tool("doc-reader").build())
 //!         .build();
 //!
 //!     client.register(&agent).await?;
