@@ -38,6 +38,7 @@ type Handlers struct {
 	PromptValidator contracts.PromptValidatorService
 	Catalog         *catalog.Catalog
 	Sessions        contracts.SessionStore
+	Guardrails      contracts.GuardrailService
 }
 
 // New creates a new Handlers instance with all dependencies.
@@ -173,6 +174,16 @@ func (h *Handlers) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		for k, v := range req.Tags {
 			agent.Tags[k] = v
 		}
+	}
+	// R9 fields: backup provider and guardrails
+	if req.BackupProvider != "" {
+		agent.BackupProvider = req.BackupProvider
+	}
+	if req.BackupModel != "" {
+		agent.BackupModel = req.BackupModel
+	}
+	if len(req.Guardrails) > 0 {
+		agent.Guardrails = req.Guardrails
 	}
 	agent.UpdatedAt = time.Now().UTC()
 	agent.VersionBump = "patch" // config edit → bump patch version
@@ -353,11 +364,21 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Message string `json:"message"`
+		Message         string `json:"message"`
+		ThinkingEnabled bool   `json:"thinking_enabled,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Message == "" {
 		respondError(w, http.StatusBadRequest, "Request must include a non-empty 'message' field")
 		return
+	}
+
+	// When thinking is enabled, extend request timeout
+	if req.ThinkingEnabled {
+		var cancel context.CancelFunc
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		r = r.WithContext(ctx)
+		_ = ctx
 	}
 
 	// Build messages — include system prompt from ingredients if present
@@ -374,11 +395,12 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 	// Route through the model router
 	start := time.Now()
 	routeReq := &models.RouteRequest{
-		Messages: messages,
-		Model:    agent.ModelName,
-		Strategy: models.RoutingFallback,
-		Kitchen:  kitchen,
-		AgentRef: agentName,
+		Messages:        messages,
+		Model:           agent.ModelName,
+		Strategy:        models.RoutingFallback,
+		Kitchen:         kitchen,
+		AgentRef:        agentName,
+		ThinkingEnabled: req.ThinkingEnabled,
 	}
 
 	resp, err := h.Router.Route(r.Context(), routeReq)
@@ -407,13 +429,14 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 	h.Store.CreateTrace(r.Context(), trace)
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"agent":     agentName,
-		"response":  resp.Content,
-		"provider":  resp.Provider,
-		"model":     resp.Model,
-		"usage":     resp.Usage,
-		"latency_ms": duration.Milliseconds(),
-		"trace_id":  trace.ID,
+		"agent":           agentName,
+		"response":        resp.Content,
+		"provider":        resp.Provider,
+		"model":           resp.Model,
+		"usage":           resp.Usage,
+		"latency_ms":      duration.Milliseconds(),
+		"trace_id":        trace.ID,
+		"thinking_blocks": resp.ThinkingBlocks,
 	})
 }
 
@@ -446,16 +469,19 @@ func (h *Handlers) RecookAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Description   string                 `json:"description"`
-		Framework     string                 `json:"framework"`
-		ModelProvider string                 `json:"model_provider"`
-		ModelName     string                 `json:"model_name"`
-		Mode          models.AgentMode       `json:"mode"`
-		MaxTurns      int                    `json:"max_turns"`
-		Ingredients   []models.Ingredient    `json:"ingredients"`
-		Skills        []string               `json:"skills"`
-		Tags          map[string]string      `json:"tags"`
-		Version       string                 `json:"version"`
+		Description    string                 `json:"description"`
+		Framework      string                 `json:"framework"`
+		ModelProvider  string                 `json:"model_provider"`
+		ModelName      string                 `json:"model_name"`
+		BackupProvider string                 `json:"backup_provider"`
+		BackupModel    string                 `json:"backup_model"`
+		Mode           models.AgentMode       `json:"mode"`
+		MaxTurns       int                    `json:"max_turns"`
+		Ingredients    []models.Ingredient    `json:"ingredients"`
+		Guardrails     []models.Guardrail     `json:"guardrails"`
+		Skills         []string               `json:"skills"`
+		Tags           map[string]string      `json:"tags"`
+		Version        string                 `json:"version"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
 		respondError(w, http.StatusBadRequest, "Invalid request body: "+err.Error())
@@ -475,6 +501,12 @@ func (h *Handlers) RecookAgent(w http.ResponseWriter, r *http.Request) {
 	if req.ModelName != "" {
 		agent.ModelName = req.ModelName
 	}
+	if req.BackupProvider != "" {
+		agent.BackupProvider = req.BackupProvider
+	}
+	if req.BackupModel != "" {
+		agent.BackupModel = req.BackupModel
+	}
 	if req.Mode != "" {
 		agent.Mode = req.Mode
 	}
@@ -483,6 +515,9 @@ func (h *Handlers) RecookAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Ingredients) > 0 {
 		agent.Ingredients = req.Ingredients
+	}
+	if len(req.Guardrails) > 0 {
+		agent.Guardrails = req.Guardrails
 	}
 	if len(req.Skills) > 0 {
 		agent.Skills = req.Skills
@@ -1543,7 +1578,7 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 		// Execute agent asynchronously
 		go func() {
 			execCtx := context.Background()
-			response, execTrace, err := h.Executor.Execute(execCtx, agent, userMessage, resolved, nil)
+			response, execTrace, err := h.Executor.Execute(execCtx, agent, userMessage, resolved, nil, false)
 
 			// Record trace with result
 			status := "completed"
@@ -2042,12 +2077,23 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Message   string            `json:"message"`
-		Variables map[string]string `json:"variables,omitempty"` // prompt template variables
+		Message         string            `json:"message"`
+		Variables       map[string]string `json:"variables,omitempty"` // prompt template variables
+		ThinkingEnabled bool              `json:"thinking_enabled,omitempty"` // enable extended thinking
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Message == "" {
 		respondError(w, http.StatusBadRequest, "Request must include a non-empty 'message' field")
 		return
+	}
+
+	// When thinking is enabled, extend the request timeout to avoid premature cancellation.
+	// Thinking models (o-series, Claude extended thinking) can take 30-120s per turn.
+	if req.ThinkingEnabled {
+		var cancel context.CancelFunc
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		r = r.WithContext(ctx)
+		_ = ctx // use new ctx
 	}
 
 	// Use cached resolved config from bake time, or re-resolve live
@@ -2083,11 +2129,39 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// ── Input Guardrails ────────────────────────────────────
+	if h.Guardrails != nil && len(agent.Guardrails) > 0 {
+		eval, gErr := h.Guardrails.EvaluateInput(r.Context(), agent.Guardrails, req.Message)
+		if gErr != nil {
+			log.Warn().Err(gErr).Str("agent", agentName).Msg("Input guardrail evaluation error")
+		} else if !eval.Passed {
+			respondJSON(w, http.StatusForbidden, map[string]interface{}{
+				"error":      "Input blocked by guardrails",
+				"guardrails": eval.Results,
+			})
+			return
+		}
+	}
+
 	// Execute the agentic loop
-	response, trace, err := h.Executor.Execute(r.Context(), agent, req.Message, resolved, sanitizedVars)
+	response, trace, err := h.Executor.Execute(r.Context(), agent, req.Message, resolved, sanitizedVars, req.ThinkingEnabled)
 	if err != nil {
 		respondError(w, http.StatusBadGateway, "Execution failed: "+err.Error())
 		return
+	}
+
+	// ── Output Guardrails ───────────────────────────────────
+	if h.Guardrails != nil && len(agent.Guardrails) > 0 {
+		eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), agent.Guardrails, response)
+		if gErr != nil {
+			log.Warn().Err(gErr).Str("agent", agentName).Msg("Output guardrail evaluation error")
+		} else if !eval.Passed {
+			respondJSON(w, http.StatusForbidden, map[string]interface{}{
+				"error":      "Output blocked by guardrails",
+				"guardrails": eval.Results,
+			})
+			return
+		}
 	}
 
 	// Record trace in store
@@ -2109,12 +2183,89 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	h.Store.CreateTrace(r.Context(), traceRecord)
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"agent":      agentName,
-		"response":   response,
-		"trace_id":   trace.TraceID,
-		"turns":      len(trace.Turns),
-		"usage":      trace.Usage,
-		"latency_ms": trace.TotalMs,
+		"agent":           agentName,
+		"response":        response,
+		"trace_id":        trace.TraceID,
+		"turns":           len(trace.Turns),
+		"usage":           trace.Usage,
+		"latency_ms":      trace.TotalMs,
+		"execution_trace": trace,
+	})
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── Guardrails Handlers ──────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// ListGuardrailKinds returns the available guardrail types and their configuration schemas.
+// GET /api/v1/guardrails/kinds
+func (h *Handlers) ListGuardrailKinds(w http.ResponseWriter, r *http.Request) {
+	kinds := []map[string]interface{}{
+		{
+			"kind":        "content_filter",
+			"label":       "Content Filter",
+			"description": "Block messages containing specific words or phrases",
+			"config_schema": map[string]interface{}{
+				"blocked_words":  "string[]  — list of blocked words/phrases",
+				"case_sensitive": "boolean   — whether matching is case-sensitive (default: false)",
+			},
+		},
+		{
+			"kind":        "pii_detection",
+			"label":       "PII Detection",
+			"description": "Detect and block personally identifiable information",
+			"config_schema": map[string]interface{}{
+				"patterns": "string[]  — PII types to check: email, phone, ssn, credit_card (default: all)",
+			},
+		},
+		{
+			"kind":        "topic_restriction",
+			"label":       "Topic Restriction",
+			"description": "Restrict conversation to allowed topics or block specific topics",
+			"config_schema": map[string]interface{}{
+				"allowed_topics": "string[]  — if set, messages must contain at least one allowed topic",
+				"blocked_topics": "string[]  — messages containing these topics are blocked",
+			},
+		},
+		{
+			"kind":        "max_length",
+			"label":       "Max Length",
+			"description": "Enforce character or word length limits",
+			"config_schema": map[string]interface{}{
+				"max_characters": "integer  — maximum character count",
+				"max_words":      "integer  — maximum word count",
+			},
+		},
+		{
+			"kind":        "regex_filter",
+			"label":       "Regex Filter",
+			"description": "Match messages against a custom regex pattern",
+			"config_schema": map[string]interface{}{
+				"pattern":        "string   — regex pattern to match against",
+				"block_on_match": "boolean  — block when pattern matches (default: true)",
+			},
+		},
+		{
+			"kind":        "prompt_injection",
+			"label":       "Prompt Injection",
+			"description": "Detect common prompt injection and jailbreak attempts",
+			"config_schema": map[string]interface{}{
+				"sensitivity": "string  — detection sensitivity: high, medium, low (default: medium)",
+			},
+		},
+		{
+			"kind":        "custom",
+			"label":       "Custom",
+			"description": "Custom guardrail (Pro: webhook/LLM-judge, OSS: no-op pass-through)",
+			"config_schema": map[string]interface{}{
+				"webhook_url": "string  — (Pro only) URL to call for custom evaluation",
+			},
+		},
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"kinds":  kinds,
+		"stages": []string{"input", "output", "both"},
 	})
 }
 
@@ -2735,6 +2886,22 @@ func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	session.Messages = append(session.Messages, userMsg)
 
+	// ── Input Guardrails (Session) ──────────────────────────
+	if h.Guardrails != nil && len(agent.Guardrails) > 0 {
+		eval, gErr := h.Guardrails.EvaluateInput(r.Context(), agent.Guardrails, req.Content)
+		if gErr != nil {
+			log.Warn().Err(gErr).Str("agent", agentName).Msg("Session input guardrail error")
+		} else if !eval.Passed {
+			// Remove the user message we just appended
+			session.Messages = session.Messages[:len(session.Messages)-1]
+			respondJSON(w, http.StatusForbidden, map[string]interface{}{
+				"error":      "Input blocked by guardrails",
+				"guardrails": eval.Results,
+			})
+			return
+		}
+	}
+
 	// Route through model router with full conversation history
 	startTime := time.Now()
 	routeReq := &models.RouteRequest{
@@ -2748,12 +2915,34 @@ func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
 		routeReq.Model = agent.ModelName
 	}
 
-	routeResp, err := h.Router.Route(r.Context(), routeReq)
+	// Use RouteWithBackup if agent has a backup provider configured
+	var routeResp *models.RouteResponse
+	if agent.BackupProvider != "" {
+		routeResp, err = h.Router.RouteWithBackup(r.Context(), routeReq, agent.BackupProvider, agent.BackupModel)
+	} else {
+		routeResp, err = h.Router.Route(r.Context(), routeReq)
+	}
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "model routing failed: "+err.Error())
 		return
 	}
 	latencyMs := time.Since(startTime).Milliseconds()
+
+	// ── Output Guardrails (Session) ─────────────────────────
+	if h.Guardrails != nil && len(agent.Guardrails) > 0 {
+		eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), agent.Guardrails, routeResp.Content)
+		if gErr != nil {
+			log.Warn().Err(gErr).Str("agent", agentName).Msg("Session output guardrail error")
+		} else if !eval.Passed {
+			// Remove the user message we appended (response never reaches the user)
+			session.Messages = session.Messages[:len(session.Messages)-1]
+			respondJSON(w, http.StatusForbidden, map[string]interface{}{
+				"error":      "Output blocked by guardrails",
+				"guardrails": eval.Results,
+			})
+			return
+		}
+	}
 
 	// Append assistant response to session
 	assistantMsg := models.ChatMessage{

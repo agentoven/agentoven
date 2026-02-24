@@ -40,6 +40,12 @@ export interface Ingredient {
 
 // ── Agents ────────────────────────────────────────────────────
 
+export interface Guardrail {
+  kind: string;
+  stage: 'input' | 'output' | 'both';
+  config: Record<string, unknown>;
+}
+
 export interface Agent {
   id: string;
   name: string;
@@ -54,11 +60,21 @@ export interface Agent {
   skills: string[];
   model_provider: string;
   model_name: string;
+  backup_provider: string;
+  backup_model: string;
   ingredients: Ingredient[];
+  guardrails: Guardrail[];
   tags: Record<string, string>;
   created_by: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface ThinkingBlock {
+  content: string;
+  token_count: number;
+  model: string;
+  provider: string;
 }
 
 export interface TestAgentResponse {
@@ -66,14 +82,50 @@ export interface TestAgentResponse {
   response: string;
   provider: string;
   model: string;
-  usage: {
-    input_tokens: number;
-    output_tokens: number;
-    total_tokens: number;
-    estimated_cost_usd: number;
-  };
+  usage: TokenUsage;
   latency_ms: number;
   trace_id: string;
+  thinking_blocks?: ThinkingBlock[];
+}
+
+export interface TokenUsage {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  thinking_tokens?: number;
+  estimated_cost_usd: number;
+}
+
+export interface ToolCallInfo {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface ToolResultInfo {
+  tool_call_id: string;
+  name: string;
+  content: string;
+  is_error: boolean;
+}
+
+export interface ExecutionTurn {
+  number: number;
+  response?: string;
+  tool_calls?: ToolCallInfo[];
+  tool_results?: ToolResultInfo[];
+  thinking_blocks?: ThinkingBlock[];
+  latency_ms: number;
+  usage: TokenUsage;
+}
+
+export interface ExecutionTrace {
+  trace_id: string;
+  agent_name: string;
+  kitchen: string;
+  turns: ExecutionTurn[];
+  total_ms: number;
+  usage: TokenUsage;
 }
 
 export interface InvokeAgentResponse {
@@ -81,13 +133,9 @@ export interface InvokeAgentResponse {
   response: string;
   trace_id: string;
   turns: number;
-  usage: {
-    input_tokens: number;
-    output_tokens: number;
-    total_tokens: number;
-    estimated_cost_usd: number;
-  };
+  usage: TokenUsage;
   latency_ms: number;
+  execution_trace: ExecutionTrace;
 }
 
 export interface AgentConfig {
@@ -120,15 +168,15 @@ export const agents = {
     request<Agent>(`/agents/${name}/cool`, { method: 'POST' }),
   rewarm: (name: string) =>
     request<Agent>(`/agents/${name}/rewarm`, { method: 'POST' }),
-  test: (name: string, message: string) =>
+  test: (name: string, message: string, thinkingEnabled?: boolean) =>
     request<TestAgentResponse>(`/agents/${name}/test`, {
       method: 'POST',
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, thinking_enabled: thinkingEnabled }),
     }),
-  invoke: (name: string, message: string, variables?: Record<string, string>) =>
+  invoke: (name: string, message: string, variables?: Record<string, string>, thinkingEnabled?: boolean) =>
     request<InvokeAgentResponse>(`/agents/${name}/invoke`, {
       method: 'POST',
-      body: JSON.stringify({ message, variables }),
+      body: JSON.stringify({ message, variables, thinking_enabled: thinkingEnabled }),
     }),
   config: (name: string) =>
     request<AgentConfig>(`/agents/${name}/config`),

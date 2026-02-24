@@ -9,6 +9,48 @@ use uuid::Uuid;
 
 use crate::ingredient::Ingredient;
 
+/// Agent execution mode.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentMode {
+    /// AgentOven runs the agentic loop (built-in executor).
+    Managed,
+    /// Agent is external, proxied via A2A endpoint.
+    External,
+}
+
+impl Default for AgentMode {
+    fn default() -> Self {
+        AgentMode::Managed
+    }
+}
+
+impl std::fmt::Display for AgentMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentMode::Managed => write!(f, "managed"),
+            AgentMode::External => write!(f, "external"),
+        }
+    }
+}
+
+/// A guardrail applied to an agent's input or output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Guardrail {
+    /// Guardrail kind (e.g., "content-filter", "pii-detector", "token-budget").
+    pub kind: String,
+    /// When to apply: "pre" (before LLM) or "post" (after LLM).
+    #[serde(default = "default_guardrail_stage")]
+    pub stage: String,
+    /// Kind-specific configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+}
+
+fn default_guardrail_stage() -> String {
+    "pre".into()
+}
+
 /// An Agent registered in AgentOven — a versioned, deployable AI unit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
@@ -26,6 +68,46 @@ pub struct Agent {
 
     /// The framework used to build this agent.
     pub framework: AgentFramework,
+
+    /// Agent mode: managed (AgentOven executor) or external (A2A proxy).
+    #[serde(default)]
+    pub mode: AgentMode,
+
+    /// Primary model provider name.
+    #[serde(default)]
+    pub model_provider: String,
+
+    /// Primary model name.
+    #[serde(default)]
+    pub model_name: String,
+
+    /// Backup model provider for failover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_provider: Option<String>,
+
+    /// Backup model name for failover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_model: Option<String>,
+
+    /// System prompt / instructions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+
+    /// Maximum turns for managed agentic loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+
+    /// Agent skills/capabilities.
+    #[serde(default)]
+    pub skills: Vec<String>,
+
+    /// Guardrails applied to this agent.
+    #[serde(default)]
+    pub guardrails: Vec<Guardrail>,
+
+    /// A2A endpoint for external agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a2a_endpoint: Option<String>,
 
     /// Ingredients: models, tools, prompts, and data sources.
     pub ingredients: Vec<Ingredient>,
@@ -75,6 +157,16 @@ pub struct AgentBuilder {
     version: String,
     description: String,
     framework: AgentFramework,
+    mode: AgentMode,
+    model_provider: String,
+    model_name: String,
+    backup_provider: Option<String>,
+    backup_model: Option<String>,
+    system_prompt: Option<String>,
+    max_turns: Option<u32>,
+    skills: Vec<String>,
+    guardrails: Vec<Guardrail>,
+    a2a_endpoint: Option<String>,
     ingredients: Vec<Ingredient>,
     tags: Vec<String>,
     kitchen_id: Option<String>,
@@ -88,6 +180,16 @@ impl AgentBuilder {
             version: "0.1.0".into(),
             description: String::new(),
             framework: AgentFramework::Custom,
+            mode: AgentMode::default(),
+            model_provider: String::new(),
+            model_name: String::new(),
+            backup_provider: None,
+            backup_model: None,
+            system_prompt: None,
+            max_turns: None,
+            skills: Vec::new(),
+            guardrails: Vec::new(),
+            a2a_endpoint: None,
             ingredients: Vec::new(),
             tags: Vec::new(),
             kitchen_id: None,
@@ -125,6 +227,56 @@ impl AgentBuilder {
         self
     }
 
+    pub fn mode(mut self, mode: AgentMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn model_provider(mut self, provider: impl Into<String>) -> Self {
+        self.model_provider = provider.into();
+        self
+    }
+
+    pub fn model_name(mut self, name: impl Into<String>) -> Self {
+        self.model_name = name.into();
+        self
+    }
+
+    pub fn backup_provider(mut self, provider: impl Into<String>) -> Self {
+        self.backup_provider = Some(provider.into());
+        self
+    }
+
+    pub fn backup_model(mut self, model: impl Into<String>) -> Self {
+        self.backup_model = Some(model.into());
+        self
+    }
+
+    pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.system_prompt = Some(prompt.into());
+        self
+    }
+
+    pub fn max_turns(mut self, turns: u32) -> Self {
+        self.max_turns = Some(turns);
+        self
+    }
+
+    pub fn skill(mut self, s: impl Into<String>) -> Self {
+        self.skills.push(s.into());
+        self
+    }
+
+    pub fn guardrail(mut self, g: Guardrail) -> Self {
+        self.guardrails.push(g);
+        self
+    }
+
+    pub fn a2a_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.a2a_endpoint = Some(endpoint.into());
+        self
+    }
+
     pub fn metadata(mut self, metadata: serde_json::Value) -> Self {
         self.metadata = Some(metadata);
         self
@@ -138,6 +290,16 @@ impl AgentBuilder {
             version: self.version,
             description: self.description,
             framework: self.framework,
+            mode: self.mode,
+            model_provider: self.model_provider,
+            model_name: self.model_name,
+            backup_provider: self.backup_provider,
+            backup_model: self.backup_model,
+            system_prompt: self.system_prompt,
+            max_turns: self.max_turns,
+            skills: self.skills,
+            guardrails: self.guardrails,
+            a2a_endpoint: self.a2a_endpoint,
             ingredients: self.ingredients,
             tags: self.tags,
             status: AgentStatus::Draft,
@@ -159,6 +321,7 @@ pub enum AgentFramework {
     OpenAiSdk,
     AutoGen,
     AgentFramework,
+    Managed,
     Custom,
 }
 

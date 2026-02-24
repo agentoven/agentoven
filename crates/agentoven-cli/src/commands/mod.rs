@@ -3,8 +3,14 @@
 pub mod agent;
 pub mod dashboard;
 pub mod init;
+pub mod kitchen;
 pub mod login;
+pub mod prompt;
+pub mod provider;
+pub mod rag;
 pub mod recipe;
+pub mod session;
+pub mod tool;
 pub mod trace;
 
 use clap::{Parser, Subcommand};
@@ -49,17 +55,41 @@ pub enum Commands {
     /// 🏺 Initialize a new AgentOven project in the current directory.
     Init(init::InitArgs),
 
-    /// 🍞 Manage agents in the oven (register, list, bake, retire).
+    /// 🍞 Manage agents in the oven (register, list, bake, invoke, retire).
     #[command(subcommand)]
     Agent(agent::AgentCommands),
+
+    /// 🔌 Manage model providers (OpenAI, Anthropic, Ollama, etc.).
+    #[command(subcommand)]
+    Provider(provider::ProviderCommands),
+
+    /// 🛠️  Manage MCP tools.
+    #[command(subcommand)]
+    Tool(tool::ToolCommands),
+
+    /// 📝 Manage versioned prompt templates.
+    #[command(subcommand)]
+    Prompt(prompt::PromptCommands),
 
     /// 📖 Manage recipes (multi-agent workflows).
     #[command(subcommand)]
     Recipe(recipe::RecipeCommands),
 
+    /// 💬 Manage multi-turn chat sessions.
+    #[command(subcommand)]
+    Session(session::SessionCommands),
+
+    /// 🏠 Manage kitchens (workspaces/tenants).
+    #[command(subcommand)]
+    Kitchen(kitchen::KitchenCommands),
+
     /// 🔍 Inspect traces and observability data.
     #[command(subcommand)]
     Trace(trace::TraceCommands),
+
+    /// 🔎 RAG pipeline operations (query, ingest).
+    #[command(subcommand)]
+    Rag(rag::RagCommands),
 
     /// 🌐 Start the control plane and open the dashboard UI.
     Dashboard(dashboard::DashboardArgs),
@@ -83,8 +113,14 @@ pub async fn execute(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Init(args) => init::execute(args).await,
         Commands::Agent(cmd) => agent::execute(cmd).await,
+        Commands::Provider(cmd) => provider::execute(cmd).await,
+        Commands::Tool(cmd) => tool::execute(cmd).await,
+        Commands::Prompt(cmd) => prompt::execute(cmd).await,
         Commands::Recipe(cmd) => recipe::execute(cmd).await,
+        Commands::Session(cmd) => session::execute(cmd).await,
+        Commands::Kitchen(cmd) => kitchen::execute(cmd).await,
         Commands::Trace(cmd) => trace::execute(cmd).await,
+        Commands::Rag(cmd) => rag::execute(cmd).await,
         Commands::Dashboard(args) => dashboard::execute(args).await,
         Commands::Login(args) => login::execute(args).await,
         Commands::Status => status().await,

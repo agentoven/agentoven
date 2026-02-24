@@ -108,6 +108,50 @@ impl Ingredient {
             config: None,
         }
     }
+
+    /// Create an observability ingredient.
+    pub fn observability(name: impl Into<String>) -> IngredientBuilder {
+        IngredientBuilder {
+            kind: IngredientKind::Observability,
+            name: name.into(),
+            provider: None,
+            role: None,
+            config: None,
+        }
+    }
+
+    /// Create an embedding ingredient.
+    pub fn embedding(name: impl Into<String>) -> IngredientBuilder {
+        IngredientBuilder {
+            kind: IngredientKind::Embedding,
+            name: name.into(),
+            provider: None,
+            role: None,
+            config: None,
+        }
+    }
+
+    /// Create a vector store ingredient.
+    pub fn vectorstore(name: impl Into<String>) -> IngredientBuilder {
+        IngredientBuilder {
+            kind: IngredientKind::VectorStore,
+            name: name.into(),
+            provider: None,
+            role: None,
+            config: None,
+        }
+    }
+
+    /// Create a retriever ingredient.
+    pub fn retriever(name: impl Into<String>) -> IngredientBuilder {
+        IngredientBuilder {
+            kind: IngredientKind::Retriever,
+            name: name.into(),
+            provider: None,
+            role: None,
+            config: None,
+        }
+    }
 }
 
 /// The kind of ingredient.
@@ -122,4 +166,13 @@ pub enum IngredientKind {
     Prompt,
     /// A data source (vector store, database, file).
     Data,
+    /// Observability configuration.
+    Observability,
+    /// Embedding model configuration.
+    Embedding,
+    /// Vector store backend configuration.
+    #[serde(rename = "vectorstore")]
+    VectorStore,
+    /// Retriever pipeline configuration.
+    Retriever,
 }

@@ -30,6 +30,7 @@ import (
 	"github.com/agentoven/agentoven/control-plane/internal/catalog"
 	"github.com/agentoven/agentoven/control-plane/internal/config"
 	"github.com/agentoven/agentoven/control-plane/internal/embeddings"
+	grails "github.com/agentoven/agentoven/control-plane/internal/guardrails"
 	"github.com/agentoven/agentoven/control-plane/internal/mcpgw"
 	"github.com/agentoven/agentoven/control-plane/internal/notify"
 	ragpkg "github.com/agentoven/agentoven/control-plane/internal/rag"
@@ -215,6 +216,12 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 
 	// Build handlers + API router
 	h := handlers.New(dataStore, mr, gw, wf, cat, sessStore)
+
+	// ── Guardrails (R9) ────────────────────────────────────
+	// Community guardrail service provides built-in heuristic evaluation.
+	// Pro can override h.Guardrails with LLM-judge or external policy engines.
+	h.Guardrails = &grails.CommunityGuardrailService{}
+	log.Info().Msg("✅ Guardrail service initialized (community)")
 
 	// ── Pluggable Auth (Release 7) ─────────────────────────
 	// Build the auth provider chain. Pro adds enterprise providers

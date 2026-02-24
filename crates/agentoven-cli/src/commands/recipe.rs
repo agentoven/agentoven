@@ -10,10 +10,16 @@ pub enum RecipeCommands {
     Create(CreateArgs),
     /// List all recipes.
     List,
+    /// Get recipe details.
+    Get(GetArgs),
+    /// Delete a recipe.
+    Delete(DeleteArgs),
     /// Bake (execute) a recipe.
     Bake(RecipeBakeArgs),
-    /// Show recipe execution history.
-    History(HistoryArgs),
+    /// Show recipe execution history / runs.
+    Runs(RunsArgs),
+    /// Approve a human gate in a recipe run.
+    Approve(ApproveArgs),
 }
 
 #[derive(Args)]
@@ -23,6 +29,21 @@ pub struct CreateArgs {
     /// Path to recipe definition YAML/TOML.
     #[arg(long, short)]
     pub from: Option<String>,
+}
+
+#[derive(Args)]
+pub struct GetArgs {
+    /// Recipe name.
+    pub name: String,
+}
+
+#[derive(Args)]
+pub struct DeleteArgs {
+    /// Recipe name.
+    pub name: String,
+    /// Skip confirmation.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Args)]
@@ -38,7 +59,7 @@ pub struct RecipeBakeArgs {
 }
 
 #[derive(Args)]
-pub struct HistoryArgs {
+pub struct RunsArgs {
     /// Recipe name.
     pub name: String,
     /// Number of recent runs to show.
@@ -46,117 +67,216 @@ pub struct HistoryArgs {
     pub limit: u32,
 }
 
+#[derive(Args)]
+pub struct ApproveArgs {
+    /// Recipe name.
+    pub name: String,
+    /// Run ID.
+    #[arg(long)]
+    pub run_id: String,
+    /// Gate ID.
+    #[arg(long)]
+    pub gate_id: String,
+    /// Approve or reject.
+    #[arg(long, default_value = "true")]
+    pub approved: bool,
+    /// Comment.
+    #[arg(long)]
+    pub comment: Option<String>,
+}
+
 pub async fn execute(cmd: RecipeCommands) -> anyhow::Result<()> {
     match cmd {
-        RecipeCommands::Create(args) => {
-            println!("\n  {} Creating recipe: {}\n", "📖".to_string(), args.name.bold());
+        RecipeCommands::Create(args) => create(args).await,
+        RecipeCommands::List => list().await,
+        RecipeCommands::Get(args) => get(args).await,
+        RecipeCommands::Delete(args) => delete(args).await,
+        RecipeCommands::Bake(args) => bake(args).await,
+        RecipeCommands::Runs(args) => runs(args).await,
+        RecipeCommands::Approve(args) => approve(args).await,
+    }
+}
 
-            let client = agentoven_core::AgentOvenClient::from_env()?;
+async fn create(args: CreateArgs) -> anyhow::Result<()> {
+    println!("\n  {} Creating recipe: {}\n", "📖".to_string(), args.name.bold());
 
-            // If --from is specified, read recipe definition from file
-            let steps = if let Some(ref from_path) = args.from {
-                let content = tokio::fs::read_to_string(from_path).await?;
-                // Try to parse as TOML or JSON
-                if from_path.ends_with(".toml") {
-                    let _parsed: toml::Value = content.parse()?;
-                    // Extract steps from the recipe definition
-                    Vec::new() // Steps would be parsed from TOML
-                } else {
-                    let _parsed: serde_json::Value = serde_json::from_str(&content)?;
-                    Vec::new() // Steps would be parsed from JSON
-                }
-            } else {
-                Vec::new()
-            };
+    let client = agentoven_core::AgentOvenClient::from_env()?;
 
-            let recipe = agentoven_core::Recipe::new(&args.name, steps);
-            match client.create_recipe(&recipe).await {
-                Ok(created) => {
-                    println!("  {} Recipe '{}' created (ID: {}).", "✓".green().bold(), args.name, created.id.dimmed());
-                    println!(
-                        "  {} Execute with: {}",
-                        "→".dimmed(),
-                        format!("agentoven recipe bake {}", args.name).green()
-                    );
-                }
-                Err(e) => {
-                    println!(
-                        "  {} Could not create recipe on control plane: {}",
-                        "⚠".yellow().bold(),
-                        e.to_string().dimmed()
-                    );
-                    println!("  {} Recipe validated locally. ID: {}", "✓".green().bold(), recipe.id.dimmed());
-                }
-            }
-            Ok(())
+    let steps = if let Some(ref from_path) = args.from {
+        let content = tokio::fs::read_to_string(from_path).await?;
+        if from_path.ends_with(".toml") {
+            let _parsed: toml::Value = content.parse()?;
+            Vec::new()
+        } else {
+            let _parsed: serde_json::Value = serde_json::from_str(&content)?;
+            Vec::new()
         }
-        RecipeCommands::List => {
-            println!("\n  {} Recipes:\n", "📖".to_string());
+    } else {
+        Vec::new()
+    };
 
-            let _client = agentoven_core::AgentOvenClient::from_env()?;
-            // Control plane list_recipes not implemented yet — show placeholder
-            println!("  (no recipes yet — use `agentoven recipe create`)");
-            Ok(())
+    let recipe = agentoven_core::Recipe::new(&args.name, steps);
+    match client.create_recipe(&recipe).await {
+        Ok(created) => {
+            println!("  {} Recipe '{}' created (ID: {}).", "✓".green().bold(), args.name, created.id.dimmed());
+            println!(
+                "  {} Execute with: {}",
+                "→".dimmed(),
+                format!("agentoven recipe bake {}", args.name).green()
+            );
         }
-        RecipeCommands::Bake(args) => {
-            println!(
-                "\n  {} Baking recipe: {}\n",
-                "🔥".to_string(),
-                args.name.bold()
-            );
-
-            let client = agentoven_core::AgentOvenClient::from_env()?;
-
-            // Parse input from --input flag or --input-file
-            let input = if let Some(ref json_str) = args.input {
-                serde_json::from_str(json_str)?
-            } else if let Some(ref file_path) = args.input_file {
-                let content = tokio::fs::read_to_string(file_path).await?;
-                serde_json::from_str(&content)?
-            } else {
-                serde_json::json!({})
-            };
-
-            match client.bake_recipe(&args.name, input).await {
-                Ok(result) => {
-                    println!("  {} Recipe baking started!", "✓".green().bold());
-                    if let Some(task_id) = result.get("task_id").and_then(|v| v.as_str()) {
-                        println!("  {} Task ID: {}", "→".dimmed(), task_id.cyan());
-                    }
-                    println!(
-                        "  {} Monitor with: {}",
-                        "→".dimmed(),
-                        "agentoven trace ls".green()
-                    );
-                }
-                Err(e) => {
-                    println!(
-                        "  {} Recipe bake failed: {}",
-                        "✗".red().bold(),
-                        e.to_string().dimmed()
-                    );
-                }
-            }
-            Ok(())
-        }
-        RecipeCommands::History(args) => {
-            println!(
-                "\n  {} History for recipe: {} (last {})\n",
-                "📊".to_string(),
-                args.name.bold(),
-                args.limit
-            );
-
-            println!(
-                "  {:<36} {:<12} {:<12} {:<10}",
-                "RUN ID".bold(),
-                "STATUS".bold(),
-                "DURATION".bold(),
-                "STARTED".bold(),
-            );
-            println!("  {}", "─".repeat(70).dimmed());
-            println!("  (no runs yet — use `agentoven recipe bake {}` to start)", args.name);
-            Ok(())
+        Err(e) => {
+            println!("  {} Could not create recipe: {}", "⚠".yellow().bold(), e.to_string().dimmed());
+            println!("  {} Recipe validated locally. ID: {}", "✓".green().bold(), recipe.id.dimmed());
         }
     }
+    Ok(())
+}
+
+async fn list() -> anyhow::Result<()> {
+    println!("\n  {} Recipes:\n", "📖".to_string());
+
+    let client = agentoven_core::AgentOvenClient::from_env()?;
+    match client.list_recipes().await {
+        Ok(recipes) => {
+            if recipes.is_empty() {
+                println!("  (no recipes yet — use `agentoven recipe create`)");
+            } else {
+                println!(
+                    "  {:<24} {:<12} {:<8} {:<20}",
+                    "NAME".bold(), "STATUS".bold(), "STEPS".bold(), "CREATED".bold()
+                );
+                println!("  {}", "─".repeat(66).dimmed());
+                for r in &recipes {
+                    let name = r["name"].as_str().unwrap_or("-");
+                    let status = r["status"].as_str().unwrap_or("-");
+                    let steps = r["steps"].as_array().map(|a| a.len()).unwrap_or(0);
+                    let created = r["created_at"].as_str().unwrap_or("-");
+                    let created_short = if created.len() > 16 { &created[..16] } else { created };
+                    println!("  {:<24} {:<12} {:<8} {}", name, status, steps, created_short);
+                }
+                println!("\n  {} {} recipe(s)", "→".dimmed(), recipes.len());
+            }
+        }
+        Err(e) => {
+            println!("  {} Could not list recipes: {}", "⚠".yellow().bold(), e.to_string().dimmed());
+        }
+    }
+    Ok(())
+}
+
+async fn get(args: GetArgs) -> anyhow::Result<()> {
+    println!("\n  {} Recipe: {}\n", "📖".to_string(), args.name.bold());
+
+    let client = agentoven_core::AgentOvenClient::from_env()?;
+    match client.get_recipe(&args.name).await {
+        Ok(r) => {
+            let pretty = serde_json::to_string_pretty(&r).unwrap_or_default();
+            for line in pretty.lines() {
+                println!("  {}", line.dimmed());
+            }
+        }
+        Err(e) => {
+            println!("  {} Not found: {}", "⚠".yellow().bold(), e.to_string().dimmed());
+        }
+    }
+    Ok(())
+}
+
+async fn delete(args: DeleteArgs) -> anyhow::Result<()> {
+    if !args.force {
+        let confirm = dialoguer::Confirm::new()
+            .with_prompt(format!("  Delete recipe '{}'?", args.name))
+            .default(false)
+            .interact()?;
+        if !confirm {
+            println!("  {} Cancelled.", "→".dimmed());
+            return Ok(());
+        }
+    }
+
+    let client = agentoven_core::AgentOvenClient::from_env()?;
+    match client.delete_recipe(&args.name).await {
+        Ok(()) => println!("  {} Recipe '{}' deleted.", "✓".green().bold(), args.name),
+        Err(e) => println!("  {} Delete failed: {}", "✗".red().bold(), e.to_string().dimmed()),
+    }
+    Ok(())
+}
+
+async fn bake(args: RecipeBakeArgs) -> anyhow::Result<()> {
+    println!("\n  {} Baking recipe: {}\n", "🔥".to_string(), args.name.bold());
+
+    let client = agentoven_core::AgentOvenClient::from_env()?;
+
+    let input = if let Some(ref json_str) = args.input {
+        serde_json::from_str(json_str)?
+    } else if let Some(ref file_path) = args.input_file {
+        let content = tokio::fs::read_to_string(file_path).await?;
+        serde_json::from_str(&content)?
+    } else {
+        serde_json::json!({})
+    };
+
+    match client.bake_recipe(&args.name, input).await {
+        Ok(result) => {
+            println!("  {} Recipe baking started!", "✓".green().bold());
+            if let Some(run_id) = result.get("run_id").or(result.get("task_id")) {
+                println!("  {} Run ID: {}", "→".dimmed(), run_id.as_str().unwrap_or("?").cyan());
+            }
+            println!("  {} Monitor with: {}", "→".dimmed(), format!("agentoven recipe runs {}", args.name).green());
+        }
+        Err(e) => {
+            println!("  {} Recipe bake failed: {}", "✗".red().bold(), e.to_string().dimmed());
+        }
+    }
+    Ok(())
+}
+
+async fn runs(args: RunsArgs) -> anyhow::Result<()> {
+    println!("\n  {} Runs for recipe: {} (last {})\n", "📊".to_string(), args.name.bold(), args.limit);
+
+    let client = agentoven_core::AgentOvenClient::from_env()?;
+    match client.recipe_runs(&args.name).await {
+        Ok(runs_list) => {
+            if runs_list.is_empty() {
+                println!("  (no runs yet — use `agentoven recipe bake {}` to start)", args.name);
+            } else {
+                println!(
+                    "  {:<36} {:<12} {:<12} {:<20}",
+                    "RUN ID".bold(), "STATUS".bold(), "DURATION".bold(), "STARTED".bold()
+                );
+                println!("  {}", "─".repeat(82).dimmed());
+                for run in runs_list.iter().take(args.limit as usize) {
+                    let id = run["id"].as_str().unwrap_or("-");
+                    let status = run["status"].as_str().unwrap_or("-");
+                    let duration = run["duration"].as_str().unwrap_or("-");
+                    let started = run["started_at"].as_str().unwrap_or("-");
+                    let started_short = if started.len() > 16 { &started[..16] } else { started };
+                    println!("  {:<36} {:<12} {:<12} {}", id, status, duration, started_short);
+                }
+                println!("\n  {} {} run(s)", "→".dimmed(), runs_list.len());
+            }
+        }
+        Err(e) => {
+            println!("  {} Could not fetch runs: {}", "⚠".yellow().bold(), e.to_string().dimmed());
+        }
+    }
+    Ok(())
+}
+
+async fn approve(args: ApproveArgs) -> anyhow::Result<()> {
+    let action = if args.approved { "Approving" } else { "Rejecting" };
+    println!("\n  {} {} gate {} in run {}...\n", "✅".to_string(), action, args.gate_id.bold(), args.run_id.dimmed());
+
+    let client = agentoven_core::AgentOvenClient::from_env()?;
+    match client.approve_gate(&args.name, &args.run_id, &args.gate_id, args.approved, args.comment.as_deref()).await {
+        Ok(_) => {
+            println!("  {} Gate {} {}.", "✓".green().bold(), args.gate_id,
+                if args.approved { "approved" } else { "rejected" });
+        }
+        Err(e) => {
+            println!("  {} Failed: {}", "✗".red().bold(), e.to_string().dimmed());
+        }
+    }
+    Ok(())
 }

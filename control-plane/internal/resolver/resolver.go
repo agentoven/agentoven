@@ -8,9 +8,12 @@ package resolver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/agentoven/agentoven/control-plane/internal/store"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
@@ -248,22 +251,57 @@ func (r *Resolver) resolveTool(ctx context.Context, kitchen string, ing models.I
 		return nil, fmt.Errorf("MCP tool %q does not have 'tool' capability", toolName)
 	}
 
+	// Compute schema hash for version pinning
+	var schemaHash string
+	if tool.Schema != nil {
+		if raw, err := json.Marshal(tool.Schema); err == nil {
+			h := sha256.Sum256(raw)
+			schemaHash = fmt.Sprintf("%x", h[:8]) // first 8 bytes = 16 hex chars
+		}
+	}
+
 	return &models.ResolvedTool{
-		Name:      tool.Name,
-		Endpoint:  tool.Endpoint,
-		Transport: tool.Transport,
-		Schema:    tool.Schema,
+		Name:       tool.Name,
+		Endpoint:   tool.Endpoint,
+		Transport:  tool.Transport,
+		Schema:     tool.Schema,
+		Version:    tool.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+		SchemaHash: schemaHash,
+		BakedAt:    time.Now().UTC(),
 	}, nil
 }
 
-// resolvePrompt looks up the prompt in the Prompt Store.
+// resolvePrompt resolves a prompt ingredient. It supports two modes:
+//
+//  1. Inline — config contains "text" or "template" with the prompt body directly.
+//     This is the path used by the dashboard's agent creation form.
+//  2. Store reference — the ingredient name (or config["prompt_name"]) references
+//     a prompt in the Prompt Store, optionally pinned to a version.
 func (r *Resolver) resolvePrompt(ctx context.Context, kitchen string, ing models.Ingredient) (*models.ResolvedPrompt, error) {
+	// ── Path 1: Inline prompt text ──────────────────────────────
+	// Dashboard sends {name:"system-prompt", kind:"prompt", config:{text:"..."}}
+	// Accept both "text" and "template" keys for convenience.
+	if inlineText, ok := ing.Config["text"].(string); ok && inlineText != "" {
+		return &models.ResolvedPrompt{
+			Name:     ing.Name,
+			Version:  0, // inline prompts are unversioned
+			Template: inlineText,
+		}, nil
+	}
+	if inlineTemplate, ok := ing.Config["template"].(string); ok && inlineTemplate != "" {
+		return &models.ResolvedPrompt{
+			Name:     ing.Name,
+			Version:  0,
+			Template: inlineTemplate,
+		}, nil
+	}
+
+	// ── Path 2: Prompt Store lookup ─────────────────────────────
 	promptName := ing.Name
 	if cfgName, ok := ing.Config["prompt_name"].(string); ok {
 		promptName = cfgName
 	}
 
-	// Check for specific version request
 	var prompt *models.Prompt
 	var err error
 	if version, ok := ing.Config["version"].(float64); ok && version > 0 {
@@ -272,7 +310,7 @@ func (r *Resolver) resolvePrompt(ctx context.Context, kitchen string, ing models
 		prompt, err = r.store.GetPrompt(ctx, kitchen, promptName)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("prompt %q not found in kitchen %q", promptName, kitchen)
+		return nil, fmt.Errorf("prompt %q not found in kitchen %q (hint: use config.text for inline prompts)", promptName, kitchen)
 	}
 
 	return &models.ResolvedPrompt{

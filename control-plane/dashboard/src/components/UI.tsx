@@ -1,4 +1,5 @@
-import type { ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
+import { X as XIcon } from 'lucide-react';
 
 // ── Status Badge ──────────────────────────────────────────────
 
@@ -178,5 +179,54 @@ export function Button({
     >
       {children}
     </button>
+  );
+}
+
+// ── Modal ─────────────────────────────────────────────────────
+
+export function Modal({
+  open,
+  onClose,
+  title,
+  children,
+  width = 'max-w-2xl',
+}: {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  children: ReactNode;
+  width?: string;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      {/* Backdrop */}
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      {/* Dialog */}
+      <div className={`relative ${width} w-full mx-4 max-h-[85vh] flex flex-col bg-[var(--ao-surface)] border border-[var(--ao-border)] rounded-2xl shadow-2xl`}>
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--ao-border)] shrink-0">
+          <h2 className="text-lg font-semibold">{title}</h2>
+          <button
+            onClick={onClose}
+            className="p-1 rounded-lg text-[var(--ao-text-muted)] hover:text-[var(--ao-text)] hover:bg-[var(--ao-surface-hover)] transition-colors"
+          >
+            <XIcon size={18} />
+          </button>
+        </div>
+        {/* Body */}
+        <div className="overflow-y-auto px-6 py-4 flex-1">
+          {children}
+        </div>
+      </div>
+    </div>
   );
 }

@@ -121,6 +121,13 @@ type Agent struct {
 	ModelProvider string `json:"model_provider,omitempty" db:"model_provider"`
 	ModelName     string `json:"model_name,omitempty" db:"model_name"`
 
+	// Backup provider for automatic failover when primary provider fails
+	BackupProvider string `json:"backup_provider,omitempty" db:"backup_provider"`
+	BackupModel    string `json:"backup_model,omitempty" db:"backup_model"`
+
+	// Guardrails — input/output validation rules applied during invoke
+	Guardrails []Guardrail `json:"guardrails,omitempty"`
+
 	// Ingredients (embedded for simplicity; normalize for large payloads)
 	Ingredients []Ingredient `json:"ingredients,omitempty"`
 
@@ -326,6 +333,10 @@ type ModelProvider struct {
 	IsDefault bool                   `json:"is_default" db:"is_default"`
 	CreatedAt time.Time              `json:"created_at" db:"created_at"`
 
+	// API Key Rotation — multiple keys with automatic rotation
+	APIKeys          []APIKeyEntry `json:"api_keys,omitempty"`
+	RotationStrategy string        `json:"rotation_strategy,omitempty" db:"rotation_strategy"` // "round-robin", "random", "weighted"
+
 	// Health check cache — populated by TestProvider
 	LastTestedAt    *time.Time `json:"last_tested_at,omitempty" db:"last_tested_at"`
 	LastTestHealthy *bool      `json:"last_test_healthy,omitempty" db:"last_test_healthy"`
@@ -444,6 +455,10 @@ type RouteRequest struct {
 
 	// ── Session/Conversation (R8) ────────────────────────────
 	SessionID string `json:"session_id,omitempty"` // conversation context
+
+	// ── Thinking / Extended Reasoning (R10) ──────────────────
+	ThinkingEnabled bool `json:"thinking_enabled,omitempty"` // enable extended thinking (o-series, Claude)
+	ThinkingBudget  int  `json:"thinking_budget,omitempty"`  // max thinking tokens (0 = model default)
 }
 
 // ResponseFormat specifies structured output from the LLM.
@@ -699,6 +714,9 @@ type ResolvedTool struct {
 	Endpoint    string                 `json:"endpoint"`
 	Transport   string                 `json:"transport"`
 	Schema      map[string]interface{} `json:"schema,omitempty"`
+	Version     string                 `json:"version,omitempty"`      // pinned at bake time
+	SchemaHash  string                 `json:"schema_hash,omitempty"` // SHA-256 of schema at bake time
+	BakedAt     time.Time              `json:"baked_at,omitempty"`    // when this tool was resolved
 }
 
 type ResolvedPrompt struct {
@@ -1366,4 +1384,63 @@ type PromotionResult struct {
 	Status      string `json:"status"`  // "promoted", "dry_run", "failed"
 	Diff        string `json:"diff,omitempty"` // human-readable diff of changes
 	Error       string `json:"error,omitempty"`
+}
+
+// ── Guardrails ──────────────────────────────────────────────
+
+// GuardrailKind identifies the type of guardrail check.
+type GuardrailKind string
+
+const (
+	GuardrailContentFilter    GuardrailKind = "content_filter"
+	GuardrailPIIDetection     GuardrailKind = "pii_detection"
+	GuardrailTopicRestriction GuardrailKind = "topic_restriction"
+	GuardrailMaxLength        GuardrailKind = "max_length"
+	GuardrailRegexFilter      GuardrailKind = "regex_filter"
+	GuardrailPromptInjection  GuardrailKind = "prompt_injection"
+	GuardrailCustom           GuardrailKind = "custom"
+)
+
+// GuardrailStage controls when a guardrail is evaluated.
+type GuardrailStage string
+
+const (
+	GuardrailStageInput  GuardrailStage = "input"
+	GuardrailStageOutput GuardrailStage = "output"
+	GuardrailStageBoth   GuardrailStage = "both"
+)
+
+// Guardrail defines a single validation rule applied to agent I/O.
+type Guardrail struct {
+	ID        string                 `json:"id"`
+	Name      string                 `json:"name,omitempty"`
+	Kind      GuardrailKind          `json:"kind"`
+	Stage     GuardrailStage         `json:"stage"`
+	Config    map[string]interface{} `json:"config,omitempty"`    // kind-specific configuration
+	Enabled   bool                   `json:"enabled"`
+	CreatedAt time.Time              `json:"created_at,omitempty"`
+}
+
+// GuardrailResult is the outcome of a single guardrail evaluation.
+type GuardrailResult struct {
+	Passed  bool          `json:"passed"`
+	Kind    GuardrailKind `json:"kind"`
+	Stage   string        `json:"stage"`  // "input" or "output"
+	Message string        `json:"message,omitempty"` // explanation when blocked
+}
+
+// GuardrailEvaluation is the aggregate result of all guardrails for a request.
+type GuardrailEvaluation struct {
+	Passed  bool              `json:"passed"`
+	Results []GuardrailResult `json:"results"`
+}
+
+// ── API Key Rotation ────────────────────────────────────────
+
+// APIKeyEntry represents a single API key in a rotation pool.
+type APIKeyEntry struct {
+	Key     string `json:"key"`
+	Label   string `json:"label,omitempty"`  // human-readable label (e.g. "prod-key-1")
+	Weight  int    `json:"weight,omitempty"` // for weighted rotation (higher = more traffic)
+	Enabled bool   `json:"enabled"`
 }

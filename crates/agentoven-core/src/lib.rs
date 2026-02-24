@@ -41,7 +41,7 @@ pub mod router;
 pub mod telemetry;
 
 // Re-exports
-pub use agent::{Agent, AgentBuilder, AgentStatus};
+pub use agent::{Agent, AgentBuilder, AgentMode, AgentStatus, Guardrail};
 pub use client::AgentOvenClient;
 pub use config::AgentOvenConfig;
 pub use ingredient::{Ingredient, IngredientKind};

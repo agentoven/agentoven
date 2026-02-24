@@ -89,7 +89,7 @@ func NewExecutor(s store.Store, r *router.ModelRouter, gw *mcpgw.Gateway) *Execu
 //  4. If LLM returns tool_calls → execute each via MCP Gateway → add results → goto 3
 //  5. If LLM returns text → return as final response
 //  6. If max_turns reached → return with "max turns exceeded" warning
-func (e *Executor) Execute(ctx context.Context, agent *models.Agent, userMessage string, resolved *models.ResolvedIngredients, promptVars map[string]string) (string, *ExecutionTrace, error) {
+func (e *Executor) Execute(ctx context.Context, agent *models.Agent, userMessage string, resolved *models.ResolvedIngredients, promptVars map[string]string, thinkingEnabled bool) (string, *ExecutionTrace, error) {
 	traceID := uuid.New().String()
 	trace := &ExecutionTrace{
 		TraceID:   traceID,
@@ -110,20 +110,28 @@ func (e *Executor) Execute(ctx context.Context, agent *models.Agent, userMessage
 	toolDefs := e.buildToolDefinitions(resolved.Tools)
 
 	var totalUsage models.TokenUsage
+	var err error
 
 	for turn := 1; turn <= maxTurns; turn++ {
 		turnStart := time.Now()
 
 		// Call Model Router with tool definitions
 		routeReq := &models.RouteRequest{
-			Messages: messages,
-			Model:    resolved.Model.Model,
-			Strategy: models.RoutingFallback,
-			Kitchen:  agent.Kitchen,
-			AgentRef: agent.Name,
+			Messages:        messages,
+			Model:           resolved.Model.Model,
+			Strategy:        models.RoutingFallback,
+			Kitchen:         agent.Kitchen,
+			AgentRef:        agent.Name,
+			ThinkingEnabled: thinkingEnabled,
 		}
 
-		routeResp, err := e.router.Route(ctx, routeReq)
+		// Use backup provider failover if configured on the agent
+		var routeResp *models.RouteResponse
+		if agent.BackupProvider != "" {
+			routeResp, err = e.router.RouteWithBackup(ctx, routeReq, agent.BackupProvider, agent.BackupModel)
+		} else {
+			routeResp, err = e.router.Route(ctx, routeReq)
+		}
 		if err != nil {
 			return "", trace, fmt.Errorf("model router call failed (turn %d): %w", turn, err)
 		}

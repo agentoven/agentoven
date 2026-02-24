@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.1] — 2026-02-24
+
+### 🖥️ CLI Overhaul — Full Control Plane Parity
+
+The CLI has been completely rewritten to cover all ~90 control plane API endpoints. Previously 19 subcommands with many placeholders, now **55+ subcommands** across 13 command groups — all wired to real API calls.
+
+#### New Command Groups
+
+- **`agentoven provider`** — 7 subcommands: list, add, get, update, remove, test, discover
+- **`agentoven tool`** — 5 subcommands: list, add, get, update, remove (with `--schema-file` support)
+- **`agentoven prompt`** — 7 subcommands: list, add, get, update, remove, validate, versions
+- **`agentoven session`** — 6 subcommands: list, create, get, delete, send, chat (interactive REPL)
+- **`agentoven kitchen`** — 4 subcommands: list, get, settings, update-settings
+- **`agentoven rag`** — 2 subcommands: query (5 strategies), ingest (with progress bar)
+
+#### Enhanced Commands
+
+- **`agentoven agent`** — expanded from 8 to **15 subcommands**: added update, delete, recook, invoke, config, card, versions. Register now supports dual-mode (TOML config file **or** direct CLI flags with `--mode`, `--model-provider`, `--guardrail`, etc.)
+- **`agentoven recipe`** — expanded from 4 to **7 subcommands**: added get, delete, approve. All handlers now call real API endpoints.
+- **`agentoven trace`** — expanded from 3 to **4 subcommands**: added audit. All handlers now call real API endpoints with structured table output.
+
+#### Core SDK Updates
+
+- **`AgentMode`** enum — `Managed` (AgentOven executor) vs `External` (A2A proxy)
+- **`Guardrail`** struct — kind, stage, config fields for the guardrails engine
+- **12 new Agent fields** — model_provider, model_name, backup_provider, backup_model, system_prompt, max_turns, skills, guardrails, a2a_endpoint, mode, etc.
+- **4 new IngredientKind variants** — Observability, Embedding, VectorStore, Retriever
+- **`AgentOvenClient`** — expanded from ~19 to **59 HTTP client methods** covering all control plane endpoints
+
+### 📦 Version Bumps
+
+| Package | Previous | Now |
+|---------|----------|-----|
+| `a2a-ao` (crate) | 0.3.0 | 0.3.1 |
+| `agentoven-core` (crate) | 0.3.0 | 0.3.1 |
+| `agentoven-cli` (crate) | 0.3.0 | 0.3.1 |
+| `agentoven` (PyPI) | 0.3.0 | 0.3.1 |
+| `@agentoven/sdk` (npm) | 0.3.0 | 0.3.1 |
+
+---
+
 ## [0.3.0] — 2026-02-22
 
 ### 🧠 Model Catalog & Intelligence

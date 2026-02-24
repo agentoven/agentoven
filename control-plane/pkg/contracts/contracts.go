@@ -376,3 +376,16 @@ type SessionStore interface {
 	// DeleteSession removes a session.
 	DeleteSession(ctx context.Context, sessionID string) error
 }
+
+// ── Guardrail Service (R9) ──────────────────────────────────
+
+// GuardrailService evaluates guardrails on agent input and output.
+// OSS ships a community implementation. Pro can override with
+// LLM-judge, external policy engines, or custom webhook validators.
+type GuardrailService interface {
+	// EvaluateInput runs input-stage guardrails against the user message.
+	EvaluateInput(ctx context.Context, guardrails []models.Guardrail, message string) (*models.GuardrailEvaluation, error)
+
+	// EvaluateOutput runs output-stage guardrails against the model response.
+	EvaluateOutput(ctx context.Context, guardrails []models.Guardrail, response string) (*models.GuardrailEvaluation, error)
+}

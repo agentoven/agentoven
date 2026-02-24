@@ -33,6 +33,9 @@ type ModelRouter struct {
 	// Round-robin counter (atomic)
 	rrCounter uint64
 
+	// Key rotation round-robin counter (atomic)
+	keyRRCounter uint64
+
 	// Latency tracking: provider name → rolling avg ms
 	latencyMu sync.RWMutex
 	latencies map[string]int64
@@ -238,6 +241,67 @@ func (mr *ModelRouter) HealthCheck(ctx context.Context) map[string]string {
 	return result
 }
 
+// SelectAPIKey picks an API key from a provider's key pool using the configured
+// rotation strategy. If no API keys are configured in the pool, falls back to
+// the provider's Config["api_key"] field.
+//
+// Strategies:
+//   - "round-robin" (default): rotates through enabled keys sequentially
+//   - "random": picks a random enabled key
+//   - "weighted": weighted random selection based on key weights
+func (mr *ModelRouter) SelectAPIKey(provider *models.ModelProvider) string {
+	// Filter to enabled keys only
+	var enabled []models.APIKeyEntry
+	for _, k := range provider.APIKeys {
+		if k.Enabled && k.Key != "" {
+			enabled = append(enabled, k)
+		}
+	}
+
+	// No rotation keys configured — use legacy single key
+	if len(enabled) == 0 {
+		apiKey, _ := provider.Config["api_key"].(string)
+		return apiKey
+	}
+
+	strategy := provider.RotationStrategy
+	if strategy == "" {
+		strategy = "round-robin"
+	}
+
+	switch strategy {
+	case "random":
+		return enabled[rand.Intn(len(enabled))].Key
+
+	case "weighted":
+		totalWeight := 0
+		for _, k := range enabled {
+			w := k.Weight
+			if w <= 0 {
+				w = 1
+			}
+			totalWeight += w
+		}
+		pick := rand.Intn(totalWeight)
+		cumulative := 0
+		for _, k := range enabled {
+			w := k.Weight
+			if w <= 0 {
+				w = 1
+			}
+			cumulative += w
+			if pick < cumulative {
+				return k.Key
+			}
+		}
+		return enabled[0].Key // fallback
+
+	default: // round-robin
+		idx := atomic.AddUint64(&mr.keyRRCounter, 1)
+		return enabled[int(idx)%len(enabled)].Key
+	}
+}
+
 // Route sends a request through the router using the specified strategy.
 func (mr *ModelRouter) Route(ctx context.Context, req *models.RouteRequest) (*models.RouteResponse, error) {
 	// Get configured providers
@@ -281,6 +345,53 @@ func (mr *ModelRouter) Route(ctx context.Context, req *models.RouteRequest) (*mo
 	}
 
 	return nil, fmt.Errorf("all providers failed, last error: %w", lastErr)
+}
+
+// RouteWithBackup routes a request through the primary provider, and if all
+// primary providers fail, automatically falls back to the backup provider.
+// This is used by InvokeAgent/SendSessionMessage when an agent has a BackupProvider configured.
+func (mr *ModelRouter) RouteWithBackup(ctx context.Context, req *models.RouteRequest, backupProvider, backupModel string) (*models.RouteResponse, error) {
+	// Try primary route first
+	resp, err := mr.Route(ctx, req)
+	if err == nil {
+		return resp, nil
+	}
+
+	// Primary failed — try backup provider if configured
+	if backupProvider == "" {
+		return nil, err // no backup, return original error
+	}
+
+	log.Warn().
+		Str("backup_provider", backupProvider).
+		Str("backup_model", backupModel).
+		Err(err).
+		Msg("Primary providers failed, attempting backup provider")
+
+	backup, bErr := mr.store.GetProvider(ctx, backupProvider)
+	if bErr != nil {
+		return nil, fmt.Errorf("primary providers failed (%w) and backup provider %q not found: %v", err, backupProvider, bErr)
+	}
+
+	// Build a request targeting the backup model
+	backupReq := *req
+	if backupModel != "" {
+		backupReq.Model = backupModel
+	} else if len(backup.Models) > 0 {
+		backupReq.Model = backup.Models[0]
+	}
+
+	resp, bErr = mr.callProvider(ctx, backup, &backupReq)
+	if bErr != nil {
+		return nil, fmt.Errorf("primary providers failed (%w) and backup provider %q also failed: %v", err, backupProvider, bErr)
+	}
+
+	// Tag the response as coming from backup
+	resp.Provider = backup.Name + " (backup)"
+	mr.trackCost(req.Kitchen, req.AgentRef, resp)
+	mr.recordTrace(ctx, req, resp)
+
+	return resp, nil
 }
 
 // RouteStream routes a request to a provider that supports streaming.
@@ -412,9 +523,29 @@ func (mr *ModelRouter) orderProviders(providers []models.ModelProvider, strategy
 func (mr *ModelRouter) callProvider(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) (*models.RouteResponse, error) {
 	start := time.Now()
 
+	// When thinking is enabled, ensure the context has enough headroom —
+	// thinking models (Claude extended, o-series) can take 30-120s per turn.
+	if req.ThinkingEnabled {
+		if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, 10*time.Minute)
+			defer cancel()
+		}
+	}
+
 	model := req.Model
 	if model == "" && len(provider.Models) > 0 {
 		model = provider.Models[0]
+	}
+
+	// Apply API key rotation: select the active key and inject it into
+	// the provider's Config map so downstream drivers always read the right key.
+	selectedKey := mr.SelectAPIKey(provider)
+	if selectedKey != "" {
+		if provider.Config == nil {
+			provider.Config = make(map[string]interface{})
+		}
+		provider.Config["api_key"] = selectedKey
 	}
 
 	// Look up registered driver

@@ -249,6 +249,11 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 				r.Get("/", rh.ListConnectors)
 			})
 		}
+
+		// Guardrails — list available guardrail kinds + configuration
+		r.Route("/guardrails", func(r chi.Router) {
+			r.Get("/kinds", h.ListGuardrailKinds)
+		})
 	})
 
 	// MCP Gateway — JSON-RPC endpoint
