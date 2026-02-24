@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Bot, Plus, Flame, Snowflake, Trash2, FlaskConical, AlertTriangle, Sun, RefreshCw, Code, Copy, Check, Shield } from 'lucide-react';
-import { agents, providers, type Agent, type Ingredient, type IngredientKind, type Guardrail, APIError } from '../api';
+import { agents, providers, type Agent, type Ingredient, type IngredientKind, APIError } from '../api';
 import { useAPI } from '../hooks';
 import {
   PageHeader, Card, StatusBadge, EmptyState,
