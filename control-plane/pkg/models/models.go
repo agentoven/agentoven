@@ -95,6 +95,43 @@ const (
 	AgentModeExternal AgentMode = "external"
 )
 
+// ExecutionMode determines how an agent process is spawned at bake time.
+type ExecutionMode string
+
+const (
+	// ExecModeLocal spawns a Python process on the control plane host.
+	ExecModeLocal ExecutionMode = "local"
+	// ExecModeDocker runs the agent as a Docker container.
+	ExecModeDocker ExecutionMode = "docker"
+	// ExecModeK8s deploys the agent as a Kubernetes Deployment + Service.
+	ExecModeK8s ExecutionMode = "k8s"
+)
+
+// ProcessStatus describes the lifecycle of a spawned agent process.
+type ProcessStatus string
+
+const (
+	ProcessStarting ProcessStatus = "starting"
+	ProcessRunning  ProcessStatus = "running"
+	ProcessStopped  ProcessStatus = "stopped"
+	ProcessFailed   ProcessStatus = "failed"
+)
+
+// ProcessInfo tracks the runtime state of a spawned agent process.
+type ProcessInfo struct {
+	AgentName   string        `json:"agent_name"`
+	Kitchen     string        `json:"kitchen"`
+	Mode        ExecutionMode `json:"mode"`
+	Status      ProcessStatus `json:"status"`
+	Port        int           `json:"port"`
+	Endpoint    string        `json:"endpoint"`               // full URL (http://host:port)
+	PID         int           `json:"pid,omitempty"`          // local mode
+	ContainerID string        `json:"container_id,omitempty"` // docker mode
+	PodName     string        `json:"pod_name,omitempty"`     // k8s mode
+	StartedAt   time.Time     `json:"started_at"`
+	Error       string        `json:"error,omitempty"`
+}
+
 type Agent struct {
 	ID          string      `json:"id" db:"id"`
 	Name        string      `json:"name" db:"name"`
@@ -110,12 +147,20 @@ type Agent struct {
 	// Empty string → no version bump (status-only updates). Not persisted.
 	VersionBump string `json:"-" db:"-"`
 
+	// ExecutionMode determines how the agent process is spawned (local/docker/k8s).
+	// Defaults to "local" if not specified.
+	ExecutionMode ExecutionMode `json:"execution_mode,omitempty" db:"execution_mode"`
+
 	// Managed mode configuration
 	MaxTurns int `json:"max_turns,omitempty" db:"max_turns"`
 
-	// A2A Configuration
-	A2AEndpoint string   `json:"a2a_endpoint,omitempty" db:"a2a_endpoint"`
-	Skills      []string `json:"skills,omitempty"`
+	// A2A Configuration — A2AEndpoint is the stable control-plane URL
+	// (always /agents/{name}/a2a). BackendEndpoint is the actual backend
+	// URL where the agent process or external service lives. The control
+	// plane proxies A2A calls from A2AEndpoint → BackendEndpoint (ADR-0007).
+	A2AEndpoint     string   `json:"a2a_endpoint,omitempty" db:"a2a_endpoint"`
+	BackendEndpoint string   `json:"backend_endpoint,omitempty" db:"backend_endpoint"`
+	Skills          []string `json:"skills,omitempty"`
 
 	// Model Configuration
 	ModelProvider string `json:"model_provider,omitempty" db:"model_provider"`
@@ -135,6 +180,10 @@ type Agent struct {
 	// set at bake time. Used by InvokeAgent and A2A handlers to avoid
 	// re-resolving on every request.
 	ResolvedConfig *ResolvedIngredients `json:"resolved_config,omitempty"`
+
+	// Process tracks the runtime state of the spawned agent process.
+	// Populated by the ProcessManager at bake time.
+	Process *ProcessInfo `json:"process,omitempty"`
 
 	// Metadata
 	Tags      map[string]string `json:"tags,omitempty"`
@@ -186,13 +235,13 @@ type Branch struct {
 }
 
 type Step struct {
-	Name         string                 `json:"name"`
-	Kind         StepKind               `json:"kind"`
-	AgentRef     string                 `json:"agent_ref,omitempty"`
-	DependsOn    []string               `json:"depends_on,omitempty"`
-	Config       map[string]interface{} `json:"config,omitempty"`
-	MaxRetries   int                    `json:"max_retries,omitempty"`
-	TimeoutSecs  int                    `json:"timeout_secs,omitempty"`
+	Name        string                 `json:"name"`
+	Kind        StepKind               `json:"kind"`
+	AgentRef    string                 `json:"agent_ref,omitempty"`
+	DependsOn   []string               `json:"depends_on,omitempty"`
+	Config      map[string]interface{} `json:"config,omitempty"`
+	MaxRetries  int                    `json:"max_retries,omitempty"`
+	TimeoutSecs int                    `json:"timeout_secs,omitempty"`
 
 	// Branching — dynamic routing after step completion.
 	// Each Branch.Condition is evaluated against the step's output JSON
@@ -243,63 +292,63 @@ type Kitchen struct {
 // The CommunityPlanResolver returns static limits; the Pro resolver reads
 // the license key to determine tier-specific limits.
 type PlanLimits struct {
-	Plan               Plan   `json:"plan"`
-	MaxAgents          int    `json:"max_agents"`
-	MaxRecipes         int    `json:"max_recipes"`
-	MaxProviders       int    `json:"max_providers"`
-	MaxMCPTools        int    `json:"max_mcp_tools"`
-	MaxPrompts         int    `json:"max_prompts"`
-	TraceRetentionDays int    `json:"trace_retention_days"`
-	AllowedStrategies  []RoutingStrategy `json:"allowed_strategies"`
-	CloudProviders     bool   `json:"cloud_providers"`      // Bedrock, Foundry, Vertex
-	SSO                bool   `json:"sso"`                   // SSO/SAML
-	Federation         bool   `json:"federation"`            // Cross-org
-	CustomDrivers            bool   `json:"custom_drivers"`              // Custom ProviderDrivers
-	PromptValidation         bool   `json:"prompt_validation"`           // Pro prompt validator
-	LLMJudge                 bool   `json:"llm_judge"`                   // LLM-as-judge prompt checking
-	MaxOutputRetentionDays   int    `json:"max_output_retention_days"`   // Agent I/O retention
-	MaxAuditRetentionDays    int    `json:"max_audit_retention_days"`    // Audit event retention
-	RequireThinkingAudit     bool   `json:"require_thinking_audit"`      // Force thinking mode
-	MaxGateWaitMinutes       int    `json:"max_gate_wait_minutes"`       // SLA for human gates
-	MaxNotificationChannels  int    `json:"max_notification_channels"`   // Notification channel quota
+	Plan                    Plan              `json:"plan"`
+	MaxAgents               int               `json:"max_agents"`
+	MaxRecipes              int               `json:"max_recipes"`
+	MaxProviders            int               `json:"max_providers"`
+	MaxMCPTools             int               `json:"max_mcp_tools"`
+	MaxPrompts              int               `json:"max_prompts"`
+	TraceRetentionDays      int               `json:"trace_retention_days"`
+	AllowedStrategies       []RoutingStrategy `json:"allowed_strategies"`
+	CloudProviders          bool              `json:"cloud_providers"`           // Bedrock, Foundry, Vertex
+	SSO                     bool              `json:"sso"`                       // SSO/SAML
+	Federation              bool              `json:"federation"`                // Cross-org
+	CustomDrivers           bool              `json:"custom_drivers"`            // Custom ProviderDrivers
+	PromptValidation        bool              `json:"prompt_validation"`         // Pro prompt validator
+	LLMJudge                bool              `json:"llm_judge"`                 // LLM-as-judge prompt checking
+	MaxOutputRetentionDays  int               `json:"max_output_retention_days"` // Agent I/O retention
+	MaxAuditRetentionDays   int               `json:"max_audit_retention_days"`  // Audit event retention
+	RequireThinkingAudit    bool              `json:"require_thinking_audit"`    // Force thinking mode
+	MaxGateWaitMinutes      int               `json:"max_gate_wait_minutes"`     // SLA for human gates
+	MaxNotificationChannels int               `json:"max_notification_channels"` // Notification channel quota
 
 	// RAG & Embeddings
-	MaxEmbeddingProviders    int    `json:"max_embedding_providers"`     // Embedding provider quota
-	MaxVectorStores          int    `json:"max_vector_stores"`           // Vector store backend quota
-	DataConnectors           bool   `json:"data_connectors"`             // Pro: data lake connectors
-	RAGTemplates             bool   `json:"rag_templates"`               // Pro: framework templates
-	AgentMonitor             bool   `json:"agent_monitor"`               // Pro: agent validator/monitor
+	MaxEmbeddingProviders int  `json:"max_embedding_providers"` // Embedding provider quota
+	MaxVectorStores       int  `json:"max_vector_stores"`       // Vector store backend quota
+	DataConnectors        bool `json:"data_connectors"`         // Pro: data lake connectors
+	RAGTemplates          bool `json:"rag_templates"`           // Pro: framework templates
+	AgentMonitor          bool `json:"agent_monitor"`           // Pro: agent validator/monitor
 }
 
 // CommunityLimits returns the default PlanLimits for the free community tier.
 func CommunityLimits() *PlanLimits {
 	return &PlanLimits{
-		Plan:               PlanCommunity,
-		MaxAgents:          10,
-		MaxRecipes:         5,
-		MaxProviders:       2,
-		MaxMCPTools:        5,
-		MaxPrompts:         10,
-		TraceRetentionDays: 7,
-		AllowedStrategies:  []RoutingStrategy{RoutingFallback},
-		CloudProviders:     false,
-		SSO:                false,
-		Federation:         false,
-		CustomDrivers:            false,
-		PromptValidation:         false,
-		LLMJudge:                 false,
-		MaxOutputRetentionDays:   0,     // no output retention in community
-		MaxAuditRetentionDays:    0,     // no audit in community
-		RequireThinkingAudit:     false,
-		MaxGateWaitMinutes:       0,     // no SLA enforcement
-		MaxNotificationChannels:  2,
+		Plan:                    PlanCommunity,
+		MaxAgents:               10,
+		MaxRecipes:              5,
+		MaxProviders:            2,
+		MaxMCPTools:             5,
+		MaxPrompts:              10,
+		TraceRetentionDays:      7,
+		AllowedStrategies:       []RoutingStrategy{RoutingFallback},
+		CloudProviders:          false,
+		SSO:                     false,
+		Federation:              false,
+		CustomDrivers:           false,
+		PromptValidation:        false,
+		LLMJudge:                false,
+		MaxOutputRetentionDays:  0, // no output retention in community
+		MaxAuditRetentionDays:   0, // no audit in community
+		RequireThinkingAudit:    false,
+		MaxGateWaitMinutes:      0, // no SLA enforcement
+		MaxNotificationChannels: 2,
 
 		// RAG & Embeddings — generous community limits
-		MaxEmbeddingProviders:    2,
-		MaxVectorStores:          2,
-		DataConnectors:           false, // Pro only
-		RAGTemplates:             false, // Pro only
-		AgentMonitor:             false, // Pro only
+		MaxEmbeddingProviders: 2,
+		MaxVectorStores:       2,
+		DataConnectors:        false, // Pro only
+		RAGTemplates:          false, // Pro only
+		AgentMonitor:          false, // Pro only
 	}
 }
 
@@ -359,12 +408,12 @@ type ProviderTestResult struct {
 type RecipeRunStatus string
 
 const (
-	RecipeRunSubmitted  RecipeRunStatus = "submitted"
-	RecipeRunRunning    RecipeRunStatus = "running"
-	RecipeRunCompleted  RecipeRunStatus = "completed"
-	RecipeRunFailed     RecipeRunStatus = "failed"
-	RecipeRunCanceled   RecipeRunStatus = "canceled"
-	RecipeRunPaused     RecipeRunStatus = "paused"
+	RecipeRunSubmitted RecipeRunStatus = "submitted"
+	RecipeRunRunning   RecipeRunStatus = "running"
+	RecipeRunCompleted RecipeRunStatus = "completed"
+	RecipeRunFailed    RecipeRunStatus = "failed"
+	RecipeRunCanceled  RecipeRunStatus = "canceled"
+	RecipeRunPaused    RecipeRunStatus = "paused"
 )
 
 type RecipeRun struct {
@@ -392,9 +441,9 @@ type StepResult struct {
 	Error         string                 `json:"error,omitempty"`
 	Tokens        int64                  `json:"tokens,omitempty"`
 	CostUSD       float64                `json:"cost_usd,omitempty"`
-	GateStatus    string                 `json:"gate_status,omitempty"`    // waiting, approved, rejected
+	GateStatus    string                 `json:"gate_status,omitempty"` // waiting, approved, rejected
 	NotifyResults []NotifyResult         `json:"notify_results,omitempty"`
-	BranchTaken   string                 `json:"branch_taken,omitempty"`  // which branch condition matched
+	BranchTaken   string                 `json:"branch_taken,omitempty"` // which branch condition matched
 }
 
 type NotifyResult struct {
@@ -426,10 +475,10 @@ type MCPTool struct {
 type RoutingStrategy string
 
 const (
-	RoutingFallback        RoutingStrategy = "fallback"
-	RoutingCostOptimized   RoutingStrategy = "cost-optimized"
+	RoutingFallback         RoutingStrategy = "fallback"
+	RoutingCostOptimized    RoutingStrategy = "cost-optimized"
 	RoutingLatencyOptimized RoutingStrategy = "latency-optimized"
-	RoutingRoundRobin      RoutingStrategy = "round-robin"
+	RoutingRoundRobin       RoutingStrategy = "round-robin"
 )
 
 type RouteRequest struct {
@@ -442,12 +491,12 @@ type RouteRequest struct {
 	// ── Model Parameters (R8) ───────────────────────────────
 	// These fields let callers control model behavior. Drivers map them
 	// to provider-specific request fields using the catalog data.
-	Temperature    *float64         `json:"temperature,omitempty"`
-	MaxTokens      *int             `json:"max_tokens,omitempty"`
-	TopP           *float64         `json:"top_p,omitempty"`
-	StopSequences  []string         `json:"stop,omitempty"`
-	ResponseFormat *ResponseFormat  `json:"response_format,omitempty"`
-	Stream         bool             `json:"stream,omitempty"`
+	Temperature    *float64        `json:"temperature,omitempty"`
+	MaxTokens      *int            `json:"max_tokens,omitempty"`
+	TopP           *float64        `json:"top_p,omitempty"`
+	StopSequences  []string        `json:"stop,omitempty"`
+	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+	Stream         bool            `json:"stream,omitempty"`
 
 	// ── Tool Calling (R8) ────────────────────────────────────
 	Tools      []ToolDefinition `json:"tools,omitempty"`
@@ -492,7 +541,7 @@ type ToolCallResult struct {
 
 // ContentPart represents one piece of a multi-part message (text, image, tool_use, tool_result).
 type ContentPart struct {
-	Type       string                 `json:"type"`                   // "text", "image_url", "tool_use", "tool_result"
+	Type       string                 `json:"type"` // "text", "image_url", "tool_use", "tool_result"
 	Text       string                 `json:"text,omitempty"`
 	ImageURL   *ImageURL              `json:"image_url,omitempty"`    // for type=image_url
 	ToolUseID  string                 `json:"tool_use_id,omitempty"`  // for type=tool_result
@@ -515,21 +564,21 @@ type ChatMessage struct {
 	// When ContentParts is set, Content may be empty. Drivers use ContentParts
 	// for multi-modal messages (text + images) and tool call/results.
 	ContentParts []ContentPart    `json:"content_parts,omitempty"`
-	ToolCalls    []ToolCallResult `json:"tool_calls,omitempty"`    // assistant messages with tool calls
-	ToolCallID   string           `json:"tool_call_id,omitempty"`  // tool result messages
-	Name         string           `json:"name,omitempty"`          // function name for tool messages
+	ToolCalls    []ToolCallResult `json:"tool_calls,omitempty"`   // assistant messages with tool calls
+	ToolCallID   string           `json:"tool_call_id,omitempty"` // tool result messages
+	Name         string           `json:"name,omitempty"`         // function name for tool messages
 }
 
 type RouteResponse struct {
-	ID             string           `json:"id"`
-	Provider       string           `json:"provider"`
-	Model          string           `json:"model"`
-	Strategy       RoutingStrategy  `json:"strategy"`
-	Content        string           `json:"content"`
-	ThinkingBlocks []ThinkingBlock  `json:"thinking_blocks,omitempty"`
-	Usage          TokenUsage       `json:"usage"`
-	LatencyMs      int64            `json:"latency_ms"`
-	Cached         bool             `json:"cached"`
+	ID             string          `json:"id"`
+	Provider       string          `json:"provider"`
+	Model          string          `json:"model"`
+	Strategy       RoutingStrategy `json:"strategy"`
+	Content        string          `json:"content"`
+	ThinkingBlocks []ThinkingBlock `json:"thinking_blocks,omitempty"`
+	Usage          TokenUsage      `json:"usage"`
+	LatencyMs      int64           `json:"latency_ms"`
+	Cached         bool            `json:"cached"`
 
 	// ── Enriched Response (R8) ───────────────────────────────
 	FinishReason string           `json:"finish_reason,omitempty"` // "stop", "tool_calls", "length", "content_filter"
@@ -546,12 +595,12 @@ type TokenUsage struct {
 }
 
 type CostSummary struct {
-	TotalCostUSD  float64            `json:"total_cost_usd"`
-	TotalTokens   int64              `json:"total_tokens"`
-	Period        string             `json:"period"`
-	ByAgent       map[string]float64 `json:"by_agent"`
-	ByModel       map[string]float64 `json:"by_model"`
-	ByProvider    map[string]float64 `json:"by_provider"`
+	TotalCostUSD float64            `json:"total_cost_usd"`
+	TotalTokens  int64              `json:"total_tokens"`
+	Period       string             `json:"period"`
+	ByAgent      map[string]float64 `json:"by_agent"`
+	ByModel      map[string]float64 `json:"by_model"`
+	ByProvider   map[string]float64 `json:"by_provider"`
 }
 
 // ── MCP Protocol Types ───────────────────────────────────────
@@ -622,24 +671,24 @@ const (
 )
 
 type ValidationIssue struct {
-	Severity    ValidationSeverity `json:"severity"`
-	Category    string             `json:"category"`    // injection, structure, compliance, security
-	Message     string             `json:"message"`
-	Line        int                `json:"line,omitempty"`
-	Position    int                `json:"position,omitempty"`
-	Suggestion  string             `json:"suggestion,omitempty"` // suggested fix
+	Severity   ValidationSeverity `json:"severity"`
+	Category   string             `json:"category"` // injection, structure, compliance, security
+	Message    string             `json:"message"`
+	Line       int                `json:"line,omitempty"`
+	Position   int                `json:"position,omitempty"`
+	Suggestion string             `json:"suggestion,omitempty"` // suggested fix
 }
 
 type ValidationReport struct {
-	PromptName   string            `json:"prompt_name"`
-	Version      int               `json:"version"`
-	Score        int               `json:"score"`         // 0-100 security/quality score
-	Issues       []ValidationIssue `json:"issues"`
-	TokenCount   int               `json:"token_count,omitempty"`
-	ModelCompat  map[string]bool   `json:"model_compat,omitempty"` // model -> compatible
-	LLMAnalysis  string            `json:"llm_analysis,omitempty"` // Pro: LLM-as-judge summary
-	ValidatedAt  time.Time         `json:"validated_at"`
-	ValidatedBy  string            `json:"validated_by"` // "community" or "pro"
+	PromptName  string            `json:"prompt_name"`
+	Version     int               `json:"version"`
+	Score       int               `json:"score"` // 0-100 security/quality score
+	Issues      []ValidationIssue `json:"issues"`
+	TokenCount  int               `json:"token_count,omitempty"`
+	ModelCompat map[string]bool   `json:"model_compat,omitempty"` // model -> compatible
+	LLMAnalysis string            `json:"llm_analysis,omitempty"` // Pro: LLM-as-judge summary
+	ValidatedAt time.Time         `json:"validated_at"`
+	ValidatedBy string            `json:"validated_by"` // "community" or "pro"
 }
 
 // ── Kitchen Settings ─────────────────────────────────────────
@@ -647,76 +696,76 @@ type ValidationReport struct {
 // KitchenSettings stores per-kitchen configuration including API keys
 // for validation services, LLM-based checks, and compliance rules.
 type KitchenSettings struct {
-	KitchenID            string            `json:"kitchen_id" db:"kitchen_id"`
+	KitchenID string `json:"kitchen_id" db:"kitchen_id"`
 
 	// Validation LLM — the model used for LLM-as-judge prompt checks (Pro)
-	ValidationProvider   string            `json:"validation_provider,omitempty"`   // e.g. "openai", "anthropic"
-	ValidationModel      string            `json:"validation_model,omitempty"`      // e.g. "gpt-4o-mini"
-	ValidationAPIKey     string            `json:"validation_api_key,omitempty"`    // API key for validation LLM
-	ValidationEndpoint   string            `json:"validation_endpoint,omitempty"`   // custom endpoint (Azure OpenAI, etc.)
+	ValidationProvider string `json:"validation_provider,omitempty"` // e.g. "openai", "anthropic"
+	ValidationModel    string `json:"validation_model,omitempty"`    // e.g. "gpt-4o-mini"
+	ValidationAPIKey   string `json:"validation_api_key,omitempty"`  // API key for validation LLM
+	ValidationEndpoint string `json:"validation_endpoint,omitempty"` // custom endpoint (Azure OpenAI, etc.)
 
 	// Compliance deny-list — custom blocked phrases/patterns
-	DenyPatterns         []string          `json:"deny_patterns,omitempty"`
+	DenyPatterns []string `json:"deny_patterns,omitempty"`
 
 	// Max template size in characters (0 = unlimited)
-	MaxTemplateSize      int               `json:"max_template_size,omitempty"`
+	MaxTemplateSize int `json:"max_template_size,omitempty"`
 
 	// Auto-validate prompts on create/update
-	AutoValidate         bool              `json:"auto_validate"`
+	AutoValidate bool `json:"auto_validate"`
 
 	// Require approval for prompts with validation errors (Pro)
-	RequireApproval      bool              `json:"require_approval,omitempty"`
+	RequireApproval bool `json:"require_approval,omitempty"`
 
 	// Require thinking/reasoning audit on all LLM calls (Pro)
 	// When enabled, Anthropic extended thinking and OpenAI reasoning are forced,
 	// and responses without thinking blocks are flagged for compliance review.
-	RequireThinkingAudit bool              `json:"require_thinking_audit,omitempty"`
+	RequireThinkingAudit bool `json:"require_thinking_audit,omitempty"`
 
 	// Retention overrides — per-kitchen override for trace and audit retention.
 	// 0 = use the plan default. Values are in days.
-	MaxOutputRetentionDays int             `json:"max_output_retention_days,omitempty"`
-	MaxAuditRetentionDays  int             `json:"max_audit_retention_days,omitempty"`
+	MaxOutputRetentionDays int `json:"max_output_retention_days,omitempty"`
+	MaxAuditRetentionDays  int `json:"max_audit_retention_days,omitempty"`
 
 	// Archive policy — controls what happens to expired data.
 	// nil = use default (purge-only for community, archive-and-purge for pro).
 	ArchivePolicy *ArchivePolicy `json:"archive_policy,omitempty"`
 
 	// Custom metadata
-	Metadata             map[string]string `json:"metadata,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
 
-	UpdatedAt            time.Time         `json:"updated_at" db:"updated_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // ── Agent Config (Resolved Ingredients) ──────────────────────
 
 // ResolvedIngredients is the output of ingredient resolution at bake/invoke time.
 type ResolvedIngredients struct {
-	Model       *ResolvedModel        `json:"model,omitempty"`
-	Tools       []ResolvedTool        `json:"tools,omitempty"`
-	Prompt      *ResolvedPrompt       `json:"prompt,omitempty"`
-	Data        []ResolvedData        `json:"data,omitempty"`
-	Embeddings  []ResolvedEmbedding   `json:"embeddings,omitempty"`
+	Model        *ResolvedModel        `json:"model,omitempty"`
+	Tools        []ResolvedTool        `json:"tools,omitempty"`
+	Prompt       *ResolvedPrompt       `json:"prompt,omitempty"`
+	Data         []ResolvedData        `json:"data,omitempty"`
+	Embeddings   []ResolvedEmbedding   `json:"embeddings,omitempty"`
 	VectorStores []ResolvedVectorStore `json:"vector_stores,omitempty"`
-	Retrievers  []ResolvedRetriever   `json:"retrievers,omitempty"`
+	Retrievers   []ResolvedRetriever   `json:"retrievers,omitempty"`
 }
 
 type ResolvedModel struct {
-	Provider    string                 `json:"provider"`
-	Kind        string                 `json:"kind"`
-	Model       string                 `json:"model"`
-	Endpoint    string                 `json:"endpoint"`
-	APIKey      string                 `json:"api_key"`
-	Config      map[string]interface{} `json:"config,omitempty"`
+	Provider string                 `json:"provider"`
+	Kind     string                 `json:"kind"`
+	Model    string                 `json:"model"`
+	Endpoint string                 `json:"endpoint"`
+	APIKey   string                 `json:"api_key"`
+	Config   map[string]interface{} `json:"config,omitempty"`
 }
 
 type ResolvedTool struct {
-	Name        string                 `json:"name"`
-	Endpoint    string                 `json:"endpoint"`
-	Transport   string                 `json:"transport"`
-	Schema      map[string]interface{} `json:"schema,omitempty"`
-	Version     string                 `json:"version,omitempty"`      // pinned at bake time
-	SchemaHash  string                 `json:"schema_hash,omitempty"` // SHA-256 of schema at bake time
-	BakedAt     time.Time              `json:"baked_at,omitempty"`    // when this tool was resolved
+	Name       string                 `json:"name"`
+	Endpoint   string                 `json:"endpoint"`
+	Transport  string                 `json:"transport"`
+	Schema     map[string]interface{} `json:"schema,omitempty"`
+	Version    string                 `json:"version,omitempty"`     // pinned at bake time
+	SchemaHash string                 `json:"schema_hash,omitempty"` // SHA-256 of schema at bake time
+	BakedAt    time.Time              `json:"baked_at,omitempty"`    // when this tool was resolved
 }
 
 type ResolvedPrompt struct {
@@ -727,8 +776,8 @@ type ResolvedPrompt struct {
 }
 
 type ResolvedData struct {
-	Name   string `json:"name"`
-	URI    string `json:"uri"`
+	Name   string                 `json:"name"`
+	URI    string                 `json:"uri"`
 	Config map[string]interface{} `json:"config,omitempty"`
 }
 
@@ -749,13 +798,13 @@ type VectorStoreBackend string
 
 const (
 	VectorStoreEmbedded   VectorStoreBackend = "embedded"   // in-memory brute-force (OSS default)
-	VectorStorePGVector   VectorStoreBackend = "pgvector"    // user-provided PostgreSQL + pgvector
-	VectorStorePinecone   VectorStoreBackend = "pinecone"    // Pro
-	VectorStoreQdrant     VectorStoreBackend = "qdrant"      // Pro
-	VectorStoreCosmosDB   VectorStoreBackend = "cosmosdb"    // Pro
-	VectorStoreChroma     VectorStoreBackend = "chroma"      // OSS
-	VectorStoreSnowflake  VectorStoreBackend = "snowflake"   // Pro (Cortex Search)
-	VectorStoreDatabricks VectorStoreBackend = "databricks"  // Pro (Vector Search)
+	VectorStorePGVector   VectorStoreBackend = "pgvector"   // user-provided PostgreSQL + pgvector
+	VectorStorePinecone   VectorStoreBackend = "pinecone"   // Pro
+	VectorStoreQdrant     VectorStoreBackend = "qdrant"     // Pro
+	VectorStoreCosmosDB   VectorStoreBackend = "cosmosdb"   // Pro
+	VectorStoreChroma     VectorStoreBackend = "chroma"     // OSS
+	VectorStoreSnowflake  VectorStoreBackend = "snowflake"  // Pro (Cortex Search)
+	VectorStoreDatabricks VectorStoreBackend = "databricks" // Pro (Vector Search)
 )
 
 // ResolvedVectorStore is the output of resolving a "vectorstore" ingredient.
@@ -764,7 +813,7 @@ type ResolvedVectorStore struct {
 	Index      string                 `json:"index"`               // index/collection name
 	Namespace  string                 `json:"namespace,omitempty"` // optional sub-partition
 	Dimensions int                    `json:"dimensions"`
-	Config     map[string]interface{} `json:"config,omitempty"`    // backend-specific config
+	Config     map[string]interface{} `json:"config,omitempty"` // backend-specific config
 }
 
 // ResolvedRetriever is the output of resolving a "retriever" ingredient.
@@ -792,13 +841,13 @@ const (
 
 // RAGQueryRequest is the input to a RAG query endpoint.
 type RAGQueryRequest struct {
-	Kitchen     string      `json:"kitchen"`
-	Question    string      `json:"question"`
-	Strategy    RAGStrategy `json:"strategy,omitempty"`     // default: naive
-	TopK        int         `json:"top_k,omitempty"`        // default: 5
-	MinScore    float64     `json:"min_score,omitempty"`    // default: 0.0
-	Namespace   string      `json:"namespace,omitempty"`    // optional partition filter
-	Filter      map[string]string `json:"filter,omitempty"` // metadata filters
+	Kitchen   string            `json:"kitchen"`
+	Question  string            `json:"question"`
+	Strategy  RAGStrategy       `json:"strategy,omitempty"`  // default: naive
+	TopK      int               `json:"top_k,omitempty"`     // default: 5
+	MinScore  float64           `json:"min_score,omitempty"` // default: 0.0
+	Namespace string            `json:"namespace,omitempty"` // optional partition filter
+	Filter    map[string]string `json:"filter,omitempty"`    // metadata filters
 }
 
 // RAGQueryResult is the output of a RAG query.
@@ -869,19 +918,19 @@ const (
 
 // DataConnectorConfig holds configuration for a data lake connector.
 type DataConnectorConfig struct {
-	ID              string                 `json:"id"`
-	Name            string                 `json:"name"`
-	Kind            DataConnectorKind      `json:"kind"`
-	Kitchen         string                 `json:"kitchen"`
-	ConnectionConfig map[string]interface{} `json:"connection_config"`  // host, warehouse, database, etc.
-	Credentials     map[string]string      `json:"credentials,omitempty"` // encrypted at rest in PG
-	Query           string                 `json:"query,omitempty"`       // SQL query or table name
-	RefreshInterval string                 `json:"refresh_interval,omitempty"` // cron expression
-	Active          bool                   `json:"active"`
-	LastSyncAt      *time.Time             `json:"last_sync_at,omitempty"`
-	LastSyncError   string                 `json:"last_sync_error,omitempty"`
-	CreatedAt       time.Time              `json:"created_at"`
-	UpdatedAt       time.Time              `json:"updated_at"`
+	ID               string                 `json:"id"`
+	Name             string                 `json:"name"`
+	Kind             DataConnectorKind      `json:"kind"`
+	Kitchen          string                 `json:"kitchen"`
+	ConnectionConfig map[string]interface{} `json:"connection_config"`          // host, warehouse, database, etc.
+	Credentials      map[string]string      `json:"credentials,omitempty"`      // encrypted at rest in PG
+	Query            string                 `json:"query,omitempty"`            // SQL query or table name
+	RefreshInterval  string                 `json:"refresh_interval,omitempty"` // cron expression
+	Active           bool                   `json:"active"`
+	LastSyncAt       *time.Time             `json:"last_sync_at,omitempty"`
+	LastSyncError    string                 `json:"last_sync_error,omitempty"`
+	CreatedAt        time.Time              `json:"created_at"`
+	UpdatedAt        time.Time              `json:"updated_at"`
 }
 
 // AgentConfig is the full resolved configuration returned by GET /agents/{name}/config.
@@ -894,12 +943,12 @@ type AgentConfig struct {
 
 // StreamChunk is a single token/event from a streaming model response.
 type StreamChunk struct {
-	Content         string     `json:"content,omitempty"`           // text content token
-	ThinkingContent string     `json:"thinking_content,omitempty"`  // thinking/reasoning token
-	ToolCall        *ToolCallChunk `json:"tool_call,omitempty"`     // partial tool call
-	Done            bool       `json:"done"`                        // stream complete
-	Error           string     `json:"error,omitempty"`             // stream error
-	Usage           *TokenUsage `json:"usage,omitempty"`            // final usage (on done)
+	Content         string         `json:"content,omitempty"`          // text content token
+	ThinkingContent string         `json:"thinking_content,omitempty"` // thinking/reasoning token
+	ToolCall        *ToolCallChunk `json:"tool_call,omitempty"`        // partial tool call
+	Done            bool           `json:"done"`                       // stream complete
+	Error           string         `json:"error,omitempty"`            // stream error
+	Usage           *TokenUsage    `json:"usage,omitempty"`            // final usage (on done)
 }
 
 // ToolCallChunk is a partial tool call from a streaming response.
@@ -959,11 +1008,11 @@ type AuditFilter struct {
 // Durable — survives server restarts. Required for compliance audit trails.
 type ApprovalRecord struct {
 	ID              string                 `json:"id" db:"id"`
-	GateKey         string                 `json:"gate_key" db:"gate_key"`             // runID:stepName
+	GateKey         string                 `json:"gate_key" db:"gate_key"` // runID:stepName
 	RunID           string                 `json:"run_id" db:"run_id"`
 	StepName        string                 `json:"step_name" db:"step_name"`
 	Kitchen         string                 `json:"kitchen" db:"kitchen"`
-	Status          string                 `json:"status" db:"status"`                 // waiting, approved, rejected, expired
+	Status          string                 `json:"status" db:"status"` // waiting, approved, rejected, expired
 	ApproverID      string                 `json:"approver_id,omitempty" db:"approver_id"`
 	ApproverEmail   string                 `json:"approver_email,omitempty" db:"approver_email"`
 	ApproverChannel string                 `json:"approver_channel,omitempty" db:"approver_channel"` // api, slack, teams, email
@@ -990,17 +1039,17 @@ const (
 
 // NotificationChannel represents a configured notification endpoint.
 type NotificationChannel struct {
-	ID          string                 `json:"id" db:"id"`
-	Name        string                 `json:"name" db:"name"`
-	Kind        ChannelKind            `json:"kind" db:"kind"`
-	Kitchen     string                 `json:"kitchen" db:"kitchen"`
-	URL         string                 `json:"url,omitempty" db:"url"`                 // webhook/slack/teams/discord URL
-	Secret      string                 `json:"secret,omitempty" db:"secret"`           // HMAC signing secret (webhook)
-	Config      map[string]interface{} `json:"config,omitempty"`                       // kind-specific config
-	Events      []string               `json:"events"`                                 // events to subscribe to
-	Active      bool                   `json:"active" db:"active"`
-	CreatedAt   time.Time              `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time              `json:"updated_at" db:"updated_at"`
+	ID        string                 `json:"id" db:"id"`
+	Name      string                 `json:"name" db:"name"`
+	Kind      ChannelKind            `json:"kind" db:"kind"`
+	Kitchen   string                 `json:"kitchen" db:"kitchen"`
+	URL       string                 `json:"url,omitempty" db:"url"`       // webhook/slack/teams/discord URL
+	Secret    string                 `json:"secret,omitempty" db:"secret"` // HMAC signing secret (webhook)
+	Config    map[string]interface{} `json:"config,omitempty"`             // kind-specific config
+	Events    []string               `json:"events"`                       // events to subscribe to
+	Active    bool                   `json:"active" db:"active"`
+	CreatedAt time.Time              `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time              `json:"updated_at" db:"updated_at"`
 }
 
 // ── Archive ──────────────────────────────────────────────────
@@ -1051,18 +1100,18 @@ type ArchivePolicy struct {
 // ArchiveRecord tracks a completed archive operation.
 // These records form the compliance audit trail for data lifecycle management.
 type ArchiveRecord struct {
-	ID          string      `json:"id" db:"id"`
-	Kitchen     string      `json:"kitchen" db:"kitchen"`
-	DataKind    string      `json:"data_kind" db:"data_kind"` // "traces" or "audit_events"
-	RecordCount int         `json:"record_count" db:"record_count"`
-	Backend     string      `json:"backend" db:"backend"`       // driver kind
-	URI         string      `json:"uri" db:"uri"`               // storage path/URL
-	SizeBytes   int64       `json:"size_bytes" db:"size_bytes"` // archive size
-	Compressed  bool        `json:"compressed" db:"compressed"`
-	Encrypted   bool        `json:"encrypted" db:"encrypted"`
-	OldestItem  time.Time   `json:"oldest_item" db:"oldest_item"`
-	NewestItem  time.Time   `json:"newest_item" db:"newest_item"`
-	CreatedAt   time.Time   `json:"created_at" db:"created_at"`
+	ID          string    `json:"id" db:"id"`
+	Kitchen     string    `json:"kitchen" db:"kitchen"`
+	DataKind    string    `json:"data_kind" db:"data_kind"` // "traces" or "audit_events"
+	RecordCount int       `json:"record_count" db:"record_count"`
+	Backend     string    `json:"backend" db:"backend"`       // driver kind
+	URI         string    `json:"uri" db:"uri"`               // storage path/URL
+	SizeBytes   int64     `json:"size_bytes" db:"size_bytes"` // archive size
+	Compressed  bool      `json:"compressed" db:"compressed"`
+	Encrypted   bool      `json:"encrypted" db:"encrypted"`
+	OldestItem  time.Time `json:"oldest_item" db:"oldest_item"`
+	NewestItem  time.Time `json:"newest_item" db:"newest_item"`
+	CreatedAt   time.Time `json:"created_at" db:"created_at"`
 }
 
 // ── Extended PlanLimits ──────────────────────────────────────
@@ -1073,8 +1122,8 @@ type ArchiveRecord struct {
 type ExtendedPlanLimits struct {
 	MaxOutputRetentionDays  int  `json:"max_output_retention_days"`
 	MaxAuditRetentionDays   int  `json:"max_audit_retention_days"`
-	RequireThinkingAudit    bool `json:"require_thinking_audit"`    // force thinking mode, flag missing
-	MaxGateWaitMinutes      int  `json:"max_gate_wait_minutes"`    // SLA for human gate resolution
+	RequireThinkingAudit    bool `json:"require_thinking_audit"` // force thinking mode, flag missing
+	MaxGateWaitMinutes      int  `json:"max_gate_wait_minutes"`  // SLA for human gate resolution
 	MaxNotificationChannels int  `json:"max_notification_channels"`
 }
 
@@ -1082,7 +1131,7 @@ type ExtendedPlanLimits struct {
 
 // TraceAggregation holds computed metrics over a set of traces.
 type TraceAggregation struct {
-	Key             string  `json:"key"`              // agent name, provider name, model name
+	Key             string  `json:"key"` // agent name, provider name, model name
 	InvocationCount int64   `json:"invocation_count"`
 	ErrorCount      int64   `json:"error_count"`
 	ErrorRate       float64 `json:"error_rate"`
@@ -1096,7 +1145,7 @@ type TraceAggregation struct {
 
 // DailyCost holds cost data for a single day.
 type DailyCost struct {
-	Date       string             `json:"date"`        // YYYY-MM-DD
+	Date       string             `json:"date"` // YYYY-MM-DD
 	TotalCost  float64            `json:"total_cost"`
 	ByAgent    map[string]float64 `json:"by_agent,omitempty"`
 	ByModel    map[string]float64 `json:"by_model,omitempty"`
@@ -1107,23 +1156,23 @@ type DailyCost struct {
 
 // PicoClawInstance represents a registered PicoClaw device (IoT edge agent).
 type PicoClawInstance struct {
-	ID           string                 `json:"id" db:"id"`
-	Name         string                 `json:"name" db:"name"`
-	Description  string                 `json:"description,omitempty" db:"description"`
-	Kitchen      string                 `json:"kitchen" db:"kitchen"`
-	Endpoint     string                 `json:"endpoint" db:"endpoint"` // http://device-ip:port
-	AgentName    string                 `json:"agent_name,omitempty" db:"agent_name"` // linked AgentOven agent
-	DeviceType   string                 `json:"device_type,omitempty" db:"device_type"` // "risc-v", "arm", "x86"
-	Platform     string                 `json:"platform,omitempty" db:"platform"` // "linux", "android"
-	Version      string                 `json:"version,omitempty" db:"version"` // PicoClaw version
-	Status       PicoClawStatus         `json:"status" db:"status"`
-	Skills       []string               `json:"skills,omitempty"`
-	Gateways     []string               `json:"gateways,omitempty"` // active chat gateways: ["telegram", "discord"]
-	Heartbeat    HeartbeatConfig        `json:"heartbeat,omitempty"`
-	LastSeen     *time.Time             `json:"last_seen,omitempty" db:"last_seen"`
-	Metadata     map[string]interface{} `json:"metadata,omitempty"`
-	CreatedAt    time.Time              `json:"created_at" db:"created_at"`
-	UpdatedAt    time.Time              `json:"updated_at" db:"updated_at"`
+	ID          string                 `json:"id" db:"id"`
+	Name        string                 `json:"name" db:"name"`
+	Description string                 `json:"description,omitempty" db:"description"`
+	Kitchen     string                 `json:"kitchen" db:"kitchen"`
+	Endpoint    string                 `json:"endpoint" db:"endpoint"`                 // http://device-ip:port
+	AgentName   string                 `json:"agent_name,omitempty" db:"agent_name"`   // linked AgentOven agent
+	DeviceType  string                 `json:"device_type,omitempty" db:"device_type"` // "risc-v", "arm", "x86"
+	Platform    string                 `json:"platform,omitempty" db:"platform"`       // "linux", "android"
+	Version     string                 `json:"version,omitempty" db:"version"`         // PicoClaw version
+	Status      PicoClawStatus         `json:"status" db:"status"`
+	Skills      []string               `json:"skills,omitempty"`
+	Gateways    []string               `json:"gateways,omitempty"` // active chat gateways: ["telegram", "discord"]
+	Heartbeat   HeartbeatConfig        `json:"heartbeat,omitempty"`
+	LastSeen    *time.Time             `json:"last_seen,omitempty" db:"last_seen"`
+	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+	CreatedAt   time.Time              `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time              `json:"updated_at" db:"updated_at"`
 }
 
 // PicoClawStatus tracks the health state of a PicoClaw instance.
@@ -1172,27 +1221,27 @@ const (
 // ChatGateway represents a chat platform gateway that bridges AgentOven
 // agents to messaging platforms (inspired by PicoClaw's gateway mode).
 type ChatGateway struct {
-	ID          string                 `json:"id" db:"id"`
-	Name        string                 `json:"name" db:"name"`
-	Kind        ChatGatewayKind        `json:"kind" db:"kind"`
-	Kitchen     string                 `json:"kitchen" db:"kitchen"`
-	AgentName   string                 `json:"agent_name" db:"agent_name"` // agent to route messages to
-	Active      bool                   `json:"active" db:"active"`
-	Config      map[string]interface{} `json:"config,omitempty"` // platform-specific: bot_token, webhook_url, etc.
-	CreatedAt   time.Time              `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time              `json:"updated_at" db:"updated_at"`
+	ID        string                 `json:"id" db:"id"`
+	Name      string                 `json:"name" db:"name"`
+	Kind      ChatGatewayKind        `json:"kind" db:"kind"`
+	Kitchen   string                 `json:"kitchen" db:"kitchen"`
+	AgentName string                 `json:"agent_name" db:"agent_name"` // agent to route messages to
+	Active    bool                   `json:"active" db:"active"`
+	Config    map[string]interface{} `json:"config,omitempty"` // platform-specific: bot_token, webhook_url, etc.
+	CreatedAt time.Time              `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time              `json:"updated_at" db:"updated_at"`
 }
 
 // GatewayMessage represents an inbound or outbound message from a chat platform.
 type GatewayMessage struct {
-	GatewayID   string    `json:"gateway_id"`
-	Platform    string    `json:"platform"`    // "telegram", "discord", etc.
-	ChannelID   string    `json:"channel_id"`  // chat/room/channel identifier
-	UserID      string    `json:"user_id"`
-	UserName    string    `json:"user_name,omitempty"`
-	Text        string    `json:"text"`
-	Direction   string    `json:"direction"`   // "inbound" or "outbound"
-	Timestamp   time.Time `json:"timestamp"`
+	GatewayID string    `json:"gateway_id"`
+	Platform  string    `json:"platform"`   // "telegram", "discord", etc.
+	ChannelID string    `json:"channel_id"` // chat/room/channel identifier
+	UserID    string    `json:"user_id"`
+	UserName  string    `json:"user_name,omitempty"`
+	Text      string    `json:"text"`
+	Direction string    `json:"direction"` // "inbound" or "outbound"
+	Timestamp time.Time `json:"timestamp"`
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1202,16 +1251,16 @@ type GatewayMessage struct {
 // AgentCard is the A2A-protocol agent card that describes an agent's capabilities,
 // endpoints, and supported interaction patterns to external callers.
 type AgentCard struct {
-	Name         string           `json:"name"`
-	Description  string           `json:"description,omitempty"`
-	URL          string           `json:"url"`                        // A2A endpoint URL
-	Version      string           `json:"version,omitempty"`
-	Provider     AgentCardProvider `json:"provider,omitempty"`
-	Capabilities AgentCapabilities `json:"capabilities"`
-	Skills       []AgentSkill     `json:"skills,omitempty"`
-	InputModes   []string         `json:"defaultInputModes,omitempty"`   // "text", "image", "audio", "video"
-	OutputModes  []string         `json:"defaultOutputModes,omitempty"`  // "text", "image", "audio"
-	Authentication *AgentAuth     `json:"authentication,omitempty"`
+	Name           string            `json:"name"`
+	Description    string            `json:"description,omitempty"`
+	URL            string            `json:"url"` // A2A endpoint URL
+	Version        string            `json:"version,omitempty"`
+	Provider       AgentCardProvider `json:"provider,omitempty"`
+	Capabilities   AgentCapabilities `json:"capabilities"`
+	Skills         []AgentSkill      `json:"skills,omitempty"`
+	InputModes     []string          `json:"defaultInputModes,omitempty"`  // "text", "image", "audio", "video"
+	OutputModes    []string          `json:"defaultOutputModes,omitempty"` // "text", "image", "audio"
+	Authentication *AgentAuth        `json:"authentication,omitempty"`
 }
 
 // AgentCardProvider identifies who built/operates the agent.
@@ -1222,15 +1271,15 @@ type AgentCardProvider struct {
 
 // AgentCapabilities describes what the agent supports.
 type AgentCapabilities struct {
-	Streaming        bool `json:"streaming,omitempty"`
-	PushNotifications bool `json:"pushNotifications,omitempty"`
+	Streaming              bool `json:"streaming,omitempty"`
+	PushNotifications      bool `json:"pushNotifications,omitempty"`
 	StateTransitionHistory bool `json:"stateTransitionHistory,omitempty"`
 	// R8 additions for session/turn management
-	Sessions         bool `json:"sessions,omitempty"`          // supports multi-turn sessions
-	HumanInput       bool `json:"humanInput,omitempty"`        // can request human input mid-execution
-	ToolCalling      bool `json:"toolCalling,omitempty"`       // supports tool-use
-	Vision           bool `json:"vision,omitempty"`            // supports image inputs
-	StructuredOutput bool `json:"structuredOutput,omitempty"`  // supports JSON schema output
+	Sessions         bool `json:"sessions,omitempty"`         // supports multi-turn sessions
+	HumanInput       bool `json:"humanInput,omitempty"`       // can request human input mid-execution
+	ToolCalling      bool `json:"toolCalling,omitempty"`      // supports tool-use
+	Vision           bool `json:"vision,omitempty"`           // supports image inputs
+	StructuredOutput bool `json:"structuredOutput,omitempty"` // supports JSON schema output
 }
 
 // AgentSkill describes one capability the agent offers.
@@ -1253,37 +1302,37 @@ type AgentAuth struct {
 
 // Session represents a multi-turn conversation between a user and an agent.
 type Session struct {
-	ID          string        `json:"id" db:"id"`
-	AgentName   string        `json:"agent_name" db:"agent_name"`
-	Kitchen     string        `json:"kitchen" db:"kitchen"`
-	UserID      string        `json:"user_id,omitempty" db:"user_id"`
-	Status      SessionStatus `json:"status" db:"status"`
-	Messages    []ChatMessage `json:"messages,omitempty"`       // conversation history
+	ID          string                 `json:"id" db:"id"`
+	AgentName   string                 `json:"agent_name" db:"agent_name"`
+	Kitchen     string                 `json:"kitchen" db:"kitchen"`
+	UserID      string                 `json:"user_id,omitempty" db:"user_id"`
+	Status      SessionStatus          `json:"status" db:"status"`
+	Messages    []ChatMessage          `json:"messages,omitempty"` // conversation history
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
-	MaxTurns    int           `json:"max_turns,omitempty" db:"max_turns"`
-	TurnCount   int           `json:"turn_count" db:"turn_count"`
-	TotalTokens int64         `json:"total_tokens" db:"total_tokens"`
-	TotalCost   float64       `json:"total_cost_usd" db:"total_cost_usd"`
-	CreatedAt   time.Time     `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time     `json:"updated_at" db:"updated_at"`
-	ExpiresAt   *time.Time    `json:"expires_at,omitempty" db:"expires_at"`
+	MaxTurns    int                    `json:"max_turns,omitempty" db:"max_turns"`
+	TurnCount   int                    `json:"turn_count" db:"turn_count"`
+	TotalTokens int64                  `json:"total_tokens" db:"total_tokens"`
+	TotalCost   float64                `json:"total_cost_usd" db:"total_cost_usd"`
+	CreatedAt   time.Time              `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time              `json:"updated_at" db:"updated_at"`
+	ExpiresAt   *time.Time             `json:"expires_at,omitempty" db:"expires_at"`
 }
 
 // SessionStatus tracks the lifecycle of a session.
 type SessionStatus string
 
 const (
-	SessionActive     SessionStatus = "active"
-	SessionPaused     SessionStatus = "paused"       // waiting for human input
-	SessionCompleted  SessionStatus = "completed"
-	SessionExpired    SessionStatus = "expired"
+	SessionActive    SessionStatus = "active"
+	SessionPaused    SessionStatus = "paused" // waiting for human input
+	SessionCompleted SessionStatus = "completed"
+	SessionExpired   SessionStatus = "expired"
 )
 
 // SessionMessage is the request body for sending a message to a session.
 type SessionMessage struct {
-	Content      string            `json:"content"`
-	ContentParts []ContentPart     `json:"content_parts,omitempty"` // multi-modal
-	PromptVars   map[string]string `json:"prompt_vars,omitempty"`   // template variables
+	Content      string                 `json:"content"`
+	ContentParts []ContentPart          `json:"content_parts,omitempty"` // multi-modal
+	PromptVars   map[string]string      `json:"prompt_vars,omitempty"`   // template variables
 	Metadata     map[string]interface{} `json:"metadata,omitempty"`
 }
 
@@ -1301,13 +1350,13 @@ type SessionResponse struct {
 
 // HumanInputRequest represents a request for human input during agent execution.
 type HumanInputRequest struct {
-	SessionID string `json:"session_id"`
-	AgentName string `json:"agent_name"`
-	Kitchen   string `json:"kitchen"`
-	Prompt    string `json:"prompt"`     // what the agent is asking the human
-	InputType string `json:"input_type"` // "text", "approval", "choice"
-	Choices   []string `json:"choices,omitempty"` // for input_type=choice
-	Timeout   int    `json:"timeout_secs,omitempty"` // max wait time
+	SessionID   string    `json:"session_id"`
+	AgentName   string    `json:"agent_name"`
+	Kitchen     string    `json:"kitchen"`
+	Prompt      string    `json:"prompt"`                 // what the agent is asking the human
+	InputType   string    `json:"input_type"`             // "text", "approval", "choice"
+	Choices     []string  `json:"choices,omitempty"`      // for input_type=choice
+	Timeout     int       `json:"timeout_secs,omitempty"` // max wait time
 	RequestedAt time.Time `json:"requested_at"`
 }
 
@@ -1318,34 +1367,34 @@ type HumanInputRequest struct {
 // ModelCapability describes the known capabilities and pricing for a model.
 // Populated from the model catalog (LiteLLM enrichment + provider discovery).
 type ModelCapability struct {
-	ModelID          string   `json:"model_id"`                    // canonical ID: "openai/gpt-5-mini"
-	ProviderKind     string   `json:"provider_kind"`               // "openai", "anthropic", "ollama"
-	ModelName        string   `json:"model_name"`                  // provider-specific: "gpt-5-mini"
-	DisplayName      string   `json:"display_name,omitempty"`      // human-friendly name
-	ContextWindow    int      `json:"context_window,omitempty"`    // max input tokens
-	MaxOutputTokens  int      `json:"max_output_tokens,omitempty"` // max output tokens
-	InputCostPer1K   float64  `json:"input_cost_per_1k,omitempty"`
-	OutputCostPer1K  float64  `json:"output_cost_per_1k,omitempty"`
-	SupportsTools    bool     `json:"supports_tools,omitempty"`
-	SupportsVision   bool     `json:"supports_vision,omitempty"`
-	SupportsStreaming bool    `json:"supports_streaming,omitempty"`
-	SupportsThinking bool     `json:"supports_thinking,omitempty"` // extended thinking / reasoning
-	SupportsJSON     bool     `json:"supports_json,omitempty"`     // structured JSON output
-	TokenParamName   string   `json:"token_param_name,omitempty"`  // "max_tokens" or "max_completion_tokens"
-	APIVersion       string   `json:"api_version,omitempty"`       // recommended API version
-	Modalities       []string `json:"modalities,omitempty"`        // ["text", "image", "audio"]
-	DeprecatedAt     string   `json:"deprecated_at,omitempty"`     // ISO date
-	Source           string   `json:"source,omitempty"`            // "catalog", "discovery", "manual"
+	ModelID           string   `json:"model_id"`                    // canonical ID: "openai/gpt-5-mini"
+	ProviderKind      string   `json:"provider_kind"`               // "openai", "anthropic", "ollama"
+	ModelName         string   `json:"model_name"`                  // provider-specific: "gpt-5-mini"
+	DisplayName       string   `json:"display_name,omitempty"`      // human-friendly name
+	ContextWindow     int      `json:"context_window,omitempty"`    // max input tokens
+	MaxOutputTokens   int      `json:"max_output_tokens,omitempty"` // max output tokens
+	InputCostPer1K    float64  `json:"input_cost_per_1k,omitempty"`
+	OutputCostPer1K   float64  `json:"output_cost_per_1k,omitempty"`
+	SupportsTools     bool     `json:"supports_tools,omitempty"`
+	SupportsVision    bool     `json:"supports_vision,omitempty"`
+	SupportsStreaming bool     `json:"supports_streaming,omitempty"`
+	SupportsThinking  bool     `json:"supports_thinking,omitempty"` // extended thinking / reasoning
+	SupportsJSON      bool     `json:"supports_json,omitempty"`     // structured JSON output
+	TokenParamName    string   `json:"token_param_name,omitempty"`  // "max_tokens" or "max_completion_tokens"
+	APIVersion        string   `json:"api_version,omitempty"`       // recommended API version
+	Modalities        []string `json:"modalities,omitempty"`        // ["text", "image", "audio"]
+	DeprecatedAt      string   `json:"deprecated_at,omitempty"`     // ISO date
+	Source            string   `json:"source,omitempty"`            // "catalog", "discovery", "manual"
 }
 
 // DiscoveredModel is a model found by querying a provider's list-models API.
 type DiscoveredModel struct {
-	ID          string            `json:"id"`           // model ID from provider
-	Provider    string            `json:"provider"`     // provider name
-	Kind        string            `json:"kind"`         // provider kind
-	OwnedBy     string            `json:"owned_by,omitempty"`
-	CreatedAt   int64             `json:"created_at,omitempty"` // unix timestamp
-	Metadata    map[string]string `json:"metadata,omitempty"`
+	ID        string            `json:"id"`       // model ID from provider
+	Provider  string            `json:"provider"` // provider name
+	Kind      string            `json:"kind"`     // provider kind
+	OwnedBy   string            `json:"owned_by,omitempty"`
+	CreatedAt int64             `json:"created_at,omitempty"` // unix timestamp
+	Metadata  map[string]string `json:"metadata,omitempty"`
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1356,34 +1405,34 @@ type DiscoveredModel struct {
 // Pro feature: agents and configs are promoted between environments.
 type Environment struct {
 	ID          string                 `json:"id" db:"id"`
-	Name        string                 `json:"name" db:"name"`        // "dev", "staging", "prod"
+	Name        string                 `json:"name" db:"name"` // "dev", "staging", "prod"
 	Kitchen     string                 `json:"kitchen" db:"kitchen"`
 	Description string                 `json:"description,omitempty" db:"description"`
 	IsDefault   bool                   `json:"is_default" db:"is_default"`
-	Config      map[string]interface{} `json:"config,omitempty"`       // env-specific overrides
-	Providers   map[string]string      `json:"providers,omitempty"`    // provider name → env-specific provider name
+	Config      map[string]interface{} `json:"config,omitempty"`    // env-specific overrides
+	Providers   map[string]string      `json:"providers,omitempty"` // provider name → env-specific provider name
 	CreatedAt   time.Time              `json:"created_at" db:"created_at"`
 	UpdatedAt   time.Time              `json:"updated_at" db:"updated_at"`
 }
 
 // PromotionRequest describes promoting an agent from one environment to another.
 type PromotionRequest struct {
-	AgentName     string `json:"agent_name"`
-	FromEnv       string `json:"from_env"`      // "dev"
-	ToEnv         string `json:"to_env"`        // "staging"
-	VersionPin    string `json:"version,omitempty"` // specific version to promote (default: latest)
-	DryRun        bool   `json:"dry_run,omitempty"` // preview without applying
+	AgentName  string `json:"agent_name"`
+	FromEnv    string `json:"from_env"`          // "dev"
+	ToEnv      string `json:"to_env"`            // "staging"
+	VersionPin string `json:"version,omitempty"` // specific version to promote (default: latest)
+	DryRun     bool   `json:"dry_run,omitempty"` // preview without applying
 }
 
 // PromotionResult describes the outcome of a promotion.
 type PromotionResult struct {
-	AgentName   string `json:"agent_name"`
-	FromEnv     string `json:"from_env"`
-	ToEnv       string `json:"to_env"`
-	Version     string `json:"version"`
-	Status      string `json:"status"`  // "promoted", "dry_run", "failed"
-	Diff        string `json:"diff,omitempty"` // human-readable diff of changes
-	Error       string `json:"error,omitempty"`
+	AgentName string `json:"agent_name"`
+	FromEnv   string `json:"from_env"`
+	ToEnv     string `json:"to_env"`
+	Version   string `json:"version"`
+	Status    string `json:"status"`         // "promoted", "dry_run", "failed"
+	Diff      string `json:"diff,omitempty"` // human-readable diff of changes
+	Error     string `json:"error,omitempty"`
 }
 
 // ── Guardrails ──────────────────────────────────────────────
@@ -1416,7 +1465,7 @@ type Guardrail struct {
 	Name      string                 `json:"name,omitempty"`
 	Kind      GuardrailKind          `json:"kind"`
 	Stage     GuardrailStage         `json:"stage"`
-	Config    map[string]interface{} `json:"config,omitempty"`    // kind-specific configuration
+	Config    map[string]interface{} `json:"config,omitempty"` // kind-specific configuration
 	Enabled   bool                   `json:"enabled"`
 	CreatedAt time.Time              `json:"created_at,omitempty"`
 }
@@ -1425,7 +1474,7 @@ type Guardrail struct {
 type GuardrailResult struct {
 	Passed  bool          `json:"passed"`
 	Kind    GuardrailKind `json:"kind"`
-	Stage   string        `json:"stage"`  // "input" or "output"
+	Stage   string        `json:"stage"`             // "input" or "output"
 	Message string        `json:"message,omitempty"` // explanation when blocked
 }
 

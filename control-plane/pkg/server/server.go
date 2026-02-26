@@ -33,6 +33,7 @@ import (
 	grails "github.com/agentoven/agentoven/control-plane/internal/guardrails"
 	"github.com/agentoven/agentoven/control-plane/internal/mcpgw"
 	"github.com/agentoven/agentoven/control-plane/internal/notify"
+	"github.com/agentoven/agentoven/control-plane/internal/process"
 	ragpkg "github.com/agentoven/agentoven/control-plane/internal/rag"
 	"github.com/agentoven/agentoven/control-plane/internal/retention"
 	modelrouter "github.com/agentoven/agentoven/control-plane/internal/router"
@@ -49,11 +50,11 @@ import (
 
 // Config is the public configuration for the control plane server.
 type Config struct {
-	Port            int
-	Version         string
-	OTELEnabled     bool
-	OTELEndpoint    string
-	ServiceName     string
+	Port         int
+	Version      string
+	OTELEnabled  bool
+	OTELEndpoint string
+	ServiceName  string
 }
 
 // Server holds the initialized AgentOven control plane.
@@ -117,6 +118,10 @@ type Server struct {
 	// SessionStore manages multi-turn conversation sessions.
 	// Exposed so Pro can replace with Redis/PostgreSQL-backed store.
 	SessionStore contracts.SessionStore
+
+	// ProcessManager manages agent runtime processes (local/docker/k8s).
+	// Exposed so Pro can customize with custom images, sidecar injection, etc.
+	ProcessManager *process.Manager
 
 	// retentionCancel cancels the retention janitor goroutine.
 	retentionCancel context.CancelFunc
@@ -198,7 +203,8 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 	mr := modelrouter.NewModelRouter(dataStore)
 	gw := mcpgw.NewGateway(dataStore)
 	ns := notify.NewService(dataStore)
-	wf := workflow.NewEngine(dataStore, ns)
+	baseURL := fmt.Sprintf("http://localhost:%d", cfg.Port)
+	wf := workflow.NewEngine(dataStore, ns, baseURL)
 
 	log.Info().Msg("✅ Model Router initialized")
 	log.Info().Msg("✅ MCP Gateway initialized")
@@ -214,8 +220,14 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 	sessStore := sessions.NewMemorySessionStore()
 	log.Info().Msg("✅ Session store initialized (in-memory)")
 
+	// ── Process Manager (Release 8) ─────────────────────────
+	// Manages agent runtime processes (local Python / Docker / K8s).
+	// Agents are spawned at bake time and stopped at cool/retire/delete.
+	pm := process.NewManager()
+	log.Info().Msg("✅ Process manager initialized (local/docker/k8s)")
+
 	// Build handlers + API router
-	h := handlers.New(dataStore, mr, gw, wf, cat, sessStore)
+	h := handlers.New(dataStore, mr, gw, wf, cat, sessStore, pm)
 
 	// ── Guardrails (R9) ────────────────────────────────────
 	// Community guardrail service provides built-in heuristic evaluation.
@@ -374,6 +386,7 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 		AuthChain:           authChain,
 		Catalog:             cat,
 		SessionStore:        sessStore,
+		ProcessManager:      pm,
 		retentionCancel:     retCancel,
 		ShutdownFunc:        shutdown,
 	}, nil
@@ -401,6 +414,13 @@ func seedDefaultKitchen(ctx context.Context, s store.Store) {
 // Shutdown stops all background goroutines (retention janitor, etc.)
 // and flushes telemetry. Should be called on graceful shutdown.
 func (s *Server) Shutdown(ctx context.Context) error {
+	// Stop all running agent processes
+	if s.ProcessManager != nil {
+		if err := s.ProcessManager.StopAll(ctx); err != nil {
+			log.Warn().Err(err).Msg("Error stopping agent processes during shutdown")
+		}
+	}
+
 	if s.retentionCancel != nil {
 		s.retentionCancel()
 	}

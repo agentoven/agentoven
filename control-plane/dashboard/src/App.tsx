@@ -13,6 +13,7 @@ import { VectorStoresPage } from './pages/VectorStores';
 import { RAGPipelinesPage } from './pages/RAGPipelines';
 import { ConnectorsPage } from './pages/Connectors';
 import { CatalogPage } from './pages/Catalog';
+import { PipelineViewPage } from './pages/PipelineView';
 
 function App() {
   return (
@@ -23,6 +24,9 @@ function App() {
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/agents/:name/test" element={<AgentTestPage />} />
           <Route path="/recipes" element={<RecipesPage />} />
+          <Route path="/dishshelf" element={<PipelineViewPage />} />
+          <Route path="/dishshelf/:recipeName" element={<PipelineViewPage />} />
+          <Route path="/dishshelf/:recipeName/runs/:runId" element={<PipelineViewPage />} />
           <Route path="/prompts" element={<PromptsPage />} />
           <Route path="/providers" element={<ProvidersPage />} />
           <Route path="/catalog" element={<CatalogPage />} />

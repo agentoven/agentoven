@@ -41,7 +41,6 @@ func main() {
 		log.Fatal().Err(err).Msg("Failed to initialize server")
 	}
 	defer srv.Store.Close()
-	defer srv.ShutdownFunc(ctx)
 
 	// Start HTTP server
 	httpServer := &http.Server{
@@ -52,7 +51,7 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// Graceful shutdown
+	// Graceful shutdown — stops HTTP, then all agent processes, then flushes telemetry
 	go func() {
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -61,7 +60,14 @@ func main() {
 		log.Info().Msg("🛑 Shutting down gracefully...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
+
+		// Stop accepting new requests
 		httpServer.Shutdown(shutdownCtx)
+
+		// Stop all agent processes + flush telemetry
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Warn().Err(err).Msg("Error during server shutdown")
+		}
 	}()
 
 	log.Info().

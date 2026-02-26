@@ -78,6 +78,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 				r.Post("/rewarm", h.RewarmAgent)
 				r.Post("/test", h.TestAgent)
 				r.Get("/config", h.GetAgentConfig)
+				r.Get("/process", h.GetAgentProcess)
 				r.Post("/invoke", h.InvokeAgent)
 
 				// Agent card (A2A-compatible metadata)
@@ -101,6 +102,9 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 				})
 			})
 		})
+
+		// Processes — running agent processes
+		r.Get("/processes", h.ListProcesses)
 
 		// Recipes (workflows)
 		r.Route("/recipes", func(r chi.Router) {
@@ -289,8 +293,8 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 	lfSecretKey := os.Getenv("LANGFUSE_SECRET_KEY")
 	lfBridge := langfuse.NewBridge(h.Store, lfBaseURL, lfPublicKey, lfSecretKey)
 	r.Route("/langfuse", func(r chi.Router) {
-		r.Post("/ingest", lfBridge.HandleIngest)   // import LangFuse traces
-		r.Post("/export", lfBridge.HandleExport)    // export AgentOven traces
+		r.Post("/ingest", lfBridge.HandleIngest) // import LangFuse traces
+		r.Post("/export", lfBridge.HandleExport) // export AgentOven traces
 	})
 
 	// PicoClaw adapter — IoT agent management, A2A relay, chat gateways, heartbeat
@@ -361,7 +365,7 @@ func parseCORSOrigins() []string {
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{
-		"status": "healthy",
+		"status":  "healthy",
 		"service": "agentoven-control-plane",
 	})
 }

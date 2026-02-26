@@ -12,12 +12,14 @@ import {
   Database,
   Search,
   Plug,
+  GitBranch,
 } from 'lucide-react';
 
 const nav = [
   { to: '/', label: 'Overview', icon: LayoutDashboard },
   { to: '/agents', label: 'Agents', icon: Bot },
   { to: '/recipes', label: 'Recipes', icon: BookOpen },
+  { to: '/dishshelf', label: 'DishShelf', icon: GitBranch },
   { to: '/prompts', label: 'Prompts', icon: FileText },
   { to: '/providers', label: 'Providers', icon: Cpu },
   { to: '/catalog', label: 'Model Catalog', icon: Library },

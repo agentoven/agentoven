@@ -35,6 +35,11 @@ type Engine struct {
 	client   *http.Client
 	notifier *notify.Service
 
+	// baseURL is the control plane's own HTTP origin (e.g. "http://localhost:8080").
+	// The engine routes all A2A and RAG calls through the control plane gateway
+	// so that auth, RBAC, and observability are applied uniformly (ADR-0007).
+	baseURL string
+
 	// Running executions: runID → cancel func
 	runsMu sync.RWMutex
 	runs   map[string]context.CancelFunc
@@ -45,9 +50,15 @@ type Engine struct {
 }
 
 // NewEngine creates a new workflow execution engine.
-func NewEngine(s store.Store, notifier *notify.Service) *Engine {
+// baseURL is the control plane's HTTP origin (e.g. "http://localhost:8080").
+// All agent and RAG calls are routed through the gateway via this URL.
+func NewEngine(s store.Store, notifier *notify.Service, baseURL string) *Engine {
+	if baseURL == "" {
+		baseURL = "http://localhost:8080"
+	}
 	return &Engine{
-		store: s,
+		store:   s,
+		baseURL: baseURL,
 		client: &http.Client{
 			Timeout: 120 * time.Second,
 		},
@@ -420,6 +431,9 @@ func (e *Engine) executeStepOnce(ctx context.Context, run *models.RecipeRun, ste
 		// Fan-in collects outputs from dependencies
 		return e.executeFanIn(step, result, completed, mu)
 
+	case models.StepRAG:
+		return e.executeRAGStep(ctx, run, step, result, completed, mu)
+
 	default:
 		return fmt.Errorf("unknown step kind: %s", step.Kind)
 	}
@@ -475,11 +489,10 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 
 	body, _ := json.Marshal(a2aReq)
 
-	// Determine endpoint
-	endpoint := agent.A2AEndpoint
-	if endpoint == "" {
-		endpoint = fmt.Sprintf("http://localhost:8080/agents/%s/a2a", agentRef)
-	}
+	// ADR-0007: Always route through the control plane gateway using the
+	// stable URL. The gateway handles backend resolution (managed process
+	// vs external endpoint), auth, RBAC, and observability.
+	endpoint := fmt.Sprintf("%s/agents/%s/a2a", e.baseURL, agentRef)
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -504,6 +517,86 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 	}
 
 	result.Output = rpcResp
+	return nil
+}
+
+// executeRAGStep calls the control plane's RAG query endpoint.
+// The step config should contain "strategy", "top_k", "namespace", and
+// optionally "question_from" (the name of a previous step whose output
+// contains the query text). If "question_from" is not set, the recipe
+// input is serialised as the question.
+func (e *Engine) executeRAGStep(ctx context.Context, run *models.RecipeRun, step *models.Step, result *models.StepResult, completed map[string]*models.StepResult, mu *sync.Mutex) error {
+	// Determine the question text
+	question := ""
+	if step.Config != nil {
+		if qf, ok := step.Config["question_from"].(string); ok && qf != "" {
+			// Pull question from a previous step's output
+			mu.Lock()
+			if sr, ok := completed[qf]; ok && sr.Output != nil {
+				if txt, ok := sr.Output["text"].(string); ok {
+					question = txt
+				} else {
+					// Serialise the whole output as the question
+					qBytes, _ := json.Marshal(sr.Output)
+					question = string(qBytes)
+				}
+			}
+			mu.Unlock()
+		}
+	}
+	if question == "" && run.Input != nil {
+		qBytes, _ := json.Marshal(run.Input)
+		question = string(qBytes)
+	}
+	if question == "" {
+		question = "No input provided"
+	}
+
+	// Build RAG query request
+	ragReq := map[string]interface{}{
+		"question": question,
+		"strategy": "naive",
+		"top_k":    3,
+	}
+	if step.Config != nil {
+		if s, ok := step.Config["strategy"].(string); ok && s != "" {
+			ragReq["strategy"] = s
+		}
+		if tk, ok := step.Config["top_k"]; ok {
+			ragReq["top_k"] = tk
+		}
+		if ns, ok := step.Config["namespace"].(string); ok && ns != "" {
+			ragReq["namespace"] = ns
+		}
+	}
+
+	body, _ := json.Marshal(ragReq)
+	endpoint := fmt.Sprintf("%s/api/v1/rag/query", e.baseURL)
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create RAG request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Kitchen", run.Kitchen)
+
+	resp, err := e.client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("RAG request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var ragResp map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&ragResp); err != nil {
+		return fmt.Errorf("decode RAG response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		errMsg, _ := ragResp["error"].(string)
+		return fmt.Errorf("RAG query failed (status %d): %s", resp.StatusCode, errMsg)
+	}
+
+	result.Output = ragResp
 	return nil
 }
 

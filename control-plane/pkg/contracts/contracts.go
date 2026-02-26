@@ -389,3 +389,30 @@ type GuardrailService interface {
 	// EvaluateOutput runs output-stage guardrails against the model response.
 	EvaluateOutput(ctx context.Context, guardrails []models.Guardrail, response string) (*models.GuardrailEvaluation, error)
 }
+
+// ── Agent Process Executor (R8) ─────────────────────────────
+
+// AgentProcessExecutor spawns and manages agent runtime processes.
+// Each agent can run as a local Python process, Docker container, or K8s pod.
+// The executor is called during BakeAgent (after provider validation) to
+// start the agent, and during CoolAgent/RetireAgent/DeleteAgent to stop it.
+//
+// OSS implementation: internal/process.Manager (local + docker + k8s)
+// Pro implementation: enhanced with custom images, sidecar injection, GPU scheduling
+type AgentProcessExecutor interface {
+	// Start spawns an agent process using the agent's ExecutionMode.
+	// Returns ProcessInfo with the assigned port/endpoint.
+	// If ExecutionMode is empty, defaults to "local" (Python process).
+	Start(ctx context.Context, agent *models.Agent) (*models.ProcessInfo, error)
+
+	// Stop terminates a running agent process. Idempotent — safe to call
+	// on already-stopped agents.
+	Stop(ctx context.Context, kitchen, agentName string) error
+
+	// Status returns the current process status for an agent.
+	// Returns nil if no process is tracked.
+	Status(ctx context.Context, kitchen, agentName string) (*models.ProcessInfo, error)
+
+	// StopAll terminates all running agent processes. Called on server shutdown.
+	StopAll(ctx context.Context) error
+}

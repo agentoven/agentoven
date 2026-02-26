@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { BookOpen, Plus, Trash2, Play } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { BookOpen, Plus, Trash2, Play, GitBranch } from 'lucide-react';
 import { recipes, type Recipe } from '../api';
 import { useAPI } from '../hooks';
 import {
@@ -48,6 +49,7 @@ export function RecipesPage() {
 
 function RecipeCard({ recipe, onAction }: { recipe: Recipe; onAction: () => void }) {
   const [busy, setBusy] = useState(false);
+  const navigate = useNavigate();
 
   const doAction = async (fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -84,6 +86,9 @@ function RecipeCard({ recipe, onAction }: { recipe: Recipe; onAction: () => void
       <div className="flex gap-2">
         <Button size="sm" onClick={() => doAction(() => recipes.bake(recipe.name, {}))} disabled={busy}>
           <Play size={14} className="mr-1" /> Run
+        </Button>
+        <Button size="sm" variant="secondary" onClick={() => navigate(`/dishshelf/${recipe.name}`)}>
+          <GitBranch size={14} className="mr-1" /> DishShelf
         </Button>
         <Button size="sm" variant="danger" onClick={() => doAction(() => recipes.delete(recipe.name))} disabled={busy}>
           <Trash2 size={14} />

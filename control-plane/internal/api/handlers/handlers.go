@@ -5,17 +5,21 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/agentoven/agentoven/control-plane/internal/api/middleware"
 	"github.com/agentoven/agentoven/control-plane/internal/catalog"
 	"github.com/agentoven/agentoven/control-plane/internal/executor"
 	"github.com/agentoven/agentoven/control-plane/internal/mcpgw"
+	"github.com/agentoven/agentoven/control-plane/internal/process"
 	"github.com/agentoven/agentoven/control-plane/internal/resolver"
 	"github.com/agentoven/agentoven/control-plane/internal/router"
 	"github.com/agentoven/agentoven/control-plane/internal/store"
@@ -35,6 +39,7 @@ type Handlers struct {
 	Workflow        *workflow.Engine
 	Resolver        *resolver.Resolver
 	Executor        *executor.Executor
+	ProcessManager  *process.Manager
 	PromptValidator contracts.PromptValidatorService
 	Catalog         *catalog.Catalog
 	Sessions        contracts.SessionStore
@@ -42,7 +47,7 @@ type Handlers struct {
 }
 
 // New creates a new Handlers instance with all dependencies.
-func New(s store.Store, mr *router.ModelRouter, gw *mcpgw.Gateway, wf *workflow.Engine, cat *catalog.Catalog, sess contracts.SessionStore) *Handlers {
+func New(s store.Store, mr *router.ModelRouter, gw *mcpgw.Gateway, wf *workflow.Engine, cat *catalog.Catalog, sess contracts.SessionStore, pm *process.Manager) *Handlers {
 	res := resolver.NewResolver(s)
 	exec := executor.NewExecutor(s, mr, gw)
 	return &Handlers{
@@ -52,6 +57,7 @@ func New(s store.Store, mr *router.ModelRouter, gw *mcpgw.Gateway, wf *workflow.
 		Workflow:        wf,
 		Resolver:        res,
 		Executor:        exec,
+		ProcessManager:  pm,
 		PromptValidator: &contracts.CommunityPromptValidator{},
 		Catalog:         cat,
 		Sessions:        sess,
@@ -199,6 +205,13 @@ func (h *Handlers) DeleteAgent(w http.ResponseWriter, r *http.Request) {
 	agentName := chi.URLParam(r, "agentName")
 	kitchen := middleware.GetKitchen(r.Context())
 
+	// Stop the agent process before deletion
+	if h.ProcessManager != nil {
+		if err := h.ProcessManager.Stop(r.Context(), kitchen, agentName); err != nil {
+			log.Warn().Err(err).Str("agent", agentName).Msg("Failed to stop agent process during delete")
+		}
+	}
+
 	if err := h.Store.DeleteAgent(r.Context(), kitchen, agentName); err != nil {
 		if _, ok := err.(*store.ErrNotFound); ok {
 			respondError(w, http.StatusNotFound, err.Error())
@@ -323,6 +336,35 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
+		}
+
+		// ── Start the agent process ──────────────────────────────
+		// After provider validation passes, spawn the agent as a running
+		// process (local Python / Docker / K8s) so it can serve A2A tasks.
+		if h.ProcessManager != nil && agent.Mode != models.AgentModeExternal {
+			procInfo, err := h.ProcessManager.Start(context.Background(), agent)
+			if err != nil {
+				agent.Status = models.AgentStatusBurnt
+				if agent.Tags == nil {
+					agent.Tags = map[string]string{}
+				}
+				agent.Tags["error"] = fmt.Sprintf("Agent process failed to start: %s", err.Error())
+				agent.UpdatedAt = time.Now().UTC()
+				h.Store.UpdateAgent(context.Background(), agent)
+				log.Warn().Err(err).Str("agent", agentName).Msg("Agent burnt — process start failed")
+				return
+			}
+
+			// Store process info but keep a2a_endpoint stable.
+			// The control plane proxies /agents/{name}/a2a → process.endpoint
+			// so clients always use the stable URL (ADR-0007).
+			agent.Process = procInfo
+			log.Info().
+				Str("agent", agentName).
+				Str("backend", procInfo.Endpoint).
+				Int("port", procInfo.Port).
+				Str("mode", string(procInfo.Mode)).
+				Msg("Agent process spawned — control plane will proxy A2A calls")
 		}
 
 		agent.Status = models.AgentStatusReady
@@ -473,19 +515,19 @@ func (h *Handlers) RecookAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Description    string                 `json:"description"`
-		Framework      string                 `json:"framework"`
-		ModelProvider  string                 `json:"model_provider"`
-		ModelName      string                 `json:"model_name"`
-		BackupProvider string                 `json:"backup_provider"`
-		BackupModel    string                 `json:"backup_model"`
-		Mode           models.AgentMode       `json:"mode"`
-		MaxTurns       int                    `json:"max_turns"`
-		Ingredients    []models.Ingredient    `json:"ingredients"`
-		Guardrails     []models.Guardrail     `json:"guardrails"`
-		Skills         []string               `json:"skills"`
-		Tags           map[string]string      `json:"tags"`
-		Version        string                 `json:"version"`
+		Description    string              `json:"description"`
+		Framework      string              `json:"framework"`
+		ModelProvider  string              `json:"model_provider"`
+		ModelName      string              `json:"model_name"`
+		BackupProvider string              `json:"backup_provider"`
+		BackupModel    string              `json:"backup_model"`
+		Mode           models.AgentMode    `json:"mode"`
+		MaxTurns       int                 `json:"max_turns"`
+		Ingredients    []models.Ingredient `json:"ingredients"`
+		Guardrails     []models.Guardrail  `json:"guardrails"`
+		Skills         []string            `json:"skills"`
+		Tags           map[string]string   `json:"tags"`
+		Version        string              `json:"version"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
 		respondError(w, http.StatusBadRequest, "Invalid request body: "+err.Error())
@@ -627,11 +669,11 @@ func (h *Handlers) RecookAgent(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	respondJSON(w, http.StatusAccepted, map[string]interface{}{
-		"name":        agentName,
-		"version":     agent.Version,
-		"status":      string(models.AgentStatusBaking),
-		"re_cooked":   true,
-		"agent_card":  "/agents/" + agentName + "/a2a/.well-known/agent-card.json",
+		"name":       agentName,
+		"version":    agent.Version,
+		"status":     string(models.AgentStatusBaking),
+		"re_cooked":  true,
+		"agent_card": "/agents/" + agentName + "/a2a/.well-known/agent-card.json",
 	})
 }
 
@@ -649,7 +691,15 @@ func (h *Handlers) CoolAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Stop the agent process if running
+	if h.ProcessManager != nil {
+		if err := h.ProcessManager.Stop(r.Context(), kitchen, agentName); err != nil {
+			log.Warn().Err(err).Str("agent", agentName).Msg("Failed to stop agent process during cool")
+		}
+	}
+
 	agent.Status = models.AgentStatusCooled
+	agent.Process = nil // clear process info
 	agent.UpdatedAt = time.Now().UTC()
 	h.Store.UpdateAgent(r.Context(), agent)
 
@@ -1731,11 +1781,113 @@ func (h *Handlers) A2AAgentEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Info().Str("agent", agentName).Msg("Routing A2A request to agent")
-	respondJSON(w, http.StatusOK, map[string]string{
-		"agent":  agentName,
-		"status": "routing",
-	})
+	// ── Resolve the backend endpoint ─────────────────────────
+	// ADR-0007: The control plane is the A2A gateway. Clients always call
+	// /agents/{name}/a2a (stable URL). The control plane proxies to:
+	//   - Managed agents: ProcessInfo.Endpoint (local/docker/k8s subprocess)
+	//   - External agents: BackendEndpoint (user-provided URL)
+	// This ensures auth, RBAC, observability, and rate-limiting for every call.
+	backendURL := h.ResolveBackendEndpoint(agent)
+	if backendURL == "" {
+		w.Header().Set("Content-Type", "application/a2a+json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"error": map[string]interface{}{
+				"code":    -32003,
+				"message": "No backend available",
+				"data":    "Agent '" + agentName + "' has no running process or backend endpoint configured",
+			},
+			"id": nil,
+		})
+		return
+	}
+
+	log.Info().
+		Str("agent", agentName).
+		Str("backend", backendURL).
+		Str("mode", string(agent.Mode)).
+		Msg("Proxying A2A request to agent backend")
+
+	// ── Proxy the request ───────────────────────────────────
+	h.proxyA2ARequest(w, r, backendURL, agentName)
+}
+
+// ResolveBackendEndpoint determines where to proxy A2A calls for an agent.
+// For managed agents, it returns the process endpoint (subprocess/docker/k8s).
+// For external agents, it returns the user-provided backend URL.
+func (h *Handlers) ResolveBackendEndpoint(agent *models.Agent) string {
+	// Managed agents: use the spawned process endpoint
+	if agent.Mode == models.AgentModeManaged || agent.Mode == "" {
+		if agent.Process != nil && agent.Process.Status == models.ProcessRunning {
+			return agent.Process.Endpoint
+		}
+		return ""
+	}
+
+	// External agents: use the configured backend endpoint
+	if agent.Mode == models.AgentModeExternal {
+		return agent.BackendEndpoint
+	}
+
+	return ""
+}
+
+// proxyA2ARequest relays an HTTP request to a backend agent endpoint and
+// streams the response back to the caller. This is the core of the
+// control-plane-as-gateway pattern (ADR-0007).
+func (h *Handlers) proxyA2ARequest(w http.ResponseWriter, r *http.Request, backendURL, agentName string) {
+	// Read the original request body
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/a2a+json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"error":   map[string]interface{}{"code": -32700, "message": "Failed to read request body"},
+			"id":      nil,
+		})
+		return
+	}
+
+	// Ensure the backend URL has no trailing slash for the root POST
+	targetURL := strings.TrimRight(backendURL, "/") + "/"
+
+	// Create the proxied request
+	proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, targetURL, bytes.NewReader(body))
+	if err != nil {
+		w.Header().Set("Content-Type", "application/a2a+json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"error":   map[string]interface{}{"code": -32603, "message": "Failed to create proxy request: " + err.Error()},
+			"id":      nil,
+		})
+		return
+	}
+	proxyReq.Header.Set("Content-Type", "application/json")
+	proxyReq.Header.Set("X-AgentOven-Agent", agentName)
+
+	// Forward the request to the backend
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Do(proxyReq)
+	if err != nil {
+		log.Warn().Err(err).Str("agent", agentName).Str("backend", backendURL).Msg("Backend request failed")
+		w.Header().Set("Content-Type", "application/a2a+json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"error":   map[string]interface{}{"code": -32603, "message": "Backend unreachable: " + err.Error()},
+			"id":      nil,
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy backend response headers and body back to the caller
+	for k, vals := range resp.Header {
+		for _, v := range vals {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
 
 func (h *Handlers) ServeAgentSpecificCard(w http.ResponseWriter, r *http.Request) {
@@ -2048,6 +2200,49 @@ func (h *Handlers) GetAgentConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GetAgentProcess returns the process status for a running agent.
+// GET /api/v1/agents/{agentName}/process
+func (h *Handlers) GetAgentProcess(w http.ResponseWriter, r *http.Request) {
+	agentName := chi.URLParam(r, "agentName")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	if h.ProcessManager == nil {
+		respondError(w, http.StatusServiceUnavailable, "Process manager not available")
+		return
+	}
+
+	info, err := h.ProcessManager.Status(r.Context(), kitchen, agentName)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if info == nil {
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"agent":   agentName,
+			"status":  "no_process",
+			"message": "No process tracked for this agent. Agent may be in external mode or not yet baked.",
+		})
+		return
+	}
+
+	respondJSON(w, http.StatusOK, info)
+}
+
+// ListProcesses returns all running agent processes.
+// GET /api/v1/processes
+func (h *Handlers) ListProcesses(w http.ResponseWriter, r *http.Request) {
+	if h.ProcessManager == nil {
+		respondJSON(w, http.StatusOK, []interface{}{})
+		return
+	}
+
+	running := h.ProcessManager.ListRunning()
+	if running == nil {
+		running = []*models.ProcessInfo{}
+	}
+	respondJSON(w, http.StatusOK, running)
+}
+
 // ══════════════════════════════════════════════════════════════
 // ── Managed Agent Invoke Handler ─────────────────────────────
 // ══════════════════════════════════════════════════════════════
@@ -2082,7 +2277,7 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		Message         string            `json:"message"`
-		Variables       map[string]string `json:"variables,omitempty"` // prompt template variables
+		Variables       map[string]string `json:"variables,omitempty"`        // prompt template variables
 		ThinkingEnabled bool              `json:"thinking_enabled,omitempty"` // enable extended thinking
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Message == "" {
@@ -2178,9 +2373,9 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		TotalTokens: trace.Usage.TotalTokens,
 		CostUSD:     trace.Usage.EstimatedCost,
 		Metadata: map[string]interface{}{
-			"mode":   "managed",
-			"turns":  len(trace.Turns),
-			"type":   "invoke",
+			"mode":  "managed",
+			"turns": len(trace.Turns),
+			"type":  "invoke",
 		},
 		CreatedAt: time.Now().UTC(),
 	}
@@ -3049,10 +3244,9 @@ func (h *Handlers) GetAgentCard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Set URL
-	if agent.A2AEndpoint != "" {
-		card.URL = agent.A2AEndpoint
-	}
+	// Set URL — always the stable control plane endpoint (ADR-0007).
+	// Never expose subprocess/backend URLs in the agent card.
+	card.URL = "/agents/" + agent.Name + "/a2a"
 
 	respondJSON(w, http.StatusOK, card)
 }

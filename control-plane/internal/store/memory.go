@@ -18,39 +18,39 @@ import (
 // snapshot is the JSON-serializable shape written to disk.
 type snapshot struct {
 	Agents        map[string]*models.Agent               `json:"agents"`
-	Recipes       map[string]*models.Recipe               `json:"recipes"`
-	Kitchens      map[string]*models.Kitchen              `json:"kitchens"`
-	Traces        map[string]*models.Trace                `json:"traces"`
-	Providers     map[string]*models.ModelProvider         `json:"providers"`
-	RecipeRuns    map[string]*models.RecipeRun             `json:"recipe_runs"`
-	Tools         map[string]*models.MCPTool               `json:"tools"`
-	Prompts       map[string][]*models.Prompt              `json:"prompts"`           // key: kitchen:name → version history
-	Settings      map[string]*models.KitchenSettings        `json:"settings"`         // key: kitchen_id
-	AgentVersions map[string][]*models.Agent               `json:"agent_versions"`   // key: kitchen:name → version history
-	AuditEvents   []*models.AuditEvent                     `json:"audit_events"`
-	Approvals     map[string]*models.ApprovalRecord         `json:"approvals"`        // key: gate_key
-	Channels      map[string]*models.NotificationChannel    `json:"channels"`         // key: kitchen:name
-	VectorDocs    map[string]*models.VectorDoc              `json:"vector_docs"`      // key: kitchen:id
-	Connectors    map[string]*models.DataConnectorConfig    `json:"connectors"`       // key: kitchen:id
+	Recipes       map[string]*models.Recipe              `json:"recipes"`
+	Kitchens      map[string]*models.Kitchen             `json:"kitchens"`
+	Traces        map[string]*models.Trace               `json:"traces"`
+	Providers     map[string]*models.ModelProvider       `json:"providers"`
+	RecipeRuns    map[string]*models.RecipeRun           `json:"recipe_runs"`
+	Tools         map[string]*models.MCPTool             `json:"tools"`
+	Prompts       map[string][]*models.Prompt            `json:"prompts"`        // key: kitchen:name → version history
+	Settings      map[string]*models.KitchenSettings     `json:"settings"`       // key: kitchen_id
+	AgentVersions map[string][]*models.Agent             `json:"agent_versions"` // key: kitchen:name → version history
+	AuditEvents   []*models.AuditEvent                   `json:"audit_events"`
+	Approvals     map[string]*models.ApprovalRecord      `json:"approvals"`   // key: gate_key
+	Channels      map[string]*models.NotificationChannel `json:"channels"`    // key: kitchen:name
+	VectorDocs    map[string]*models.VectorDoc           `json:"vector_docs"` // key: kitchen:id
+	Connectors    map[string]*models.DataConnectorConfig `json:"connectors"`  // key: kitchen:id
 }
 
 // MemoryStore implements Store with in-memory maps.
 type MemoryStore struct {
-	mu         sync.RWMutex
-	agents     map[string]*models.Agent         // key: kitchen:name
-	recipes    map[string]*models.Recipe         // key: kitchen:name
-	kitchens   map[string]*models.Kitchen        // key: id
-	traces     map[string]*models.Trace          // key: id
-	providers  map[string]*models.ModelProvider   // key: name
-	recipeRuns map[string]*models.RecipeRun       // key: id
-	tools      map[string]*models.MCPTool         // key: kitchen:name
-	prompts    map[string][]*models.Prompt        // key: kitchen:name → version history (newest last)
-	settings   map[string]*models.KitchenSettings  // key: kitchen_id
-	auditEvents  []*models.AuditEvent               // append-only log
-	approvals    map[string]*models.ApprovalRecord   // key: gate_key
-	channels     map[string]*models.NotificationChannel // key: kitchen:name
-	vectorDocs   map[string]*models.VectorDoc        // key: kitchen:id
-	connectors   map[string]*models.DataConnectorConfig // key: kitchen:id
+	mu          sync.RWMutex
+	agents      map[string]*models.Agent               // key: kitchen:name
+	recipes     map[string]*models.Recipe              // key: kitchen:name
+	kitchens    map[string]*models.Kitchen             // key: id
+	traces      map[string]*models.Trace               // key: id
+	providers   map[string]*models.ModelProvider       // key: name
+	recipeRuns  map[string]*models.RecipeRun           // key: id
+	tools       map[string]*models.MCPTool             // key: kitchen:name
+	prompts     map[string][]*models.Prompt            // key: kitchen:name → version history (newest last)
+	settings    map[string]*models.KitchenSettings     // key: kitchen_id
+	auditEvents []*models.AuditEvent                   // append-only log
+	approvals   map[string]*models.ApprovalRecord      // key: gate_key
+	channels    map[string]*models.NotificationChannel // key: kitchen:name
+	vectorDocs  map[string]*models.VectorDoc           // key: kitchen:id
+	connectors  map[string]*models.DataConnectorConfig // key: kitchen:id
 
 	// Agent version history — append-only, keyed by kitchen:name
 	agentVersions map[string][]*models.Agent // key: kitchen:name → version history
