@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 /// An ingredient used by an agent — a model, tool, prompt, or data source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ingredient {
+    /// Unique identifier (set by the control plane).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+
     /// The kind of ingredient.
     pub kind: IngredientKind,
 
@@ -15,16 +19,24 @@ pub struct Ingredient {
     pub name: String,
 
     /// Provider or protocol (e.g., "azure-openai", "mcp").
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
 
     /// Role in the agent (e.g., "primary", "fallback", "evaluator").
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+
+    /// Whether this ingredient is required.
+    #[serde(default = "default_required")]
+    pub required: bool,
 
     /// Configuration specific to this ingredient.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<serde_json::Value>,
+}
+
+fn default_required() -> bool {
+    true
 }
 
 /// Builder for creating ingredients with a fluent API.
@@ -55,10 +67,12 @@ impl IngredientBuilder {
 
     pub fn build(self) -> Ingredient {
         Ingredient {
+            id: String::new(),
             kind: self.kind,
             name: self.name,
             provider: self.provider,
             role: self.role,
+            required: true,
             config: self.config,
         }
     }

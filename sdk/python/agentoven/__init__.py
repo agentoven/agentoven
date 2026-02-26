@@ -4,18 +4,16 @@ AgentOven Python SDK — enterprise agent orchestration.
 The tastiest way to manage your AI agents. 🏺
 
 Usage:
-    from agentoven import Agent, AgentOvenClient
+    from agentoven import Agent, Ingredient, Recipe, Step, AgentOvenClient
 
-    client = AgentOvenClient(url="http://localhost:8080")
+    agent = Agent("summarizer", ingredients=[
+        Ingredient.model("gpt-4o", provider="azure-openai"),
+        Ingredient.tool("doc-reader", protocol="mcp"),
+    ])
 
-    agent = Agent(
-        name="research-agent",
-        description="Researches topics and summarizes findings",
-        framework="langchain",
-    )
-
-    client.register_agent(agent)
-    client.bake("research-agent")
+    client = AgentOvenClient()
+    client.register(agent)
+    client.bake(agent)
 """
 
 from agentoven._native import (
@@ -25,6 +23,7 @@ from agentoven._native import (
     Ingredient,
     IngredientKind,
     Recipe,
+    Step,
 )
 
 __all__ = [
@@ -34,6 +33,7 @@ __all__ = [
     "Ingredient",
     "IngredientKind",
     "Recipe",
+    "Step",
 ]
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"

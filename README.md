@@ -13,8 +13,8 @@
 </p>
 
 <p align="center">
-  <a href="https://agentoven.dev/docs">Documentation</a> •
-  <a href="https://agentoven.dev/docs/quickstart">Quickstart</a> •
+  <a href="https://docs.agentoven.dev">Documentation</a> •
+  <a href="https://docs.agentoven.dev/quickstart">Quickstart</a> •
   <a href="https://github.com/agentoven/agentoven/discussions">Community</a> •
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
@@ -57,9 +57,12 @@ AgentOven provides a unified control plane with:
 | 📊 **Observability** | OpenTelemetry tracing on every invocation, cost & latency dashboards |
 | 🔄 **Workflow Engine** | DAG-based multi-agent orchestration via A2A task lifecycle |
 | 📝 **Prompt Studio** | Versioned prompt management with diff view and A/B variants |
+| 💬 **Sessions** | Multi-turn chat sessions with history, thinking mode, and streaming |
+| 🛡️ **Guardrails** | Pre/post processing content filters and safety checks |
 | 🧪 **Evaluation** | Automated evals with LLM judges and regression detection |
 | 💰 **Cost Tracking** | Per-request token counting, tenant-level chargeback |
-| 🔐 **Governance** | RBAC, audit logs, SOC2/GDPR compliant |
+| 🔐 **Governance** | Pluggable auth (API keys, service accounts, SSO), RBAC, audit logs |
+| 🔎 **RAG Pipelines** | 5 retrieval strategies with vector stores and embedding management |
 
 ## Architecture
 
@@ -102,45 +105,67 @@ pip install agentoven
 ### Install the TypeScript SDK
 
 ```bash
-npm install agentoven
+npm install @agentoven/sdk
 ```
 
 ### Bake your first agent
 
-```python
-from agentoven import Agent, Ingredient, Recipe
+```bash
+# Initialize a project
+agentoven init --name my-agent --framework openai-sdk
 
-# Define your agent as a recipe
-agent = Agent(
-    name="summarizer",
-    version="1.0.0",
+# Set up a model provider
+agentoven provider add my-openai --kind openai --api-key $OPENAI_API_KEY
+
+# Register an agent
+agentoven agent register summarizer \
+  --description "Summarizes documents with citations" \
+  --model-provider my-openai \
+  --model-name gpt-4o \
+  --system-prompt "You are a document summarizer."
+
+# Bake (deploy) the agent
+agentoven agent bake summarizer
+
+# Test it interactively
+agentoven agent test summarizer --interactive
+```
+
+### Or use the Python SDK
+
+```python
+from agentoven import Agent, Ingredient, AgentOvenClient
+
+# Define your agent with ingredients
+agent = Agent("summarizer",
     description="Summarizes documents with citations",
+    model_provider="my-openai",
+    model_name="gpt-4o",
+    system_prompt="You are a document summarizer.",
     ingredients=[
-        Ingredient.model("gpt-4o", provider="azure-openai"),
+        Ingredient.model("gpt-4o", provider="my-openai"),
         Ingredient.model("claude-sonnet", provider="anthropic", role="fallback"),
         Ingredient.tool("document-reader", protocol="mcp"),
     ],
 )
 
-# Register with the oven
-agent.register()
-
-# Bake (deploy) the agent
-agent.bake(environment="production")
+# Register and bake via the client
+client = AgentOvenClient()
+client.register(agent)
+client.bake(agent, environment="production")
 
 # The agent is now discoverable via A2A
 # Other agents can find it at:
 #   /.well-known/agent-card.json
 ```
 
-### Create a multi-agent workflow (recipe)
+### Multi-Agent Recipes
 
 ```python
-from agentoven import Recipe, Step
+from agentoven import Recipe, Step, AgentOvenClient
 
 # A Recipe is a multi-agent workflow
-recipe = Recipe(
-    name="document-review",
+recipe = Recipe("document-review",
     steps=[
         Step("planner", agent="task-planner", timeout="30s"),
         Step("researcher", agent="doc-researcher", parallel=True),
@@ -150,9 +175,93 @@ recipe = Recipe(
     ],
 )
 
-# Each step communicates via A2A protocol
-result = recipe.bake(input={"document_url": "https://..."})
+# Bake the recipe via the client
+client = AgentOvenClient()
+client.bake(recipe, input='{"document_url": "https://..."}')
 ```
+
+---
+
+## CLI Reference
+
+The `agentoven` CLI provides **55+ commands** across **13 command groups** for complete control of your agent infrastructure.
+
+### Global Flags
+
+```
+--url <url>       Control plane URL (env: AGENTOVEN_URL)
+--api-key <key>   API key (env: AGENTOVEN_API_KEY)
+-k, --kitchen     Kitchen/workspace scope (env: AGENTOVEN_KITCHEN)
+--output <fmt>    Output format: text, json, table
+--help            Show help for any command
+```
+
+### Commands Overview
+
+| Command Group | Subcommands | Description |
+|---|---|---|
+| `agentoven init` | — | Initialize a new project with `agentoven.toml` |
+| `agentoven agent` | `register`, `list`, `get`, `update`, `delete`, `bake`, `recook`, `cool`, `rewarm`, `retire`, `test`, `invoke`, `config`, `card`, `versions` | Full agent lifecycle management |
+| `agentoven provider` | `list`, `add`, `get`, `update`, `remove`, `test`, `discover` | Model provider management (OpenAI, Anthropic, Ollama, LiteLLM) |
+| `agentoven tool` | `list`, `add`, `get`, `update`, `remove` | MCP tool management |
+| `agentoven prompt` | `list`, `add`, `get`, `update`, `remove`, `validate`, `versions` | Versioned prompt template management |
+| `agentoven recipe` | `create`, `list`, `get`, `delete`, `bake`, `runs`, `approve` | Multi-agent workflow orchestration |
+| `agentoven session` | `list`, `create`, `get`, `delete`, `send`, `chat` | Multi-turn chat session management |
+| `agentoven kitchen` | `list`, `get`, `settings`, `update-settings` | Workspace/tenant management |
+| `agentoven trace` | `ls`, `get`, `cost`, `audit` | Observability, cost tracking, audit logs |
+| `agentoven rag` | `query`, `ingest` | RAG pipeline operations |
+| `agentoven dashboard` | — | Start the control plane + open the dashboard UI |
+| `agentoven login` | — | Authenticate with the control plane |
+| `agentoven status` | — | Show control plane health and agent count |
+
+### Agent Lifecycle
+
+```
+  register → bake → ready
+                ↓       ↑
+              cool → rewarm
+                ↓
+             retire
+```
+
+| Command | Description |
+|---|---|
+| `agentoven agent register <name>` | Register a new agent (accepts `--config`, `--framework`, `--model-provider`, `--guardrail`, etc.) |
+| `agentoven agent bake <name>` | Deploy an agent — resolves ingredients, validates config, sets status to ready |
+| `agentoven agent recook <name>` | Hot-swap agent configuration without full redeployment |
+| `agentoven agent cool <name>` | Pause a running agent (preserves state) |
+| `agentoven agent rewarm <name>` | Bring a cooled agent back to ready |
+| `agentoven agent retire <name>` | Permanently decommission an agent |
+| `agentoven agent invoke <name>` | Run a managed agent with full agentic loop and execution trace |
+| `agentoven agent test <name>` | One-shot or interactive playground for testing agents |
+| `agentoven agent card <name>` | Show the A2A Agent Card (discovery metadata) |
+| `agentoven agent versions <name>` | Show version history |
+
+### Multi-turn Sessions
+
+```bash
+# Create a session
+agentoven session create my-agent
+
+# Interactive chat with thinking mode
+agentoven session chat my-agent <session-id> --thinking
+
+# Send a single message
+agentoven session send my-agent <session-id> --message "Summarize this doc"
+```
+
+### RAG Operations
+
+```bash
+# Ingest documents into a collection
+agentoven rag ingest ./docs/ --collection knowledge-base --chunk-size 1000
+
+# Query with different strategies
+agentoven rag query "What is AgentOven?" --strategy naive --sources
+agentoven rag query "How does routing work?" --strategy hyde --top-k 10
+```
+
+---
 
 ## Kitchen Vocabulary 🏺
 
@@ -164,7 +273,11 @@ AgentOven uses a **clay oven** metaphor throughout:
 | **Recipe** | A multi-agent workflow (DAG) |
 | **Ingredient** | A model, tool, prompt, or data source |
 | **Bake** | Deploy an agent or run a workflow |
-| **Kitchen** | A workspace/project |
+| **Cool** | Pause a running agent |
+| **Rewarm** | Bring a cooled agent back to ready |
+| **Retire** | Permanently decommission an agent |
+| **Re-cook** | Hot-swap agent configuration |
+| **Kitchen** | A workspace/project (tenant boundary) |
 | **Baker** | A user/team building agents |
 | **Menu** | The agent catalog/registry |
 
@@ -175,14 +288,16 @@ agentoven/
 ├── crates/                    # Rust workspace
 │   ├── a2a-ao/               # A2A protocol SDK (standalone crate)
 │   ├── agentoven-core/       # SDK core library
-│   └── agentoven-cli/        # CLI tool
+│   └── agentoven-cli/        # CLI tool (55+ commands)
 ├── control-plane/            # Go control plane service
+│   ├── cmd/server/           # Entry point
+│   ├── pkg/                  # Public interfaces (contracts, models)
+│   └── internal/             # Router, MCP gateway, workflow engine, RAG, auth
 ├── sdk/
 │   ├── python/               # Python SDK (PyO3 bindings)
 │   └── typescript/           # TypeScript SDK (napi-rs bindings)
-├── ui/                       # React dashboard
-├── docs/                     # Documentation (Docusaurus)
-└── infra/                    # Docker, Helm, Terraform
+├── infra/                    # Docker, Helm, Terraform
+└── site/                     # Static landing page
 ```
 
 ## Contributing
@@ -202,10 +317,12 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 |---|---|---|
 | Agent Registry | ✅ Single-tenant | Multi-tenant, org hierarchy |
 | A2A + MCP | ✅ Full protocol | + cross-org federation |
-| CLI + SDKs | ✅ Full | ✅ Full |
+| CLI + SDKs | ✅ Full (55+ commands) | ✅ Full |
 | Model Router | ✅ Routing + fallback | + cost optimizer, budgets |
+| Sessions | ✅ Multi-turn chat | ✅ Multi-turn chat |
+| RAG Pipelines | ✅ 5 strategies | + quality monitor |
 | Observability | ✅ 7-day retention | 400-day, advanced analytics |
-| Auth | API keys, OAuth | SSO/SAML, RBAC, audit logs |
+| Auth | API keys, service tokens | SSO/SAML, OIDC, RBAC, audit logs |
 | Compliance | SOC2, GDPR | + FedRAMP, HIPAA, GxP |
 | Deployment | Self-hosted | + managed cloud, BYOC, SLA |
 

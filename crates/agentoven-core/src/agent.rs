@@ -18,6 +18,9 @@ pub enum AgentMode {
     Managed,
     /// Agent is external, proxied via A2A endpoint.
     External,
+    /// Unknown or unset mode (deserialized from empty string or unrecognized value).
+    #[serde(other)]
+    Unknown,
 }
 
 impl std::fmt::Display for AgentMode {
@@ -25,6 +28,7 @@ impl std::fmt::Display for AgentMode {
         match self {
             AgentMode::Managed => write!(f, "managed"),
             AgentMode::External => write!(f, "external"),
+            AgentMode::Unknown => write!(f, "unknown"),
         }
     }
 }
@@ -105,6 +109,7 @@ pub struct Agent {
     pub a2a_endpoint: Option<String>,
 
     /// Ingredients: models, tools, prompts, and data sources.
+    #[serde(default)]
     pub ingredients: Vec<Ingredient>,
 
     /// Tags for categorization and search.
@@ -115,8 +120,13 @@ pub struct Agent {
     pub status: AgentStatus,
 
     /// The kitchen (workspace) this agent belongs to.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Accepts both "kitchen" and "kitchen_id" from JSON.
+    #[serde(default, alias = "kitchen", skip_serializing_if = "Option::is_none")]
     pub kitchen_id: Option<String>,
+
+    /// Resolved configuration (populated by the control plane after baking).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_config: Option<serde_json::Value>,
 
     /// Who created this agent.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -299,6 +309,7 @@ impl AgentBuilder {
             tags: self.tags,
             status: AgentStatus::Draft,
             kitchen_id: self.kitchen_id,
+            resolved_config: None,
             created_by: None,
             created_at: now,
             updated_at: now,
@@ -308,15 +319,26 @@ impl AgentBuilder {
 }
 
 /// The framework used to build an agent.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
 pub enum AgentFramework {
-    LangGraph,
-    CrewAi,
-    OpenAiSdk,
-    AutoGen,
-    AgentFramework,
+    /// LangGraph / LangChain agents.
+    #[serde(alias = "lang-graph", alias = "langgraph")]
+    Langchain,
+    /// CrewAI agents.
+    #[serde(alias = "crew-ai")]
+    Crewai,
+    /// OpenAI SDK agents.
+    #[serde(alias = "openai-sdk", alias = "open-ai-sdk")]
+    Openai,
+    /// AutoGen agents.
+    #[serde(alias = "auto-gen")]
+    Autogen,
+    /// Managed by AgentOven runtime.
     Managed,
+    /// Custom / unknown framework.
+    #[default]
+    #[serde(other)]
     Custom,
 }
 
@@ -361,7 +383,7 @@ mod tests {
         let agent = Agent::builder("summarizer")
             .version("1.0.0")
             .description("Summarizes documents")
-            .framework(AgentFramework::LangGraph)
+            .framework(AgentFramework::Langchain)
             .ingredient(Ingredient::model("gpt-4o").provider("azure-openai").build())
             .tag("nlp")
             .tag("summarization")

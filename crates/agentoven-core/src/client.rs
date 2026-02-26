@@ -5,7 +5,7 @@
 use reqwest::Client;
 use url::Url;
 
-use crate::agent::Agent;
+use crate::agent::{Agent, AgentMode};
 use crate::recipe::Recipe;
 
 /// Client for interacting with the AgentOven control plane.
@@ -65,11 +65,66 @@ impl AgentOvenClient {
     // ── Agent Operations ─────────────────────────────────────
 
     /// Register a new agent in the oven (menu).
+    ///
+    /// Sends only the user-provided fields; server-managed fields
+    /// (id, status, kitchen, timestamps, a2a_endpoint) are set server-side.
     pub async fn register(&self, agent: &Agent) -> anyhow::Result<Agent> {
         let url = self.url("/api/v1/agents");
+
+        // Build a minimal registration payload — only fields the server expects.
+        let mut body = serde_json::json!({
+            "name": agent.name,
+            "description": agent.description,
+            "framework": agent.framework,
+        });
+        let obj = body.as_object_mut().unwrap();
+
+        if !agent.version.is_empty() {
+            obj.insert("version".into(), agent.version.clone().into());
+        }
+        if !agent.model_provider.is_empty() {
+            obj.insert("model_provider".into(), agent.model_provider.clone().into());
+        }
+        if !agent.model_name.is_empty() {
+            obj.insert("model_name".into(), agent.model_name.clone().into());
+        }
+        if let Some(ref bp) = agent.backup_provider {
+            obj.insert("backup_provider".into(), bp.clone().into());
+        }
+        if let Some(ref bm) = agent.backup_model {
+            obj.insert("backup_model".into(), bm.clone().into());
+        }
+        if let Some(ref sp) = agent.system_prompt {
+            obj.insert("system_prompt".into(), sp.clone().into());
+        }
+        if let Some(mt) = agent.max_turns {
+            obj.insert("max_turns".into(), mt.into());
+        }
+        if !agent.skills.is_empty() {
+            obj.insert("skills".into(), serde_json::to_value(&agent.skills)?);
+        }
+        if !agent.ingredients.is_empty() {
+            obj.insert(
+                "ingredients".into(),
+                serde_json::to_value(&agent.ingredients)?,
+            );
+        }
+        if !agent.tags.is_empty() {
+            obj.insert("tags".into(), serde_json::to_value(&agent.tags)?);
+        }
+        if !agent.guardrails.is_empty() {
+            obj.insert(
+                "guardrails".into(),
+                serde_json::to_value(&agent.guardrails)?,
+            );
+        }
+        if agent.mode != AgentMode::default() {
+            obj.insert("mode".into(), serde_json::to_value(&agent.mode)?);
+        }
+
         let resp = self
             .authed_request(self.http.post(url))
-            .json(agent)
+            .json(&body)
             .send()
             .await?
             .error_for_status()?;

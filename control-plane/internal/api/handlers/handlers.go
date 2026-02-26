@@ -200,12 +200,16 @@ func (h *Handlers) DeleteAgent(w http.ResponseWriter, r *http.Request) {
 	kitchen := middleware.GetKitchen(r.Context())
 
 	if err := h.Store.DeleteAgent(r.Context(), kitchen, agentName); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 
 	log.Info().Str("agent", agentName).Str("kitchen", kitchen).Msg("Agent retired")
-	w.WriteHeader(http.StatusNoContent)
+	respondJSON(w, http.StatusOK, map[string]string{"status": "deleted", "agent": agentName})
 }
 
 func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {

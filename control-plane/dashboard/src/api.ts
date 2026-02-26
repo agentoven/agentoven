@@ -12,6 +12,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const body = await res.json().catch(() => ({}));
     throw new APIError(body.error || `API error ${res.status}`, res.status, body.details);
   }
+  // 204 No Content or empty body — return without parsing JSON
+  if (res.status === 204 || res.headers.get('content-length') === '0') {
+    return undefined as T;
+  }
   return res.json();
 }
 

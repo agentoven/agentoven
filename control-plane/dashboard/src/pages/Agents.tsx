@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Bot, Plus, Flame, Snowflake, Trash2, FlaskConical, AlertTriangle, Sun, RefreshCw, Code, Copy, Check, Shield } from 'lucide-react';
 import { agents, providers, type Agent, type Ingredient, type IngredientKind, APIError } from '../api';
@@ -84,14 +84,31 @@ export function AgentsPage() {
 function AgentCard({ agent, onAction, onIntegrate, onRecook }: { agent: Agent; onAction: () => void; onIntegrate: () => void; onRecook: () => void }) {
   const [busy, setBusy] = useState(false);
   const [bakeError, setBakeError] = useState<string[] | null>(null);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const navigate = useNavigate();
 
-  const doAction = async (fn: () => Promise<unknown>) => {
+  // Auto-dismiss toast after 3 seconds
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3000);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  const doAction = async (fn: () => Promise<unknown>, successMsg?: string) => {
     setBusy(true);
     setBakeError(null);
-    try { await fn(); onAction(); } catch (e) {
+    setToast(null);
+    try {
+      await fn();
+      if (successMsg) setToast({ message: successMsg, type: 'success' });
+      onAction();
+    } catch (e) {
       if (e instanceof APIError && e.details) {
         setBakeError(e.details);
+      } else if (e instanceof Error) {
+        setToast({ message: e.message, type: 'error' });
+      } else {
+        setToast({ message: 'An unexpected error occurred', type: 'error' });
       }
     }
     setBusy(false);
@@ -157,13 +174,13 @@ function AgentCard({ agent, onAction, onIntegrate, onRecook }: { agent: Agent; o
 
       <div className="flex gap-2 flex-wrap">
         {agent.status === 'draft' && (
-          <Button size="sm" onClick={() => doAction(() => agents.bake(agent.name))} disabled={busy}>
+          <Button size="sm" onClick={() => doAction(() => agents.bake(agent.name), `Agent '${agent.name}' baked successfully`)} disabled={busy}>
             <Flame size={14} className="mr-1" /> Bake
           </Button>
         )}
         {agent.status === 'burnt' && (
           <>
-            <Button size="sm" onClick={() => doAction(() => agents.bake(agent.name))} disabled={busy}>
+            <Button size="sm" onClick={() => doAction(() => agents.bake(agent.name), `Agent '${agent.name}' baked successfully`)} disabled={busy}>
               <Flame size={14} className="mr-1" /> Retry Bake
             </Button>
             <Button size="sm" variant="secondary" onClick={onRecook} disabled={busy}>
@@ -182,14 +199,14 @@ function AgentCard({ agent, onAction, onIntegrate, onRecook }: { agent: Agent; o
             <Button size="sm" variant="secondary" onClick={onRecook} disabled={busy}>
               <RefreshCw size={14} className="mr-1" /> Re-cook
             </Button>
-            <Button size="sm" variant="secondary" onClick={() => doAction(() => agents.cool(agent.name))} disabled={busy}>
+            <Button size="sm" variant="secondary" onClick={() => doAction(() => agents.cool(agent.name), `Agent '${agent.name}' cooled`)} disabled={busy}>
               <Snowflake size={14} className="mr-1" /> Cool
             </Button>
           </>
         )}
         {agent.status === 'cooled' && (
           <>
-            <Button size="sm" onClick={() => doAction(() => agents.rewarm(agent.name))} disabled={busy}>
+            <Button size="sm" onClick={() => doAction(() => agents.rewarm(agent.name), `Agent '${agent.name}' rewarmed`)} disabled={busy}>
               <Sun size={14} className="mr-1" /> Rewarm
             </Button>
             <Button size="sm" variant="secondary" onClick={onRecook} disabled={busy}>
@@ -201,14 +218,26 @@ function AgentCard({ agent, onAction, onIntegrate, onRecook }: { agent: Agent; o
           </>
         )}
         {(agent.status === 'active' || agent.status === 'baked') && (
-          <Button size="sm" variant="secondary" onClick={() => doAction(() => agents.cool(agent.name))} disabled={busy}>
+          <Button size="sm" variant="secondary" onClick={() => doAction(() => agents.cool(agent.name), `Agent '${agent.name}' cooled`)} disabled={busy}>
             <Snowflake size={14} className="mr-1" /> Cool
           </Button>
         )}
-        <Button size="sm" variant="danger" onClick={() => doAction(() => agents.delete(agent.name))} disabled={busy}>
+        <Button size="sm" variant="danger" onClick={() => doAction(() => agents.delete(agent.name), `Agent '${agent.name}' deleted`)} disabled={busy}>
           <Trash2 size={14} />
         </Button>
       </div>
+
+      {/* Toast notification */}
+      {toast && (
+        <div className={`mt-3 px-3 py-2 rounded-lg text-xs font-medium flex items-center justify-between ${
+          toast.type === 'success'
+            ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+            : 'bg-red-500/15 text-red-400 border border-red-500/30'
+        }`}>
+          <span>{toast.type === 'success' ? '✅' : '❌'} {toast.message}</span>
+          <button onClick={() => setToast(null)} className="ml-2 opacity-60 hover:opacity-100">✕</button>
+        </div>
+      )}
     </Card>
   );
 }

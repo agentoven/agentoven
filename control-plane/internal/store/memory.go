@@ -474,8 +474,13 @@ func (m *MemoryStore) UpdateAgent(_ context.Context, agent *models.Agent) error 
 
 func (m *MemoryStore) DeleteAgent(_ context.Context, kitchen, name string) error {
 	m.mu.Lock()
-	delete(m.agents, key(kitchen, name))
-	delete(m.agentVersions, key(kitchen, name))
+	k := key(kitchen, name)
+	if _, ok := m.agents[k]; !ok {
+		m.mu.Unlock()
+		return &ErrNotFound{Entity: "agent", Key: name}
+	}
+	delete(m.agents, k)
+	delete(m.agentVersions, k)
 	m.mu.Unlock()
 	m.requestSave()
 	return nil
