@@ -1,12 +1,13 @@
 import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Bot, Plus, Flame, Snowflake, Trash2, FlaskConical, AlertTriangle, Sun, RefreshCw, Code, Copy, Check, Shield } from 'lucide-react';
+import { Bot, Plus, Flame, Snowflake, Trash2, FlaskConical, AlertTriangle, Sun, RefreshCw, Code, Copy, Check, Shield, Terminal } from 'lucide-react';
 import { agents, providers, type Agent, type Ingredient, type IngredientKind, APIError } from '../api';
 import { useAPI } from '../hooks';
 import {
   PageHeader, Card, StatusBadge, EmptyState,
   Spinner, ErrorBanner, Button, Modal,
 } from '../components/UI';
+import { AgentLogViewer } from '../components/AgentLogViewer';
 
 // ── Main Page ─────────────────────────────────────────────────
 
@@ -15,6 +16,7 @@ export function AgentsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [integrateAgent, setIntegrateAgent] = useState<Agent | null>(null);
   const [recookAgent, setRecookAgent] = useState<Agent | null>(null);
+  const [logAgent, setLogAgent] = useState<string | null>(null);
 
   return (
     <div>
@@ -41,6 +43,7 @@ export function AgentsPage() {
               onAction={refetch}
               onIntegrate={() => setIntegrateAgent(agent)}
               onRecook={() => setRecookAgent(agent)}
+              onViewLogs={() => setLogAgent(agent.name)}
             />
           ))}
         </div>
@@ -77,11 +80,14 @@ export function AgentsPage() {
       >
         {recookAgent && <AgentEditForm agent={recookAgent} onDone={() => { setRecookAgent(null); refetch(); }} />}
       </Modal>
+
+      {/* ── Live Log Viewer ── */}
+      {logAgent && <AgentLogViewer agentName={logAgent} onClose={() => setLogAgent(null)} />}
     </div>
   );
 }
 
-function AgentCard({ agent, onAction, onIntegrate, onRecook }: { agent: Agent; onAction: () => void; onIntegrate: () => void; onRecook: () => void }) {
+function AgentCard({ agent, onAction, onIntegrate, onRecook, onViewLogs }: { agent: Agent; onAction: () => void; onIntegrate: () => void; onRecook: () => void; onViewLogs: () => void }) {
   const [busy, setBusy] = useState(false);
   const [bakeError, setBakeError] = useState<string[] | null>(null);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -135,6 +141,11 @@ function AgentCard({ agent, onAction, onIntegrate, onRecook }: { agent: Agent; o
           }`}>
             {agent.mode || 'managed'}
           </span>
+          {agent.mode === 'managed' && agent.behavior === 'agentic' && (
+            <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-amber-500/20 text-amber-400">
+              agentic
+            </span>
+          )}
           {agent.mode === 'managed' && (
             <span className="text-[var(--ao-text-muted)]">max {agent.max_turns || 10} turns</span>
           )}
@@ -195,6 +206,9 @@ function AgentCard({ agent, onAction, onIntegrate, onRecook }: { agent: Agent; o
             </Button>
             <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${agent.name}/test`)}>
               <FlaskConical size={14} className="mr-1" /> Test
+            </Button>
+            <Button size="sm" variant="secondary" onClick={onViewLogs}>
+              <Terminal size={14} className="mr-1" /> Logs
             </Button>
             <Button size="sm" variant="secondary" onClick={onRecook} disabled={busy}>
               <RefreshCw size={14} className="mr-1" /> Re-cook
@@ -434,6 +448,10 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
     skills: '',
     mode: 'managed' as 'managed' | 'external',
     max_turns: 10,
+    behavior: 'reactive' as 'reactive' | 'agentic',
+    context_budget: 16000,
+    summary_model: '',
+    reasoning_strategy: 'react' as 'react' | 'plan-and-execute' | 'reflexion',
   });
   const [ingredients, setIngredients] = useState<IngredientRow[]>([]);
   const [guardrails, setGuardrails] = useState<GuardrailRow[]>([]);
@@ -500,6 +518,10 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
         skills,
         mode: form.mode,
         max_turns: form.mode === 'managed' ? form.max_turns : undefined,
+        behavior: form.mode === 'managed' ? form.behavior : undefined,
+        context_budget: form.behavior === 'agentic' ? form.context_budget : undefined,
+        summary_model: form.behavior === 'agentic' && form.summary_model ? form.summary_model : undefined,
+        reasoning_strategy: form.behavior === 'agentic' ? form.reasoning_strategy : undefined,
       } as any);
       onCreated();
     } catch (e) {
@@ -571,6 +593,44 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
                 </div>
               )}
             </div>
+
+            {/* Agent behavior (managed only) */}
+            {form.mode === 'managed' && (
+              <div className="p-3 rounded-lg border border-purple-500/30 bg-purple-500/5">
+                <p className="text-xs font-semibold text-purple-400 uppercase tracking-wider mb-3">Agent Behavior</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Behavior</label>
+                    <select value={form.behavior} onChange={(e) => setForm({ ...form, behavior: e.target.value as 'reactive' | 'agentic' })} className={inputCls}>
+                      <option value="reactive">Reactive (single-turn)</option>
+                      <option value="agentic">Agentic (multi-turn, tool use)</option>
+                    </select>
+                  </div>
+                  {form.behavior === 'agentic' && (
+                    <div>
+                      <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Reasoning Strategy</label>
+                      <select value={form.reasoning_strategy} onChange={(e) => setForm({ ...form, reasoning_strategy: e.target.value as 'react' | 'plan-and-execute' | 'reflexion' })} className={inputCls}>
+                        <option value="react">ReAct (Reason + Act)</option>
+                        <option value="plan-and-execute">Plan & Execute</option>
+                        <option value="reflexion">Reflexion</option>
+                      </select>
+                    </div>
+                  )}
+                </div>
+                {form.behavior === 'agentic' && (
+                  <div className="grid grid-cols-2 gap-3 mt-3">
+                    <div>
+                      <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Context Budget (tokens)</label>
+                      <input type="number" min={1000} max={128000} value={form.context_budget} onChange={(e) => setForm({ ...form, context_budget: parseInt(e.target.value) || 16000 })} className={inputCls} />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Summary Model</label>
+                      <input value={form.summary_model} onChange={(e) => setForm({ ...form, summary_model: e.target.value })} className={inputCls} placeholder="gpt-4o-mini (optional)" />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Primary model */}
             <div className="p-3 rounded-lg border border-[var(--ao-border)] bg-[var(--ao-bg)]">
@@ -799,6 +859,10 @@ function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => void }) 
     skills: agent.skills?.join(', ') || '',
     mode: agent.mode || 'managed' as 'managed' | 'external',
     max_turns: agent.max_turns || 10,
+    behavior: agent.behavior || 'reactive' as 'reactive' | 'agentic',
+    context_budget: agent.context_budget || 16000,
+    summary_model: agent.summary_model || '',
+    reasoning_strategy: agent.reasoning_strategy || 'react' as 'react' | 'plan-and-execute' | 'reflexion',
   });
   const [ingredients, setIngredients] = useState<IngredientRow[]>(otherIngredients);
   const [guardrails, setGuardrails] = useState<GuardrailRow[]>(existingGuardrails);
@@ -863,6 +927,10 @@ function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => void }) 
         skills,
         mode: form.mode,
         max_turns: form.mode === 'managed' ? form.max_turns : undefined,
+        behavior: form.mode === 'managed' ? form.behavior : undefined,
+        context_budget: form.mode === 'managed' && form.behavior === 'agentic' ? form.context_budget : undefined,
+        summary_model: form.mode === 'managed' && form.behavior === 'agentic' ? (form.summary_model || undefined) : undefined,
+        reasoning_strategy: form.mode === 'managed' && form.behavior === 'agentic' ? form.reasoning_strategy : undefined,
       } as any);
       onDone();
     } catch (e) {
@@ -942,6 +1010,44 @@ function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => void }) 
                 </div>
               )}
             </div>
+
+            {/* Agent behavior (managed only) */}
+            {form.mode === 'managed' && (
+              <div className="p-3 rounded-lg border border-purple-500/30 bg-purple-500/5">
+                <p className="text-xs font-semibold text-purple-400 uppercase tracking-wider mb-3">Agent Behavior</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Behavior</label>
+                    <select value={form.behavior} onChange={(e) => setForm({ ...form, behavior: e.target.value as 'reactive' | 'agentic' })} className={inputCls}>
+                      <option value="reactive">Reactive (single-turn)</option>
+                      <option value="agentic">Agentic (multi-turn, tool use)</option>
+                    </select>
+                  </div>
+                  {form.behavior === 'agentic' && (
+                    <div>
+                      <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Reasoning Strategy</label>
+                      <select value={form.reasoning_strategy} onChange={(e) => setForm({ ...form, reasoning_strategy: e.target.value as 'react' | 'plan-and-execute' | 'reflexion' })} className={inputCls}>
+                        <option value="react">ReAct (Reason + Act)</option>
+                        <option value="plan-and-execute">Plan & Execute</option>
+                        <option value="reflexion">Reflexion</option>
+                      </select>
+                    </div>
+                  )}
+                </div>
+                {form.behavior === 'agentic' && (
+                  <div className="grid grid-cols-2 gap-3 mt-3">
+                    <div>
+                      <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Context Budget (tokens)</label>
+                      <input type="number" min={1000} max={128000} value={form.context_budget} onChange={(e) => setForm({ ...form, context_budget: parseInt(e.target.value) || 16000 })} className={inputCls} />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Summary Model</label>
+                      <input value={form.summary_model} onChange={(e) => setForm({ ...form, summary_model: e.target.value })} className={inputCls} placeholder="gpt-4o-mini (optional)" />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Primary model */}
             <div className="p-3 rounded-lg border border-[var(--ao-border)] bg-[var(--ao-bg)]">

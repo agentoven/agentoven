@@ -49,7 +49,7 @@ type Handlers struct {
 // New creates a new Handlers instance with all dependencies.
 func New(s store.Store, mr *router.ModelRouter, gw *mcpgw.Gateway, wf *workflow.Engine, cat *catalog.Catalog, sess contracts.SessionStore, pm *process.Manager) *Handlers {
 	res := resolver.NewResolver(s)
-	exec := executor.NewExecutor(s, mr, gw)
+	exec := executor.NewExecutor(s, mr, gw, sess)
 	return &Handlers{
 		Store:           s,
 		Router:          mr,
@@ -1421,7 +1421,16 @@ func (h *Handlers) UpdateMCPTool(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) ListTraces(w http.ResponseWriter, r *http.Request) {
 	kitchen := middleware.GetKitchen(r.Context())
-	traces, err := h.Store.ListTraces(r.Context(), kitchen, 100)
+
+	// Parse optional filter query params
+	filter := store.TraceFilter{
+		AgentName:  r.URL.Query().Get("agent"),
+		RecipeName: r.URL.Query().Get("recipe"),
+		Status:     r.URL.Query().Get("status"),
+		Limit:      100,
+	}
+
+	traces, err := h.Store.ListTracesFiltered(r.Context(), kitchen, filter)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -2241,6 +2250,87 @@ func (h *Handlers) ListProcesses(w http.ResponseWriter, r *http.Request) {
 		running = []*models.ProcessInfo{}
 	}
 	respondJSON(w, http.StatusOK, running)
+}
+
+// StreamAgentLogs streams live agent process logs via Server-Sent Events.
+// GET /api/v1/agents/{agentName}/logs
+func (h *Handlers) StreamAgentLogs(w http.ResponseWriter, r *http.Request) {
+	agentName := chi.URLParam(r, "agentName")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	if h.ProcessManager == nil {
+		respondError(w, http.StatusServiceUnavailable, "process manager not available")
+		return
+	}
+
+	logBuf := h.ProcessManager.GetLogBuffer(kitchen, agentName)
+	if logBuf == nil {
+		respondError(w, http.StatusNotFound, fmt.Sprintf("no running process for agent '%s'", agentName))
+		return
+	}
+
+	// Set SSE headers
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		respondError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	// Send recent log history first
+	recent := logBuf.Recent(200)
+	for _, entry := range recent {
+		data, _ := json.Marshal(entry)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+	}
+	flusher.Flush()
+
+	// Subscribe to live updates
+	ch := logBuf.Subscribe()
+	defer logBuf.Unsubscribe(ch)
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case entry, ok := <-ch:
+			if !ok {
+				return
+			}
+			data, _ := json.Marshal(entry)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		}
+	}
+}
+
+// GetAgentLogs returns the recent log history for an agent (non-streaming).
+// GET /api/v1/agents/{agentName}/logs/recent
+func (h *Handlers) GetAgentLogs(w http.ResponseWriter, r *http.Request) {
+	agentName := chi.URLParam(r, "agentName")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	if h.ProcessManager == nil {
+		respondError(w, http.StatusServiceUnavailable, "process manager not available")
+		return
+	}
+
+	logBuf := h.ProcessManager.GetLogBuffer(kitchen, agentName)
+	if logBuf == nil {
+		respondError(w, http.StatusNotFound, fmt.Sprintf("no running process for agent '%s'", agentName))
+		return
+	}
+
+	entries := logBuf.Recent(500)
+	if entries == nil {
+		entries = []process.LogEntry{}
+	}
+	respondJSON(w, http.StatusOK, entries)
 }
 
 // ══════════════════════════════════════════════════════════════

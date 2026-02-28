@@ -3,7 +3,7 @@
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 
 // AgentOven Python SDK — native Rust bindings via PyO3.
 //
@@ -213,6 +213,42 @@ fn pyobj_to_json_string(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Strin
     }
 }
 
+/// Convert a Python object to a serde_json::Value, handling nested dicts and lists.
+fn pyany_to_json(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
+    // Check bool before i64 because Python bool is a subclass of int
+    if let Ok(b) = obj.extract::<bool>() {
+        return Ok(serde_json::Value::Bool(b));
+    }
+    if let Ok(i) = obj.extract::<i64>() {
+        return Ok(serde_json::Value::Number(i.into()));
+    }
+    if let Ok(f) = obj.extract::<f64>() {
+        return Ok(serde_json::json!(f));
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return Ok(serde_json::Value::String(s));
+    }
+    if obj.is_none() {
+        return Ok(serde_json::Value::Null);
+    }
+    if let Ok(dict) = obj.downcast::<PyDict>() {
+        let mut map = serde_json::Map::new();
+        for (k, v) in dict.iter() {
+            let key: String = k.extract()?;
+            map.insert(key, pyany_to_json(&v)?);
+        }
+        return Ok(serde_json::Value::Object(map));
+    }
+    if let Ok(list) = obj.downcast::<PyList>() {
+        let mut arr = Vec::new();
+        for item in list.iter() {
+            arr.push(pyany_to_json(&item)?);
+        }
+        return Ok(serde_json::Value::Array(arr));
+    }
+    Ok(serde_json::Value::String(obj.repr()?.to_string()))
+}
+
 // ── Step ─────────────────────────────────────────────────────
 
 /// A step in a multi-agent recipe.
@@ -225,6 +261,8 @@ fn pyobj_to_json_string(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Strin
 pub struct Step {
     #[pyo3(get, set)]
     pub name: String,
+    #[pyo3(get, set)]
+    pub kind: String,
     #[pyo3(get, set)]
     pub agent: Option<String>,
     #[pyo3(get, set)]
@@ -242,9 +280,10 @@ pub struct Step {
 #[pymethods]
 impl Step {
     #[new]
-    #[pyo3(signature = (name, agent=None, parallel=false, timeout=None, human_gate=false, notify=vec![], depends_on=vec![]))]
+    #[pyo3(signature = (name, kind="agent".to_string(), agent=None, parallel=false, timeout=None, human_gate=false, notify=vec![], depends_on=vec![]))]
     fn new(
         name: String,
+        kind: String,
         agent: Option<String>,
         parallel: bool,
         timeout: Option<String>,
@@ -252,7 +291,7 @@ impl Step {
         notify: Vec<String>,
         depends_on: Vec<String>,
     ) -> Self {
-        Step { name, agent, parallel, timeout, human_gate, notify, depends_on }
+        Step { name, kind, agent, parallel, timeout, human_gate, notify, depends_on }
     }
 
     fn __repr__(&self) -> String {
@@ -293,6 +332,8 @@ pub struct Agent {
     #[pyo3(get, set)]
     pub model_name: String,
     #[pyo3(get, set)]
+    pub mode: String,
+    #[pyo3(get, set)]
     pub system_prompt: Option<String>,
     #[pyo3(get, set)]
     pub ingredients: Vec<Ingredient>,
@@ -310,6 +351,7 @@ impl Agent {
         version="0.1.0".to_string(),
         model_provider="".to_string(),
         model_name="".to_string(),
+        mode="managed".to_string(),
         system_prompt=None,
         ingredients=vec![],
     ))]
@@ -321,10 +363,11 @@ impl Agent {
         version: String,
         model_provider: String,
         model_name: String,
+        mode: String,
         system_prompt: Option<String>,
         ingredients: Vec<Ingredient>,
     ) -> Self {
-        Agent { name, description, framework, version, model_provider, model_name, system_prompt, ingredients, status: AgentStatus::Draft }
+        Agent { name, description, framework, version, model_provider, model_name, mode, system_prompt, ingredients, status: AgentStatus::Draft }
     }
 
     /// Add an ingredient to this agent.
@@ -493,6 +536,10 @@ impl AgentOvenClient {
             "ingredients": ingredients,
         });
 
+        // Agent mode
+        if !agent.mode.is_empty() {
+            body["mode"] = serde_json::json!(agent.mode);
+        }
         // Top-level model fields for backward compat
         if !agent.model_provider.is_empty() {
             body["model_provider"] = serde_json::json!(agent.model_provider);
@@ -500,8 +547,22 @@ impl AgentOvenClient {
         if !agent.model_name.is_empty() {
             body["model_name"] = serde_json::json!(agent.model_name);
         }
+        // Convert system_prompt → prompt ingredient (backend reads ingredients, not top-level field)
         if let Some(ref sp) = agent.system_prompt {
-            body["system_prompt"] = serde_json::json!(sp);
+            if !sp.is_empty() {
+                if let serde_json::Value::Array(ref mut arr) = body["ingredients"] {
+                    // Only add if no prompt ingredient already exists
+                    let has_prompt = arr.iter().any(|i| i.get("kind").and_then(|k| k.as_str()) == Some("prompt"));
+                    if !has_prompt {
+                        arr.push(serde_json::json!({
+                            "name": "system-prompt",
+                            "kind": "prompt",
+                            "config": { "text": sp },
+                            "required": true
+                        }));
+                    }
+                }
+            }
         }
 
         body
@@ -513,14 +574,13 @@ impl AgentOvenClient {
             .steps
             .iter()
             .map(|s| {
-                let kind = if s.human_gate { "human_gate" } else { "agent" };
+                let kind = if s.human_gate { "human_gate" } else { s.kind.as_str() };
                 let mut step = serde_json::json!({
                     "name": s.name,
                     "kind": kind,
-                    "parallel": s.parallel,
                 });
                 if let Some(ref a) = s.agent {
-                    step["agent"] = serde_json::json!(a);
+                    step["agent_ref"] = serde_json::json!(a);
                 }
                 if let Some(ref t) = s.timeout {
                     step["timeout"] = serde_json::json!(t);
@@ -575,6 +635,162 @@ impl AgentOvenClient {
         self.register(agent)
     }
 
+    // ── Provider ─────────────────────────────────────────────
+
+    /// Register a model provider.
+    ///
+    ///     client.register_provider("my-openai", "openai", api_key="sk-...")
+    #[pyo3(signature = (name, kind, api_key=None, endpoint=None, models=vec![]))]
+    fn register_provider(
+        &self,
+        name: &str,
+        kind: &str,
+        api_key: Option<String>,
+        endpoint: Option<String>,
+        models: Vec<String>,
+    ) -> PyResult<String> {
+        let http = reqwest::blocking::Client::new();
+        let url = self.api_url("/models/providers");
+        let mut config = serde_json::Map::new();
+        if let Some(ref key) = api_key {
+            config.insert("api_key".into(), serde_json::json!(key));
+        }
+        let mut body = serde_json::json!({
+            "name": name,
+            "kind": kind,
+            "models": models,
+            "config": config,
+        });
+        if let Some(ref ep) = endpoint {
+            body["endpoint"] = serde_json::json!(ep);
+        }
+        let req = self.authed_request(&http, reqwest::Method::POST, &url).json(&body);
+        let (status, text) = self.send(req)?;
+        if (200..300).contains(&status) || status == 409 {
+            Ok(format!("✅ Provider '{name}' registered"))
+        } else {
+            Err(PyRuntimeError::new_err(format!("Provider register failed ({status}): {text}")))
+        }
+    }
+
+    // ── Get Agent ────────────────────────────────────────────
+
+    /// Get a single agent by name.
+    ///
+    ///     agent = client.get_agent("my-agent")
+    ///     print(agent.status)
+    fn get_agent(&self, name: &str) -> PyResult<Agent> {
+        let http = reqwest::blocking::Client::new();
+        let url = self.api_url(&format!("/agents/{name}"));
+        let req = self.authed_request(&http, reqwest::Method::GET, &url);
+        let (status, text) = self.send(req)?;
+        if !(200..300).contains(&status) {
+            return Err(PyRuntimeError::new_err(format!("Get agent failed ({status}): {text}")));
+        }
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| PyRuntimeError::new_err(format!("JSON parse error: {e}")))?;
+        Ok(Agent {
+            name: v["name"].as_str().unwrap_or("").to_string(),
+            description: v["description"].as_str().unwrap_or("").to_string(),
+            framework: v["framework"].as_str().unwrap_or("custom").to_string(),
+            version: v["version"].as_str().unwrap_or("0.1.0").to_string(),
+            model_provider: v["model_provider"].as_str().unwrap_or("").to_string(),
+            model_name: v["model_name"].as_str().unwrap_or("").to_string(),
+            mode: v["mode"].as_str().unwrap_or("managed").to_string(),
+            system_prompt: v.get("system_prompt").and_then(|s| s.as_str()).map(|s| s.to_string()),
+            ingredients: vec![],
+            status: match v["status"].as_str().unwrap_or("draft") {
+                "baking" => AgentStatus::Baking,
+                "ready" => AgentStatus::Ready,
+                "cooled" => AgentStatus::Cooled,
+                "burnt" => AgentStatus::Burnt,
+                "retired" => AgentStatus::Retired,
+                _ => AgentStatus::Draft,
+            },
+        })
+    }
+
+    // ── Recipe CRUD ──────────────────────────────────────────
+
+    /// Create a recipe without running it.
+    ///
+    ///     client.create_recipe(recipe)
+    fn create_recipe(&self, recipe: &Recipe) -> PyResult<String> {
+        let http = reqwest::blocking::Client::new();
+        let url = self.api_url("/recipes");
+        let body = self.recipe_to_json(recipe);
+        let req = self.authed_request(&http, reqwest::Method::POST, &url).json(&body);
+        let (status, text) = self.send(req)?;
+        if (200..300).contains(&status) || status == 409 {
+            Ok(format!("✅ Recipe '{}' created", recipe.name))
+        } else {
+            Err(PyRuntimeError::new_err(format!("Recipe create failed ({status}): {text}")))
+        }
+    }
+
+    /// Run a recipe by name with input parameters.
+    ///
+    ///     result = client.bake_recipe("my-recipe", {"query": "Hello"})
+    #[pyo3(signature = (name, input=None))]
+    fn bake_recipe(
+        &self,
+        name: &str,
+        input: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<String> {
+        let http = reqwest::blocking::Client::new();
+        let url = self.api_url(&format!("/recipes/{name}/bake"));
+        let body = match input {
+            Some(obj) => pyany_to_json(obj)?,
+            None => serde_json::json!({}),
+        };
+        let req = self.authed_request(&http, reqwest::Method::POST, &url).json(&body);
+        let (status, text) = self.send(req)?;
+        if (200..300).contains(&status) {
+            Ok(text)
+        } else {
+            Err(PyRuntimeError::new_err(format!("Recipe bake failed ({status}): {text}")))
+        }
+    }
+
+    /// List all recipes.
+    fn list_recipes(&self) -> PyResult<String> {
+        let http = reqwest::blocking::Client::new();
+        let url = self.api_url("/recipes");
+        let req = self.authed_request(&http, reqwest::Method::GET, &url);
+        let (status, text) = self.send(req)?;
+        if (200..300).contains(&status) {
+            Ok(text)
+        } else {
+            Err(PyRuntimeError::new_err(format!("List recipes failed ({status}): {text}")))
+        }
+    }
+
+    /// Get runs for a recipe.
+    fn get_recipe_runs(&self, name: &str) -> PyResult<String> {
+        let http = reqwest::blocking::Client::new();
+        let url = self.api_url(&format!("/recipes/{name}/runs"));
+        let req = self.authed_request(&http, reqwest::Method::GET, &url);
+        let (status, text) = self.send(req)?;
+        if (200..300).contains(&status) {
+            Ok(text)
+        } else {
+            Err(PyRuntimeError::new_err(format!("Get recipe runs failed ({status}): {text}")))
+        }
+    }
+
+    /// Get a specific recipe run by ID.
+    fn get_recipe_run(&self, recipe_name: &str, run_id: &str) -> PyResult<String> {
+        let http = reqwest::blocking::Client::new();
+        let url = self.api_url(&format!("/recipes/{recipe_name}/runs/{run_id}"));
+        let req = self.authed_request(&http, reqwest::Method::GET, &url);
+        let (status, text) = self.send(req)?;
+        if (200..300).contains(&status) {
+            Ok(text)
+        } else {
+            Err(PyRuntimeError::new_err(format!("Get run failed ({status}): {text}")))
+        }
+    }
+
     // ── List ─────────────────────────────────────────────────
 
     /// List all agents in the current kitchen.
@@ -603,6 +819,7 @@ impl AgentOvenClient {
                     version: a.version,
                     model_provider: a.model_provider,
                     model_name: a.model_name,
+                    mode: format!("{}", a.mode),
                     system_prompt: a.system_prompt,
                     ingredients: vec![],
                     status: match a.status {

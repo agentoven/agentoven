@@ -29,6 +29,10 @@ type Store = store.Store
 // ErrNotFound is a type alias for the internal ErrNotFound error.
 type ErrNotFound = store.ErrNotFound
 
+// TraceFilter is a type alias for the internal TraceFilter struct.
+// Exposed so enterprise repo can reference it in store implementations.
+type TraceFilter = store.TraceFilter
+
 // ── Model Router Service ────────────────────────────────────
 
 // ModelRouterService routes LLM requests to configured providers.

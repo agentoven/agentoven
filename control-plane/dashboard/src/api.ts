@@ -60,6 +60,11 @@ export interface Agent {
   kitchen: string;
   version: string;
   max_turns: number;
+  // Agentic behavior fields
+  behavior: 'reactive' | 'agentic';
+  context_budget: number;
+  summary_model: string;
+  reasoning_strategy: 'react' | 'plan-and-execute' | 'reflexion';
   a2a_endpoint: string;
   skills: string[];
   model_provider: string;
@@ -152,6 +157,12 @@ export interface AgentConfig {
   };
 }
 
+export interface LogEntry {
+  timestamp: string;
+  stream: string; // "stdout" or "stderr"
+  line: string;
+}
+
 export const agents = {
   list: () => request<Agent[]>('/agents'),
   get: (name: string) => request<Agent>(`/agents/${name}`),
@@ -184,6 +195,9 @@ export const agents = {
     }),
   config: (name: string) =>
     request<AgentConfig>(`/agents/${name}/config`),
+  logsRecent: (name: string) =>
+    request<LogEntry[]>(`/agents/${name}/logs/recent`),
+  logsStreamURL: (name: string) => `${BASE}/agents/${name}/logs`,
 };
 
 // ── Recipes ───────────────────────────────────────────────────
@@ -304,11 +318,20 @@ export interface Trace {
   total_tokens: number;
   cost_usd: number;
   metadata: Record<string, unknown>;
+  output_text: string;
+  user_id: string;
   created_at: string;
 }
 
 export const traces = {
-  list: () => request<Trace[]>('/traces'),
+  list: (filters?: { agent?: string; recipe?: string; status?: string }) => {
+    const params = new URLSearchParams();
+    if (filters?.agent) params.set('agent', filters.agent);
+    if (filters?.recipe) params.set('recipe', filters.recipe);
+    if (filters?.status) params.set('status', filters.status);
+    const qs = params.toString();
+    return request<Trace[]>(`/traces${qs ? '?' + qs : ''}`);
+  },
   get: (id: string) => request<Trace>(`/traces/${id}`),
 };
 

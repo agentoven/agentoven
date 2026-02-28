@@ -95,6 +95,30 @@ const (
 	AgentModeExternal AgentMode = "external"
 )
 
+// AgentBehavior controls whether an agent is single-turn (reactive) or
+// runs an autonomous reasoning loop with memory (agentic).
+type AgentBehavior string
+
+const (
+	// BehaviorReactive is the default — single request/response, no memory.
+	BehaviorReactive AgentBehavior = "reactive"
+	// BehaviorAgentic enables the autonomous loop with sliding context,
+	// native tool calling, session memory, and agent-to-agent delegation.
+	BehaviorAgentic AgentBehavior = "agentic"
+)
+
+// ReasoningStrategy controls how the agentic loop reasons about tasks.
+type ReasoningStrategy string
+
+const (
+	// StrategyReAct uses the ReAct pattern: Thought → Action → Observation → repeat.
+	StrategyReAct ReasoningStrategy = "react"
+	// StrategyPlanAndExecute generates a full plan first, then executes each step.
+	StrategyPlanAndExecute ReasoningStrategy = "plan-and-execute"
+	// StrategyReflexion adds a self-critique step after each action.
+	StrategyReflexion ReasoningStrategy = "reflexion"
+)
+
 // ExecutionMode determines how an agent process is spawned at bake time.
 type ExecutionMode string
 
@@ -153,6 +177,13 @@ type Agent struct {
 
 	// Managed mode configuration
 	MaxTurns int `json:"max_turns,omitempty" db:"max_turns"`
+
+	// Agentic behavior — controls whether the agent runs an autonomous
+	// reasoning loop with memory, tool calling, and delegation.
+	Behavior          AgentBehavior     `json:"behavior,omitempty" db:"behavior"`
+	ContextBudget     int               `json:"context_budget,omitempty" db:"context_budget"`         // max tokens for sliding context window (default: 16000)
+	SummaryModel      string            `json:"summary_model,omitempty" db:"summary_model"`           // cheap model for context compression (e.g. "gpt-4o-mini")
+	ReasoningStrategy ReasoningStrategy `json:"reasoning_strategy,omitempty" db:"reasoning_strategy"` // "react", "plan-and-execute", "reflexion"
 
 	// A2A Configuration — A2AEndpoint is the stable control-plane URL
 	// (always /agents/{name}/a2a). BackendEndpoint is the actual backend
@@ -417,17 +448,19 @@ const (
 )
 
 type RecipeRun struct {
-	ID          string                 `json:"id" db:"id"`
-	RecipeID    string                 `json:"recipe_id" db:"recipe_id"`
-	Kitchen     string                 `json:"kitchen" db:"kitchen"`
-	Status      RecipeRunStatus        `json:"status" db:"status"`
-	Input       map[string]interface{} `json:"input,omitempty"`
-	Output      map[string]interface{} `json:"output,omitempty"`
-	StepResults []StepResult           `json:"step_results,omitempty"`
-	StartedAt   time.Time              `json:"started_at" db:"started_at"`
-	CompletedAt *time.Time             `json:"completed_at,omitempty" db:"completed_at"`
-	DurationMs  int64                  `json:"duration_ms,omitempty" db:"duration_ms"`
-	Error       string                 `json:"error,omitempty" db:"error"`
+	ID           string                 `json:"id" db:"id"`
+	RecipeID     string                 `json:"recipe_id" db:"recipe_id"`
+	Kitchen      string                 `json:"kitchen" db:"kitchen"`
+	Status       RecipeRunStatus        `json:"status" db:"status"`
+	Input        map[string]interface{} `json:"input,omitempty"`
+	Output       map[string]interface{} `json:"output,omitempty"`
+	StepResults  []StepResult           `json:"step_results,omitempty"`
+	StartedAt    time.Time              `json:"started_at" db:"started_at"`
+	CompletedAt  *time.Time             `json:"completed_at,omitempty" db:"completed_at"`
+	DurationMs   int64                  `json:"duration_ms,omitempty" db:"duration_ms"`
+	TotalTokens  int64                  `json:"total_tokens,omitempty" db:"total_tokens"`
+	TotalCostUSD float64                `json:"total_cost_usd,omitempty" db:"total_cost_usd"`
+	Error        string                 `json:"error,omitempty" db:"error"`
 }
 
 type StepResult struct {

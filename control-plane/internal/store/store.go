@@ -27,6 +27,7 @@ type Store interface {
 	NotificationChannelStore
 	VectorDocStore
 	DataConnectorStore
+	SessionStore
 
 	// Ping checks if the database is reachable.
 	Ping(ctx context.Context) error
@@ -36,6 +37,17 @@ type Store interface {
 
 	// Migrate runs database migrations.
 	Migrate(ctx context.Context) error
+}
+
+// ── Session Store ───────────────────────────────────────────
+
+// SessionStore manages multi-turn conversation sessions for agentic agents.
+type SessionStore interface {
+	GetSession(ctx context.Context, id string) (*models.Session, error)
+	CreateSession(ctx context.Context, session *models.Session) error
+	UpdateSession(ctx context.Context, session *models.Session) error
+	DeleteSession(ctx context.Context, id string) error
+	ListSessionsByAgent(ctx context.Context, kitchen, agentName string, limit int) ([]models.Session, error)
 }
 
 // ── Agent Store ─────────────────────────────────────────────
@@ -72,8 +84,17 @@ type KitchenStore interface {
 
 // ── Trace Store ─────────────────────────────────────────────
 
+// TraceFilter defines optional filters for listing traces.
+type TraceFilter struct {
+	AgentName  string // exact match on agent_name
+	RecipeName string // exact match on recipe_name
+	Status     string // exact match on status
+	Limit      int    // max results (default 100)
+}
+
 type TraceStore interface {
 	ListTraces(ctx context.Context, kitchen string, limit int) ([]models.Trace, error)
+	ListTracesFiltered(ctx context.Context, kitchen string, filter TraceFilter) ([]models.Trace, error)
 	GetTrace(ctx context.Context, id string) (*models.Trace, error)
 	CreateTrace(ctx context.Context, trace *models.Trace) error
 	DeleteTrace(ctx context.Context, id string) error

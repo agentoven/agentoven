@@ -24,6 +24,7 @@ type localProcess struct {
 	cmd    *exec.Cmd
 	cancel context.CancelFunc
 	pid    int
+	logs   *LogBuffer
 }
 
 // LocalExecutor spawns agent processes as Python subprocesses.
@@ -72,7 +73,14 @@ func (le *LocalExecutor) Start(ctx context.Context, agent *models.Agent, info *m
 		cancel()
 		return fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
-	cmd.Stderr = os.Stderr // agent logs go to control plane stderr
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		return fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
+
+	// Create log buffer for this agent (keep last 2000 lines)
+	logBuf := NewLogBuffer(2000)
 
 	// Start the process
 	if err := cmd.Start(); err != nil {
@@ -88,8 +96,19 @@ func (le *LocalExecutor) Start(ctx context.Context, agent *models.Agent, info *m
 		cmd:    cmd,
 		cancel: cancel,
 		pid:    cmd.Process.Pid,
+		logs:   logBuf,
 	}
 	le.mu.Unlock()
+
+	// Stream stderr to log buffer in the background
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			logBuf.Write("stderr", line)
+			log.Debug().Str("agent", agent.Name).Str("stream", "stderr").Msg(line)
+		}
+	}()
 
 	log.Info().
 		Str("agent", agent.Name).
@@ -105,8 +124,13 @@ func (le *LocalExecutor) Start(ctx context.Context, agent *models.Agent, info *m
 			line := scanner.Text()
 			if line == "AGENT_READY" {
 				readyCh <- true
+				// Continue reading stdout into log buffer
+				for scanner.Scan() {
+					logBuf.Write("stdout", scanner.Text())
+				}
 				return
 			}
+			logBuf.Write("stdout", line)
 		}
 		readyCh <- false
 	}()
@@ -183,6 +207,18 @@ func (le *LocalExecutor) Stop(_ context.Context, info *models.ProcessInfo) error
 	}
 
 	return nil
+}
+
+// GetLogBuffer returns the log buffer for a running agent process, or nil if not found.
+func (le *LocalExecutor) GetLogBuffer(kitchen, agentName string) *LogBuffer {
+	key := processKey(kitchen, agentName)
+	le.mu.Lock()
+	defer le.mu.Unlock()
+	proc, ok := le.processes[key]
+	if !ok {
+		return nil
+	}
+	return proc.logs
 }
 
 // ensureScript extracts the embedded agent_runner.py to a temp directory.

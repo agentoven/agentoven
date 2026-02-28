@@ -32,6 +32,7 @@ type snapshot struct {
 	Channels      map[string]*models.NotificationChannel `json:"channels"`    // key: kitchen:name
 	VectorDocs    map[string]*models.VectorDoc           `json:"vector_docs"` // key: kitchen:id
 	Connectors    map[string]*models.DataConnectorConfig `json:"connectors"`  // key: kitchen:id
+	Sessions      map[string]*models.Session             `json:"sessions"`    // key: id
 }
 
 // MemoryStore implements Store with in-memory maps.
@@ -51,6 +52,7 @@ type MemoryStore struct {
 	channels    map[string]*models.NotificationChannel // key: kitchen:name
 	vectorDocs  map[string]*models.VectorDoc           // key: kitchen:id
 	connectors  map[string]*models.DataConnectorConfig // key: kitchen:id
+	sessions    map[string]*models.Session             // key: id
 
 	// Agent version history — append-only, keyed by kitchen:name
 	agentVersions map[string][]*models.Agent // key: kitchen:name → version history
@@ -96,6 +98,7 @@ func NewMemoryStore() *MemoryStore {
 		channels:      make(map[string]*models.NotificationChannel),
 		vectorDocs:    make(map[string]*models.VectorDoc),
 		connectors:    make(map[string]*models.DataConnectorConfig),
+		sessions:      make(map[string]*models.Session),
 		saveCh:        make(chan struct{}, 1),
 		doneCh:        make(chan struct{}),
 		traceTTL:      traceTTL,
@@ -613,6 +616,37 @@ func (m *MemoryStore) ListTraces(_ context.Context, kitchen string, limit int) (
 			if len(result) >= limit {
 				break
 			}
+		}
+	}
+	return result, nil
+}
+
+func (m *MemoryStore) ListTracesFiltered(_ context.Context, kitchen string, filter TraceFilter) ([]models.Trace, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+
+	var result []models.Trace
+	for _, t := range m.traces {
+		if kitchen != "" && t.Kitchen != kitchen {
+			continue
+		}
+		if filter.AgentName != "" && t.AgentName != filter.AgentName {
+			continue
+		}
+		if filter.RecipeName != "" && t.RecipeName != filter.RecipeName {
+			continue
+		}
+		if filter.Status != "" && t.Status != filter.Status {
+			continue
+		}
+		result = append(result, *t)
+		if len(result) >= limit {
+			break
 		}
 	}
 	return result, nil
@@ -1268,6 +1302,75 @@ func (m *MemoryStore) DeleteConnector(_ context.Context, kitchen, id string) err
 	m.mu.Unlock()
 	m.requestSave()
 	return nil
+}
+
+// ── Session Store ───────────────────────────────────────────
+
+func (m *MemoryStore) GetSession(_ context.Context, id string) (*models.Session, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	s, ok := m.sessions[id]
+	if !ok {
+		return nil, &ErrNotFound{Entity: "session", Key: id}
+	}
+	c := *s
+	c.Messages = make([]models.ChatMessage, len(s.Messages))
+	for i, msg := range s.Messages {
+		c.Messages[i] = msg
+	}
+	return &c, nil
+}
+
+func (m *MemoryStore) CreateSession(_ context.Context, session *models.Session) error {
+	m.mu.Lock()
+	c := *session
+	c.Messages = make([]models.ChatMessage, len(session.Messages))
+	for i, msg := range session.Messages {
+		c.Messages[i] = msg
+	}
+	m.sessions[session.ID] = &c
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) UpdateSession(_ context.Context, session *models.Session) error {
+	m.mu.Lock()
+	c := *session
+	c.Messages = make([]models.ChatMessage, len(session.Messages))
+	for i, msg := range session.Messages {
+		c.Messages[i] = msg
+	}
+	m.sessions[session.ID] = &c
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) DeleteSession(_ context.Context, id string) error {
+	m.mu.Lock()
+	delete(m.sessions, id)
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) ListSessionsByAgent(_ context.Context, kitchen, agentName string, limit int) ([]models.Session, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if limit <= 0 {
+		limit = 50
+	}
+	var result []models.Session
+	for _, s := range m.sessions {
+		if s.Kitchen == kitchen && s.AgentName == agentName {
+			result = append(result, *s)
+			if len(result) >= limit {
+				break
+			}
+		}
+	}
+	return result, nil
 }
 
 // Compile-time check that MemoryStore implements Store.

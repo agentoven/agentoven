@@ -494,6 +494,8 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 	// vs external endpoint), auth, RBAC, and observability.
 	endpoint := fmt.Sprintf("%s/agents/%s/a2a", e.baseURL, agentRef)
 
+	stepStart := time.Now()
+
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create A2A request: %w", err)
@@ -502,22 +504,117 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 
 	resp, err := e.client.Do(httpReq)
 	if err != nil {
+		e.createStepTrace(ctx, kitchen, agentRef, run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", err.Error())
 		return fmt.Errorf("A2A request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var rpcResp map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		e.createStepTrace(ctx, kitchen, agentRef, run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", err.Error())
 		return fmt.Errorf("decode A2A response: %w", err)
 	}
 
 	// Check for RPC error
 	if rpcErr, ok := rpcResp["error"].(map[string]interface{}); ok {
+		errMsg := fmt.Sprintf("%v", rpcErr["message"])
+		e.createStepTrace(ctx, kitchen, agentRef, run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", errMsg)
 		return fmt.Errorf("A2A error: %v", rpcErr["message"])
 	}
 
+	// Extract output text and usage data from the A2A response
+	outputText, tokens, costUSD := extractA2AMetrics(rpcResp)
+
+	// Populate cost/token data on the step result
+	result.Tokens = tokens
+	result.CostUSD = costUSD
+
+	// Create a trace record for this step
+	e.createStepTrace(ctx, kitchen, agentRef, run.RecipeID, run.ID, step.Name, "completed", stepStart, tokens, costUSD, outputText, "")
+
 	result.Output = rpcResp
 	return nil
+}
+
+// createStepTrace persists a Trace record for a single agent/RAG step execution.
+func (e *Engine) createStepTrace(ctx context.Context, kitchen, agentName, recipeName, runID, stepName, status string, start time.Time, tokens int64, costUSD float64, outputText, errMsg string) {
+	durationMs := time.Since(start).Milliseconds()
+	trace := &models.Trace{
+		ID:          uuid.New().String(),
+		AgentName:   agentName,
+		RecipeName:  recipeName,
+		Kitchen:     kitchen,
+		Status:      status,
+		DurationMs:  durationMs,
+		TotalTokens: tokens,
+		CostUSD:     costUSD,
+		OutputText:  outputText,
+		Metadata: map[string]interface{}{
+			"run_id":    runID,
+			"step_name": stepName,
+		},
+		CreatedAt: time.Now().UTC(),
+	}
+	if errMsg != "" {
+		trace.Metadata["error"] = errMsg
+	}
+	if err := e.store.CreateTrace(ctx, trace); err != nil {
+		log.Error().Err(err).Str("agent", agentName).Str("step", stepName).Msg("Failed to persist trace")
+	}
+}
+
+// extractA2AMetrics extracts output text, token count, and cost from an A2A JSON-RPC response.
+// The response shape is: { "result": { "status": {...}, "artifacts": [{ "parts": [{"type":"text","text":"..."}] }], "usage": {"prompt_tokens":N,"completion_tokens":N,"total_tokens":N,"cost_usd":F} } }
+func extractA2AMetrics(rpcResp map[string]interface{}) (outputText string, tokens int64, costUSD float64) {
+	rpcResult, ok := rpcResp["result"].(map[string]interface{})
+	if !ok {
+		return "", 0, 0
+	}
+
+	// Extract text from artifacts
+	if artifacts, ok := rpcResult["artifacts"].([]interface{}); ok {
+		for _, art := range artifacts {
+			artMap, ok := art.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if parts, ok := artMap["parts"].([]interface{}); ok {
+				for _, part := range parts {
+					partMap, ok := part.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					if partMap["type"] == "text" {
+						if txt, ok := partMap["text"].(string); ok {
+							if outputText != "" {
+								outputText += "\n"
+							}
+							outputText += txt
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Extract usage/token data — check both top-level "usage" and nested in result
+	usage, _ := rpcResult["usage"].(map[string]interface{})
+	if usage == nil {
+		// Some A2A implementations put usage in metadata
+		if meta, ok := rpcResult["metadata"].(map[string]interface{}); ok {
+			usage, _ = meta["usage"].(map[string]interface{})
+		}
+	}
+	if usage != nil {
+		if t, ok := usage["total_tokens"].(float64); ok {
+			tokens = int64(t)
+		}
+		if c, ok := usage["cost_usd"].(float64); ok {
+			costUSD = c
+		}
+	}
+
+	return outputText, tokens, costUSD
 }
 
 // executeRAGStep calls the control plane's RAG query endpoint.
@@ -573,6 +670,8 @@ func (e *Engine) executeRAGStep(ctx context.Context, run *models.RecipeRun, step
 	body, _ := json.Marshal(ragReq)
 	endpoint := fmt.Sprintf("%s/api/v1/rag/query", e.baseURL)
 
+	stepStart := time.Now()
+
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create RAG request: %w", err)
@@ -582,19 +681,26 @@ func (e *Engine) executeRAGStep(ctx context.Context, run *models.RecipeRun, step
 
 	resp, err := e.client.Do(httpReq)
 	if err != nil {
+		e.createStepTrace(ctx, run.Kitchen, "rag-pipeline", run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", err.Error())
 		return fmt.Errorf("RAG request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var ragResp map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&ragResp); err != nil {
+		e.createStepTrace(ctx, run.Kitchen, "rag-pipeline", run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", err.Error())
 		return fmt.Errorf("decode RAG response: %w", err)
 	}
 
 	if resp.StatusCode >= 400 {
 		errMsg, _ := ragResp["error"].(string)
+		e.createStepTrace(ctx, run.Kitchen, "rag-pipeline", run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", errMsg)
 		return fmt.Errorf("RAG query failed (status %d): %s", resp.StatusCode, errMsg)
 	}
+
+	// Extract answer text from RAG response
+	answerText, _ := ragResp["answer"].(string)
+	e.createStepTrace(ctx, run.Kitchen, "rag-pipeline", run.RecipeID, run.ID, step.Name, "completed", stepStart, 0, 0, answerText, "")
 
 	result.Output = ragResp
 	return nil
@@ -812,6 +918,16 @@ func (e *Engine) completeRun(run *models.RecipeRun, stepResults []models.StepRes
 	run.StepResults = stepResults
 	run.Output = output
 
+	// Aggregate token and cost data across all steps
+	var totalTokens int64
+	var totalCostUSD float64
+	for _, sr := range stepResults {
+		totalTokens += sr.Tokens
+		totalCostUSD += sr.CostUSD
+	}
+	run.TotalTokens = totalTokens
+	run.TotalCostUSD = totalCostUSD
+
 	if err := e.store.UpdateRecipeRun(context.Background(), run); err != nil {
 		log.Error().Err(err).Str("run_id", run.ID).Msg("Failed to update completed run")
 	}
@@ -820,6 +936,8 @@ func (e *Engine) completeRun(run *models.RecipeRun, stepResults []models.StepRes
 		Str("run_id", run.ID).
 		Int64("duration_ms", run.DurationMs).
 		Int("steps", len(stepResults)).
+		Int64("total_tokens", totalTokens).
+		Float64("total_cost_usd", totalCostUSD).
 		Msg("🎉 Recipe execution completed")
 }
 

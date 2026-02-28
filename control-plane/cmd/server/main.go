@@ -40,7 +40,6 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to initialize server")
 	}
-	defer srv.Store.Close()
 
 	// Start HTTP server
 	httpServer := &http.Server{
@@ -51,13 +50,14 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// Graceful shutdown — stops HTTP, then all agent processes, then flushes telemetry
+	// Graceful shutdown — stops HTTP, then all agent processes, then flushes store + telemetry
+	shutdownDone := make(chan struct{})
 	go func() {
 		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-		<-sigChan
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+		sig := <-sigChan
 
-		log.Info().Msg("🛑 Shutting down gracefully...")
+		log.Info().Str("signal", sig.String()).Msg("🛑 Shutting down gracefully...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
@@ -68,6 +68,13 @@ func main() {
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Warn().Err(err).Msg("Error during server shutdown")
 		}
+
+		// Flush store snapshot (critical — ensures data.json is written)
+		if err := srv.Store.Close(); err != nil {
+			log.Warn().Err(err).Msg("Error closing store")
+		}
+
+		close(shutdownDone)
 	}()
 
 	log.Info().
@@ -77,4 +84,8 @@ func main() {
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatal().Err(err).Msg("Server failed")
 	}
+
+	// Wait for graceful shutdown to finish (store flush, process cleanup)
+	<-shutdownDone
+	log.Info().Msg("🏺 AgentOven shut down cleanly")
 }

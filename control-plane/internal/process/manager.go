@@ -266,6 +266,12 @@ func (m *Manager) ListRunning() []*models.ProcessInfo {
 	return running
 }
 
+// GetLogBuffer returns the log buffer for a running agent process.
+// Returns nil if the agent is not running or not using local execution.
+func (m *Manager) GetLogBuffer(kitchen, agentName string) *LogBuffer {
+	return m.local.GetLogBuffer(kitchen, agentName)
+}
+
 // buildEnvironment creates the env vars map for the agent process.
 func (m *Manager) buildEnvironment(agent *models.Agent, port int) map[string]string {
 	env := map[string]string{

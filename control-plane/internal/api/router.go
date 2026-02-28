@@ -100,6 +100,10 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 						r.Post("/messages", h.SendSessionMessage)
 					})
 				})
+
+				// Live agent logs — streaming and recent
+				r.Get("/logs", h.StreamAgentLogs)
+				r.Get("/logs/recent", h.GetAgentLogs)
 			})
 		})
 
