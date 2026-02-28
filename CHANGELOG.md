@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.1] — 2026-02-28
+
+### 🛡️ Guardrails Enforcement
+
+- **Input guardrails before status check** — `InvokeAgent` handler now evaluates input guardrails before checking agent status, ensuring bad input is rejected regardless of agent state (security-first)
+- **Guardrails on TestAgent endpoint** — `POST /agents/{name}/test` (Simple mode in dashboard) now evaluates both input and output guardrails; previously it bypassed guardrails entirely
+
+---
+
 ## [0.4.0] — 2026-02-28
 
 ### 🤖 Agentic Behaviour & Sliding Context (Release Eight)

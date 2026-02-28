@@ -418,6 +418,20 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ── Input Guardrails ────────────────────────────────────
+	if h.Guardrails != nil && len(agent.Guardrails) > 0 {
+		eval, gErr := h.Guardrails.EvaluateInput(r.Context(), agent.Guardrails, req.Message)
+		if gErr != nil {
+			log.Warn().Err(gErr).Str("agent", agentName).Msg("Input guardrail evaluation error (test)")
+		} else if !eval.Passed {
+			respondJSON(w, http.StatusForbidden, map[string]interface{}{
+				"error":      "Input blocked by guardrails",
+				"guardrails": eval.Results,
+			})
+			return
+		}
+	}
+
 	// When thinking is enabled, extend request timeout
 	if req.ThinkingEnabled {
 		var cancel context.CancelFunc
@@ -454,6 +468,20 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		respondError(w, http.StatusBadGateway, "Model provider error: "+err.Error())
 		return
+	}
+
+	// ── Output Guardrails ───────────────────────────────────
+	if h.Guardrails != nil && len(agent.Guardrails) > 0 {
+		eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), agent.Guardrails, resp.Content)
+		if gErr != nil {
+			log.Warn().Err(gErr).Str("agent", agentName).Msg("Output guardrail evaluation error (test)")
+		} else if !eval.Passed {
+			respondJSON(w, http.StatusForbidden, map[string]interface{}{
+				"error":      "Output blocked by guardrails",
+				"guardrails": eval.Results,
+			})
+			return
+		}
 	}
 
 	// Record trace
@@ -2359,12 +2387,7 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if agent.Status != models.AgentStatusReady {
-		respondError(w, http.StatusBadRequest,
-			fmt.Sprintf("Agent '%s' is not ready (status: %s) — bake it first", agentName, agent.Status))
-		return
-	}
-
+	// Parse request body early so guardrails can evaluate before status check
 	var req struct {
 		Message         string            `json:"message"`
 		Variables       map[string]string `json:"variables,omitempty"`        // prompt template variables
@@ -2372,6 +2395,28 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Message == "" {
 		respondError(w, http.StatusBadRequest, "Request must include a non-empty 'message' field")
+		return
+	}
+
+	// ── Input Guardrails ────────────────────────────────────
+	// Evaluate BEFORE status check — bad input should be rejected
+	// regardless of agent state (security-first principle).
+	if h.Guardrails != nil && len(agent.Guardrails) > 0 {
+		eval, gErr := h.Guardrails.EvaluateInput(r.Context(), agent.Guardrails, req.Message)
+		if gErr != nil {
+			log.Warn().Err(gErr).Str("agent", agentName).Msg("Input guardrail evaluation error")
+		} else if !eval.Passed {
+			respondJSON(w, http.StatusForbidden, map[string]interface{}{
+				"error":      "Input blocked by guardrails",
+				"guardrails": eval.Results,
+			})
+			return
+		}
+	}
+
+	if agent.Status != models.AgentStatusReady {
+		respondError(w, http.StatusBadRequest,
+			fmt.Sprintf("Agent '%s' is not ready (status: %s) — bake it first", agentName, agent.Status))
 		return
 	}
 
@@ -2415,20 +2460,6 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			}
-		}
-	}
-
-	// ── Input Guardrails ────────────────────────────────────
-	if h.Guardrails != nil && len(agent.Guardrails) > 0 {
-		eval, gErr := h.Guardrails.EvaluateInput(r.Context(), agent.Guardrails, req.Message)
-		if gErr != nil {
-			log.Warn().Err(gErr).Str("agent", agentName).Msg("Input guardrail evaluation error")
-		} else if !eval.Passed {
-			respondJSON(w, http.StatusForbidden, map[string]interface{}{
-				"error":      "Input blocked by guardrails",
-				"guardrails": eval.Results,
-			})
-			return
 		}
 	}
 
