@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License" /></a>
   <a href="https://crates.io/crates/a2a-ao"><img src="https://img.shields.io/crates/v/a2a-ao.svg" alt="a2a-ao on crates.io" /></a>
   <a href="https://crates.io/crates/agentoven-core"><img src="https://img.shields.io/crates/v/agentoven-core.svg" alt="agentoven-core on crates.io" /></a>
   <a href="https://crates.io/crates/agentoven-cli"><img src="https://img.shields.io/crates/v/agentoven-cli.svg" alt="agentoven-cli on crates.io" /></a>

@@ -1,10 +1,10 @@
 {
   "name": "@agentoven/sdk",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "AgentOven TypeScript SDK — enterprise agent orchestration",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "keywords": ["agents", "ai", "orchestration", "a2a", "mcp"],
   "repository": {
     "type": "git",

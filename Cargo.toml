@@ -12,9 +12,9 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.4.3"
+version = "0.5.0"
 edition = "2021"
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/agentoven/agentoven"
 homepage = "https://agentoven.dev"
 authors = ["AgentOven Contributors"]
@@ -71,8 +71,8 @@ napi = { version = "2", features = ["async", "serde-json"] }
 napi-derive = "2"
 
 # Internal crates
-a2a-ao = { version = "0.4.3", path = "crates/a2a-ao" }
-agentoven-core = { version = "0.4.3", path = "crates/agentoven-core" }
+a2a-ao = { version = "0.5.0", path = "crates/a2a-ao" }
+agentoven-core = { version = "0.5.0", path = "crates/agentoven-core" }
 
 [profile.release]
 lto = true

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.0] — 2026-03-03
+
+### 📜 License Change
+- **Switched from MIT to Apache 2.0** — adds trademark protection, patent grant, and NOTICE file requirement
+- **Added NOTICE file** — copyright attribution, trademark notice, AI code generation notice
+- **Added .github/AI-POLICY.md** — comprehensive list of Pro-only interfaces that should not be AI-generated
+- **Updated all manifests** — Cargo.toml, pyproject.toml, package.json, README badge, CONTRIBUTING.md
+
+---
+
 ## [0.4.3] — 2026-03-03
 
 ### 🖥️ CLI: Local Server & Config Management (Release Nine)

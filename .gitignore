@@ -23,9 +23,10 @@ __pycache__/
 *.pyo
 *.egg-info/
 sdk/python/dist/
-sdk/python/*.so
-sdk/python/*.dylib
-sdk/python/*.pyd
+sdk/python/**/*.so
+sdk/python/**/*.dylib
+sdk/python/**/*.pyd
+sdk/python/tests/
 .venv/
 venv/
 
@@ -57,7 +58,11 @@ htmlcov/
 *.log
 logs/
 
+# Compiled binaries (Go server, etc.)
+control-plane/server
+
 # Internal planning docs
 .docs/
+IMPL-PLAN.md
 
 .github/copilot-instructions.md
