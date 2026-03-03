@@ -20,6 +20,7 @@ import (
 
 	"github.com/agentoven/agentoven/control-plane/internal/api/middleware"
 	"github.com/agentoven/agentoven/control-plane/internal/catalog"
+	"github.com/agentoven/agentoven/control-plane/internal/ctxwindow"
 	"github.com/agentoven/agentoven/control-plane/internal/executor"
 	"github.com/agentoven/agentoven/control-plane/internal/mcpgw"
 	"github.com/agentoven/agentoven/control-plane/internal/process"
@@ -3347,14 +3348,73 @@ func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Route through model router with full conversation history
+	// Route through model router with sliding context window
 	startTime := time.Now()
-	routeReq := &models.RouteRequest{
-		Kitchen:   kitchen,
-		Messages:  session.Messages,
-		SessionID: sessionID,
-		AgentRef:  agentName,
+
+	// ── Sliding Context Window ──────────────────────────────
+	// Determine the context budget from agent config and model catalog.
+	modelLimit := 0
+	if h.Catalog != nil && agent.ModelName != "" {
+		if cap := h.Catalog.LookupByID(agent.ModelName); cap != nil {
+			modelLimit = cap.ContextWindow
+		}
 	}
+	budget := ctxwindow.EffectiveBudget(agent.ContextBudget, modelLimit)
+
+	// Estimate tokens for the full conversation
+	allTokens := ctxwindow.EstimateTokensForMessages(session.Messages)
+	summarised := false
+
+	// If over budget, trim older messages and insert a text-based summary
+	contextMessages := session.Messages
+	if allTokens > budget {
+		kept, toSummarize := ctxwindow.TrimToSlidingWindow(session.Messages, budget)
+		if len(toSummarize) > 0 {
+			summaryText := ctxwindow.FormatSummaryMessage(toSummarize)
+			summaryMsg := models.ChatMessage{
+				Role:    "system",
+				Content: "[Summary of earlier conversation]\n" + summaryText,
+			}
+			// Insert summary after system messages, before recent messages
+			contextMessages = make([]models.ChatMessage, 0, len(kept)+1)
+			// Find where system messages end
+			insertIdx := 0
+			for i, m := range kept {
+				if m.Role != "system" {
+					insertIdx = i
+					break
+				}
+				contextMessages = append(contextMessages, m)
+				insertIdx = i + 1
+			}
+			contextMessages = append(contextMessages, summaryMsg)
+			contextMessages = append(contextMessages, kept[insertIdx:]...)
+			summarised = true
+
+			log.Debug().
+				Str("session", sessionID).
+				Int("original_msgs", len(session.Messages)).
+				Int("summarized", len(toSummarize)).
+				Int("kept", len(kept)).
+				Int("budget", budget).
+				Int("estimated", allTokens).
+				Msg("Session context trimmed via sliding window")
+		}
+	}
+
+	// Recalculate used tokens after trimming
+	usedTokens := ctxwindow.EstimateTokensForMessages(contextMessages)
+
+	routeReq := &models.RouteRequest{
+		Kitchen:       kitchen,
+		Messages:      contextMessages,
+		SessionID:     sessionID,
+		AgentRef:      agentName,
+		EnableCaching: true, // enable prompt caching for sessions by default
+	}
+
+	// Apply prompt-cache breakpoints (marks last system message)
+	routeReq.Messages = ctxwindow.MarkCacheBreakpoints(routeReq.Messages)
 	// Apply agent's model if configured
 	if agent.ModelName != "" {
 		routeReq.Model = agent.ModelName
@@ -3410,14 +3470,22 @@ func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
 		log.Error().Err(err).Str("session", sessionID).Msg("Failed to update session")
 	}
 
+	// Compute context budget report for the response
+	// Include output tokens in the used count for accurate reporting
+	finalUsed := usedTokens + int(routeResp.Usage.OutputTokens)
+	cacheHits := routeResp.Usage.CacheHits
+	tokensSaved := int(routeResp.Usage.CachedTokens)
+	budgetReport := ctxwindow.BuildReport(modelLimit, budget, finalUsed, summarised, cacheHits, tokensSaved)
+
 	resp := models.SessionResponse{
-		SessionID:    sessionID,
-		TurnNumber:   session.TurnCount,
-		Content:      routeResp.Content,
-		FinishReason: routeResp.FinishReason,
-		Usage:        routeResp.Usage,
-		LatencyMs:    latencyMs,
-		Status:       session.Status,
+		SessionID:     sessionID,
+		TurnNumber:    session.TurnCount,
+		Content:       routeResp.Content,
+		FinishReason:  routeResp.FinishReason,
+		Usage:         routeResp.Usage,
+		ContextBudget: budgetReport,
+		LatencyMs:     latencyMs,
+		Status:        session.Status,
 	}
 
 	respondJSON(w, http.StatusOK, resp)

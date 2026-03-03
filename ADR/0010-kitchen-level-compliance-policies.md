@@ -128,13 +128,11 @@ type ComplianceViolation struct {
 - Checks `MaxPromptLength` at invoke time
 - Logs violations to zerolog
 
-### 4. Pro Implementation (ProComplianceValidator)
+### 4. Pro Implementation
 
-- Regex-based PII detection (email, phone, SSN, credit card patterns)
-- LLM-judge for denied topics
-- Data residency enforcement via provider region metadata
-- Full audit logging (input/output capture)
-- External policy engine integration (OPA, Cedar)
+Pro provides a `ProComplianceValidator` with enhanced capabilities including
+PII detection, content filtering, data residency enforcement, and external
+policy engine integration. See the Pro repo for implementation details.
 
 ### 5. API Endpoints
 

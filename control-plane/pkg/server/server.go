@@ -126,6 +126,9 @@ type Server struct {
 	// Exposed so Pro can replace with Redis/PostgreSQL-backed store.
 	SessionStore contracts.SessionStore
 
+	// SessionJanitor expires stale sessions periodically.
+	SessionJanitor *sessions.ExpiryJanitor
+
 	// ProcessManager manages agent runtime processes (local/docker/k8s).
 	// Exposed so Pro can customize with custom images, sidecar injection, etc.
 	ProcessManager *process.Manager
@@ -240,6 +243,11 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 	// ── Session Store (Release 8) ───────────────────────────
 	sessStore := sessions.NewMemorySessionStore()
 	log.Info().Msg("✅ Session store initialized (in-memory)")
+
+	// ── Session Expiry Janitor (Release 10) ─────────────────
+	sessJanitor := sessions.NewExpiryJanitor(sessStore, sessions.DefaultExpiryInterval, sessions.DefaultIdleTimeout)
+	sessJanitor.Start()
+	log.Info().Msg("✅ Session expiry janitor started (5m interval, 2h idle timeout)")
 
 	// ── Process Manager (Release 8) ─────────────────────────
 	// Manages agent runtime processes (local Python / Docker / K8s).
@@ -429,6 +437,7 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 		AuthChain:           authChain,
 		Catalog:             cat,
 		SessionStore:        sessStore,
+		SessionJanitor:      sessJanitor,
 		ProcessManager:      pm,
 		PicoClawAdapter:     pcAdapter,
 		GatewayManager:      pcGateway,
@@ -474,6 +483,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	if s.GatewayManager != nil {
 		s.GatewayManager.StopAll()
+	}
+
+	// Stop session expiry janitor
+	if s.SessionJanitor != nil {
+		s.SessionJanitor.Stop()
 	}
 
 	if s.retentionCancel != nil {

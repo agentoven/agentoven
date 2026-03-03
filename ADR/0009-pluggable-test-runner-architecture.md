@@ -96,14 +96,16 @@ Client                API Handler              Backend               Worker
 - Client polls `GET /test-suites/{id}/runs/{runID}` for progress
 - External backends call `POST /api/v1/test-runs/{runID}/callback` with results
 
-### 3. Backend Implementations (Pro only)
+### 3. Backend Implementations
+
+The `TestRunnerBackend` interface enables multiple execution backends:
 
 | Backend | How It Works | Use Case |
 |---------|-------------|----------|
 | **local** (default) | Bounded goroutine pool (max N concurrent per kitchen) | Dev, small teams |
-| **celery** | Publishes tasks to a Celery broker (Redis/RabbitMQ) | Python shops |
-| **temporal** | Creates Temporal workflow per suite run | Enterprises with Temporal |
-| **k8s** | Spawns a Kubernetes Job per suite run | Cloud-native teams |
+
+Pro provides additional backend implementations for enterprise workloads.
+See the Pro repo for details.
 
 ### 4. Kitchen-Level Configuration
 
@@ -113,69 +115,28 @@ Client                API Handler              Backend               Worker
 // pkg/models/models.go — inside KitchenSettings struct
 
 // Test runner backend configuration
-TestRunnerBackend string            `json:"test_runner_backend,omitempty"` // "local", "celery", "temporal", "k8s"
-TestRunnerConfig  map[string]string `json:"test_runner_config,omitempty"` // backend-specific: broker_url, namespace, queue, etc.
-MaxConcurrentRuns int               `json:"max_concurrent_runs,omitempty"` // override plan limit per kitchen
+TestRunnerBackend string            `json:"test_runner_backend,omitempty"` // "local" (OSS), others via Pro
+TestRunnerConfig  map[string]string `json:"test_runner_config,omitempty"` // backend-specific config
+MaxConcurrentRuns int               `json:"max_concurrent_runs,omitempty"` // concurrency limit per kitchen
 ```
 
-### 5. PlanLimits Extension
+### 5. Plan Limits
 
-```go
-// PlanLimits gains:
-MaxTestSuites        int `json:"max_test_suites"`
-MaxConcurrentTestRuns int `json:"max_concurrent_test_runs"`
-MaxTestCasesPerSuite int `json:"max_test_cases_per_suite"`
-```
+Test suite execution is subject to plan limits defined by `PlanLimits`.
+OSS ships the `CommunityLocalTestRunner` (ADR-0011) for basic testing.
+Pro provides enhanced limits, scheduling, and external backends. See the
+Pro repo for tier-specific quota details.
 
-| Feature | Community | Pro | Enterprise |
-|---------|-----------|-----|------------|
-| Max test suites | 0 (disabled) | 50 | Unlimited |
-| Max concurrent runs | 0 | 5 | 20 |
-| Max cases per suite | 0 | 100 | 1000 |
-| Scheduled runs | ❌ | ✅ | ✅ |
-| External backends | ❌ | ❌ | ✅ |
+### 6. Access Control
 
-### 6. RBAC Permissions (Pro)
+Test suite operations are subject to the standard RBAC system defined
+in AUTH-PLAN.md. Pro provides role-based and attribute-based access control
+for test suite operations. See the Pro repo for permission matrices.
 
-New permissions added to the Role-Permission matrix:
+### 7. Attribute-Based Access Control (future)
 
-| Permission | admin | chef | baker | auditor | finance | viewer |
-|-----------|-------|------|-------|---------|---------|--------|
-| `testsuite:create` | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| `testsuite:read` | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| `testsuite:update` | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| `testsuite:delete` | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `testsuite:run` | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| `testsuite:schedule` | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
-
-### 7. ABAC Policy Model (Pro, future)
-
-Beyond role-based checks, enterprises need attribute-based policies:
-
-```go
-// ABACPolicy defines a rule evaluated against request attributes.
-type ABACPolicy struct {
-    ID          string            `json:"id"`
-    Name        string            `json:"name"`
-    Resource    string            `json:"resource"`    // "testsuite", "agent", "recipe", etc.
-    Action      string            `json:"action"`      // "create", "run", "delete", etc.
-    Effect      string            `json:"effect"`      // "allow" or "deny"
-    Conditions  []ABACCondition   `json:"conditions"`  // ALL must match
-}
-
-type ABACCondition struct {
-    Attribute string `json:"attribute"` // "identity.groups", "resource.tags.env", "time.hour"
-    Operator  string `json:"operator"`  // "eq", "in", "gt", "lt", "matches"
-    Value     string `json:"value"`     // "production", "engineering", "9"
-}
-```
-
-Example policies:
-- "Only users in the `platform-eng` group can run test suites tagged `production`"
-- "Test suites can only be scheduled between 09:00–18:00 UTC"
-- "Maximum 5 concurrent runs for kitchens tagged `dev`"
-
-ABAC is evaluated **after** RBAC — a user must pass both checks.
+Pro supports attribute-based policies (ABAC) evaluated after RBAC for
+fine-grained access control. See the Pro repo for the ABAC policy model.
 
 ### 8. Callback Endpoint for External Backends
 
@@ -219,28 +180,24 @@ kitchen names from active test suites.
   No more timeouts on large test suites.
 - **Kitchen autonomy** — each kitchen can choose its own execution backend and
   concurrency limits. Platform teams configure Temporal; dev teams use local.
-- **Access control** — RBAC permissions prevent unauthorized test suite operations.
-  ABAC policies enable fine-grained attribute-based rules.
-- **Two-repo clean** — interface in OSS, all implementations in Pro. No Pro feature
-  code leaks into the OSS repo.
+- **Access control** — standard RBAC and ABAC controls are available via the
+  Pro repo to govern test suite operations.
+- **Two-repo clean** — interface in OSS, enhanced implementations in Pro.
 
 ### Negative
 
-- **More moving parts** — external backends require additional infrastructure
-  (Redis, Temporal server, K8s cluster). Local backend mitigates this for
-  small deployments.
+- **More moving parts** — external backends (available via Pro) require additional
+  infrastructure. Local backend mitigates this for small deployments.
 - **Callback security** — the callback endpoint is a new attack surface. Mitigated
   by requiring service account tokens with HMAC verification.
-- **ABAC complexity** — attribute-based policies are powerful but complex. Initial
-  implementation will be simple condition matching; a full policy engine (like OPA)
-  is a future consideration.
 
 ### Neutral
 
 - **Backward compatible** — the local backend reproduces current behavior (minus
   the unbounded goroutines). Existing test suites work without configuration changes.
 - **Pro-only feature** — test suite execution remains a Pro feature. OSS ships
-  only the models, store interface, and contract interface.
+  only the models, store interface, and contract interface. The local backend
+  is available in OSS for basic testing (see ADR-0011).
 
 ## Related
 

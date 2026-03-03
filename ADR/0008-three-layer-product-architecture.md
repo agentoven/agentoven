@@ -22,9 +22,8 @@ what the Pro Dashboard should do.
 
 ### Problems with a Single Dashboard
 
-1. **OSS dashboard is public** — adding enterprise features via feature flags
-   means the code is visible. Coding agents (Copilot, Cursor, Codex) can trivially
-   strip license checks from public code.
+1. **OSS dashboard is public** — adding enterprise features directly means the
+   code is visible. The two-repo model (ADR-0003) keeps Pro code private.
 2. **Consumer-facing UX is fundamentally different** — agent consumers don't need
    to see provider configs, MCP tools, or trace spans. They need a simple
    chat/run/output interface.
@@ -59,16 +58,10 @@ AgentOven uses a **three-layer product architecture** for user-facing surfaces:
 │   Repo: agentoven-pro/dashboard/                                 │
 │   Auth: SSO/SAML/OIDC via Pro auth providers                     │
 │   Users: Platform admins, ML/AI engineers                        │
-│   Features: Everything in OSS Dashboard PLUS:                    │
-│     - Login page + session management                            │
-│     - Multi-kitchen switching                                    │
-│     - RBAC-aware UI (admin vs baker vs viewer)                   │
-│     - Compliance & audit trail                                   │
-│     - Cost analytics & chargeback                                │
-│     - License status & tier management                           │
-│     - Provider quota dashboards                                  │
-│     - User/team management                                       │
+│   Features: Everything in OSS Dashboard plus enterprise          │
+│             management capabilities                              │
 │   Deployment: Internal/VPN, enterprise-managed                   │
+│   Details: See Pro repo ADR-0004                                 │
 └─────────────────────────────────────────────────────────────────┘
                               │
                     calls agent APIs
@@ -108,10 +101,9 @@ AgentOven uses a **three-layer product architecture** for user-facing surfaces:
 
 This decision was carefully evaluated. See "Alternatives Considered" below.
 
-The critical insight: **OSS code is public**. Modern coding agents (Copilot,
-Cursor, Codex) can read the entire codebase and trivially strip license checks,
-feature flags, or conditional imports. The two-repo model (ADR-0003) ensures Pro
-code is **invisible** to OSS users, not just gated.
+The two-repo model (ADR-0003) ensures Pro code is **invisible** to OSS users,
+not just gated. This is an intentional business protection, not just code
+organization.
 
 ### Scoped API Keys (New Concept)
 
@@ -144,7 +136,7 @@ This enables:
 
 - **Clear separation of concerns** — each layer serves one persona with focused UX
 - **Business model alignment** — OSS (free) → Pro Dashboard (paid) → Agent Viewer
-  (drives adoption, creates lock-in via consumer dependence)
+  (drives adoption)
 - **Security** — Pro code stays in private repo. Scoped keys limit blast radius.
 - **Deployment flexibility** — enterprises can deploy each layer independently
   (admin on VPN, viewer public, OSS for dev laptops)
@@ -160,19 +152,17 @@ This enables:
 
 ### Neutral
 
-- **Current Streamlit compliance pages** (audit trail, cost analytics, license
-  status) should migrate to the Pro React Dashboard. The Streamlit app should be
-  rewritten as the Agent Viewer.
-- **Pro Dashboard shares the same React stack** as OSS. The Pro repo can copy the
-  OSS dashboard as a starting point, then add enterprise pages.
+- **Current Streamlit pages** (compliance, cost analytics) should migrate to the
+  Pro React Dashboard over time.
+- **Pro Dashboard shares the same React stack** as OSS. The Pro repo can extend
+  the OSS dashboard with enterprise pages.
 
 ## Alternatives Considered
 
 ### 1. Feature flags in OSS Dashboard
 
-**Rejected.** OSS code is public on GitHub. Feature flags (even server-side) are
-visible in source. Coding agents can strip them. The two-repo model is intentional
-business protection, not just code organization.
+**Rejected.** OSS code is public on GitHub. The two-repo model ensures Pro features
+are architecturally separate, not conditionally toggled.
 
 ### 2. Single dashboard with role-based page visibility
 
@@ -194,10 +184,6 @@ embedding story. Could support both in the agent viewer framework.
 
 ## Migration Path
 
-1. **Current Streamlit app** (`agentoven-pro/dashboard/app.py`) → pages move to
-   Pro React Dashboard (compliance, audit, cost, license)
-2. **New Streamlit viewer** (`ent-agent-core/control-plane/viewer/`) → auto-generated
+1. **New Streamlit viewer** (`ent-agent-core/control-plane/viewer/`) → auto-generated
    from agent metadata, chat/run/output interface
-3. **Pro React Dashboard** (`agentoven-pro/dashboard/`) → new React app, imports
-   OSS dashboard components, adds login + enterprise pages
-4. **Scoped API keys** → new store interface, CRUD API, auth provider
+2. **Scoped API keys** → new store interface, CRUD API, auth provider

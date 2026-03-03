@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agentoven/agentoven/control-plane/internal/ctxwindow"
 	"github.com/agentoven/agentoven/control-plane/internal/mcpgw"
 	"github.com/agentoven/agentoven/control-plane/internal/resolver"
 	"github.com/agentoven/agentoven/control-plane/internal/router"
@@ -396,10 +397,7 @@ func (e *Executor) buildSystemPrompt(agent *models.Agent, resolved *models.Resol
 // messages are summarized using the agent's SummaryModel (or the primary
 // model as fallback), and replaced with a single summary message.
 func (e *Executor) buildSlidingContext(ctx context.Context, agent *models.Agent, resolved *models.ResolvedIngredients, session *models.Session, userMessage string, promptVars map[string]string) []models.ChatMessage {
-	budget := agent.ContextBudget
-	if budget <= 0 {
-		budget = DefaultContextBudget
-	}
+	budget := ctxwindow.EffectiveBudget(agent.ContextBudget, 0)
 
 	// Build the system prompt
 	systemPrompt := e.buildSystemPrompt(agent, resolved, promptVars)
@@ -412,7 +410,7 @@ func (e *Executor) buildSlidingContext(ctx context.Context, agent *models.Agent,
 	allMessages = append(allMessages, models.ChatMessage{Role: "user", Content: userMessage})
 
 	// Estimate total tokens
-	totalTokens := estimateTokensForMessages(allMessages)
+	totalTokens := ctxwindow.EstimateTokensForMessages(allMessages)
 
 	if totalTokens <= budget {
 		// Under budget — use everything as-is
@@ -420,8 +418,8 @@ func (e *Executor) buildSlidingContext(ctx context.Context, agent *models.Agent,
 	}
 
 	// Over budget — compress older messages into a summary
-	systemTokens := estimateTokens(systemMsg.Content)
-	userTokens := estimateTokens(userMessage)
+	systemTokens := ctxwindow.EstimateTokens(systemMsg.Content)
+	userTokens := ctxwindow.EstimateTokens(userMessage)
 	reservedTokens := systemTokens + userTokens + 500 // 500 tokens buffer for summary overhead
 
 	// Find how many recent messages we can keep within budget
@@ -431,7 +429,7 @@ func (e *Executor) buildSlidingContext(ctx context.Context, agent *models.Agent,
 
 	// Walk backwards through session.Messages to keep recent ones
 	for i := len(session.Messages) - 1; i >= 0; i-- {
-		msgTokens := estimateTokens(session.Messages[i].Content)
+		msgTokens := ctxwindow.EstimateTokens(session.Messages[i].Content)
 		if recentTokens+msgTokens > availableForRecent {
 			break
 		}
@@ -530,19 +528,15 @@ func (e *Executor) summarizeMessages(ctx context.Context, agent *models.Agent, m
 }
 
 // estimateTokens returns a rough token count for a string.
-// Uses the ~4 chars per token heuristic. Replace with tiktoken-go
-// for production accuracy.
+// Delegates to the shared ctxwindow package.
 func estimateTokens(text string) int {
-	return len(text) / 4
+	return ctxwindow.EstimateTokens(text)
 }
 
 // estimateTokensForMessages returns the total estimated tokens across all messages.
+// Delegates to the shared ctxwindow package.
 func estimateTokensForMessages(messages []models.ChatMessage) int {
-	total := 0
-	for _, msg := range messages {
-		total += estimateTokens(msg.Content) + 4 // 4 tokens overhead per message (role, delimiters)
-	}
-	return total
+	return ctxwindow.EstimateTokensForMessages(messages)
 }
 
 // ── Native Tool Calling ─────────────────────────────────────

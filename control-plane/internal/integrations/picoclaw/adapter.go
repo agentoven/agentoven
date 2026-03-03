@@ -51,22 +51,22 @@ func NewAdapter(s store.Store) *Adapter {
 
 // RegisterRequest is the payload to register a PicoClaw instance.
 type RegisterRequest struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description,omitempty"`
-	Endpoint    string                 `json:"endpoint"` // http://device-ip:port
-	DeviceType  string                 `json:"device_type,omitempty"` // "risc-v", "arm", "x86"
-	Platform    string                 `json:"platform,omitempty"` // "linux", "android"
-	Skills      []string               `json:"skills,omitempty"`
-	Gateways    []string               `json:"gateways,omitempty"` // ["telegram", "discord"]
+	Name        string                  `json:"name"`
+	Description string                  `json:"description,omitempty"`
+	Endpoint    string                  `json:"endpoint"`              // http://device-ip:port
+	DeviceType  string                  `json:"device_type,omitempty"` // "risc-v", "arm", "x86"
+	Platform    string                  `json:"platform,omitempty"`    // "linux", "android"
+	Skills      []string                `json:"skills,omitempty"`
+	Gateways    []string                `json:"gateways,omitempty"` // ["telegram", "discord"]
 	Heartbeat   *models.HeartbeatConfig `json:"heartbeat,omitempty"`
-	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+	Metadata    map[string]interface{}  `json:"metadata,omitempty"`
 }
 
 // RegisterResponse is returned after registering a PicoClaw instance.
 type RegisterResponse struct {
-	Instance  *models.PicoClawInstance `json:"instance"`
-	AgentName string                    `json:"agent_name"`
-	A2AEndpoint string                  `json:"a2a_endpoint"`
+	Instance    *models.PicoClawInstance `json:"instance"`
+	AgentName   string                   `json:"agent_name"`
+	A2AEndpoint string                   `json:"a2a_endpoint"`
 }
 
 // Register registers a PicoClaw instance and creates a corresponding
@@ -138,11 +138,11 @@ func (a *Adapter) Register(ctx context.Context, kitchen string, req RegisterRequ
 		A2AEndpoint: req.Endpoint,
 		Skills:      skills,
 		Tags: map[string]string{
-			"picoclaw":       "true",
-			"picoclaw_id":    instance.ID,
-			"device_type":    req.DeviceType,
-			"platform":       req.Platform,
-			"iot":            "true",
+			"picoclaw":    "true",
+			"picoclaw_id": instance.ID,
+			"device_type": req.DeviceType,
+			"platform":    req.Platform,
+			"iot":         "true",
 		},
 		CreatedAt: now,
 		UpdatedAt: now,

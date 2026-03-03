@@ -659,6 +659,12 @@ type RouteRequest struct {
 	// ── Thinking / Extended Reasoning (R10) ──────────────────
 	ThinkingEnabled bool `json:"thinking_enabled,omitempty"` // enable extended thinking (o-series, Claude)
 	ThinkingBudget  int  `json:"thinking_budget,omitempty"`  // max thinking tokens (0 = model default)
+
+	// ── Prompt Caching (R10) ─────────────────────────────────
+	// When true, the router marks system prompts and stable context prefix
+	// with cache-control hints. Anthropic uses explicit "ephemeral" breakpoints;
+	// OpenAI uses automatic prefix caching. Reduces costs on repeated prompts.
+	EnableCaching bool `json:"enable_caching,omitempty"`
 }
 
 // ResponseFormat specifies structured output from the LLM.
@@ -718,6 +724,12 @@ type ChatMessage struct {
 	ToolCalls    []ToolCallResult `json:"tool_calls,omitempty"`   // assistant messages with tool calls
 	ToolCallID   string           `json:"tool_call_id,omitempty"` // tool result messages
 	Name         string           `json:"name,omitempty"`         // function name for tool messages
+
+	// ── Prompt Caching (R10) ─────────────────────────────────
+	// CacheControl signals the provider to cache this message's content.
+	// Supported: Anthropic ("ephemeral"), OpenAI (auto-prefix caching).
+	// Drivers that don't support caching ignore this field.
+	CacheControl string `json:"cache_control,omitempty"` // "ephemeral" for Anthropic cache breakpoint
 }
 
 type RouteResponse struct {
@@ -738,11 +750,15 @@ type RouteResponse struct {
 }
 
 type TokenUsage struct {
-	InputTokens    int64   `json:"input_tokens"`
-	OutputTokens   int64   `json:"output_tokens"`
-	ThinkingTokens int64   `json:"thinking_tokens,omitempty"`
-	TotalTokens    int64   `json:"total_tokens"`
-	EstimatedCost  float64 `json:"estimated_cost_usd"`
+	InputTokens      int64   `json:"input_tokens"`
+	OutputTokens     int64   `json:"output_tokens"`
+	ThinkingTokens   int64   `json:"thinking_tokens,omitempty"`
+	TotalTokens      int64   `json:"total_tokens"`
+	EstimatedCost    float64 `json:"estimated_cost_usd"`
+	CacheHits        int     `json:"cache_hits,omitempty"`         // prompt-cache hits from provider
+	CachedTokens     int64   `json:"cached_tokens,omitempty"`      // tokens served from cache
+	CacheCreation    int64   `json:"cache_creation,omitempty"`     // tokens written to cache this turn
+	CacheSavingsUSD  float64 `json:"cache_savings_usd,omitempty"`  // estimated $ saved via caching
 }
 
 type CostSummary struct {
@@ -957,9 +973,9 @@ type ResolvedData struct {
 
 // ResolvedEmbedding is the output of resolving an "embedding" ingredient.
 type ResolvedEmbedding struct {
-	Provider       string                 `json:"provider"`         // provider kind: "openai", "ollama", "azure-openai"
-	ProviderName   string                 `json:"provider_name"`    // user-supplied provider name (ISS-009)
-	Model          string                 `json:"model"`            // "text-embedding-3-small"
+	Provider       string                 `json:"provider"`        // provider kind: "openai", "ollama", "azure-openai"
+	ProviderName   string                 `json:"provider_name"`   // user-supplied provider name (ISS-009)
+	Model          string                 `json:"model"`           // "text-embedding-3-small"
 	Dimensions     int                    `json:"dimensions"`      // 1536, 3072, etc.
 	BatchSize      int                    `json:"batch_size"`      // max texts per embed call
 	DistanceMetric string                 `json:"distance_metric"` // "cosine", "euclidean", "dot"
@@ -1513,14 +1529,39 @@ type SessionMessage struct {
 
 // SessionResponse is the response from a session message.
 type SessionResponse struct {
-	SessionID    string           `json:"session_id"`
-	TurnNumber   int              `json:"turn_number"`
-	Content      string           `json:"content"`
-	ToolCalls    []ToolCallResult `json:"tool_calls,omitempty"`
-	FinishReason string           `json:"finish_reason,omitempty"` // "stop", "tool_calls", "human_input", "max_turns"
-	Usage        TokenUsage       `json:"usage"`
-	LatencyMs    int64            `json:"latency_ms"`
-	Status       SessionStatus    `json:"status"`
+	SessionID     string               `json:"session_id"`
+	TurnNumber    int                  `json:"turn_number"`
+	Content       string               `json:"content"`
+	ToolCalls     []ToolCallResult     `json:"tool_calls,omitempty"`
+	FinishReason  string               `json:"finish_reason,omitempty"` // "stop", "tool_calls", "human_input", "max_turns"
+	Usage         TokenUsage           `json:"usage"`
+	ContextBudget *ContextBudgetReport `json:"context_budget,omitempty"`
+	LatencyMs     int64                `json:"latency_ms"`
+	Status        SessionStatus        `json:"status"`
+}
+
+// ContextBudgetReport tracks how much of the model's context window is consumed.
+// Returned in every SessionResponse so callers can visualise usage (progress bar, meter)
+// and take action before the window fills up.
+type ContextBudgetReport struct {
+	// ModelLimit is the model's maximum context window (tokens), from ModelCapability.
+	ModelLimit int `json:"model_limit"`
+	// Budget is the effective budget for the conversation (may be less than ModelLimit).
+	// Derived from Agent.ContextBudget when set, otherwise equals ModelLimit.
+	Budget int `json:"budget"`
+	// Used is the estimated token count of the current conversation context
+	// (system prompt + history + last response).
+	Used int `json:"used"`
+	// Remaining is Budget − Used (clamped to 0).
+	Remaining int `json:"remaining"`
+	// UtilizationPct is Used/Budget × 100, rounded to one decimal place.
+	UtilizationPct float64 `json:"utilization_pct"`
+	// Summarised indicates whether older messages were summarised to stay within budget.
+	Summarised bool `json:"summarised"`
+	// CacheHits is the number of prompt-cache hits from the provider (if supported).
+	CacheHits int `json:"cache_hits,omitempty"`
+	// TokensSaved is the estimated tokens saved through prompt caching this turn.
+	TokensSaved int `json:"tokens_saved,omitempty"`
 }
 
 // HumanInputRequest represents a request for human input during agent execution.

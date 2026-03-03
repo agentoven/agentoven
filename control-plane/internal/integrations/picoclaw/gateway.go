@@ -58,9 +58,9 @@ func (m *GatewayManager) HasDriver(kind models.ChatGatewayKind) bool {
 // CreateGatewayRequest is the payload to create a chat gateway.
 type CreateGatewayRequest struct {
 	Name      string                 `json:"name"`
-	Kind      models.ChatGatewayKind `json:"kind"` // telegram, discord, slack-bot, etc.
+	Kind      models.ChatGatewayKind `json:"kind"`       // telegram, discord, slack-bot, etc.
 	AgentName string                 `json:"agent_name"` // target PicoClaw agent
-	Config    map[string]interface{} `json:"config"` // platform-specific: bot_token, channel_id, etc.
+	Config    map[string]interface{} `json:"config"`     // platform-specific: bot_token, channel_id, etc.
 	Active    bool                   `json:"active"`
 }
 

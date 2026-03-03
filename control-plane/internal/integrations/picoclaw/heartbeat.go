@@ -17,12 +17,12 @@ import (
 // PicoClaw instances and updates their status. This is inspired by
 // PicoClaw's HEARTBEAT.md pattern (every 30min) but more configurable.
 type HeartbeatMonitor struct {
-	store       store.Store
-	adapter     *Adapter
-	interval    time.Duration
-	stopCh      chan struct{}
-	mu          sync.Mutex
-	running     bool
+	store    store.Store
+	adapter  *Adapter
+	interval time.Duration
+	stopCh   chan struct{}
+	mu       sync.Mutex
+	running  bool
 
 	// Callbacks for integration with notifications, audit, etc.
 	OnStatusChange func(agentName string, oldStatus, newStatus models.PicoClawStatus)
