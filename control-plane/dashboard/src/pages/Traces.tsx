@@ -187,14 +187,14 @@ export function TracesPage() {
                                   <span className="text-[var(--ao-text-muted)]">Trace ID:</span>{' '}
                                   <code className="text-xs">{trace.id}</code>
                                 </div>
-                                {trace.metadata?.run_id && (
+                              {!!trace.metadata?.run_id && (
                                   <div>
                                     <span className="text-[var(--ao-text-muted)]">Run ID:</span>{' '}
                                     <code className="text-xs">{String(trace.metadata.run_id)}</code>
                                   </div>
                                 )}
                               </div>
-                              {trace.metadata?.error && (
+                              {!!trace.metadata?.error && (
                                 <div className="text-sm text-red-400 bg-red-900/20 rounded px-3 py-2">
                                   {String(trace.metadata.error)}
                                 </div>
