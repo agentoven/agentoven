@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.3] — 2026-03-03
+
+### 🖥️ CLI: Local Server & Config Management (Release Nine)
+
+#### `agentoven local` — On-Demand Local Server
+- **Docker-first** — `agentoven local up` auto-pulls `ghcr.io/agentoven/agentoven` + PostgreSQL, starts in containers
+- **Binary fallback** — `agentoven local up --binary` downloads pre-built Go binary from GitHub releases (no Docker needed)
+- **Lifecycle commands** — `up`, `down`, `status`, `logs`, `reset` for full server lifecycle management
+- **Auto-configures CLI** — after startup, the CLI points at `localhost:8080` automatically
+- **Memory-only mode** — `--no-pg` flag for quick ephemeral testing without PostgreSQL
+- **Cross-platform** — supports macOS (arm64/amd64), Linux (arm64/amd64), Windows
+
+#### CLI Config & Pro Gating
+- **`agentoven config`** — `set-url`, `set-key`, `set-kitchen`, `show` subcommands; config persisted at `~/.agentoven/config.toml`
+- **`agentoven use <kitchen>`** — switch active kitchen with access verification (401/403/404 handling)
+- **`agentoven login`** — Pro-only; community users directed to `config set-key`
+- **Runtime Pro gating** — CLI discovers features from `GET /api/v1/info`; Pro commands (`environment`, `test-suite`, `service-account`) show upgrade message on community servers
+- **Kitchen CRUD** — `agentoven kitchen create` / `delete` subcommands
+- **Enhanced status** — `agentoven status` shows server edition, version, URL, kitchen
+
+#### Server Info & License
+- **`GET /api/v1/info`** endpoint (OSS) — returns edition, features, limits, auth config
+- **Pro ServerInfo override** — license-derived features, limits, auth providers
+- **`GET /api/v1/license/status`** endpoint (Pro) — license validity, expiry, plan
+- **Phone-home client** (Pro) — periodic license validation with usage metering and revocation detection
+- **Pro requires PostgreSQL** — removed in-memory fallback from Pro binary
+
+---
+
 ## [0.4.1] — 2026-02-28
 
 ### 🛡️ Guardrails Enforcement
