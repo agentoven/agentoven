@@ -147,7 +147,10 @@ func (r *Resolver) Resolve(ctx context.Context, agent *models.Agent) (*models.Re
 		if ret.EmbeddingRef != "" {
 			found := false
 			for _, emb := range resolved.Embeddings {
-				if emb.Provider+"/"+emb.Model == ret.EmbeddingRef || emb.Provider == ret.EmbeddingRef {
+				// ISS-009 fix: match on provider name (user-supplied), kind, or kind/model
+				if emb.ProviderName == ret.EmbeddingRef ||
+					emb.Provider+"/"+emb.Model == ret.EmbeddingRef ||
+					emb.Provider == ret.EmbeddingRef {
 					found = true
 					break
 				}
@@ -384,6 +387,7 @@ func (r *Resolver) resolveEmbedding(ctx context.Context, ing models.Ingredient) 
 
 	return &models.ResolvedEmbedding{
 		Provider:       provider.Kind,
+		ProviderName:   providerName, // ISS-009: store the user-supplied name for cross-reference matching
 		Model:          modelName,
 		Dimensions:     dims,
 		BatchSize:      batchSize,
@@ -404,7 +408,11 @@ func (r *Resolver) resolveVectorStore(ing models.Ingredient) (*models.ResolvedVe
 
 	index, _ := ing.Config["index"].(string)
 	if index == "" {
-		return nil, fmt.Errorf("missing 'index' in vectorstore config")
+		if backendStr == "embedded" {
+			index = "default" // ISS-013: embedded backend doesn't need a user-specified index
+		} else {
+			return nil, fmt.Errorf("missing 'index' in vectorstore config")
+		}
 	}
 
 	namespace, _ := ing.Config["namespace"].(string)

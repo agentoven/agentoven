@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/agentoven/agentoven/control-plane/internal/store"
@@ -409,7 +410,7 @@ func (a *Adapter) checkHealth(ctx context.Context, agent *models.Agent) models.H
 		return result
 	}
 
-	statusURL := agent.A2AEndpoint + "/status"
+	statusURL := strings.TrimRight(agent.A2AEndpoint, "/") + "/status"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, statusURL, nil)
 	if err != nil {
 		result.Status = models.PicoClawStatusOffline

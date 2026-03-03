@@ -42,6 +42,7 @@ func NewHeartbeatMonitor(s store.Store, adapter *Adapter, interval time.Duration
 }
 
 // Start begins the heartbeat polling loop.
+// ISS-005 fix: recreate stopCh so the monitor can restart after Stop().
 func (m *HeartbeatMonitor) Start(ctx context.Context) {
 	m.mu.Lock()
 	if m.running {
@@ -49,6 +50,7 @@ func (m *HeartbeatMonitor) Start(ctx context.Context) {
 		return
 	}
 	m.running = true
+	m.stopCh = make(chan struct{}) // recreate channel (previous Stop() closed it)
 	m.mu.Unlock()
 
 	log.Info().Dur("interval", m.interval).Msg("PicoClaw heartbeat monitor started")
@@ -113,9 +115,13 @@ func (m *HeartbeatMonitor) checkAll(ctx context.Context) {
 }
 
 // processResult updates agent status based on heartbeat result and fires callbacks.
+// ISS-006 fix: consolidates all mutations into a single UpdateAgent call to avoid
+// double version bumps and phantom version entries.
 func (m *HeartbeatMonitor) processResult(ctx context.Context, kitchen string, agent *models.Agent, result models.HeartbeatResult) {
 	oldStatus := inferCurrentStatus(agent)
 	newStatus := result.Status
+
+	needsUpdate := false
 
 	if oldStatus != newStatus {
 		log.Info().
@@ -136,10 +142,7 @@ func (m *HeartbeatMonitor) processResult(ctx context.Context, kitchen string, ag
 			agent.Status = models.AgentStatusCooled
 		}
 
-		agent.UpdatedAt = time.Now().UTC()
-		if err := m.store.UpdateAgent(ctx, agent); err != nil {
-			log.Warn().Err(err).Str("agent", agent.Name).Msg("heartbeat: failed to update agent status")
-		}
+		needsUpdate = true
 
 		// Fire callback if registered
 		if m.OnStatusChange != nil {
@@ -159,7 +162,15 @@ func (m *HeartbeatMonitor) processResult(ctx context.Context, kitchen string, ag
 		if result.MemoryMB > 0 {
 			agent.Tags["memory_mb"] = fmt.Sprintf("%.1f", result.MemoryMB)
 		}
-		_ = m.store.UpdateAgent(ctx, agent)
+		needsUpdate = true
+	}
+
+	// Single store update with all mutations applied
+	if needsUpdate {
+		agent.UpdatedAt = time.Now().UTC()
+		if err := m.store.UpdateAgent(ctx, agent); err != nil {
+			log.Warn().Err(err).Str("agent", agent.Name).Msg("heartbeat: failed to update agent")
+		}
 	}
 }
 

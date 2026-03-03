@@ -957,8 +957,9 @@ type ResolvedData struct {
 
 // ResolvedEmbedding is the output of resolving an "embedding" ingredient.
 type ResolvedEmbedding struct {
-	Provider       string                 `json:"provider"`        // "openai", "ollama", "azure-openai"
-	Model          string                 `json:"model"`           // "text-embedding-3-small"
+	Provider       string                 `json:"provider"`         // provider kind: "openai", "ollama", "azure-openai"
+	ProviderName   string                 `json:"provider_name"`    // user-supplied provider name (ISS-009)
+	Model          string                 `json:"model"`            // "text-embedding-3-small"
 	Dimensions     int                    `json:"dimensions"`      // 1536, 3072, etc.
 	BatchSize      int                    `json:"batch_size"`      // max texts per embed call
 	DistanceMetric string                 `json:"distance_metric"` // "cosine", "euclidean", "dot"

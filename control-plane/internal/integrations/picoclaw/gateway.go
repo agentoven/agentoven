@@ -130,7 +130,9 @@ func (m *GatewayManager) StopAll() {
 // ── Internal ─────────────────────────────────────────────────
 
 // startGateway starts a chat gateway and routes messages to the linked agent.
-func (m *GatewayManager) startGateway(ctx context.Context, gw *models.ChatGateway) error {
+// ISS-001 fix: uses context.Background() instead of the HTTP request context,
+// which would be cancelled as soon as the response is written.
+func (m *GatewayManager) startGateway(_ context.Context, gw *models.ChatGateway) error {
 	m.mu.RLock()
 	driver, ok := m.drivers[gw.Kind]
 	m.mu.RUnlock()
@@ -139,7 +141,7 @@ func (m *GatewayManager) startGateway(ctx context.Context, gw *models.ChatGatewa
 		return fmt.Errorf("no driver for gateway kind %q (available drivers: %v)", gw.Kind, m.driverKinds())
 	}
 
-	gwCtx, cancel := context.WithCancel(ctx)
+	gwCtx, cancel := context.WithCancel(context.Background())
 
 	// onMessage callback: relay incoming chat messages to the PicoClaw agent
 	onMessage := func(msg models.GatewayMessage) {

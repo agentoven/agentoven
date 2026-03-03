@@ -31,6 +31,7 @@ import (
 	"github.com/agentoven/agentoven/control-plane/internal/config"
 	"github.com/agentoven/agentoven/control-plane/internal/embeddings"
 	grails "github.com/agentoven/agentoven/control-plane/internal/guardrails"
+	"github.com/agentoven/agentoven/control-plane/internal/integrations/picoclaw"
 	"github.com/agentoven/agentoven/control-plane/internal/mcpgw"
 	"github.com/agentoven/agentoven/control-plane/internal/notify"
 	"github.com/agentoven/agentoven/control-plane/internal/process"
@@ -128,6 +129,16 @@ type Server struct {
 	// ProcessManager manages agent runtime processes (local/docker/k8s).
 	// Exposed so Pro can customize with custom images, sidecar injection, etc.
 	ProcessManager *process.Manager
+
+	// PicoClawAdapter manages PicoClaw IoT agent registration and relay.
+	PicoClawAdapter *picoclaw.Adapter
+
+	// GatewayManager manages chat platform gateways (Telegram, Discord, etc.).
+	// Exposed so Pro can register platform-native ChatGatewayDriver implementations.
+	GatewayManager *picoclaw.GatewayManager
+
+	// HeartbeatMonitor polls PicoClaw instances for health status.
+	HeartbeatMonitor *picoclaw.HeartbeatMonitor
 
 	// ServerInfo holds the response for GET /api/v1/info.
 	// OSS populates with CommunityServerInfo(); Pro overrides with license data.
@@ -368,7 +379,19 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 		Ingester:    ragIngester,
 	}
 
-	router := api.NewRouter(cfg, h, rh, authChain)
+	// ── PicoClaw IoT Integration ────────────────────────────
+	// Create PicoClaw adapter, gateway manager, and heartbeat monitor.
+	// These are exposed on the Server struct so Pro can register
+	// ChatGatewayDriver implementations and customize heartbeat behavior.
+	pcAdapter := picoclaw.NewAdapter(dataStore)
+	pcGateway := picoclaw.NewGatewayManager(dataStore, pcAdapter)
+	pcHeartbeat := picoclaw.NewHeartbeatMonitor(dataStore, pcAdapter, 60*time.Second)
+
+	router := api.NewRouter(cfg, h, rh, authChain, pcAdapter, pcGateway)
+
+	// Start heartbeat monitor (ISS-008: was never wired before)
+	pcHeartbeat.Start(context.Background())
+	log.Info().Msg("✅ PicoClaw heartbeat monitor started")
 
 	// Start retention janitor (runs every 6 hours)
 	janitor := retention.NewJanitor(dataStore, 6*time.Hour)
@@ -407,6 +430,9 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 		Catalog:             cat,
 		SessionStore:        sessStore,
 		ProcessManager:      pm,
+		PicoClawAdapter:     pcAdapter,
+		GatewayManager:      pcGateway,
+		HeartbeatMonitor:    pcHeartbeat,
 		ServerInfo:          srvInfo,
 		retentionCancel:     retCancel,
 		ShutdownFunc:        shutdown,
@@ -440,6 +466,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		if err := s.ProcessManager.StopAll(ctx); err != nil {
 			log.Warn().Err(err).Msg("Error stopping agent processes during shutdown")
 		}
+	}
+
+	// Stop PicoClaw heartbeat monitor and all chat gateways (ISS-008)
+	if s.HeartbeatMonitor != nil {
+		s.HeartbeatMonitor.Stop()
+	}
+	if s.GatewayManager != nil {
+		s.GatewayManager.StopAll()
 	}
 
 	if s.retentionCancel != nil {

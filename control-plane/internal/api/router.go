@@ -24,10 +24,11 @@ import (
 // Phase 2: accepts *handlers.Handlers with store/router/gateway/engine deps.
 // Phase 5 (RAG): accepts optional *handlers.RAGHandlers for RAG/embedding/vectorstore routes.
 // Phase 7 (Auth): accepts AuthProviderChain for pluggable authentication.
+// R10 (ISS-008): accepts PicoClaw adapter and gateway manager, created in buildServer
 //
 // Returns *chi.Mux (which implements http.Handler) so the Server can expose it
 // for Pro to mount additional routes (e.g. /api/v1/test-suites).
-func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandlers, authChain contracts.AuthProviderChain) *chi.Mux {
+func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandlers, authChain contracts.AuthProviderChain, pcAdapter *picoclaw.Adapter, pcGateway *picoclaw.GatewayManager) *chi.Mux {
 	r := chi.NewRouter()
 
 	// Global middleware
@@ -322,8 +323,8 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 	})
 
 	// PicoClaw adapter — IoT agent management, A2A relay, chat gateways, heartbeat
-	pcAdapter := picoclaw.NewAdapter(h.Store)
-	pcGateway := picoclaw.NewGatewayManager(h.Store, pcAdapter)
+	// ISS-008: pcAdapter and pcGateway are created in buildServer and passed in,
+	// enabling lifecycle management (heartbeat start/stop, gateway shutdown).
 	r.Route("/picoclaw", func(r chi.Router) {
 		// Instance management
 		r.Get("/instances", pcAdapter.HandleListInstances)

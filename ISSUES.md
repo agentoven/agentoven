@@ -34,7 +34,7 @@
   ```go
   gwCtx, cancel := context.WithCancel(context.Background())
   ```
-- **Status:** ⬜ Open
+- **Status:** ✅ Fixed (R10, 3 Mar 2026)
 
 ---
 
@@ -120,7 +120,7 @@
   for `pcGateway.StopAll()`.
 - **Fix:** Wire `HeartbeatMonitor` into `main.go`. Call `Start()` on server startup and
   `Stop()`/`StopAll()` on graceful shutdown via `os.Signal`.
-- **Status:** ⬜ Open
+- **Status:** ✅ Fixed (R10, 3 Mar 2026) — PicoClaw components created in `buildServer()`, HeartbeatMonitor started, shutdown hooks added.
 
 ### ISS-009: resolveEmbedding uses provider Kind instead of Name
 
@@ -132,7 +132,7 @@
   `embedding_ref: "my-openai"`, the match fails.
 - **Fix:** Store both `ProviderKind` and `ProviderName` in `ResolvedEmbedding`, or
   match on name.
-- **Status:** ⬜ Open
+- **Status:** ✅ Fixed (R10, 3 Mar 2026) — added `ProviderName` field, cross-reference matches on name, kind, and kind/model.
 
 ---
 
@@ -156,7 +156,7 @@
 - **Description:** `checkHealth` builds `agent.A2AEndpoint + "/status"`. If the endpoint
   is `http://device:8080/`, this produces `http://device:8080//status`.
 - **Fix:** `strings.TrimRight(agent.A2AEndpoint, "/") + "/status"`
-- **Status:** ⬜ Open
+- **Status:** ✅ Fixed (R10, 3 Mar 2026)
 
 ### ISS-012: HandleStopGateway comment/implementation mismatch
 
@@ -175,7 +175,7 @@
   the `embedded` (in-memory) backend, where there is only one store per kitchen. This
   forces users to supply a meaningless index name for the simplest use case.
 - **Fix:** Default `index` to `"default"` when backend is `embedded`.
-- **Status:** ⬜ Open
+- **Status:** ✅ Fixed (R10, 3 Mar 2026)
 
 ---
 
@@ -301,10 +301,10 @@
 
 | Severity | Count | Fixed |
 |----------|-------|-------|
-| 🔴 Critical | 1 | 0 |
+| 🔴 Critical | 1 | 1 |
 | 🟠 High | 6 | 4 |
-| 🟡 Medium | 5 | 0 |
-| 🟢 Low | 4 | 0 |
+| 🟡 Medium | 5 | 4 |
+| 🟢 Low | 4 | 2 |
 | ⚪ Infra | 5 | 0 |
 | 🔒 Auth | 2 | 2 (partial) |
-| **Total** | **23** | **6** |
+| **Total** | **23** | **13** |
