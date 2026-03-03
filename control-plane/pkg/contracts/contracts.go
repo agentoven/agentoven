@@ -394,6 +394,192 @@ type GuardrailService interface {
 	EvaluateOutput(ctx context.Context, guardrails []models.Guardrail, response string) (*models.GuardrailEvaluation, error)
 }
 
+// ── Test Runner Backend (R9) ─────────────────────────────────
+
+// TestRunnerBackend dispatches test suite runs to a backend for async execution.
+// The backend decouples test execution from the API server process.
+//
+// OSS ships CommunityTestRunnerBackend (no-op — test suites are Pro-only).
+// Pro ships: LocalRunnerBackend (bounded goroutine pool),
+//
+//	CeleryRunnerBackend (Redis/RabbitMQ broker),
+//	TemporalRunnerBackend (Temporal workflow),
+//	K8sRunnerBackend (Kubernetes Job per run).
+//
+// External backends report results via the callback endpoint:
+//
+//	POST /api/v1/test-runs/{runID}/callback
+type TestRunnerBackend interface {
+	// SubmitRun dispatches a test suite run to the backend for async execution.
+	// Returns a run ID immediately. Execution happens asynchronously.
+	// The backend is responsible for calling the agent's test endpoint per case
+	// and persisting results to the store.
+	SubmitRun(ctx context.Context, suite *models.TestSuite, trigger, createdBy string) (runID string, err error)
+
+	// CancelRun requests cancellation of a running test suite execution.
+	// Idempotent — safe to call on completed or unknown runs.
+	CancelRun(ctx context.Context, runID string) error
+
+	// GetRunStatus returns the current status of a submitted test run.
+	// Returns ErrNotFound if the run ID is not recognized.
+	GetRunStatus(ctx context.Context, runID string) (*models.TestRun, error)
+
+	// Kind returns the backend identifier (e.g. "local", "celery", "temporal", "k8s").
+	Kind() string
+
+	// HealthCheck verifies the backend is reachable and operational.
+	HealthCheck(ctx context.Context) error
+}
+
+// CommunityTestRunnerBackend is a no-op backend for the OSS edition.
+// Test suites are a Pro-only feature; the community backend returns errors
+// indicating the feature is not available.
+type CommunityTestRunnerBackend struct{}
+
+func (b *CommunityTestRunnerBackend) SubmitRun(_ context.Context, _ *models.TestSuite, _, _ string) (string, error) {
+	return "", fmt.Errorf("test suites are a Pro feature — upgrade at https://agentoven.dev/pricing")
+}
+
+func (b *CommunityTestRunnerBackend) CancelRun(_ context.Context, _ string) error {
+	return fmt.Errorf("test suites are a Pro feature")
+}
+
+func (b *CommunityTestRunnerBackend) GetRunStatus(_ context.Context, _ string) (*models.TestRun, error) {
+	return nil, fmt.Errorf("test suites are a Pro feature")
+}
+
+func (b *CommunityTestRunnerBackend) Kind() string { return "community" }
+
+func (b *CommunityTestRunnerBackend) HealthCheck(_ context.Context) error { return nil }
+
+// ── Environment Service (R9) ────────────────────────────────
+
+// EnvironmentService manages deployment environments and agent promotions.
+// Pro provides the real implementation with approval gates, version pinning,
+// and external tracker sync. Community returns errors.
+type EnvironmentService interface {
+	// Promote moves an agent from one environment to another.
+	// Creates a new AgentDeployment record and handles approval gates.
+	Promote(ctx context.Context, req *models.PromotionRequest) (*models.PromotionResult, error)
+
+	// Rollback reverts an environment to a previous deployment.
+	Rollback(ctx context.Context, kitchen, agentName, envSlug string) (*models.PromotionResult, error)
+
+	// ValidatePromotion checks if a promotion is allowed (quota, approval, etc.)
+	// without executing it.
+	ValidatePromotion(ctx context.Context, req *models.PromotionRequest) error
+
+	// SeedDefaults creates the default dev/qa/prod environments for a kitchen.
+	SeedDefaults(ctx context.Context, kitchen string) error
+}
+
+// CommunityEnvironmentService is a no-op for the OSS edition.
+type CommunityEnvironmentService struct{}
+
+func (s *CommunityEnvironmentService) Promote(_ context.Context, _ *models.PromotionRequest) (*models.PromotionResult, error) {
+	return nil, fmt.Errorf("environment promotion is a Pro feature — upgrade at https://agentoven.dev/pricing")
+}
+
+func (s *CommunityEnvironmentService) Rollback(_ context.Context, _, _, _ string) (*models.PromotionResult, error) {
+	return nil, fmt.Errorf("environment rollback is a Pro feature")
+}
+
+func (s *CommunityEnvironmentService) ValidatePromotion(_ context.Context, _ *models.PromotionRequest) error {
+	return fmt.Errorf("environment promotion is a Pro feature")
+}
+
+func (s *CommunityEnvironmentService) SeedDefaults(_ context.Context, _ string) error {
+	return nil // no-op in community
+}
+
+// ── Tracker Driver (R9) ─────────────────────────────────────
+
+// TrackerDriver connects test suites and agent deployments to an external
+// issue tracker (JIRA, GitLab, GitHub Issues, Azure DevOps). Configured
+// per-kitchen via ExternalTrackerConfig in KitchenSettings.
+//
+// Pro ships: JIRADriver, GitLabDriver, GitHubDriver, AzureDevOpsDriver.
+// Community ships the no-op CommunityTrackerDriver.
+type TrackerDriver interface {
+	// Kind returns the tracker type identifier.
+	Kind() models.TrackerKind
+
+	// CreateIssue creates a new issue in the external tracker.
+	// Returns the tracker reference (e.g. "PROJ-1234").
+	CreateIssue(ctx context.Context, title, description string, labels []string) (trackerRef string, err error)
+
+	// LinkTestRun associates a test run with an existing tracker issue.
+	// Adds a comment or link on the issue with the run summary.
+	LinkTestRun(ctx context.Context, trackerRef string, run *models.TestRun) error
+
+	// SyncRunResult updates the tracker issue with the final test run results.
+	// Called when a test run completes (if auto-sync is enabled).
+	SyncRunResult(ctx context.Context, trackerRef string, run *models.TestRun) error
+
+	// GetIssueStatus fetches the current status of a tracker issue.
+	GetIssueStatus(ctx context.Context, trackerRef string) (status string, err error)
+
+	// HealthCheck verifies the tracker connection is working.
+	HealthCheck(ctx context.Context) error
+}
+
+// CommunityTrackerDriver is a no-op for the OSS edition.
+type CommunityTrackerDriver struct{}
+
+func (d *CommunityTrackerDriver) Kind() models.TrackerKind { return "" }
+
+func (d *CommunityTrackerDriver) CreateIssue(_ context.Context, _, _ string, _ []string) (string, error) {
+	return "", fmt.Errorf("external tracker integration is a Pro feature — upgrade at https://agentoven.dev/pricing")
+}
+
+func (d *CommunityTrackerDriver) LinkTestRun(_ context.Context, _ string, _ *models.TestRun) error {
+	return fmt.Errorf("external tracker integration is a Pro feature")
+}
+
+func (d *CommunityTrackerDriver) SyncRunResult(_ context.Context, _ string, _ *models.TestRun) error {
+	return fmt.Errorf("external tracker integration is a Pro feature")
+}
+
+func (d *CommunityTrackerDriver) GetIssueStatus(_ context.Context, _ string) (string, error) {
+	return "", fmt.Errorf("external tracker integration is a Pro feature")
+}
+
+func (d *CommunityTrackerDriver) HealthCheck(_ context.Context) error { return nil }
+
+// ── Service Account Manager (R9) ────────────────────────────
+
+// ServiceAccountManager handles kitchen-scoped service account lifecycle.
+// Pro provides the real implementation with bcrypt hashing, token rotation,
+// and RBAC integration. Community returns errors.
+type ServiceAccountManager interface {
+	// IssueToken creates a new service account and returns the plaintext token
+	// (only returned once at creation time).
+	IssueToken(ctx context.Context, sa *models.ServiceAccount) (plaintextToken string, err error)
+
+	// ValidateToken checks a plaintext token against stored hashes.
+	// Returns the matching ServiceAccount if valid.
+	ValidateToken(ctx context.Context, token string) (*models.ServiceAccount, error)
+
+	// RotateToken revokes the old token and issues a new one.
+	// Returns the new plaintext token.
+	RotateToken(ctx context.Context, kitchen, id string) (newToken string, err error)
+}
+
+// CommunityServiceAccountManager is a no-op for the OSS edition.
+type CommunityServiceAccountManager struct{}
+
+func (m *CommunityServiceAccountManager) IssueToken(_ context.Context, _ *models.ServiceAccount) (string, error) {
+	return "", fmt.Errorf("managed service accounts are a Pro feature — upgrade at https://agentoven.dev/pricing")
+}
+
+func (m *CommunityServiceAccountManager) ValidateToken(_ context.Context, _ string) (*models.ServiceAccount, error) {
+	return nil, fmt.Errorf("managed service accounts are a Pro feature")
+}
+
+func (m *CommunityServiceAccountManager) RotateToken(_ context.Context, _, _ string) (string, error) {
+	return "", fmt.Errorf("managed service accounts are a Pro feature")
+}
+
 // ── Agent Process Executor (R8) ─────────────────────────────
 
 // AgentProcessExecutor spawns and manages agent runtime processes.

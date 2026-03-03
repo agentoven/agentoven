@@ -24,7 +24,10 @@ import (
 // Phase 2: accepts *handlers.Handlers with store/router/gateway/engine deps.
 // Phase 5 (RAG): accepts optional *handlers.RAGHandlers for RAG/embedding/vectorstore routes.
 // Phase 7 (Auth): accepts AuthProviderChain for pluggable authentication.
-func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandlers, authChain contracts.AuthProviderChain) http.Handler {
+//
+// Returns *chi.Mux (which implements http.Handler) so the Server can expose it
+// for Pro to mount additional routes (e.g. /api/v1/test-suites).
+func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandlers, authChain contracts.AuthProviderChain) *chi.Mux {
 	r := chi.NewRouter()
 
 	// Global middleware
@@ -52,7 +55,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   corsOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Kitchen-Id", "X-Request-Id", "X-API-Key", "X-Service-Token"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Kitchen-Id", "X-Request-Id", "X-API-Key", "X-Service-Token", "X-Agent-Key"},
 		ExposedHeaders:   []string{"X-Request-Id", "X-Trace-Id"},
 		AllowCredentials: !isWildcard, // safe: only allow credentials with explicit origins
 		MaxAge:           300,
@@ -61,6 +64,10 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 	// Health & info
 	r.Get("/health", healthHandler)
 	r.Get("/version", versionHandler(cfg))
+
+	// Server info — tells CLI clients the edition, features, and limits.
+	// Pro overrides h.ServerInfo after server construction.
+	r.Get("/api/v1/info", h.ServerInfoHandler)
 
 	// API v1
 	r.Route("/api/v1", func(r chi.Router) {
@@ -194,6 +201,17 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 			r.Put("/", h.UpdateKitchenSettings)
 		})
 
+		// Scoped API Keys — consumer-facing agent access keys
+		r.Route("/keys", func(r chi.Router) {
+			r.Get("/", h.HandleListScopedKeys)
+			r.Post("/", h.HandleCreateScopedKey)
+			r.Route("/{keyID}", func(r chi.Router) {
+				r.Get("/", h.HandleGetScopedKey)
+				r.Post("/revoke", h.HandleRevokeScopedKey)
+				r.Get("/usage", h.HandleGetScopedKeyUsage)
+			})
+		})
+
 		// Approvals — durable human gate approvals
 		r.Route("/approvals", func(r chi.Router) {
 			r.Get("/", h.ListApprovals)
@@ -224,10 +242,12 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 			r.Get("/{traceId}", h.GetTrace)
 		})
 
-		// Kitchens — OSS is single-kitchen (read-only, "default" kitchen only)
+		// Kitchens — CRUD for workspaces / tenant boundaries
 		r.Route("/kitchens", func(r chi.Router) {
 			r.Get("/", h.ListKitchens)
+			r.Post("/", h.CreateKitchen)
 			r.Get("/{kitchenId}", h.GetKitchen)
+			r.Delete("/{kitchenId}", h.DeleteKitchen)
 		})
 
 		// ── RAG & Intelligence (Release 5) ──────────────────

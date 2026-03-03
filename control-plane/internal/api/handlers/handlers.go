@@ -15,6 +15,9 @@ import (
 	"strings"
 	"time"
 
+	"crypto/rand"
+	"crypto/sha256"
+
 	"github.com/agentoven/agentoven/control-plane/internal/api/middleware"
 	"github.com/agentoven/agentoven/control-plane/internal/catalog"
 	"github.com/agentoven/agentoven/control-plane/internal/executor"
@@ -25,6 +28,7 @@ import (
 	"github.com/agentoven/agentoven/control-plane/internal/store"
 	"github.com/agentoven/agentoven/control-plane/internal/workflow"
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
+	pkgmw "github.com/agentoven/agentoven/control-plane/pkg/middleware"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -44,6 +48,10 @@ type Handlers struct {
 	Catalog         *catalog.Catalog
 	Sessions        contracts.SessionStore
 	Guardrails      contracts.GuardrailService
+
+	// ServerInfo is the response for GET /api/v1/info.
+	// OSS sets CommunityServerInfo; Pro overrides with license data.
+	ServerInfo *models.ServerInfo
 }
 
 // New creates a new Handlers instance with all dependencies.
@@ -70,7 +78,30 @@ func New(s store.Store, mr *router.ModelRouter, gw *mcpgw.Gateway, wf *workflow.
 
 func (h *Handlers) ListAgents(w http.ResponseWriter, r *http.Request) {
 	kitchen := middleware.GetKitchen(r.Context())
-	agents, err := h.Store.ListAgents(r.Context(), kitchen)
+
+	// Query param filtering (R9): ?tag=key:value, ?environment=slug, ?status=ready
+	tagFilter := r.URL.Query().Get("tag")
+	envFilter := r.URL.Query().Get("environment")
+	statusFilter := r.URL.Query().Get("status")
+
+	var agents []models.Agent
+	var err error
+
+	switch {
+	case tagFilter != "":
+		// Parse "key:value" format
+		parts := strings.SplitN(tagFilter, ":", 2)
+		if len(parts) != 2 || parts[0] == "" {
+			respondError(w, http.StatusBadRequest, "tag filter must be in key:value format")
+			return
+		}
+		agents, err = h.Store.ListAgentsByTag(r.Context(), kitchen, parts[0], parts[1])
+	case envFilter != "":
+		agents, err = h.Store.ListAgentsByEnvironment(r.Context(), kitchen, envFilter)
+	default:
+		agents, err = h.Store.ListAgents(r.Context(), kitchen)
+	}
+
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -78,6 +109,18 @@ func (h *Handlers) ListAgents(w http.ResponseWriter, r *http.Request) {
 	if agents == nil {
 		agents = []models.Agent{}
 	}
+
+	// Client-side status filter (applies on top of tag/env filter)
+	if statusFilter != "" {
+		filtered := make([]models.Agent, 0, len(agents))
+		for _, a := range agents {
+			if string(a.Status) == statusFilter {
+				filtered = append(filtered, a)
+			}
+		}
+		agents = filtered
+	}
+
 	respondJSON(w, http.StatusOK, agents)
 }
 
@@ -315,23 +358,46 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 		Str("environment", req.Environment).
 		Msg("Agent baking started")
 
-	// Validate provider connectivity async, then mark ready or burnt
-	go func() {
+	// ISS-004 fix: Validate provider connectivity async, then mark ready or burnt.
+	// Re-fetch the agent from the store inside the goroutine to avoid racing
+	// on the same pointer that was used in the HTTP response. Capture only the
+	// immutable identifiers (kitchen, agentName) — not the *Agent pointer.
+	go func(kitchen, agentName, modelProvider string, mode models.AgentMode) {
 		time.Sleep(1 * time.Second)
 
+		// Re-fetch the agent from the store to get the current state.
+		// Another request may have modified the agent since we released the
+		// HTTP response, so working from a fresh copy prevents stale overwrites.
+		fresh, err := h.Store.GetAgent(context.Background(), kitchen, agentName)
+		if err != nil {
+			log.Warn().Err(err).Str("agent", agentName).Msg("BakeAgent goroutine: cannot re-fetch agent")
+			return
+		}
+
+		// Guard: if the agent is no longer in "baking" status, someone else
+		// already touched it (cool, retire, another bake). Abort to prevent
+		// a stale status overwrite.
+		if fresh.Status != models.AgentStatusBaking {
+			log.Info().
+				Str("agent", agentName).
+				Str("status", string(fresh.Status)).
+				Msg("BakeAgent goroutine: agent no longer baking, aborting")
+			return
+		}
+
 		// Test the provider with a real credential-validating call
-		if agent.ModelProvider != "" {
-			provider, err := h.Store.GetProvider(context.Background(), agent.ModelProvider)
+		if modelProvider != "" {
+			provider, err := h.Store.GetProvider(context.Background(), modelProvider)
 			if err == nil {
 				result := h.Router.TestProvider(context.Background(), provider)
 				if !result.Healthy {
-					agent.Status = models.AgentStatusBurnt
-					if agent.Tags == nil {
-						agent.Tags = map[string]string{}
+					fresh.Status = models.AgentStatusBurnt
+					if fresh.Tags == nil {
+						fresh.Tags = map[string]string{}
 					}
-					agent.Tags["error"] = fmt.Sprintf("Provider '%s' test failed: %s", agent.ModelProvider, result.Error)
-					agent.UpdatedAt = time.Now().UTC()
-					h.Store.UpdateAgent(context.Background(), agent)
+					fresh.Tags["error"] = fmt.Sprintf("Provider '%s' test failed: %s", modelProvider, result.Error)
+					fresh.UpdatedAt = time.Now().UTC()
+					h.Store.UpdateAgent(context.Background(), fresh)
 					log.Warn().Str("agent", agentName).Msg("Agent burnt — provider test failed")
 					return
 				}
@@ -341,16 +407,16 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 		// ── Start the agent process ──────────────────────────────
 		// After provider validation passes, spawn the agent as a running
 		// process (local Python / Docker / K8s) so it can serve A2A tasks.
-		if h.ProcessManager != nil && agent.Mode != models.AgentModeExternal {
-			procInfo, err := h.ProcessManager.Start(context.Background(), agent)
+		if h.ProcessManager != nil && mode != models.AgentModeExternal {
+			procInfo, err := h.ProcessManager.Start(context.Background(), fresh)
 			if err != nil {
-				agent.Status = models.AgentStatusBurnt
-				if agent.Tags == nil {
-					agent.Tags = map[string]string{}
+				fresh.Status = models.AgentStatusBurnt
+				if fresh.Tags == nil {
+					fresh.Tags = map[string]string{}
 				}
-				agent.Tags["error"] = fmt.Sprintf("Agent process failed to start: %s", err.Error())
-				agent.UpdatedAt = time.Now().UTC()
-				h.Store.UpdateAgent(context.Background(), agent)
+				fresh.Tags["error"] = fmt.Sprintf("Agent process failed to start: %s", err.Error())
+				fresh.UpdatedAt = time.Now().UTC()
+				h.Store.UpdateAgent(context.Background(), fresh)
 				log.Warn().Err(err).Str("agent", agentName).Msg("Agent burnt — process start failed")
 				return
 			}
@@ -358,7 +424,7 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 			// Store process info but keep a2a_endpoint stable.
 			// The control plane proxies /agents/{name}/a2a → process.endpoint
 			// so clients always use the stable URL (ADR-0007).
-			agent.Process = procInfo
+			fresh.Process = procInfo
 			log.Info().
 				Str("agent", agentName).
 				Str("backend", procInfo.Endpoint).
@@ -367,18 +433,18 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 				Msg("Agent process spawned — control plane will proxy A2A calls")
 		}
 
-		agent.Status = models.AgentStatusReady
-		agent.UpdatedAt = time.Now().UTC()
-		if agent.Tags == nil {
-			agent.Tags = map[string]string{}
+		fresh.Status = models.AgentStatusReady
+		fresh.UpdatedAt = time.Now().UTC()
+		if fresh.Tags == nil {
+			fresh.Tags = map[string]string{}
 		}
-		delete(agent.Tags, "error")
-		if err := h.Store.UpdateAgent(context.Background(), agent); err != nil {
+		delete(fresh.Tags, "error")
+		if err := h.Store.UpdateAgent(context.Background(), fresh); err != nil {
 			log.Warn().Err(err).Str("agent", agentName).Msg("Failed to update agent to ready")
 		} else {
 			log.Info().Str("agent", agentName).Msg("Agent is ready")
 		}
-	}()
+	}(kitchen, agentName, agent.ModelProvider, agent.Mode)
 
 	respondJSON(w, http.StatusAccepted, map[string]string{
 		"name":        agentName,
@@ -393,6 +459,17 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 	agentName := chi.URLParam(r, "agentName")
 	kitchen := middleware.GetKitchen(r.Context())
+
+	// ── Scoped key agent access check ───────────────────────
+	if identity := pkgmw.GetIdentity(r.Context()); identity != nil && identity.Provider == "scoped-key" {
+		keyID := identity.Claims["key_id"]
+		scopedKey, err := h.Store.GetScopedKey(r.Context(), kitchen, keyID)
+		if err != nil || !scopedKey.CanAccessAgent(agentName) {
+			respondError(w, http.StatusForbidden,
+				fmt.Sprintf("Scoped key does not have access to agent '%s'", agentName))
+			return
+		}
+	}
 
 	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
 	if err != nil {
@@ -1532,6 +1609,28 @@ func (h *Handlers) GetKitchen(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, kitchen)
 }
 
+func (h *Handlers) DeleteKitchen(w http.ResponseWriter, r *http.Request) {
+	kitchenID := chi.URLParam(r, "kitchenId")
+
+	// Prevent deleting the default kitchen
+	if kitchenID == "default" {
+		respondError(w, http.StatusForbidden, "Cannot delete the default kitchen")
+		return
+	}
+
+	if err := h.Store.DeleteKitchen(r.Context(), kitchenID); err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	log.Info().Str("kitchen", kitchenID).Msg("Kitchen deleted")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ══════════════════════════════════════════════════════════════
 // ── A2A Gateway Handlers ─────────────────────────────────────
 // ══════════════════════════════════════════════════════════════
@@ -2371,6 +2470,17 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	agentName := chi.URLParam(r, "agentName")
 	kitchen := middleware.GetKitchen(r.Context())
 
+	// ── Scoped key agent access check ───────────────────────
+	if identity := pkgmw.GetIdentity(r.Context()); identity != nil && identity.Provider == "scoped-key" {
+		keyID := identity.Claims["key_id"]
+		scopedKey, err := h.Store.GetScopedKey(r.Context(), kitchen, keyID)
+		if err != nil || !scopedKey.CanAccessAgent(agentName) {
+			respondError(w, http.StatusForbidden,
+				fmt.Sprintf("Scoped key does not have access to agent '%s'", agentName))
+			return
+		}
+	}
+
 	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
 	if err != nil {
 		if _, ok := err.(*store.ErrNotFound); ok {
@@ -2918,6 +3028,21 @@ func respondError(w http.ResponseWriter, status int, message string) {
 	respondJSON(w, status, map[string]string{"error": message})
 }
 
+// ══════════════════════════════════════════════════════════════
+// ── Server Info Handler ──────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// ServerInfoHandler returns the server edition, features, limits, and auth config.
+// The CLI calls this once per session to discover what the server supports and
+// to gate Pro-only commands at runtime.
+func (h *Handlers) ServerInfoHandler(w http.ResponseWriter, r *http.Request) {
+	if h.ServerInfo == nil {
+		respondJSON(w, http.StatusOK, models.CommunityServerInfo("unknown"))
+		return
+	}
+	respondJSON(w, http.StatusOK, h.ServerInfo)
+}
+
 // maskProviderKeys redacts sensitive fields (api_key, api_secret) in provider
 // config before returning to API consumers.
 func maskProviderKeys(p *models.ModelProvider) *models.ModelProvider {
@@ -3388,5 +3513,193 @@ func (h *Handlers) ListDiscoveryDrivers(w http.ResponseWriter, r *http.Request) 
 	}
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"discovery_capable": kinds,
+	})
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── Scoped API Key Handlers ──────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// HandleCreateScopedKey creates a new scoped API key.
+// The plain-text key is returned ONLY in this response — it cannot be retrieved again.
+// POST /api/v1/keys
+func (h *Handlers) HandleCreateScopedKey(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+
+	var req struct {
+		Label      string   `json:"label"`
+		AgentNames []string `json:"agent_names"` // ["*"] for all agents
+		MaxCalls   int      `json:"max_calls"`   // 0 = unlimited
+		ExpiresIn  string   `json:"expires_in"`  // e.g. "24h", "7d", "" = never
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON body")
+		return
+	}
+	if req.Label == "" {
+		respondError(w, http.StatusBadRequest, "label is required")
+		return
+	}
+	if len(req.AgentNames) == 0 {
+		respondError(w, http.StatusBadRequest, "agent_names is required (use [\"*\"] for all agents)")
+		return
+	}
+
+	// Generate a cryptographically random key: ao_sk_<32 random bytes hex>
+	keyBytes := make([]byte, 32)
+	if _, err := rand.Read(keyBytes); err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to generate key")
+		return
+	}
+	plainKey := fmt.Sprintf("ao_sk_%x", keyBytes)
+	keyHash := fmt.Sprintf("%x", sha256.Sum256([]byte(plainKey)))
+	keyPrefix := plainKey[:12] // "ao_sk_" + first 6 hex chars
+
+	// Parse expiration
+	var expiresAt *time.Time
+	if req.ExpiresIn != "" {
+		d, err := time.ParseDuration(req.ExpiresIn)
+		if err != nil {
+			// Try day-based format: "7d" → 7 * 24h
+			if strings.HasSuffix(req.ExpiresIn, "d") {
+				days, err2 := strconv.Atoi(strings.TrimSuffix(req.ExpiresIn, "d"))
+				if err2 != nil || days <= 0 {
+					respondError(w, http.StatusBadRequest, "Invalid expires_in format (use e.g. '24h', '7d')")
+					return
+				}
+				d = time.Duration(days) * 24 * time.Hour
+			} else {
+				respondError(w, http.StatusBadRequest, "Invalid expires_in format (use e.g. '24h', '7d')")
+				return
+			}
+		}
+		t := time.Now().UTC().Add(d)
+		expiresAt = &t
+	}
+
+	// Determine creator from identity
+	createdBy := "system"
+	if identity := pkgmw.GetIdentity(r.Context()); identity != nil {
+		createdBy = identity.Subject
+	}
+
+	key := &models.ScopedAPIKey{
+		ID:         uuid.New().String(),
+		KeyHash:    keyHash,
+		KeyPrefix:  keyPrefix,
+		Kitchen:    kitchen,
+		AgentNames: req.AgentNames,
+		Label:      req.Label,
+		MaxCalls:   req.MaxCalls,
+		ExpiresAt:  expiresAt,
+		CreatedBy:  createdBy,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+
+	if err := h.Store.CreateScopedKey(r.Context(), key); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Return the plain key ONCE — it cannot be retrieved again
+	respondJSON(w, http.StatusCreated, map[string]interface{}{
+		"id":          key.ID,
+		"key":         plainKey, // only time it's exposed
+		"key_prefix":  key.KeyPrefix,
+		"label":       key.Label,
+		"kitchen":     key.Kitchen,
+		"agent_names": key.AgentNames,
+		"max_calls":   key.MaxCalls,
+		"expires_at":  key.ExpiresAt,
+		"created_by":  key.CreatedBy,
+		"created_at":  key.CreatedAt,
+	})
+}
+
+// HandleListScopedKeys lists all scoped keys in the kitchen (hashes hidden).
+// GET /api/v1/keys
+func (h *Handlers) HandleListScopedKeys(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+
+	keys, err := h.Store.ListScopedKeys(r.Context(), kitchen)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, keys)
+}
+
+// HandleGetScopedKey returns a single scoped key by ID.
+// GET /api/v1/keys/{keyID}
+func (h *Handlers) HandleGetScopedKey(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+	keyID := chi.URLParam(r, "keyID")
+
+	key, err := h.Store.GetScopedKey(r.Context(), kitchen, keyID)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	respondJSON(w, http.StatusOK, key)
+}
+
+// HandleRevokeScopedKey revokes a scoped key (soft delete).
+// POST /api/v1/keys/{keyID}/revoke
+func (h *Handlers) HandleRevokeScopedKey(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+	keyID := chi.URLParam(r, "keyID")
+
+	if err := h.Store.RevokeScopedKey(r.Context(), kitchen, keyID); err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "revoked", "id": keyID})
+}
+
+// HandleGetScopedKeyUsage returns usage stats for a scoped key.
+// GET /api/v1/keys/{keyID}/usage
+func (h *Handlers) HandleGetScopedKeyUsage(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+	keyID := chi.URLParam(r, "keyID")
+
+	key, err := h.Store.GetScopedKey(r.Context(), kitchen, keyID)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	remaining := -1 // unlimited
+	if key.MaxCalls > 0 {
+		remaining = key.MaxCalls - key.CallCount
+		if remaining < 0 {
+			remaining = 0
+		}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"id":              key.ID,
+		"label":           key.Label,
+		"call_count":      key.CallCount,
+		"max_calls":       key.MaxCalls,
+		"remaining_calls": remaining,
+		"revoked":         key.Revoked,
+		"expired":         key.IsExpired(),
+		"quota_exceeded":  key.IsQuotaExceeded(),
 	})
 }

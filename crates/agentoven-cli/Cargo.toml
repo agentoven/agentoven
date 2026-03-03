@@ -33,3 +33,6 @@ indicatif = "0.17"
 tabled = "0.16"
 dirs = "5"
 toml = "0.8"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

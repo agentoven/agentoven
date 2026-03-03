@@ -48,13 +48,17 @@ dev-dashboard:
 dev-pro:
 	@echo "🏺 Starting AgentOven Pro dev mode..."
 	@echo ""
-	@echo "  Pro API server → http://localhost:8080"
-	@echo "  Dashboard      → http://localhost:5173"
+	@echo "  Pro API server        → http://localhost:8080"
+	@echo "  Dashboard (React)     → http://localhost:5173"
+	@echo "  Compliance Dashboard  → http://localhost:8501"
 	@echo ""
-	@$(MAKE) -j2 dev-pro-server dev-dashboard
+	@$(MAKE) -j3 dev-pro-server dev-dashboard dev-pro-dashboard
 
 dev-pro-server:
 	cd ../agentoven-pro && go run ./cmd/server
+
+dev-pro-dashboard:
+	cd ../agentoven-pro/dashboard && streamlit run app.py --server.port 8501 --server.headless true
 
 # Build the enterprise server binary
 build-pro:

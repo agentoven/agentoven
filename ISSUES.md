@@ -72,9 +72,7 @@
   (setting status to `ready` or `burnt`) and calls `UpdateAgent` again. Another HTTP
   request could modify the same agent between the two updates, causing stale overwrites.
   The version is also spuriously bumped twice.
-- **Fix:** Re-fetch the agent from the store inside the goroutine before modifying it.
-  Use optimistic concurrency (check version hasn't changed).
-- **Status:** ⬜ Open
+- **Status:** ✅ Fixed (R9, 1 Mar 2026) — goroutine re-fetches agent from store, checks status is still `baking` before mutating, captures immutable identifiers instead of `*Agent` pointer.
 
 ---
 
@@ -304,9 +302,9 @@
 | Severity | Count | Fixed |
 |----------|-------|-------|
 | 🔴 Critical | 1 | 0 |
-| 🟠 High | 6 | 3 |
+| 🟠 High | 6 | 4 |
 | 🟡 Medium | 5 | 0 |
 | 🟢 Low | 4 | 0 |
 | ⚪ Infra | 5 | 0 |
 | 🔒 Auth | 2 | 2 (partial) |
-| **Total** | **23** | **5** |
+| **Total** | **23** | **6** |

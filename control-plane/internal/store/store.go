@@ -28,6 +28,11 @@ type Store interface {
 	VectorDocStore
 	DataConnectorStore
 	SessionStore
+	ScopedKeyStore
+	TestSuiteStore
+	EnvironmentStore
+	AgentDeploymentStore
+	ServiceAccountStore
 
 	// Ping checks if the database is reachable.
 	Ping(ctx context.Context) error
@@ -62,6 +67,10 @@ type AgentStore interface {
 	// Agent versioning — tracks historical versions of agents
 	ListAgentVersions(ctx context.Context, kitchen, name string) ([]models.Agent, error)
 	GetAgentVersion(ctx context.Context, kitchen, name, version string) (*models.Agent, error)
+
+	// Agent filtering — tag and environment queries (R9)
+	ListAgentsByTag(ctx context.Context, kitchen, tagKey, tagValue string) ([]models.Agent, error)
+	ListAgentsByEnvironment(ctx context.Context, kitchen, envSlug string) ([]models.Agent, error)
 }
 
 // ── Recipe Store ────────────────────────────────────────────
@@ -80,6 +89,7 @@ type KitchenStore interface {
 	ListKitchens(ctx context.Context) ([]models.Kitchen, error)
 	GetKitchen(ctx context.Context, id string) (*models.Kitchen, error)
 	CreateKitchen(ctx context.Context, kitchen *models.Kitchen) error
+	DeleteKitchen(ctx context.Context, id string) error
 }
 
 // ── Trace Store ─────────────────────────────────────────────
@@ -222,7 +232,139 @@ type DataConnectorStore interface {
 	DeleteConnector(ctx context.Context, kitchen, id string) error
 }
 
+// ── Scoped API Key Store ────────────────────────────────────
+
+// ScopedKeyStore manages scoped API keys for the Agent Viewer.
+// Scoped keys grant access to specific agents with usage quotas and traceability.
+type ScopedKeyStore interface {
+	// CreateScopedKey persists a new scoped API key.
+	CreateScopedKey(ctx context.Context, key *models.ScopedAPIKey) error
+
+	// GetScopedKey returns a scoped key by ID within a kitchen.
+	GetScopedKey(ctx context.Context, kitchen, id string) (*models.ScopedAPIKey, error)
+
+	// GetScopedKeyByHash looks up a scoped key by its bcrypt hash.
+	// Used by the ScopedKeyProvider to authenticate requests.
+	GetScopedKeyByHash(ctx context.Context, keyHash string) (*models.ScopedAPIKey, error)
+
+	// ListScopedKeys returns all scoped keys in a kitchen.
+	ListScopedKeys(ctx context.Context, kitchen string) ([]models.ScopedAPIKey, error)
+
+	// IncrementScopedKeyUsage atomically increments the call count for a key.
+	IncrementScopedKeyUsage(ctx context.Context, id string) error
+
+	// RevokeScopedKey marks a key as revoked.
+	RevokeScopedKey(ctx context.Context, kitchen, id string) error
+
+	// DeleteScopedKey permanently removes a scoped key.
+	DeleteScopedKey(ctx context.Context, kitchen, id string) error
+}
+
+// TestSuiteStore manages test suites, test cases, and test run results.
+type TestSuiteStore interface {
+	// CreateTestSuite creates a new test suite with its cases.
+	CreateTestSuite(ctx context.Context, suite *models.TestSuite) error
+
+	// GetTestSuite returns a test suite by kitchen and ID.
+	GetTestSuite(ctx context.Context, kitchen, id string) (*models.TestSuite, error)
+
+	// ListTestSuites returns all test suites in a kitchen.
+	ListTestSuites(ctx context.Context, kitchen string) ([]models.TestSuite, error)
+
+	// UpdateTestSuite updates an existing test suite.
+	UpdateTestSuite(ctx context.Context, suite *models.TestSuite) error
+
+	// DeleteTestSuite removes a test suite.
+	DeleteTestSuite(ctx context.Context, kitchen, id string) error
+
+	// CreateTestRun records a new test run result.
+	CreateTestRun(ctx context.Context, run *models.TestRun) error
+
+	// GetTestRun returns a specific test run.
+	GetTestRun(ctx context.Context, id string) (*models.TestRun, error)
+
+	// ListTestRuns returns test runs for a suite, most recent first.
+	ListTestRuns(ctx context.Context, suiteID string, limit int) ([]models.TestRun, error)
+}
+
 // ── Errors ──────────────────────────────────────────────────
+
+// ── Environment Store (R9) ──────────────────────────────────
+
+// EnvironmentStore manages deployment environments (dev, qa, prod, custom)
+// and their configuration. Pro feature gated by PlanLimits.MaxEnvironments.
+type EnvironmentStore interface {
+	// CreateEnvironment persists a new environment.
+	CreateEnvironment(ctx context.Context, env *models.Environment) error
+
+	// GetEnvironment returns an environment by kitchen and slug.
+	GetEnvironment(ctx context.Context, kitchen, slug string) (*models.Environment, error)
+
+	// ListEnvironments returns all environments in a kitchen, ordered by Order.
+	ListEnvironments(ctx context.Context, kitchen string) ([]models.Environment, error)
+
+	// UpdateEnvironment updates an existing environment.
+	UpdateEnvironment(ctx context.Context, env *models.Environment) error
+
+	// DeleteEnvironment removes a non-default environment.
+	DeleteEnvironment(ctx context.Context, kitchen, slug string) error
+
+	// SeedDefaultEnvironments creates the default dev/qa/prod environments if none exist.
+	SeedDefaultEnvironments(ctx context.Context, kitchen string) error
+}
+
+// ── Agent Deployment Store (R9) ─────────────────────────────
+
+// AgentDeploymentStore tracks which agent versions are deployed in which environments.
+// A deployment is immutable once active — new promotions create new deployment records.
+type AgentDeploymentStore interface {
+	// CreateDeployment records a new agent deployment.
+	CreateDeployment(ctx context.Context, deployment *models.AgentDeployment) error
+
+	// GetDeployment returns a deployment by ID.
+	GetDeployment(ctx context.Context, id string) (*models.AgentDeployment, error)
+
+	// GetActiveDeployment returns the currently active deployment for an agent in an environment.
+	GetActiveDeployment(ctx context.Context, kitchen, agentName, envSlug string) (*models.AgentDeployment, error)
+
+	// ListDeployments returns all deployments for an agent across environments.
+	ListDeployments(ctx context.Context, kitchen, agentName string, limit int) ([]models.AgentDeployment, error)
+
+	// ListDeploymentsByEnvironment returns all deployments in an environment.
+	ListDeploymentsByEnvironment(ctx context.Context, kitchen, envSlug string, limit int) ([]models.AgentDeployment, error)
+
+	// UpdateDeploymentStatus changes a deployment's status (e.g. active → rolled_back).
+	UpdateDeploymentStatus(ctx context.Context, id string, status models.DeploymentStatus) error
+}
+
+// ── Service Account Store (R9) ──────────────────────────────
+
+// ServiceAccountStore manages kitchen-scoped machine identities.
+// Service accounts produce Identity objects for RBAC, unlike ScopedAPIKeys
+// which are agent-scoped access tokens.
+type ServiceAccountStore interface {
+	// CreateServiceAccount persists a new service account.
+	CreateServiceAccount(ctx context.Context, sa *models.ServiceAccount) error
+
+	// GetServiceAccount returns a service account by kitchen and ID.
+	GetServiceAccount(ctx context.Context, kitchen, id string) (*models.ServiceAccount, error)
+
+	// GetServiceAccountByTokenHash looks up a service account by token hash.
+	// Used by the auth provider chain to authenticate requests.
+	GetServiceAccountByTokenHash(ctx context.Context, tokenHash string) (*models.ServiceAccount, error)
+
+	// ListServiceAccounts returns all service accounts in a kitchen.
+	ListServiceAccounts(ctx context.Context, kitchen string) ([]models.ServiceAccount, error)
+
+	// UpdateServiceAccountLastUsed updates the last-used timestamp atomically.
+	UpdateServiceAccountLastUsed(ctx context.Context, id string) error
+
+	// RevokeServiceAccount marks a service account as revoked.
+	RevokeServiceAccount(ctx context.Context, kitchen, id, revokedBy string) error
+
+	// DeleteServiceAccount permanently removes a service account.
+	DeleteServiceAccount(ctx context.Context, kitchen, id string) error
+}
 
 // ErrNotFound is returned when a requested entity does not exist.
 type ErrNotFound struct {

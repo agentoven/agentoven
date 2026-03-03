@@ -28,31 +28,43 @@ type snapshot struct {
 	Settings      map[string]*models.KitchenSettings     `json:"settings"`       // key: kitchen_id
 	AgentVersions map[string][]*models.Agent             `json:"agent_versions"` // key: kitchen:name → version history
 	AuditEvents   []*models.AuditEvent                   `json:"audit_events"`
-	Approvals     map[string]*models.ApprovalRecord      `json:"approvals"`   // key: gate_key
-	Channels      map[string]*models.NotificationChannel `json:"channels"`    // key: kitchen:name
-	VectorDocs    map[string]*models.VectorDoc           `json:"vector_docs"` // key: kitchen:id
-	Connectors    map[string]*models.DataConnectorConfig `json:"connectors"`  // key: kitchen:id
-	Sessions      map[string]*models.Session             `json:"sessions"`    // key: id
+	Approvals     map[string]*models.ApprovalRecord      `json:"approvals"`        // key: gate_key
+	Channels      map[string]*models.NotificationChannel `json:"channels"`         // key: kitchen:name
+	VectorDocs    map[string]*models.VectorDoc           `json:"vector_docs"`      // key: kitchen:id
+	Connectors    map[string]*models.DataConnectorConfig `json:"connectors"`       // key: kitchen:id
+	Sessions      map[string]*models.Session             `json:"sessions"`         // key: id
+	ScopedKeys    map[string]*models.ScopedAPIKey        `json:"scoped_keys"`      // key: id
+	TestSuites    map[string]*models.TestSuite           `json:"test_suites"`      // key: id
+	TestRuns      map[string]*models.TestRun             `json:"test_runs"`        // key: id
+	Environments  map[string]*models.Environment         `json:"environments"`     // key: kitchen:slug
+	Deployments   map[string]*models.AgentDeployment     `json:"deployments"`      // key: id
+	ServiceAccts  map[string]*models.ServiceAccount      `json:"service_accounts"` // key: id
 }
 
 // MemoryStore implements Store with in-memory maps.
 type MemoryStore struct {
-	mu          sync.RWMutex
-	agents      map[string]*models.Agent               // key: kitchen:name
-	recipes     map[string]*models.Recipe              // key: kitchen:name
-	kitchens    map[string]*models.Kitchen             // key: id
-	traces      map[string]*models.Trace               // key: id
-	providers   map[string]*models.ModelProvider       // key: name
-	recipeRuns  map[string]*models.RecipeRun           // key: id
-	tools       map[string]*models.MCPTool             // key: kitchen:name
-	prompts     map[string][]*models.Prompt            // key: kitchen:name → version history (newest last)
-	settings    map[string]*models.KitchenSettings     // key: kitchen_id
-	auditEvents []*models.AuditEvent                   // append-only log
-	approvals   map[string]*models.ApprovalRecord      // key: gate_key
-	channels    map[string]*models.NotificationChannel // key: kitchen:name
-	vectorDocs  map[string]*models.VectorDoc           // key: kitchen:id
-	connectors  map[string]*models.DataConnectorConfig // key: kitchen:id
-	sessions    map[string]*models.Session             // key: id
+	mu           sync.RWMutex
+	agents       map[string]*models.Agent               // key: kitchen:name
+	recipes      map[string]*models.Recipe              // key: kitchen:name
+	kitchens     map[string]*models.Kitchen             // key: id
+	traces       map[string]*models.Trace               // key: id
+	providers    map[string]*models.ModelProvider       // key: name
+	recipeRuns   map[string]*models.RecipeRun           // key: id
+	tools        map[string]*models.MCPTool             // key: kitchen:name
+	prompts      map[string][]*models.Prompt            // key: kitchen:name → version history (newest last)
+	settings     map[string]*models.KitchenSettings     // key: kitchen_id
+	auditEvents  []*models.AuditEvent                   // append-only log
+	approvals    map[string]*models.ApprovalRecord      // key: gate_key
+	channels     map[string]*models.NotificationChannel // key: kitchen:name
+	vectorDocs   map[string]*models.VectorDoc           // key: kitchen:id
+	connectors   map[string]*models.DataConnectorConfig // key: kitchen:id
+	sessions     map[string]*models.Session             // key: id
+	scopedKeys   map[string]*models.ScopedAPIKey        // key: id
+	testSuites   map[string]*models.TestSuite           // key: id
+	testRuns     map[string]*models.TestRun             // key: id
+	environments map[string]*models.Environment         // key: kitchen:slug
+	deployments  map[string]*models.AgentDeployment     // key: id
+	serviceAccts map[string]*models.ServiceAccount      // key: id
 
 	// Agent version history — append-only, keyed by kitchen:name
 	agentVersions map[string][]*models.Agent // key: kitchen:name → version history
@@ -99,6 +111,12 @@ func NewMemoryStore() *MemoryStore {
 		vectorDocs:    make(map[string]*models.VectorDoc),
 		connectors:    make(map[string]*models.DataConnectorConfig),
 		sessions:      make(map[string]*models.Session),
+		scopedKeys:    make(map[string]*models.ScopedAPIKey),
+		testSuites:    make(map[string]*models.TestSuite),
+		testRuns:      make(map[string]*models.TestRun),
+		environments:  make(map[string]*models.Environment),
+		deployments:   make(map[string]*models.AgentDeployment),
+		serviceAccts:  make(map[string]*models.ServiceAccount),
 		saveCh:        make(chan struct{}, 1),
 		doneCh:        make(chan struct{}),
 		traceTTL:      traceTTL,
@@ -222,6 +240,12 @@ func (m *MemoryStore) saveSnapshot() {
 		Channels:      m.channels,
 		VectorDocs:    m.vectorDocs,
 		Connectors:    m.connectors,
+		ScopedKeys:    m.scopedKeys,
+		TestSuites:    m.testSuites,
+		TestRuns:      m.testRuns,
+		Environments:  m.environments,
+		Deployments:   m.deployments,
+		ServiceAccts:  m.serviceAccts,
 	}
 	data, err := json.MarshalIndent(snap, "", "  ")
 	m.mu.RUnlock()
@@ -313,6 +337,24 @@ func (m *MemoryStore) loadSnapshot() {
 	}
 	if snap.Connectors != nil {
 		m.connectors = snap.Connectors
+	}
+	if snap.ScopedKeys != nil {
+		m.scopedKeys = snap.ScopedKeys
+	}
+	if snap.TestSuites != nil {
+		m.testSuites = snap.TestSuites
+	}
+	if snap.TestRuns != nil {
+		m.testRuns = snap.TestRuns
+	}
+	if snap.Environments != nil {
+		m.environments = snap.Environments
+	}
+	if snap.Deployments != nil {
+		m.deployments = snap.Deployments
+	}
+	if snap.ServiceAccts != nil {
+		m.serviceAccts = snap.ServiceAccts
 	}
 
 	total := len(m.agents) + len(m.recipes) + len(m.kitchens) + len(m.providers) + len(m.tools) + len(m.prompts)
@@ -600,6 +642,17 @@ func (m *MemoryStore) CreateKitchen(_ context.Context, kitchen *models.Kitchen) 
 	copy := *kitchen
 	m.kitchens[kitchen.ID] = &copy
 	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) DeleteKitchen(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.kitchens[id]; !ok {
+		return &ErrNotFound{Entity: "kitchen", Key: id}
+	}
+	delete(m.kitchens, id)
 	m.requestSave()
 	return nil
 }
@@ -1371,6 +1424,548 @@ func (m *MemoryStore) ListSessionsByAgent(_ context.Context, kitchen, agentName 
 		}
 	}
 	return result, nil
+}
+
+// ── Scoped API Key Store ────────────────────────────────────
+
+func (m *MemoryStore) CreateScopedKey(_ context.Context, key *models.ScopedAPIKey) error {
+	m.mu.Lock()
+	c := *key
+	m.scopedKeys[key.ID] = &c
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) GetScopedKey(_ context.Context, kitchen, id string) (*models.ScopedAPIKey, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	k, ok := m.scopedKeys[id]
+	if !ok || k.Kitchen != kitchen {
+		return nil, &ErrNotFound{Entity: "scoped_key", Key: id}
+	}
+	c := *k
+	c.AgentNames = make([]string, len(k.AgentNames))
+	copy(c.AgentNames, k.AgentNames)
+	return &c, nil
+}
+
+func (m *MemoryStore) GetScopedKeyByHash(_ context.Context, keyHash string) (*models.ScopedAPIKey, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, k := range m.scopedKeys {
+		if k.KeyHash == keyHash {
+			c := *k
+			c.AgentNames = make([]string, len(k.AgentNames))
+			copy(c.AgentNames, k.AgentNames)
+			return &c, nil
+		}
+	}
+	return nil, &ErrNotFound{Entity: "scoped_key", Key: "hash:" + keyHash[:8]}
+}
+
+func (m *MemoryStore) ListScopedKeys(_ context.Context, kitchen string) ([]models.ScopedAPIKey, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var result []models.ScopedAPIKey
+	for _, k := range m.scopedKeys {
+		if k.Kitchen == kitchen {
+			c := *k
+			c.AgentNames = make([]string, len(k.AgentNames))
+			copy(c.AgentNames, k.AgentNames)
+			result = append(result, c)
+		}
+	}
+	return result, nil
+}
+
+func (m *MemoryStore) IncrementScopedKeyUsage(_ context.Context, id string) error {
+	m.mu.Lock()
+	k, ok := m.scopedKeys[id]
+	if !ok {
+		m.mu.Unlock()
+		return &ErrNotFound{Entity: "scoped_key", Key: id}
+	}
+	k.CallCount++
+	k.UpdatedAt = time.Now().UTC()
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) RevokeScopedKey(_ context.Context, kitchen, id string) error {
+	m.mu.Lock()
+	k, ok := m.scopedKeys[id]
+	if !ok || k.Kitchen != kitchen {
+		m.mu.Unlock()
+		return &ErrNotFound{Entity: "scoped_key", Key: id}
+	}
+	k.Revoked = true
+	k.UpdatedAt = time.Now().UTC()
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) DeleteScopedKey(_ context.Context, kitchen, id string) error {
+	m.mu.Lock()
+	k, ok := m.scopedKeys[id]
+	if !ok || k.Kitchen != kitchen {
+		m.mu.Unlock()
+		return &ErrNotFound{Entity: "scoped_key", Key: id}
+	}
+	delete(m.scopedKeys, id)
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+// ── Test Suite Store ────────────────────────────────────────
+
+func (m *MemoryStore) CreateTestSuite(_ context.Context, suite *models.TestSuite) error {
+	m.mu.Lock()
+	m.testSuites[suite.ID] = suite
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) GetTestSuite(_ context.Context, kitchen, id string) (*models.TestSuite, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	s, ok := m.testSuites[id]
+	if !ok || s.Kitchen != kitchen {
+		return nil, &ErrNotFound{Entity: "test_suite", Key: id}
+	}
+	copy := *s
+	return &copy, nil
+}
+
+func (m *MemoryStore) ListTestSuites(_ context.Context, kitchen string) ([]models.TestSuite, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var result []models.TestSuite
+	for _, s := range m.testSuites {
+		if s.Kitchen == kitchen {
+			result = append(result, *s)
+		}
+	}
+	if result == nil {
+		result = []models.TestSuite{}
+	}
+	return result, nil
+}
+
+func (m *MemoryStore) UpdateTestSuite(_ context.Context, suite *models.TestSuite) error {
+	m.mu.Lock()
+	existing, ok := m.testSuites[suite.ID]
+	if !ok || existing.Kitchen != suite.Kitchen {
+		m.mu.Unlock()
+		return &ErrNotFound{Entity: "test_suite", Key: suite.ID}
+	}
+	m.testSuites[suite.ID] = suite
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) DeleteTestSuite(_ context.Context, kitchen, id string) error {
+	m.mu.Lock()
+	s, ok := m.testSuites[id]
+	if !ok || s.Kitchen != kitchen {
+		m.mu.Unlock()
+		return &ErrNotFound{Entity: "test_suite", Key: id}
+	}
+	delete(m.testSuites, id)
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) CreateTestRun(_ context.Context, run *models.TestRun) error {
+	m.mu.Lock()
+	m.testRuns[run.ID] = run
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) GetTestRun(_ context.Context, id string) (*models.TestRun, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	r, ok := m.testRuns[id]
+	if !ok {
+		return nil, &ErrNotFound{Entity: "test_run", Key: id}
+	}
+	copy := *r
+	return &copy, nil
+}
+
+func (m *MemoryStore) ListTestRuns(_ context.Context, suiteID string, limit int) ([]models.TestRun, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var result []models.TestRun
+	for _, r := range m.testRuns {
+		if r.SuiteID == suiteID {
+			result = append(result, *r)
+		}
+	}
+	// Sort by started_at descending
+	for i := 0; i < len(result); i++ {
+		for j := i + 1; j < len(result); j++ {
+			if result[j].StartedAt.After(result[i].StartedAt) {
+				result[i], result[j] = result[j], result[i]
+			}
+		}
+	}
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	if result == nil {
+		result = []models.TestRun{}
+	}
+	return result, nil
+}
+
+// ── Agent Filtering (R9) ────────────────────────────────────
+
+func (m *MemoryStore) ListAgentsByTag(_ context.Context, kitchen, tagKey, tagValue string) ([]models.Agent, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var result []models.Agent
+	for _, a := range m.agents {
+		if a.Kitchen != kitchen {
+			continue
+		}
+		if v, ok := a.Tags[tagKey]; ok && v == tagValue {
+			result = append(result, *a)
+		}
+	}
+	if result == nil {
+		result = []models.Agent{}
+	}
+	return result, nil
+}
+
+func (m *MemoryStore) ListAgentsByEnvironment(_ context.Context, kitchen, envSlug string) ([]models.Agent, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	// Collect agent names that have an active deployment in this environment
+	deployed := make(map[string]bool)
+	for _, d := range m.deployments {
+		if d.Kitchen == kitchen && d.Environment == envSlug && d.Status == models.DeploymentActive {
+			deployed[d.AgentName] = true
+		}
+	}
+	var result []models.Agent
+	for _, a := range m.agents {
+		if a.Kitchen == kitchen && deployed[a.Name] {
+			result = append(result, *a)
+		}
+	}
+	if result == nil {
+		result = []models.Agent{}
+	}
+	return result, nil
+}
+
+// ── Environment Store (R9) ──────────────────────────────────
+
+func (m *MemoryStore) CreateEnvironment(_ context.Context, env *models.Environment) error {
+	key := env.Kitchen + ":" + env.Slug
+	m.mu.Lock()
+	if _, ok := m.environments[key]; ok {
+		m.mu.Unlock()
+		return &ErrNotFound{Entity: "environment_conflict", Key: env.Slug}
+	}
+	m.environments[key] = env
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) GetEnvironment(_ context.Context, kitchen, slug string) (*models.Environment, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	env, ok := m.environments[kitchen+":"+slug]
+	if !ok {
+		return nil, &ErrNotFound{Entity: "environment", Key: slug}
+	}
+	copy := *env
+	return &copy, nil
+}
+
+func (m *MemoryStore) ListEnvironments(_ context.Context, kitchen string) ([]models.Environment, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var result []models.Environment
+	for _, e := range m.environments {
+		if e.Kitchen == kitchen {
+			result = append(result, *e)
+		}
+	}
+	// Sort by Order ascending
+	for i := 0; i < len(result); i++ {
+		for j := i + 1; j < len(result); j++ {
+			if result[j].Order < result[i].Order {
+				result[i], result[j] = result[j], result[i]
+			}
+		}
+	}
+	if result == nil {
+		result = []models.Environment{}
+	}
+	return result, nil
+}
+
+func (m *MemoryStore) UpdateEnvironment(_ context.Context, env *models.Environment) error {
+	key := env.Kitchen + ":" + env.Slug
+	m.mu.Lock()
+	if _, ok := m.environments[key]; !ok {
+		m.mu.Unlock()
+		return &ErrNotFound{Entity: "environment", Key: env.Slug}
+	}
+	env.UpdatedAt = time.Now().UTC()
+	m.environments[key] = env
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) DeleteEnvironment(_ context.Context, kitchen, slug string) error {
+	key := kitchen + ":" + slug
+	m.mu.Lock()
+	env, ok := m.environments[key]
+	if !ok {
+		m.mu.Unlock()
+		return &ErrNotFound{Entity: "environment", Key: slug}
+	}
+	if env.IsDefault {
+		m.mu.Unlock()
+		return &ErrNotFound{Entity: "cannot_delete_default_env", Key: slug}
+	}
+	delete(m.environments, key)
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) SeedDefaultEnvironments(_ context.Context, kitchen string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Check if any environments already exist for this kitchen
+	for _, e := range m.environments {
+		if e.Kitchen == kitchen {
+			return nil // already seeded
+		}
+	}
+	defaults := models.DefaultEnvironments(kitchen)
+	for i := range defaults {
+		defaults[i].ID = kitchen + "-env-" + defaults[i].Slug
+		m.environments[kitchen+":"+defaults[i].Slug] = &defaults[i]
+	}
+	m.requestSave()
+	return nil
+}
+
+// ── Agent Deployment Store (R9) ─────────────────────────────
+
+func (m *MemoryStore) CreateDeployment(_ context.Context, deployment *models.AgentDeployment) error {
+	m.mu.Lock()
+	m.deployments[deployment.ID] = deployment
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) GetDeployment(_ context.Context, id string) (*models.AgentDeployment, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	d, ok := m.deployments[id]
+	if !ok {
+		return nil, &ErrNotFound{Entity: "deployment", Key: id}
+	}
+	copy := *d
+	return &copy, nil
+}
+
+func (m *MemoryStore) GetActiveDeployment(_ context.Context, kitchen, agentName, envSlug string) (*models.AgentDeployment, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, d := range m.deployments {
+		if d.Kitchen == kitchen && d.AgentName == agentName && d.Environment == envSlug && d.Status == models.DeploymentActive {
+			copy := *d
+			return &copy, nil
+		}
+	}
+	return nil, &ErrNotFound{Entity: "deployment", Key: kitchen + "/" + agentName + "/" + envSlug}
+}
+
+func (m *MemoryStore) ListDeployments(_ context.Context, kitchen, agentName string, limit int) ([]models.AgentDeployment, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var result []models.AgentDeployment
+	for _, d := range m.deployments {
+		if d.Kitchen == kitchen && d.AgentName == agentName {
+			result = append(result, *d)
+		}
+	}
+	// Sort by deployed_at descending
+	for i := 0; i < len(result); i++ {
+		for j := i + 1; j < len(result); j++ {
+			if result[j].DeployedAt.After(result[i].DeployedAt) {
+				result[i], result[j] = result[j], result[i]
+			}
+		}
+	}
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	if result == nil {
+		result = []models.AgentDeployment{}
+	}
+	return result, nil
+}
+
+func (m *MemoryStore) ListDeploymentsByEnvironment(_ context.Context, kitchen, envSlug string, limit int) ([]models.AgentDeployment, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var result []models.AgentDeployment
+	for _, d := range m.deployments {
+		if d.Kitchen == kitchen && d.Environment == envSlug {
+			result = append(result, *d)
+		}
+	}
+	// Sort by deployed_at descending
+	for i := 0; i < len(result); i++ {
+		for j := i + 1; j < len(result); j++ {
+			if result[j].DeployedAt.After(result[i].DeployedAt) {
+				result[i], result[j] = result[j], result[i]
+			}
+		}
+	}
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	if result == nil {
+		result = []models.AgentDeployment{}
+	}
+	return result, nil
+}
+
+func (m *MemoryStore) UpdateDeploymentStatus(_ context.Context, id string, status models.DeploymentStatus) error {
+	m.mu.Lock()
+	d, ok := m.deployments[id]
+	if !ok {
+		m.mu.Unlock()
+		return &ErrNotFound{Entity: "deployment", Key: id}
+	}
+	d.Status = status
+	if status == models.DeploymentRolledBack {
+		now := time.Now().UTC()
+		d.RolledBackAt = &now
+	}
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+// ── Service Account Store (R9) ──────────────────────────────
+
+func (m *MemoryStore) CreateServiceAccount(_ context.Context, sa *models.ServiceAccount) error {
+	m.mu.Lock()
+	// Check uniqueness: name within kitchen
+	for _, existing := range m.serviceAccts {
+		if existing.Kitchen == sa.Kitchen && existing.Name == sa.Name {
+			m.mu.Unlock()
+			return &ErrNotFound{Entity: "service_account_conflict", Key: sa.Name}
+		}
+	}
+	m.serviceAccts[sa.ID] = sa
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) GetServiceAccount(_ context.Context, kitchen, id string) (*models.ServiceAccount, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	sa, ok := m.serviceAccts[id]
+	if !ok || sa.Kitchen != kitchen {
+		return nil, &ErrNotFound{Entity: "service_account", Key: id}
+	}
+	copy := *sa
+	return &copy, nil
+}
+
+func (m *MemoryStore) GetServiceAccountByTokenHash(_ context.Context, tokenHash string) (*models.ServiceAccount, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, sa := range m.serviceAccts {
+		if sa.TokenHash == tokenHash {
+			copy := *sa
+			return &copy, nil
+		}
+	}
+	return nil, &ErrNotFound{Entity: "service_account", Key: "token"}
+}
+
+func (m *MemoryStore) ListServiceAccounts(_ context.Context, kitchen string) ([]models.ServiceAccount, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var result []models.ServiceAccount
+	for _, sa := range m.serviceAccts {
+		if sa.Kitchen == kitchen {
+			result = append(result, *sa)
+		}
+	}
+	if result == nil {
+		result = []models.ServiceAccount{}
+	}
+	return result, nil
+}
+
+func (m *MemoryStore) UpdateServiceAccountLastUsed(_ context.Context, id string) error {
+	m.mu.Lock()
+	sa, ok := m.serviceAccts[id]
+	if !ok {
+		m.mu.Unlock()
+		return &ErrNotFound{Entity: "service_account", Key: id}
+	}
+	now := time.Now().UTC()
+	sa.LastUsedAt = &now
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) RevokeServiceAccount(_ context.Context, kitchen, id, revokedBy string) error {
+	m.mu.Lock()
+	sa, ok := m.serviceAccts[id]
+	if !ok || sa.Kitchen != kitchen {
+		m.mu.Unlock()
+		return &ErrNotFound{Entity: "service_account", Key: id}
+	}
+	sa.Revoked = true
+	now := time.Now().UTC()
+	sa.RevokedAt = &now
+	sa.RevokedBy = revokedBy
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) DeleteServiceAccount(_ context.Context, kitchen, id string) error {
+	m.mu.Lock()
+	sa, ok := m.serviceAccts[id]
+	if !ok || sa.Kitchen != kitchen {
+		m.mu.Unlock()
+		return &ErrNotFound{Entity: "service_account", Key: id}
+	}
+	delete(m.serviceAccts, id)
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
 }
 
 // Compile-time check that MemoryStore implements Store.

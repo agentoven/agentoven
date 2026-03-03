@@ -30,6 +30,8 @@ opentelemetry_sdk = { workspace = true }
 tracing-opentelemetry = "0.28"
 async-trait = "0.1"
 base64 = "0.22"
+dirs-next = "2"
+toml = "0.8"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

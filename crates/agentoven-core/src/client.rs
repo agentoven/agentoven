@@ -35,18 +35,19 @@ impl AgentOvenClient {
         })
     }
 
-    /// Create from environment variables.
+    /// Create from config file + environment variables.
     ///
-    /// Reads `AGENTOVEN_URL`, `AGENTOVEN_API_KEY`, `AGENTOVEN_KITCHEN`.
+    /// Priority: CLI flags > env vars > `~/.agentoven/config.toml` > defaults.
     pub fn from_env() -> anyhow::Result<Self> {
-        let base_url =
-            std::env::var("AGENTOVEN_URL").unwrap_or_else(|_| "http://localhost:8080".into());
-        let api_key = std::env::var("AGENTOVEN_API_KEY").ok();
-        let kitchen_id = std::env::var("AGENTOVEN_KITCHEN").ok();
+        let cfg = crate::config::AgentOvenConfig::load();
+        Self::from_config(&cfg)
+    }
 
-        let mut client = Self::new(&base_url)?;
-        client.api_key = api_key;
-        client.kitchen_id = kitchen_id;
+    /// Create from an explicit config struct (no env-var lookup).
+    pub fn from_config(cfg: &crate::config::AgentOvenConfig) -> anyhow::Result<Self> {
+        let mut client = Self::new(&cfg.url)?;
+        client.api_key = cfg.auth_credential().map(|s| s.to_string());
+        client.kitchen_id = cfg.kitchen.clone();
         Ok(client)
     }
 
@@ -614,6 +615,43 @@ impl AgentOvenClient {
         Ok(resp.json().await?)
     }
 
+    /// Create a new kitchen.
+    pub async fn create_kitchen(
+        &self,
+        kitchen: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let url = self.url("/api/v1/kitchens");
+        let resp = self
+            .authed_request(self.http.post(url))
+            .json(&kitchen)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
+    /// Delete a kitchen.
+    pub async fn delete_kitchen(&self, id: &str) -> anyhow::Result<()> {
+        let url = self.url(&format!("/api/v1/kitchens/{id}"));
+        self.authed_request(self.http.delete(url))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// Get server info (edition, features, limits).
+    /// The CLI calls this to discover what commands are available.
+    pub async fn server_info(&self) -> anyhow::Result<serde_json::Value> {
+        let url = self.url("/api/v1/info");
+        let resp = self
+            .authed_request(self.http.get(url))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
     /// Get kitchen settings.
     pub async fn get_settings(&self) -> anyhow::Result<serde_json::Value> {
         let url = self.url("/api/v1/settings");
@@ -912,6 +950,45 @@ impl AgentOvenClient {
             .await?
             .error_for_status()?;
         Ok(resp.json().await?)
+    }
+
+    // ── Generic HTTP helpers (for Pro-gated commands) ──────
+
+    /// Generic GET that returns deserialized JSON.
+    pub async fn raw_get<T: serde::de::DeserializeOwned>(&self, path: &str) -> anyhow::Result<T> {
+        let url = self.url(path);
+        let resp = self
+            .authed_request(self.http.get(url))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
+    /// Generic POST that sends JSON and returns deserialized JSON.
+    pub async fn raw_post<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<T> {
+        let url = self.url(path);
+        let resp = self
+            .authed_request(self.http.post(url))
+            .json(body)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
+    /// Generic DELETE.
+    pub async fn raw_delete(&self, path: &str) -> anyhow::Result<()> {
+        let url = self.url(path);
+        self.authed_request(self.http.delete(url))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
     }
 
     // ── Internal ─────────────────────────────────────────────

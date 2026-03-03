@@ -9,6 +9,10 @@ pub enum KitchenCommands {
     List,
     /// Get kitchen details.
     Get(GetArgs),
+    /// Create a new kitchen.
+    Create(CreateArgs),
+    /// Delete a kitchen.
+    Delete(DeleteArgs),
     /// View current kitchen settings.
     Settings,
     /// Update kitchen settings.
@@ -19,6 +23,24 @@ pub enum KitchenCommands {
 pub struct GetArgs {
     /// Kitchen ID.
     pub id: String,
+}
+
+#[derive(Args)]
+pub struct CreateArgs {
+    /// Kitchen name (must be unique).
+    pub name: String,
+    /// Plan (community, pro, enterprise). Defaults to community.
+    #[arg(long, default_value = "community")]
+    pub plan: String,
+}
+
+#[derive(Args)]
+pub struct DeleteArgs {
+    /// Kitchen ID to delete.
+    pub id: String,
+    /// Skip confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Args)]
@@ -47,6 +69,8 @@ pub async fn execute(cmd: KitchenCommands) -> anyhow::Result<()> {
     match cmd {
         KitchenCommands::List => list().await,
         KitchenCommands::Get(args) => get(args).await,
+        KitchenCommands::Create(args) => create(args).await,
+        KitchenCommands::Delete(args) => delete(args).await,
         KitchenCommands::Settings => settings().await,
         KitchenCommands::UpdateSettings(args) => update_settings(args).await,
     }
@@ -204,6 +228,75 @@ async fn update_settings(args: UpdateSettingsArgs) -> anyhow::Result<()> {
         }
         Err(e) => {
             println!("  {} Failed: {}", "✗".red().bold(), e.to_string().dimmed());
+        }
+    }
+    Ok(())
+}
+
+async fn create(args: CreateArgs) -> anyhow::Result<()> {
+    println!("\n  🏠 Creating kitchen: {}\n", args.name.bold());
+
+    let body = serde_json::json!({
+        "name": args.name,
+        "plan": args.plan,
+    });
+
+    let client = agentoven_core::AgentOvenClient::from_env()?;
+    match client.create_kitchen(body).await {
+        Ok(k) => {
+            let id = k["id"].as_str().unwrap_or("-");
+            let name = k["name"].as_str().unwrap_or(&args.name);
+            println!(
+                "  {} Kitchen {} created (id: {})",
+                "✓".green().bold(),
+                name.cyan().bold(),
+                id.dimmed()
+            );
+        }
+        Err(e) => {
+            println!(
+                "  {} Failed to create kitchen: {}",
+                "✗".red().bold(),
+                e.to_string().dimmed()
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn delete(args: DeleteArgs) -> anyhow::Result<()> {
+    if !args.yes {
+        println!(
+            "\n  {} Are you sure you want to delete kitchen {}?",
+            "⚠".yellow().bold(),
+            args.id.red().bold()
+        );
+        println!("  This action cannot be undone.\n");
+        let confirm = dialoguer::Confirm::new()
+            .with_prompt("  Continue?")
+            .default(false)
+            .interact()?;
+        if !confirm {
+            println!("  {} Cancelled.", "→".dimmed());
+            return Ok(());
+        }
+    }
+
+    let client = agentoven_core::AgentOvenClient::from_env()?;
+    match client.delete_kitchen(&args.id).await {
+        Ok(()) => {
+            println!(
+                "  {} Kitchen {} deleted.",
+                "✓".green().bold(),
+                args.id.dimmed()
+            );
+        }
+        Err(e) => {
+            println!(
+                "  {} Failed to delete kitchen: {}",
+                "✗".red().bold(),
+                e.to_string().dimmed()
+            );
         }
     }
     Ok(())

@@ -45,6 +45,7 @@ import (
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
 )
 
@@ -61,6 +62,11 @@ type Config struct {
 type Server struct {
 	// Handler is the HTTP handler with all routes and middleware.
 	Handler http.Handler
+
+	// Mux is the underlying chi router, exposed so Pro can mount
+	// additional routes (e.g. /api/v1/test-suites) without forking.
+	// Use Mux.Route("/api/v1/...", func(r chi.Router) { ... }) to add routes.
+	Mux *chi.Mux
 
 	// Store is the data store (in-memory for OSS).
 	// Exposed so Pro can use it in TierEnforcer and other middleware.
@@ -122,6 +128,10 @@ type Server struct {
 	// ProcessManager manages agent runtime processes (local/docker/k8s).
 	// Exposed so Pro can customize with custom images, sidecar injection, etc.
 	ProcessManager *process.Manager
+
+	// ServerInfo holds the response for GET /api/v1/info.
+	// OSS populates with CommunityServerInfo(); Pro overrides with license data.
+	ServerInfo *models.ServerInfo
 
 	// retentionCancel cancels the retention janitor goroutine.
 	retentionCancel context.CancelFunc
@@ -228,6 +238,7 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 
 	// Build handlers + API router
 	h := handlers.New(dataStore, mr, gw, wf, cat, sessStore, pm)
+	h.ServerInfo = models.CommunityServerInfo(pubCfg.Version)
 
 	// ── Guardrails (R9) ────────────────────────────────────
 	// Community guardrail service provides built-in heuristic evaluation.
@@ -250,6 +261,12 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 	if svcAcctProvider.Enabled() {
 		authChain.RegisterProvider(svcAcctProvider)
 	}
+
+	// Register scoped key provider — enables X-Agent-Key authentication
+	// for consumer-facing agent access (Agent Viewer, embeds, external consumers).
+	scopedKeyProvider := aoauth.NewScopedKeyProvider(dataStore)
+	authChain.RegisterProvider(scopedKeyProvider)
+	log.Info().Msg("✅ Scoped key auth provider registered")
 
 	// ── RAG & Intelligence (Release 5) ──────────────────────
 
@@ -369,8 +386,11 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 	planResolver := &contracts.CommunityPlanResolver{}
 	tierEnforcer := &contracts.CommunityTierEnforcer{}
 
+	srvInfo := models.CommunityServerInfo(pubCfg.Version)
+
 	return &Server{
 		Handler:             router,
+		Mux:                 router,
 		Store:               dataStore,
 		Router:              mr,
 		Notifier:            ns,
@@ -387,6 +407,7 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 		Catalog:             cat,
 		SessionStore:        sessStore,
 		ProcessManager:      pm,
+		ServerInfo:          srvInfo,
 		retentionCancel:     retCancel,
 		ShutdownFunc:        shutdown,
 	}, nil

@@ -349,6 +349,25 @@ type PlanLimits struct {
 	DataConnectors        bool `json:"data_connectors"`         // Pro: data lake connectors
 	RAGTemplates          bool `json:"rag_templates"`           // Pro: framework templates
 	AgentMonitor          bool `json:"agent_monitor"`           // Pro: agent validator/monitor
+
+	// Test Suites (Pro)
+	MaxTestSuites         int  `json:"max_test_suites"`          // 0 = disabled (community)
+	MaxConcurrentTestRuns int  `json:"max_concurrent_test_runs"` // max parallel runs per kitchen
+	MaxTestCasesPerSuite  int  `json:"max_test_cases_per_suite"` // max cases in a single suite
+	ScheduledTestRuns     bool `json:"scheduled_test_runs"`      // cron-based scheduled runs
+	ExternalTestBackends  bool `json:"external_test_backends"`   // Celery, Temporal, K8s backends
+
+	// Environments & Promotion (Pro)
+	MaxEnvironments   int  `json:"max_environments"`   // 0 = disabled (community), 3 = pro default
+	PromotionWorkflow bool `json:"promotion_workflow"` // stage gating with approval gates
+
+	// Service Accounts (Pro)
+	MaxServiceAccounts     int  `json:"max_service_accounts"`     // 0 = disabled (community)
+	ManagedServiceAccounts bool `json:"managed_service_accounts"` // kitchen-scoped SA CRUD
+
+	// External Trackers (Pro)
+	ExternalTrackers   bool `json:"external_trackers"`   // JIRA, GitLab, GitHub, Azure DevOps
+	TraceabilityMatrix bool `json:"traceability_matrix"` // requirement→test→agent traceability
 }
 
 // CommunityLimits returns the default PlanLimits for the free community tier.
@@ -380,6 +399,105 @@ func CommunityLimits() *PlanLimits {
 		DataConnectors:        false, // Pro only
 		RAGTemplates:          false, // Pro only
 		AgentMonitor:          false, // Pro only
+
+		// Test Suites — disabled in community
+		MaxTestSuites:         0,     // disabled
+		MaxConcurrentTestRuns: 0,     // disabled
+		MaxTestCasesPerSuite:  0,     // disabled
+		ScheduledTestRuns:     false, // Pro only
+		ExternalTestBackends:  false, // Enterprise only
+
+		// Environments — disabled in community
+		MaxEnvironments:   0,     // disabled
+		PromotionWorkflow: false, // Pro only
+
+		// Service Accounts — disabled in community
+		MaxServiceAccounts:     0,     // disabled
+		ManagedServiceAccounts: false, // Pro only
+
+		// External Trackers — disabled in community
+		ExternalTrackers:   false, // Pro only
+		TraceabilityMatrix: false, // Pro only
+	}
+}
+
+// ── Server Info ──────────────────────────────────────────────
+
+// ServerInfo is the response for GET /api/v1/info. It tells CLI clients
+// what edition is running, which features are available, and what the
+// plan limits are. The CLI uses this to gate Pro-only commands at runtime.
+type ServerInfo struct {
+	Service  string          `json:"service"`
+	Version  string          `json:"version"`
+	Edition  string          `json:"edition"` // "community", "pro", "enterprise"
+	Plan     Plan            `json:"plan"`
+	Org      string          `json:"org,omitempty"`
+	Features *ServerFeatures `json:"features"`
+	Limits   *PlanLimits     `json:"limits"`
+	Auth     *ServerAuth     `json:"auth"`
+	License  *LicenseInfo    `json:"license,omitempty"`
+}
+
+// ServerFeatures describes which capabilities the server supports.
+// OSS returns all false; Pro populates based on the license.
+type ServerFeatures struct {
+	Environments    bool `json:"environments"`
+	TestSuites      bool `json:"test_suites"`
+	ServiceAccounts bool `json:"service_accounts"`
+	ScopedKeys      bool `json:"scoped_keys"`
+	SSO             bool `json:"sso"`
+	Federation      bool `json:"federation"`
+	CloudProviders  bool `json:"cloud_providers"`
+	Audit           bool `json:"audit"`
+	RAG             bool `json:"rag"`
+	Guardrails      bool `json:"guardrails"`
+	Promotions      bool `json:"promotions"`
+	PhoneHome       bool `json:"phone_home"`
+}
+
+// ServerAuth describes the authentication configuration.
+type ServerAuth struct {
+	Providers   []string `json:"providers"`
+	SSOEnabled  bool     `json:"sso_enabled"`
+	RequireAuth bool     `json:"require_auth"`
+}
+
+// LicenseInfo provides license status (Pro/Enterprise only).
+type LicenseInfo struct {
+	Valid     bool   `json:"valid"`
+	ExpiresAt string `json:"expires_at,omitempty"`
+	Org       string `json:"org,omitempty"`
+	Plan      Plan   `json:"plan"`
+	LicenseID string `json:"license_id,omitempty"`
+}
+
+// CommunityServerInfo returns the default ServerInfo for OSS/Community.
+func CommunityServerInfo(version string) *ServerInfo {
+	return &ServerInfo{
+		Service: "agentoven-control-plane",
+		Version: version,
+		Edition: "community",
+		Plan:    PlanCommunity,
+		Features: &ServerFeatures{
+			Environments:    false,
+			TestSuites:      false,
+			ServiceAccounts: false,
+			ScopedKeys:      true, // OSS has scoped keys
+			SSO:             false,
+			Federation:      false,
+			CloudProviders:  false,
+			Audit:           false,
+			RAG:             true, // OSS has RAG
+			Guardrails:      true, // OSS has community guardrails
+			Promotions:      false,
+			PhoneHome:       false,
+		},
+		Limits: CommunityLimits(),
+		Auth: &ServerAuth{
+			Providers:   []string{"apikey"},
+			SSOEnabled:  false,
+			RequireAuth: false,
+		},
 	}
 }
 
@@ -762,6 +880,29 @@ type KitchenSettings struct {
 	// Archive policy — controls what happens to expired data.
 	// nil = use default (purge-only for community, archive-and-purge for pro).
 	ArchivePolicy *ArchivePolicy `json:"archive_policy,omitempty"`
+
+	// ── Test Runner Configuration (Pro) ─────────────────────
+	// Controls how test suite runs are dispatched and executed.
+	// Community edition: test suites are disabled (no-op backend).
+
+	// TestRunnerBackend selects the execution backend for this kitchen.
+	// Supported: "local" (bounded goroutine pool, default), "celery", "temporal", "k8s".
+	TestRunnerBackend string `json:"test_runner_backend,omitempty"`
+
+	// TestRunnerConfig holds backend-specific settings.
+	// For "celery": {"broker_url": "redis://...", "queue": "tests"}
+	// For "temporal": {"namespace": "default", "task_queue": "agent-tests"}
+	// For "k8s": {"namespace": "agentoven", "image": "agentoven/runner:latest"}
+	TestRunnerConfig map[string]string `json:"test_runner_config,omitempty"`
+
+	// MaxConcurrentRuns overrides the plan-level limit per kitchen.
+	// 0 = use plan default.
+	MaxConcurrentRuns int `json:"max_concurrent_runs,omitempty"`
+
+	// ── External Tracker Configuration (Pro) ────────────────
+	// Connects test suites to an external issue tracker (JIRA, GitLab, etc.)
+	// for automatic result sync and traceability matrix generation.
+	ExternalTracker *ExternalTrackerConfig `json:"external_tracker,omitempty"`
 
 	// Custom metadata
 	Metadata map[string]string `json:"metadata,omitempty"`
@@ -1434,38 +1575,209 @@ type DiscoveredModel struct {
 // ── Environment (Pro, R8) ────────────────────────────────────
 // ══════════════════════════════════════════════════════════════
 
-// Environment represents a deployment stage (dev, staging, prod).
-// Pro feature: agents and configs are promoted between environments.
+// Environment represents a deployment stage (dev, qa, prod, or custom).
+// Pro feature: agents are promoted between environments with approval gates.
+// Each environment has its own URL, provider overrides, and promotion policy.
 type Environment struct {
-	ID          string                 `json:"id" db:"id"`
-	Name        string                 `json:"name" db:"name"` // "dev", "staging", "prod"
-	Kitchen     string                 `json:"kitchen" db:"kitchen"`
-	Description string                 `json:"description,omitempty" db:"description"`
-	IsDefault   bool                   `json:"is_default" db:"is_default"`
-	Config      map[string]interface{} `json:"config,omitempty"`    // env-specific overrides
-	Providers   map[string]string      `json:"providers,omitempty"` // provider name → env-specific provider name
-	CreatedAt   time.Time              `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time              `json:"updated_at" db:"updated_at"`
+	ID               string                 `json:"id" db:"id"`
+	Name             string                 `json:"name" db:"name"` // display name: "Development", "QA", "Production"
+	Slug             string                 `json:"slug" db:"slug"` // machine name: "dev", "qa", "prod"
+	Kitchen          string                 `json:"kitchen" db:"kitchen"`
+	Description      string                 `json:"description,omitempty" db:"description"`
+	URL              string                 `json:"url,omitempty" db:"url"` // environment-specific control plane URL
+	Order            int                    `json:"order" db:"order"`       // promotion order: 0=dev, 1=qa, 2=prod
+	IsDefault        bool                   `json:"is_default" db:"is_default"`
+	IsProduction     bool                   `json:"is_production" db:"is_production"`
+	ApprovalRequired bool                   `json:"approval_required" db:"approval_required"`         // require human approval for promotion into this env
+	PromotionPolicy  string                 `json:"promotion_policy,omitempty" db:"promotion_policy"` // "manual", "auto", "gated" (default: "manual")
+	Config           map[string]interface{} `json:"config,omitempty"`                                 // env-specific overrides
+	Providers        map[string]string      `json:"providers,omitempty"`                              // provider name → env-specific provider name
+	Tags             map[string]string      `json:"tags,omitempty"`
+	CreatedAt        time.Time              `json:"created_at" db:"created_at"`
+	UpdatedAt        time.Time              `json:"updated_at" db:"updated_at"`
+}
+
+// DefaultEnvironments returns the three standard deployment stages.
+func DefaultEnvironments(kitchen string) []Environment {
+	now := time.Now().UTC()
+	return []Environment{
+		{Name: "Development", Slug: "dev", Kitchen: kitchen, Order: 0, IsDefault: true, PromotionPolicy: "auto", CreatedAt: now, UpdatedAt: now},
+		{Name: "QA", Slug: "qa", Kitchen: kitchen, Order: 1, ApprovalRequired: false, PromotionPolicy: "manual", CreatedAt: now, UpdatedAt: now},
+		{Name: "Production", Slug: "prod", Kitchen: kitchen, Order: 2, IsProduction: true, ApprovalRequired: true, PromotionPolicy: "gated", CreatedAt: now, UpdatedAt: now},
+	}
 }
 
 // PromotionRequest describes promoting an agent from one environment to another.
 type PromotionRequest struct {
 	AgentName  string `json:"agent_name"`
-	FromEnv    string `json:"from_env"`          // "dev"
-	ToEnv      string `json:"to_env"`            // "staging"
-	VersionPin string `json:"version,omitempty"` // specific version to promote (default: latest)
-	DryRun     bool   `json:"dry_run,omitempty"` // preview without applying
+	FromEnv    string `json:"from_env"`              // "dev"
+	ToEnv      string `json:"to_env"`                // "qa"
+	VersionPin string `json:"version,omitempty"`     // specific version to promote (default: latest)
+	DryRun     bool   `json:"dry_run,omitempty"`     // preview without applying
+	Comment    string `json:"comment,omitempty"`     // promotion reason / change notes
+	TrackerRef string `json:"tracker_ref,omitempty"` // linked issue (e.g. "PROJ-1234")
 }
 
 // PromotionResult describes the outcome of a promotion.
 type PromotionResult struct {
-	AgentName string `json:"agent_name"`
-	FromEnv   string `json:"from_env"`
-	ToEnv     string `json:"to_env"`
-	Version   string `json:"version"`
-	Status    string `json:"status"`         // "promoted", "dry_run", "failed"
-	Diff      string `json:"diff,omitempty"` // human-readable diff of changes
-	Error     string `json:"error,omitempty"`
+	AgentName    string    `json:"agent_name"`
+	FromEnv      string    `json:"from_env"`
+	ToEnv        string    `json:"to_env"`
+	Version      string    `json:"version"`
+	Status       string    `json:"status"`         // "promoted", "pending_approval", "dry_run", "failed"
+	Diff         string    `json:"diff,omitempty"` // human-readable diff of changes
+	Error        string    `json:"error,omitempty"`
+	ApprovalID   string    `json:"approval_id,omitempty"`   // if gated, the approval record ID
+	DeploymentID string    `json:"deployment_id,omitempty"` // the created AgentDeployment ID
+	PromotedBy   string    `json:"promoted_by,omitempty"`
+	PromotedAt   time.Time `json:"promoted_at"`
+}
+
+// ── Agent Deployment (Pro, R9) ──────────────────────────────
+
+// DeploymentStatus tracks the lifecycle of an agent deployment in an environment.
+type DeploymentStatus string
+
+const (
+	DeploymentPending    DeploymentStatus = "pending"     // awaiting approval
+	DeploymentActive     DeploymentStatus = "active"      // live in this environment
+	DeploymentRolledBack DeploymentStatus = "rolled_back" // replaced by rollback
+	DeploymentSuperseded DeploymentStatus = "superseded"  // replaced by newer promotion
+)
+
+// AgentDeployment records an agent version deployed to a specific environment.
+// This is the join entity: agent × version × environment.
+// Immutable once active — a new promotion creates a new deployment.
+type AgentDeployment struct {
+	ID           string                 `json:"id" db:"id"`
+	AgentName    string                 `json:"agent_name" db:"agent_name"`
+	Kitchen      string                 `json:"kitchen" db:"kitchen"`
+	Environment  string                 `json:"environment" db:"environment"` // env slug
+	Version      string                 `json:"version" db:"version"`         // semver snapshot
+	Status       DeploymentStatus       `json:"status" db:"status"`
+	PromotedFrom string                 `json:"promoted_from,omitempty" db:"promoted_from"` // source env slug
+	DeployedBy   string                 `json:"deployed_by" db:"deployed_by"`
+	DeployedAt   time.Time              `json:"deployed_at" db:"deployed_at"`
+	RolledBackAt *time.Time             `json:"rolled_back_at,omitempty" db:"rolled_back_at"`
+	RolledBackBy string                 `json:"rolled_back_by,omitempty" db:"rolled_back_by"`
+	Comment      string                 `json:"comment,omitempty" db:"comment"`
+	TrackerRef   string                 `json:"tracker_ref,omitempty" db:"tracker_ref"` // linked issue
+	Config       map[string]interface{} `json:"config,omitempty"`                       // env-specific config snapshot
+	Metadata     map[string]string      `json:"metadata,omitempty"`
+}
+
+// ── Service Account (Pro, R9) ────────────────────────────────
+
+// ServiceAccount is a kitchen-scoped machine identity for agent-to-agent
+// calls, CI/CD pipelines, and external integrations. Unlike ScopedAPIKeys
+// (which grant access to specific agents), service accounts are identity-level
+// and produce an Identity for RBAC.
+//
+// Token format: "ao_sa_<random>" — 32 bytes, base62 encoded.
+// Stored as bcrypt hash, never in plaintext after creation.
+type ServiceAccount struct {
+	ID          string     `json:"id" db:"id"`
+	Name        string     `json:"name" db:"name"` // unique within kitchen
+	Kitchen     string     `json:"kitchen" db:"kitchen"`
+	Description string     `json:"description,omitempty" db:"description"`
+	Role        string     `json:"role" db:"role"`                 // AgentOven role (baker, chef, etc.)
+	Scopes      []string   `json:"scopes,omitempty"`               // optional fine-grained scopes
+	TokenHash   string     `json:"-" db:"token_hash"`              // bcrypt, never in JSON
+	TokenPrefix string     `json:"token_prefix" db:"token_prefix"` // first 8 chars ("ao_sa_Ab")
+	ExpiresAt   *time.Time `json:"expires_at,omitempty" db:"expires_at"`
+	CreatedBy   string     `json:"created_by" db:"created_by"`
+	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
+	LastUsedAt  *time.Time `json:"last_used_at,omitempty" db:"last_used_at"`
+	Revoked     bool       `json:"revoked" db:"revoked"`
+	RevokedAt   *time.Time `json:"revoked_at,omitempty" db:"revoked_at"`
+	RevokedBy   string     `json:"revoked_by,omitempty" db:"revoked_by"`
+}
+
+// IsExpired returns true if the service account token has expired.
+func (sa *ServiceAccount) IsExpired() bool {
+	if sa.ExpiresAt == nil {
+		return false
+	}
+	return time.Now().After(*sa.ExpiresAt)
+}
+
+// IsUsable returns true if the service account can authenticate.
+func (sa *ServiceAccount) IsUsable() bool {
+	return !sa.Revoked && !sa.IsExpired()
+}
+
+// ── External Tracker Integration (Pro, R9) ──────────────────
+
+// TrackerKind identifies the external issue tracker type.
+type TrackerKind string
+
+const (
+	TrackerJIRA        TrackerKind = "jira"
+	TrackerGitLab      TrackerKind = "gitlab"
+	TrackerGitHub      TrackerKind = "github"
+	TrackerAzureDevOps TrackerKind = "azure-devops"
+)
+
+// ExternalTrackerConfig stores the connection settings for an external
+// issue tracker. Configured at the kitchen level in KitchenSettings.
+type ExternalTrackerConfig struct {
+	Kind           TrackerKind       `json:"kind"`                    // jira, gitlab, github, azure-devops
+	BaseURL        string            `json:"base_url"`                // e.g. "https://myorg.atlassian.net"
+	ProjectKey     string            `json:"project_key"`             // e.g. "AGENT" for JIRA, repo path for GitLab
+	APITokenRef    string            `json:"api_token_ref,omitempty"` // reference to stored secret (never plaintext)
+	AutoSync       bool              `json:"auto_sync"`               // auto-sync test run results to tracker
+	SyncOnComplete bool              `json:"sync_on_complete"`        // sync when test run completes
+	CreateOnFail   bool              `json:"create_on_fail"`          // auto-create issue on test failure
+	Labels         []string          `json:"labels,omitempty"`        // default labels for created issues
+	CustomFields   map[string]string `json:"custom_fields,omitempty"` // tracker-specific custom field mappings
+}
+
+// TrackerSyncStatus tracks whether a test run has been synced to the external tracker.
+type TrackerSyncStatus string
+
+const (
+	TrackerSyncNone    TrackerSyncStatus = ""        // not configured or no tracker ref
+	TrackerSyncPending TrackerSyncStatus = "pending" // queued for sync
+	TrackerSyncSynced  TrackerSyncStatus = "synced"  // successfully synced
+	TrackerSyncFailed  TrackerSyncStatus = "failed"  // sync failed
+)
+
+// ── Traceability Matrix (Pro, R9) ────────────────────────────
+
+// TraceabilityEntry links a requirement/ticket to test suites, test runs,
+// agents, and environments — enabling full compliance traceability.
+type TraceabilityEntry struct {
+	TrackerRef   string            `json:"tracker_ref"`             // e.g. "PROJ-1234"
+	TrackerKind  TrackerKind       `json:"tracker_kind"`            // jira, gitlab, etc.
+	TrackerURL   string            `json:"tracker_url,omitempty"`   // direct link to the issue
+	Title        string            `json:"title,omitempty"`         // issue title/summary
+	Status       string            `json:"status,omitempty"`        // issue status (open, in-progress, done)
+	SuiteIDs     []string          `json:"suite_ids"`               // linked test suite IDs
+	LatestRunID  string            `json:"latest_run_id,omitempty"` // most recent test run
+	LatestResult string            `json:"latest_result,omitempty"` // passed, failed, error
+	AgentName    string            `json:"agent_name,omitempty"`
+	Environment  string            `json:"environment,omitempty"` // which env was tested
+	Version      string            `json:"version,omitempty"`     // agent version tested
+	Tags         map[string]string `json:"tags,omitempty"`
+	LastSyncedAt *time.Time        `json:"last_synced_at,omitempty"`
+}
+
+// TraceabilityMatrix is a collection of traceability entries for a kitchen,
+// providing a compliance-ready view of requirement→test→agent→environment coverage.
+type TraceabilityMatrix struct {
+	Kitchen     string               `json:"kitchen"`
+	Entries     []TraceabilityEntry  `json:"entries"`
+	GeneratedAt time.Time            `json:"generated_at"`
+	Coverage    TraceabilityCoverage `json:"coverage"`
+}
+
+// TraceabilityCoverage summarises how well requirements are covered by tests.
+type TraceabilityCoverage struct {
+	TotalRequirements int     `json:"total_requirements"`
+	CoveredByTests    int     `json:"covered_by_tests"`
+	PassingTests      int     `json:"passing_tests"`
+	FailingTests      int     `json:"failing_tests"`
+	CoveragePercent   float64 `json:"coverage_percent"` // 0.0 - 100.0
 }
 
 // ── Guardrails ──────────────────────────────────────────────
@@ -1525,4 +1837,148 @@ type APIKeyEntry struct {
 	Label   string `json:"label,omitempty"`  // human-readable label (e.g. "prod-key-1")
 	Weight  int    `json:"weight,omitempty"` // for weighted rotation (higher = more traffic)
 	Enabled bool   `json:"enabled"`
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── Scoped API Keys (R8) ────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// ScopedAPIKey grants access to specific agents with usage tracking.
+// Used by the Agent Viewer to give end users access to individual agents
+// without full control plane access.
+//
+// Key format: "ao_sk_<random>" — 32 bytes, base62 encoded.
+// Stored as bcrypt hash, never in plaintext after creation.
+type ScopedAPIKey struct {
+	ID         string     `json:"id"`
+	KeyHash    string     `json:"-"`          // bcrypt hash, never in JSON responses
+	KeyPrefix  string     `json:"key_prefix"` // first 8 chars for identification (e.g. "ao_sk_Ab")
+	Kitchen    string     `json:"kitchen"`
+	AgentNames []string   `json:"agent_names"` // which agents this key can invoke
+	Label      string     `json:"label"`       // human-readable name ("marketing-team", "demo-key")
+	MaxCalls   int        `json:"max_calls"`   // 0 = unlimited
+	CallCount  int        `json:"call_count"`  // current usage
+	ExpiresAt  *time.Time `json:"expires_at"`  // nil = never expires
+	CreatedBy  string     `json:"created_by"`  // Identity.Subject who created this key
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+	Revoked    bool       `json:"revoked"`
+}
+
+// IsExpired returns true if the key has passed its expiration time.
+func (k *ScopedAPIKey) IsExpired() bool {
+	if k.ExpiresAt == nil {
+		return false
+	}
+	return time.Now().After(*k.ExpiresAt)
+}
+
+// IsQuotaExceeded returns true if the key has reached its call limit.
+func (k *ScopedAPIKey) IsQuotaExceeded() bool {
+	if k.MaxCalls == 0 {
+		return false
+	}
+	return k.CallCount >= k.MaxCalls
+}
+
+// CanAccessAgent returns true if the key grants access to the named agent.
+func (k *ScopedAPIKey) CanAccessAgent(agentName string) bool {
+	for _, name := range k.AgentNames {
+		if name == agentName || name == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+// ── Test Suites ──────────────────────────────────────────────
+// Agent test suites allow batch evaluation of agent behavior against
+// expected outputs — the primary gap vs LangSmith.
+
+// TestSuite is a named collection of test cases for one or more agents.
+type TestSuite struct {
+	ID          string     `json:"id"`
+	Name        string     `json:"name"`
+	Kitchen     string     `json:"kitchen"`
+	Description string     `json:"description,omitempty"`
+	AgentName   string     `json:"agent_name"` // target agent
+	Cases       []TestCase `json:"cases"`
+	Schedule    string     `json:"schedule,omitempty"`    // cron expression, e.g. "0 */6 * * *" (every 6h)
+	NextRunAt   *time.Time `json:"next_run_at,omitempty"` // computed from Schedule
+	Enabled     bool       `json:"enabled"`               // whether scheduled runs are active
+	TrackerRef  string     `json:"tracker_ref,omitempty"` // linked external issue (e.g. "PROJ-1234")
+	CreatedBy   string     `json:"created_by,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+// TestCase is a single input → expected-output pair within a test suite.
+type TestCase struct {
+	ID             string            `json:"id"`
+	Name           string            `json:"name"`
+	Input          string            `json:"input"`                     // user message
+	ExpectedOutput string            `json:"expected_output,omitempty"` // for exact/similarity matching
+	Tags           []string          `json:"tags,omitempty"`            // e.g. ["edge-case", "safety"]
+	Variables      map[string]string `json:"variables,omitempty"`       // prompt template variables
+	MaxLatencyMs   int64             `json:"max_latency_ms,omitempty"`  // SLA threshold
+}
+
+// TestRunStatus tracks the lifecycle of a test suite execution.
+type TestRunStatus string
+
+const (
+	TestRunPending   TestRunStatus = "pending"
+	TestRunRunning   TestRunStatus = "running"
+	TestRunCompleted TestRunStatus = "completed"
+	TestRunFailed    TestRunStatus = "failed"
+)
+
+// TestRun records one execution of a test suite.
+type TestRun struct {
+	ID                string            `json:"id"`
+	SuiteID           string            `json:"suite_id"`
+	SuiteName         string            `json:"suite_name"`
+	Kitchen           string            `json:"kitchen"`
+	AgentName         string            `json:"agent_name"`
+	Status            TestRunStatus     `json:"status"`
+	Results           []TestResult      `json:"results"`
+	Summary           TestRunSummary    `json:"summary"`
+	Trigger           string            `json:"trigger"`                       // "manual", "scheduled", "ci"
+	TrackerRef        string            `json:"tracker_ref,omitempty"`         // inherited from suite or set per-run
+	TrackerSyncStatus TrackerSyncStatus `json:"tracker_sync_status,omitempty"` // sync state with external tracker
+	Environment       string            `json:"environment,omitempty"`         // which env the agent was tested in
+	AgentVersion      string            `json:"agent_version,omitempty"`       // version of agent at test time
+	StartedAt         time.Time         `json:"started_at"`
+	CompletedAt       *time.Time        `json:"completed_at,omitempty"`
+	DurationMs        int64             `json:"duration_ms"`
+	CreatedBy         string            `json:"created_by,omitempty"`
+}
+
+// TestResult records the outcome of a single test case execution.
+type TestResult struct {
+	CaseID         string  `json:"case_id"`
+	CaseName       string  `json:"case_name"`
+	Input          string  `json:"input"`
+	ExpectedOutput string  `json:"expected_output,omitempty"`
+	ActualOutput   string  `json:"actual_output"`
+	Passed         bool    `json:"passed"`
+	LatencyMs      int64   `json:"latency_ms"`
+	TokensUsed     int64   `json:"tokens_used"`
+	CostUSD        float64 `json:"cost_usd"`
+	Error          string  `json:"error,omitempty"`
+	TraceID        string  `json:"trace_id,omitempty"` // link to the trace record
+}
+
+// TestRunSummary aggregates metrics across all test case results.
+type TestRunSummary struct {
+	TotalCases   int     `json:"total_cases"`
+	Passed       int     `json:"passed"`
+	Failed       int     `json:"failed"`
+	Errors       int     `json:"errors"`
+	PassRate     float64 `json:"pass_rate"` // 0.0 - 1.0
+	AvgLatencyMs int64   `json:"avg_latency_ms"`
+	TotalTokens  int64   `json:"total_tokens"`
+	TotalCostUSD float64 `json:"total_cost_usd"`
+	P50LatencyMs int64   `json:"p50_latency_ms"`
+	P95LatencyMs int64   `json:"p95_latency_ms"`
 }
