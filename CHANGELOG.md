@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.1] — 2026-03-04
+
+### 🧠 Context Window Management & Prompt Caching
+- **ContextBudgetReport** — every session response now includes token utilization metrics (budget, used, remaining, utilization %)
+- **Sliding context window** — `SendSessionMessage` trims history to 80% of model context window, prepends summary of dropped turns
+- **Prompt caching** — `CacheControl` on `ChatMessage`, `EnableCaching` on `RouteRequest`, `MarkCacheBreakpoints` for Anthropic-style ephemeral breakpoints
+- **Cache metrics** — `CacheHits`, `CachedTokens`, `CacheCreation`, `CacheSavingsUSD` on `TokenUsage`
+- **Shared `ctxwindow` package** — `EstimateTokens`, `TrimToSlidingWindow`, `BuildReport`, `MarkCacheBreakpoints`, `FormatSummaryMessage`
+
+### 🧹 Session Lifecycle
+- **ExpiryJanitor** — background goroutine sweeps expired/idle sessions every 5 min (2h idle timeout)
+- **Wired into Server lifecycle** — starts on boot, stops on graceful shutdown
+
+### 🔒 ADR Hygiene
+- **ADR-0008, 0009, 0010 redacted** — removed Pro implementation details from OSS ADRs to prevent code leakage
+- **Pro ADR-0005, 0006 created** — moved enterprise content (RBAC matrix, ABAC policies, compliance validators) to Pro repo
+
+### 📦 Housekeeping
+- **Homebrew formula** — updated license from MIT to Apache-2.0, bumped tag URL
+- **Go config default** — fixed stale version constant (was 0.3.0)
+
 ## [0.5.0] — 2026-03-03
 
 ### 📜 License Change

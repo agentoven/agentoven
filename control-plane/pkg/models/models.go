@@ -750,15 +750,15 @@ type RouteResponse struct {
 }
 
 type TokenUsage struct {
-	InputTokens      int64   `json:"input_tokens"`
-	OutputTokens     int64   `json:"output_tokens"`
-	ThinkingTokens   int64   `json:"thinking_tokens,omitempty"`
-	TotalTokens      int64   `json:"total_tokens"`
-	EstimatedCost    float64 `json:"estimated_cost_usd"`
-	CacheHits        int     `json:"cache_hits,omitempty"`         // prompt-cache hits from provider
-	CachedTokens     int64   `json:"cached_tokens,omitempty"`      // tokens served from cache
-	CacheCreation    int64   `json:"cache_creation,omitempty"`     // tokens written to cache this turn
-	CacheSavingsUSD  float64 `json:"cache_savings_usd,omitempty"`  // estimated $ saved via caching
+	InputTokens     int64   `json:"input_tokens"`
+	OutputTokens    int64   `json:"output_tokens"`
+	ThinkingTokens  int64   `json:"thinking_tokens,omitempty"`
+	TotalTokens     int64   `json:"total_tokens"`
+	EstimatedCost   float64 `json:"estimated_cost_usd"`
+	CacheHits       int     `json:"cache_hits,omitempty"`        // prompt-cache hits from provider
+	CachedTokens    int64   `json:"cached_tokens,omitempty"`     // tokens served from cache
+	CacheCreation   int64   `json:"cache_creation,omitempty"`    // tokens written to cache this turn
+	CacheSavingsUSD float64 `json:"cache_savings_usd,omitempty"` // estimated $ saved via caching
 }
 
 type CostSummary struct {
