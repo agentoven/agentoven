@@ -308,6 +308,44 @@ export const tools = {
 
 // ── Traces ────────────────────────────────────────────────────
 
+export type SpanKind = 'agent' | 'llm' | 'tool' | 'retriever' | 'chain' | 'embedding';
+
+export interface SpanEvent {
+  name: string;
+  timestamp: string;
+  attributes?: Record<string, unknown>;
+}
+
+export interface SpanTokenUsage {
+  input_tokens: number;
+  output_tokens: number;
+  thinking_tokens?: number;
+  total_tokens: number;
+  estimated_cost_usd?: number;
+  cache_hits?: number;
+  cached_tokens?: number;
+}
+
+export interface Span {
+  id: string;
+  trace_id: string;
+  parent_span_id?: string;
+  name: string;
+  kind: SpanKind;
+  status: string;
+  start_time: string;
+  end_time: string;
+  duration_ms: number;
+  input?: unknown;
+  output?: unknown;
+  metadata?: Record<string, unknown>;
+  usage?: SpanTokenUsage;
+  model?: string;
+  provider?: string;
+  error?: string;
+  events?: SpanEvent[];
+}
+
 export interface Trace {
   id: string;
   agent_name: string;
@@ -318,9 +356,15 @@ export interface Trace {
   total_tokens: number;
   cost_usd: number;
   metadata: Record<string, unknown>;
+  input_text?: string;
   output_text: string;
+  parent_trace_id?: string;
+  session_id?: string;
+  tags?: string[];
+  usage?: SpanTokenUsage;
   user_id: string;
   created_at: string;
+  spans?: Span[];
 }
 
 export const traces = {
@@ -332,7 +376,9 @@ export const traces = {
     const qs = params.toString();
     return request<Trace[]>(`/traces${qs ? '?' + qs : ''}`);
   },
-  get: (id: string) => request<Trace>(`/traces/${id}`),
+  get: (id: string) => request<Trace>(`/traces/${id}?spans=true`),
+  spans: (traceId: string) => request<Span[]>(`/traces/${traceId}/spans`),
+  span: (spanId: string) => request<Span>(`/spans/${spanId}`),
 };
 
 // ── Prompts ───────────────────────────────────────────────────

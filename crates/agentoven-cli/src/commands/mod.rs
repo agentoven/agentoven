@@ -1,6 +1,7 @@
 //! CLI command definitions and dispatch.
 
 pub mod agent;
+pub mod apply;
 pub mod config_cmd;
 pub mod dashboard;
 pub mod environment;
@@ -61,6 +62,9 @@ pub struct Cli {
 pub enum Commands {
     /// 🏺 Initialize a new AgentOven project in the current directory.
     Init(init::InitArgs),
+
+    /// 📦 Apply resources from a YAML/JSON/TOML manifest (declarative mode).
+    Apply(apply::ApplyArgs),
 
     /// 🍞 Manage agents in the oven (register, list, bake, invoke, retire).
     #[command(subcommand)]
@@ -142,6 +146,7 @@ pub enum OutputFormat {
 pub async fn execute(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Init(args) => init::execute(args).await,
+        Commands::Apply(args) => apply::execute(args).await,
         Commands::Agent(cmd) => agent::execute(*cmd).await,
         Commands::Provider(cmd) => provider::execute(cmd).await,
         Commands::Tool(cmd) => tool::execute(cmd).await,

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -48,6 +49,8 @@ type MemoryStore struct {
 	recipes      map[string]*models.Recipe              // key: kitchen:name
 	kitchens     map[string]*models.Kitchen             // key: id
 	traces       map[string]*models.Trace               // key: id
+	spans        map[string]*models.Span                // key: span_id
+	spansByTrace map[string][]string                    // key: trace_id → []span_id (ordered)
 	providers    map[string]*models.ModelProvider       // key: name
 	recipeRuns   map[string]*models.RecipeRun           // key: id
 	tools        map[string]*models.MCPTool             // key: kitchen:name
@@ -117,6 +120,8 @@ func NewMemoryStore() *MemoryStore {
 		environments:  make(map[string]*models.Environment),
 		deployments:   make(map[string]*models.AgentDeployment),
 		serviceAccts:  make(map[string]*models.ServiceAccount),
+		spans:         make(map[string]*models.Span),
+		spansByTrace:  make(map[string][]string),
 		saveCh:        make(chan struct{}, 1),
 		doneCh:        make(chan struct{}),
 		traceTTL:      traceTTL,
@@ -732,6 +737,129 @@ func (m *MemoryStore) DeleteTrace(_ context.Context, id string) error {
 		return &ErrNotFound{Entity: "trace", Key: id}
 	}
 	delete(m.traces, id)
+	// Also delete associated spans
+	if spanIDs, ok := m.spansByTrace[id]; ok {
+		for _, sid := range spanIDs {
+			delete(m.spans, sid)
+		}
+		delete(m.spansByTrace, id)
+	}
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) UpdateTrace(_ context.Context, trace *models.Trace) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.traces[trace.ID]; !ok {
+		return &ErrNotFound{Entity: "trace", Key: trace.ID}
+	}
+	copy := *trace
+	m.traces[trace.ID] = &copy
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) GetTraceWithSpans(_ context.Context, id string) (*models.Trace, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	t, ok := m.traces[id]
+	if !ok {
+		return nil, &ErrNotFound{Entity: "trace", Key: id}
+	}
+	copy := *t
+	// Attach spans ordered by start_time
+	if spanIDs, ok := m.spansByTrace[id]; ok {
+		spans := make([]models.Span, 0, len(spanIDs))
+		for _, sid := range spanIDs {
+			if sp, ok := m.spans[sid]; ok {
+				spans = append(spans, *sp)
+			}
+		}
+		// Sort by start time
+		sort.Slice(spans, func(i, j int) bool {
+			return spans[i].StartTime.Before(spans[j].StartTime)
+		})
+		copy.Spans = spans
+	}
+	return &copy, nil
+}
+
+// ── Span Store ──────────────────────────────────────────────
+
+func (m *MemoryStore) CreateSpan(_ context.Context, span *models.Span) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	copy := *span
+	m.spans[span.ID] = &copy
+	m.spansByTrace[span.TraceID] = append(m.spansByTrace[span.TraceID], span.ID)
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) CreateSpans(_ context.Context, spans []models.Span) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range spans {
+		copy := spans[i]
+		m.spans[copy.ID] = &copy
+		m.spansByTrace[copy.TraceID] = append(m.spansByTrace[copy.TraceID], copy.ID)
+	}
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) ListSpansByTrace(_ context.Context, traceID string) ([]models.Span, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	spanIDs, ok := m.spansByTrace[traceID]
+	if !ok {
+		return []models.Span{}, nil
+	}
+	spans := make([]models.Span, 0, len(spanIDs))
+	for _, sid := range spanIDs {
+		if sp, ok := m.spans[sid]; ok {
+			spans = append(spans, *sp)
+		}
+	}
+	sort.Slice(spans, func(i, j int) bool {
+		return spans[i].StartTime.Before(spans[j].StartTime)
+	})
+	return spans, nil
+}
+
+func (m *MemoryStore) GetSpan(_ context.Context, id string) (*models.Span, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	sp, ok := m.spans[id]
+	if !ok {
+		return nil, &ErrNotFound{Entity: "span", Key: id}
+	}
+	copy := *sp
+	return &copy, nil
+}
+
+func (m *MemoryStore) UpdateSpan(_ context.Context, span *models.Span) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.spans[span.ID]; !ok {
+		return &ErrNotFound{Entity: "span", Key: span.ID}
+	}
+	copy := *span
+	m.spans[span.ID] = &copy
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) DeleteSpansByTrace(_ context.Context, traceID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if spanIDs, ok := m.spansByTrace[traceID]; ok {
+		for _, sid := range spanIDs {
+			delete(m.spans, sid)
+		}
+		delete(m.spansByTrace, traceID)
+	}
 	m.requestSave()
 	return nil
 }

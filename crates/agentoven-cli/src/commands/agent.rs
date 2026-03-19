@@ -67,12 +67,16 @@ pub enum AgentCommands {
 
 #[derive(Args)]
 pub struct RegisterArgs {
-    /// Agent name (optional if using --config).
+    /// Agent name (optional if using --config or --from).
     pub name: Option<String>,
 
     /// Path to agentoven.toml.
     #[arg(long, short)]
     pub config: Option<String>,
+
+    /// Path to agent definition file (YAML/JSON/TOML).
+    #[arg(long, short = 'f')]
+    pub from: Option<String>,
 
     // ── Direct flags (used when not using --config) ──
     /// Agent description.
@@ -325,6 +329,11 @@ pub async fn execute(cmd: AgentCommands) -> anyhow::Result<()> {
 }
 
 async fn register(args: RegisterArgs) -> anyhow::Result<()> {
+    // If --from is provided, parse the file and register from it
+    if let Some(ref from_path) = args.from {
+        return register_from_file(from_path).await;
+    }
+
     // Determine if we're using TOML config or direct flags
     let use_config =
         args.config.is_some() || (args.name.is_none() && args.model_provider.is_none());
@@ -520,6 +529,104 @@ async fn register(args: RegisterArgs) -> anyhow::Result<()> {
         let agent = builder.build();
         register_agent_with_client(&agent).await
     }
+}
+
+/// Register an agent from a YAML/JSON/TOML definition file.
+async fn register_from_file(path: &str) -> anyhow::Result<()> {
+    println!("\n  🏺 Registering agent from {}...\n", path.cyan());
+
+    let content = tokio::fs::read_to_string(path).await?;
+
+    let parsed: serde_json::Value = if path.ends_with(".yaml") || path.ends_with(".yml") {
+        serde_yaml::from_str(&content)?
+    } else if path.ends_with(".toml") {
+        let toml_val: toml::Value = content.parse()?;
+        serde_json::to_value(toml_val)?
+    } else {
+        serde_json::from_str(&content)?
+    };
+
+    let name = parsed["name"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing 'name' field in {}", path))?;
+    let version = parsed["version"].as_str().unwrap_or("0.1.0");
+    let description = parsed["description"].as_str().unwrap_or("");
+    let framework_str = parsed["framework"].as_str().unwrap_or("managed");
+    let mode_str = parsed["mode"].as_str().unwrap_or("managed");
+
+    let framework = parse_framework(framework_str);
+    let mode = if mode_str == "external" {
+        AgentMode::External
+    } else {
+        AgentMode::Managed
+    };
+
+    let mut builder = Agent::builder(name)
+        .version(version)
+        .description(description)
+        .framework(framework)
+        .mode(mode)
+        .model_provider(parsed["model_provider"].as_str().unwrap_or(""))
+        .model_name(parsed["model_name"].as_str().unwrap_or(""));
+
+    if let Some(bp) = parsed["backup_provider"].as_str() {
+        builder = builder.backup_provider(bp);
+    }
+    if let Some(bm) = parsed["backup_model"].as_str() {
+        builder = builder.backup_model(bm);
+    }
+    if let Some(sp) = parsed["system_prompt"].as_str() {
+        builder = builder.system_prompt(sp);
+    }
+    if let Some(mt) = parsed["max_turns"].as_u64() {
+        builder = builder.max_turns(mt as u32);
+    }
+    if let Some(ep) = parsed["a2a_endpoint"].as_str() {
+        builder = builder.a2a_endpoint(ep);
+    }
+
+    // Parse ingredients if present
+    let mut ingredients = Vec::new();
+    if let Some(ing) = parsed.get("ingredients") {
+        if let Some(models) = ing.get("models").and_then(|v| v.as_array()) {
+            for m in models {
+                let ing_name = m["name"].as_str().unwrap_or("unknown");
+                let mut ib = Ingredient::model(ing_name);
+                if let Some(p) = m["provider"].as_str() {
+                    ib = ib.provider(p);
+                }
+                if let Some(r) = m["role"].as_str() {
+                    ib = ib.role(r);
+                }
+                ingredients.push(ib.build());
+            }
+        }
+        if let Some(tools) = ing.get("tools").and_then(|v| v.as_array()) {
+            for t in tools {
+                let ing_name = t["name"].as_str().unwrap_or("unknown");
+                let mut ib = Ingredient::tool(ing_name);
+                if let Some(p) = t["protocol"].as_str() {
+                    ib = ib.provider(p);
+                }
+                ingredients.push(ib.build());
+            }
+        }
+    }
+
+    let agent = ingredients
+        .into_iter()
+        .fold(builder, |a, i| a.ingredient(i))
+        .build();
+
+    println!(
+        "  {} Parsed: {} ({}, {})",
+        "→".dimmed(),
+        agent.qualified_name().bold(),
+        framework_display(&agent.framework).cyan(),
+        agent.mode
+    );
+
+    register_agent_with_client(&agent).await
 }
 
 async fn register_agent_with_client(agent: &Agent) -> anyhow::Result<()> {

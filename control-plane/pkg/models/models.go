@@ -258,6 +258,9 @@ const (
 	StepFanOut    StepKind = "fan_out"
 	StepFanIn     StepKind = "fan_in"
 	StepRAG       StepKind = "rag"
+	StepRouter    StepKind = "router"     // R8: route to exactly one of N branches
+	StepMap       StepKind = "map"        // R8: iterate over array, run agent per item
+	StepSubRecipe StepKind = "sub_recipe" // R8: invoke another recipe as a sub-workflow
 )
 
 type Branch struct {
@@ -281,6 +284,28 @@ type Step struct {
 	// to dependency-based resolution (backward compatible).
 	Branches    []Branch `json:"branches,omitempty"`
 	DefaultNext string   `json:"default_next,omitempty"`
+
+	// Looping — repeat the step while LoopCondition evaluates to true.
+	// LoopCondition is an expr-lang/expr expression evaluated against
+	// the step's output. MaxIterations is a hard cap (required when
+	// LoopCondition is set). Retry (MaxRetries) is inner per-attempt;
+	// loop is outer per-iteration.
+	LoopCondition string `json:"loop_condition,omitempty"`
+	MaxIterations int    `json:"max_iterations,omitempty"`
+
+	// Map / Iteration — run the referenced agent once per item in an
+	// upstream step's output array. SourcePath is a dot-separated path
+	// to the array field (e.g. "items" or "results.documents").
+	// MaxConcurrency limits parallel invocations (0 = unlimited).
+	SourcePath     string `json:"source_path,omitempty"`
+	MaxConcurrency int    `json:"max_concurrency,omitempty"`
+
+	// Sub-recipe — invoke another recipe as a nested workflow.
+	// RecipeRef is the name of the sub-recipe. InputMapping and
+	// OutputMapping map parent fields ↔ sub-recipe fields.
+	RecipeRef     string            `json:"recipe_ref,omitempty"`
+	InputMapping  map[string]string `json:"input_mapping,omitempty"`
+	OutputMapping map[string]string `json:"output_mapping,omitempty"`
 
 	// Notification — MCP tool names with "notify" capability to fire on
 	// gate_waiting, step_completed, or step_failed events.
@@ -517,6 +542,62 @@ type Trace struct {
 	OutputText     string                 `json:"output_text,omitempty" db:"output_text"`
 	ThinkingBlocks []ThinkingBlock        `json:"thinking_blocks,omitempty"`
 	CreatedAt      time.Time              `json:"created_at" db:"created_at"`
+
+	// ── Enriched fields (R10 — LangSmith-parity tracing) ─────
+	InputText       string                 `json:"input_text,omitempty" db:"input_text"`
+	ParentTraceID   string                 `json:"parent_trace_id,omitempty" db:"parent_trace_id"`
+	SessionID       string                 `json:"session_id,omitempty" db:"session_id"`
+	Tags            []string               `json:"tags,omitempty"`
+	Usage           *TokenUsage            `json:"usage,omitempty"`
+	RuntimeMetadata map[string]interface{} `json:"runtime_metadata,omitempty"`
+
+	// Spans are loaded eagerly by GetTrace (with spans=true) or ListSpansByTrace.
+	// Not persisted on the Trace row itself — stored in the spans table/map.
+	Spans []Span `json:"spans,omitempty" db:"-"`
+}
+
+// ── Span ─────────────────────────────────────────────────────
+
+// SpanKind categorizes what a span represents in the execution tree.
+type SpanKind string
+
+const (
+	SpanKindAgent     SpanKind = "agent"     // top-level agent invocation
+	SpanKindLLM       SpanKind = "llm"       // a single LLM call
+	SpanKindTool      SpanKind = "tool"      // a tool/function call execution
+	SpanKindRetriever SpanKind = "retriever" // RAG retrieval operation
+	SpanKindChain     SpanKind = "chain"     // a chain/pipeline step
+	SpanKindEmbedding SpanKind = "embedding" // an embedding operation
+)
+
+// Span represents a single operation within a trace — analogous to an OTEL span.
+// Spans form a tree: the root span has no ParentSpanID, child spans reference their parent.
+// This enables LangSmith-style waterfall visualization of agent execution.
+type Span struct {
+	ID           string                 `json:"id" db:"id"`
+	TraceID      string                 `json:"trace_id" db:"trace_id"`
+	ParentSpanID string                 `json:"parent_span_id,omitempty" db:"parent_span_id"`
+	Name         string                 `json:"name" db:"name"`
+	Kind         SpanKind               `json:"kind" db:"kind"`
+	Status       string                 `json:"status" db:"status"` // "running", "completed", "failed"
+	StartTime    time.Time              `json:"start_time" db:"start_time"`
+	EndTime      time.Time              `json:"end_time" db:"end_time"`
+	DurationMs   int64                  `json:"duration_ms" db:"duration_ms"`
+	Input        json.RawMessage        `json:"input,omitempty" db:"input"`   // request payload (messages, tool args)
+	Output       json.RawMessage        `json:"output,omitempty" db:"output"` // response payload (content, tool result)
+	Metadata     map[string]interface{} `json:"metadata,omitempty"`
+	Usage        *TokenUsage            `json:"usage,omitempty"`                  // token breakdown for LLM spans
+	Model        string                 `json:"model,omitempty" db:"model"`       // model name (LLM spans)
+	Provider     string                 `json:"provider,omitempty" db:"provider"` // provider name (LLM spans)
+	Error        string                 `json:"error,omitempty" db:"error"`       // error message if status=failed
+	Events       []SpanEvent            `json:"events,omitempty"`                 // timed events within the span
+}
+
+// SpanEvent is a timestamped event within a span (e.g. "first token", "tool selected").
+type SpanEvent struct {
+	Name       string                 `json:"name"`
+	Timestamp  time.Time              `json:"timestamp"`
+	Attributes map[string]interface{} `json:"attributes,omitempty"`
 }
 
 // ── Model Provider ───────────────────────────────────────────
@@ -573,6 +654,7 @@ type RecipeRun struct {
 	Input        map[string]interface{} `json:"input,omitempty"`
 	Output       map[string]interface{} `json:"output,omitempty"`
 	StepResults  []StepResult           `json:"step_results,omitempty"`
+	ParentRunID  string                 `json:"parent_run_id,omitempty" db:"parent_run_id"` // R8: set when this run is a sub-recipe invocation
 	StartedAt    time.Time              `json:"started_at" db:"started_at"`
 	CompletedAt  *time.Time             `json:"completed_at,omitempty" db:"completed_at"`
 	DurationMs   int64                  `json:"duration_ms,omitempty" db:"duration_ms"`
@@ -584,7 +666,7 @@ type RecipeRun struct {
 type StepResult struct {
 	StepName      string                 `json:"step_name"`
 	StepKind      string                 `json:"step_kind"`
-	Status        string                 `json:"status"`
+	Status        string                 `json:"status"` // completed, failed, skipped, canceled
 	Output        map[string]interface{} `json:"output,omitempty"`
 	AgentRef      string                 `json:"agent_ref,omitempty"`
 	StartedAt     time.Time              `json:"started_at"`
@@ -595,6 +677,17 @@ type StepResult struct {
 	GateStatus    string                 `json:"gate_status,omitempty"` // waiting, approved, rejected
 	NotifyResults []NotifyResult         `json:"notify_results,omitempty"`
 	BranchTaken   string                 `json:"branch_taken,omitempty"` // which branch condition matched
+
+	// R8: Map/Iteration results — one sub-result per item processed.
+	SubResults []StepResult `json:"sub_results,omitempty"`
+	ItemCount  int          `json:"item_count,omitempty"`
+
+	// R8: Loop results — how many iterations ran + output history.
+	LoopIterations int                      `json:"loop_iterations,omitempty"`
+	LoopHistory    []map[string]interface{} `json:"loop_history,omitempty"`
+
+	// R8: Sub-recipe run ID for traceability.
+	SubRunID string `json:"sub_run_id,omitempty"`
 }
 
 type NotifyResult struct {
@@ -619,6 +712,26 @@ type MCPTool struct {
 	Enabled      bool                   `json:"enabled" db:"enabled"`
 	CreatedAt    time.Time              `json:"created_at" db:"created_at"`
 	UpdatedAt    time.Time              `json:"updated_at" db:"updated_at"`
+}
+
+// ── MCP Upstream (ADR-0014) ──────────────────────────────────
+// MCPUpstream represents a Microsoft MCP Gateway (or compatible) upstream
+// server that proxies tool calls to containerized MCP servers. This is a
+// model-only definition for future use — no endpoints or handlers yet.
+// See ADR/0014-microsoft-mcp-gateway-upstream.md for architecture details.
+
+type MCPUpstream struct {
+	ID        string            `json:"id" db:"id"`
+	Name      string            `json:"name" db:"name"`
+	Kitchen   string            `json:"kitchen" db:"kitchen"`
+	Endpoint  string            `json:"endpoint" db:"endpoint"`           // e.g., "https://mcp-gw.internal:8080"
+	Transport string            `json:"transport" db:"transport"`         // "http" or "sse"
+	AuthType  string            `json:"auth_type" db:"auth_type"`         // "none", "bearer", "entra-id", "api-key"
+	AuthRef   string            `json:"auth_ref,omitempty" db:"auth_ref"` // reference to secret/provider
+	Labels    map[string]string `json:"labels,omitempty"`                 // routing labels
+	Enabled   bool              `json:"enabled" db:"enabled"`
+	CreatedAt time.Time         `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time         `json:"updated_at" db:"updated_at"`
 }
 
 // ── Model Routing ────────────────────────────────────────────

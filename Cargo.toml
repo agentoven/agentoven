@@ -12,7 +12,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/agentoven/agentoven"
@@ -71,8 +71,8 @@ napi = { version = "2", features = ["async", "serde-json"] }
 napi-derive = "2"
 
 # Internal crates
-a2a-ao = { version = "0.5.1", path = "crates/a2a-ao" }
-agentoven-core = { version = "0.5.1", path = "crates/agentoven-core" }
+a2a-ao = { version = "0.5.2", path = "crates/a2a-ao" }
+agentoven-core = { version = "0.5.2", path = "crates/agentoven-core" }
 
 [profile.release]
 lto = true

@@ -4,6 +4,8 @@ use clap::{Args, Subcommand};
 use colored::Colorize;
 use serde_json;
 
+use agentoven_core::recipe::{Step, StepKind};
+
 #[derive(Subcommand)]
 pub enum RecipeCommands {
     /// Create a new recipe.
@@ -104,13 +106,61 @@ async fn create(args: CreateArgs) -> anyhow::Result<()> {
 
     let steps = if let Some(ref from_path) = args.from {
         let content = tokio::fs::read_to_string(from_path).await?;
-        if from_path.ends_with(".toml") {
-            let _parsed: toml::Value = content.parse()?;
-            Vec::new()
+        let parsed: serde_json::Value = if from_path.ends_with(".toml") {
+            let toml_val: toml::Value = content.parse()?;
+            serde_json::to_value(toml_val)?
+        } else if from_path.ends_with(".yaml") || from_path.ends_with(".yml") {
+            serde_yaml::from_str(&content)?
         } else {
-            let _parsed: serde_json::Value = serde_json::from_str(&content)?;
-            Vec::new()
-        }
+            serde_json::from_str(&content)?
+        };
+
+        // Extract steps array from the parsed document
+        let steps_arr = parsed
+            .get("steps")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Missing 'steps' array in {}", from_path))?;
+
+        steps_arr
+            .iter()
+            .map(|s| {
+                let name = s["name"].as_str().unwrap_or("step").to_string();
+                let agent = s.get("agent").and_then(|v| v.as_str()).map(String::from);
+                let kind_str = s.get("kind").and_then(|v| v.as_str()).unwrap_or("agent");
+                let kind = match kind_str {
+                    "human-gate" | "gate" => StepKind::HumanGate,
+                    "evaluator" => StepKind::Evaluator,
+                    "condition" | "branch" => StepKind::Condition,
+                    "fan-out" | "parallel" => StepKind::FanOut,
+                    "fan-in" | "join" => StepKind::FanIn,
+                    _ => StepKind::Agent,
+                };
+                let depends_on = s
+                    .get("depends_on")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let timeout = s.get("timeout").and_then(|v| v.as_str()).map(String::from);
+                let parallel = s.get("parallel").and_then(|v| v.as_bool()).unwrap_or(false);
+
+                Step {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name,
+                    kind,
+                    agent,
+                    parallel,
+                    timeout,
+                    depends_on,
+                    retry: None,
+                    notify: Vec::new(),
+                    config: None,
+                }
+            })
+            .collect()
     } else {
         Vec::new()
     };

@@ -249,6 +249,32 @@ fn pyany_to_json(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
     Ok(serde_json::Value::String(obj.repr()?.to_string()))
 }
 
+// ── Branch ────────────────────────────────────────────────────
+
+/// A branch condition for router steps.
+///
+///     Branch('category == "billing"', "billing-handler")
+#[pyclass]
+#[derive(Clone, Debug)]
+pub struct Branch {
+    #[pyo3(get, set)]
+    pub condition: String,
+    #[pyo3(get, set)]
+    pub next: String,
+}
+
+#[pymethods]
+impl Branch {
+    #[new]
+    fn new(condition: String, next: String) -> Self {
+        Branch { condition, next }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Branch('{}', '{}')", self.condition, self.next)
+    }
+}
+
 // ── Step ─────────────────────────────────────────────────────
 
 /// A step in a multi-agent recipe.
@@ -256,6 +282,13 @@ fn pyany_to_json(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
 ///     Step("planner", agent="task-planner", timeout="30s")
 ///     Step("researcher", agent="doc-researcher", parallel=True)
 ///     Step("approval", human_gate=True, notify=["team-leads"])
+///     Step("triage", kind="router", agent="classifier",
+///          branches=[Branch('intent == "order"', "handle-order")],
+///          default_next="handle-general")
+///     Step("process-items", kind="map", agent="processor",
+///          source_path="extract.output.items", max_concurrency=3)
+///     Step("review", loop_condition='approved == true', max_iterations=5)
+///     Step("sub-flow", kind="sub_recipe", recipe_ref="my-sub-recipe")
 #[pyclass]
 #[derive(Clone, Debug)]
 pub struct Step {
@@ -275,12 +308,52 @@ pub struct Step {
     pub notify: Vec<String>,
     #[pyo3(get, set)]
     pub depends_on: Vec<String>,
+    // ── Routing fields ───────────────────────────────────────
+    #[pyo3(get, set)]
+    pub branches: Vec<Branch>,
+    #[pyo3(get, set)]
+    pub default_next: Option<String>,
+    // ── Looping fields ───────────────────────────────────────
+    #[pyo3(get, set)]
+    pub loop_condition: Option<String>,
+    #[pyo3(get, set)]
+    pub max_iterations: Option<u32>,
+    // ── Map/Iteration fields ─────────────────────────────────
+    #[pyo3(get, set)]
+    pub source_path: Option<String>,
+    #[pyo3(get, set)]
+    pub max_concurrency: Option<u32>,
+    // ── Sub-recipe (hierarchy) fields ────────────────────────
+    #[pyo3(get, set)]
+    pub recipe_ref: Option<String>,
+    #[pyo3(get, set)]
+    pub input_mapping: Option<std::collections::HashMap<String, String>>,
+    #[pyo3(get, set)]
+    pub output_mapping: Option<std::collections::HashMap<String, String>>,
 }
 
 #[pymethods]
 impl Step {
     #[new]
-    #[pyo3(signature = (name, kind="agent".to_string(), agent=None, parallel=false, timeout=None, human_gate=false, notify=vec![], depends_on=vec![]))]
+    #[pyo3(signature = (
+        name,
+        kind="agent".to_string(),
+        agent=None,
+        parallel=false,
+        timeout=None,
+        human_gate=false,
+        notify=vec![],
+        depends_on=vec![],
+        branches=vec![],
+        default_next=None,
+        loop_condition=None,
+        max_iterations=None,
+        source_path=None,
+        max_concurrency=None,
+        recipe_ref=None,
+        input_mapping=None,
+        output_mapping=None,
+    ))]
     fn new(
         name: String,
         kind: String,
@@ -290,8 +363,23 @@ impl Step {
         human_gate: bool,
         notify: Vec<String>,
         depends_on: Vec<String>,
+        branches: Vec<Branch>,
+        default_next: Option<String>,
+        loop_condition: Option<String>,
+        max_iterations: Option<u32>,
+        source_path: Option<String>,
+        max_concurrency: Option<u32>,
+        recipe_ref: Option<String>,
+        input_mapping: Option<std::collections::HashMap<String, String>>,
+        output_mapping: Option<std::collections::HashMap<String, String>>,
     ) -> Self {
-        Step { name, kind, agent, parallel, timeout, human_gate, notify, depends_on }
+        Step {
+            name, kind, agent, parallel, timeout, human_gate, notify, depends_on,
+            branches, default_next,
+            loop_condition, max_iterations,
+            source_path, max_concurrency,
+            recipe_ref, input_mapping, output_mapping,
+        }
     }
 
     fn __repr__(&self) -> String {
@@ -590,6 +678,40 @@ impl AgentOvenClient {
                 }
                 if !s.notify.is_empty() {
                     step["notify"] = serde_json::json!(s.notify);
+                }
+                // Routing fields
+                if !s.branches.is_empty() {
+                    let branches: Vec<serde_json::Value> = s.branches.iter().map(|b| {
+                        serde_json::json!({ "condition": b.condition, "next": b.next })
+                    }).collect();
+                    step["branches"] = serde_json::json!(branches);
+                }
+                if let Some(ref dn) = s.default_next {
+                    step["default_next"] = serde_json::json!(dn);
+                }
+                // Looping fields
+                if let Some(ref lc) = s.loop_condition {
+                    step["loop_condition"] = serde_json::json!(lc);
+                }
+                if let Some(mi) = s.max_iterations {
+                    step["max_iterations"] = serde_json::json!(mi);
+                }
+                // Map/Iteration fields
+                if let Some(ref sp) = s.source_path {
+                    step["source_path"] = serde_json::json!(sp);
+                }
+                if let Some(mc) = s.max_concurrency {
+                    step["max_concurrency"] = serde_json::json!(mc);
+                }
+                // Sub-recipe (hierarchy) fields
+                if let Some(ref rr) = s.recipe_ref {
+                    step["recipe_ref"] = serde_json::json!(rr);
+                }
+                if let Some(ref im) = s.input_mapping {
+                    step["input_mapping"] = serde_json::json!(im);
+                }
+                if let Some(ref om) = s.output_mapping {
+                    step["output_mapping"] = serde_json::json!(om);
                 }
                 step
             })
@@ -1007,6 +1129,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AgentStatus>()?;
     m.add_class::<Ingredient>()?;
     m.add_class::<IngredientKind>()?;
+    m.add_class::<Branch>()?;
     m.add_class::<Step>()?;
     m.add_class::<Recipe>()?;
     m.add_class::<AgentOvenClient>()?;

@@ -15,9 +15,9 @@ type Config struct {
 }
 
 type DatabaseConfig struct {
-	URL             string
-	MaxConnections  int
-	MigrationsPath  string
+	URL            string
+	MaxConnections int
+	MigrationsPath string
 }
 
 type TelemetryConfig struct {

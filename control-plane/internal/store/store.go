@@ -17,6 +17,7 @@ type Store interface {
 	RecipeStore
 	KitchenStore
 	TraceStore
+	SpanStore
 	ModelProviderStore
 	RecipeRunStore
 	MCPToolStore
@@ -106,8 +107,35 @@ type TraceStore interface {
 	ListTraces(ctx context.Context, kitchen string, limit int) ([]models.Trace, error)
 	ListTracesFiltered(ctx context.Context, kitchen string, filter TraceFilter) ([]models.Trace, error)
 	GetTrace(ctx context.Context, id string) (*models.Trace, error)
+	GetTraceWithSpans(ctx context.Context, id string) (*models.Trace, error)
 	CreateTrace(ctx context.Context, trace *models.Trace) error
+	UpdateTrace(ctx context.Context, trace *models.Trace) error
 	DeleteTrace(ctx context.Context, id string) error
+}
+
+// ── Span Store ──────────────────────────────────────────────
+
+// SpanStore manages hierarchical spans within traces.
+// Spans form a tree: root spans have no ParentSpanID, child spans reference their parent.
+// This enables LangSmith-style waterfall visualization.
+type SpanStore interface {
+	// CreateSpan persists a single span.
+	CreateSpan(ctx context.Context, span *models.Span) error
+
+	// CreateSpans persists multiple spans in a batch (used after executor completes).
+	CreateSpans(ctx context.Context, spans []models.Span) error
+
+	// ListSpansByTrace returns all spans for a trace, ordered by start_time.
+	ListSpansByTrace(ctx context.Context, traceID string) ([]models.Span, error)
+
+	// GetSpan returns a single span by ID.
+	GetSpan(ctx context.Context, id string) (*models.Span, error)
+
+	// UpdateSpan updates a span (e.g. set end_time, status, output after completion).
+	UpdateSpan(ctx context.Context, span *models.Span) error
+
+	// DeleteSpansByTrace removes all spans for a trace (used when deleting a trace).
+	DeleteSpansByTrace(ctx context.Context, traceID string) error
 }
 
 // ── Model Provider Store ────────────────────────────────────

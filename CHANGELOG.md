@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.2] — 2026-03-16
+
+### 🚀 Declarative Agent Management
+- **`agentoven apply -f`** — new CLI command for declarative agent, recipe, and tool registration from YAML/JSON/TOML manifests
+- **Multi-document YAML** — single file can define agents, recipes, and tool sets separated by `---`
+- **`--dry-run` flag** — validate manifests without applying changes
+- **`--from` flag on `agent register`** — register agents from definition files (YAML/JSON/TOML)
+- **`--from` flag on `recipe create`** — now actually parses steps from files (was a stub)
+
+### 🔧 Bulk Tool Registration
+- **`POST /api/v1/tools/bulk`** — new endpoint for registering multiple MCP tools in a single request
+- **`bulk_add_tools()`** — added to Rust `AgentOvenClient` SDK
+- **Input validation** — `RegisterAgent` requires non-empty name; `RegisterMCPTool` validates name and transport enum
+
+### 🏗️ Workflow Engine: All 6 Agentic Patterns
+- **Chaining** — sequential step execution with data flow
+- **Parallelization** — concurrent fan-out/fan-in execution
+- **Routing** — expression-based conditional branching (via `expr-lang/expr`)
+- **Orchestrator-Worker** — hierarchical delegation pattern
+- **Evaluator-Optimizer** — iterative refinement loops
+- **Autonomous** — self-directing agent loops with exit conditions
+
+### 🔐 Pluggable Auth (Release Seven)
+- **AuthProvider interface** — pluggable authentication chain (API keys, service accounts, HMAC-signed tokens)
+- **ISS-022 CORS fix** — env-configurable origins, no credentials with wildcard
+- **ISS-021 Tier enforcer** — exact path matching replaces `strings.Contains`
+
+### 🌐 Community & Docs
+- **Discord invite** — added across README, landing page navbar, and footer
+- **"Why Us" section** — competitive comparison on landing page (vs LangChain, CrewAI, Portkey)
+- **CLI docs updated** — `agentoven apply`, `--from` flags documented
+- **ADR-0014** — Microsoft MCP Gateway as Pro-only upstream provider
+
+### 📦 Model
+- **`MCPUpstream` struct** — data model for Microsoft MCP Gateway integration (Pro, ADR-0014)
+
+---
+
 ## [0.5.1] — 2026-03-04
 
 ### 🧠 Context Window Management & Prompt Caching

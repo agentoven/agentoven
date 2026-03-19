@@ -132,6 +132,12 @@ func (h *Handlers) RegisterAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate required fields
+	if strings.TrimSpace(req.Name) == "" {
+		respondError(w, http.StatusBadRequest, "Agent 'name' is required")
+		return
+	}
+
 	kitchen := middleware.GetKitchen(r.Context())
 	req.ID = uuid.New().String()
 	req.Status = models.AgentStatusDraft
@@ -541,7 +547,9 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 		ThinkingEnabled: req.ThinkingEnabled,
 	}
 
-	resp, err := h.Router.Route(r.Context(), routeReq)
+	// Use ContextSkipTrace so the router does not create its own flat trace;
+	// this handler records a richer trace below with input/output text.
+	resp, err := h.Router.Route(router.ContextSkipTrace(r.Context()), routeReq)
 	duration := time.Since(start)
 	if err != nil {
 		respondError(w, http.StatusBadGateway, "Model provider error: "+err.Error())
@@ -562,7 +570,8 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Record trace
+	// Record trace — enriched with input/output text and full token usage
+	traceUsage := resp.Usage
 	trace := &models.Trace{
 		ID:          uuid.New().String(),
 		AgentName:   agentName,
@@ -571,6 +580,9 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 		DurationMs:  duration.Milliseconds(),
 		TotalTokens: resp.Usage.TotalTokens,
 		CostUSD:     resp.Usage.EstimatedCost,
+		InputText:   req.Message,
+		OutputText:  resp.Content,
+		Usage:       &traceUsage,
 		Metadata: map[string]interface{}{
 			"provider": resp.Provider,
 			"model":    resp.Model,
@@ -579,6 +591,31 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: time.Now().UTC(),
 	}
 	h.Store.CreateTrace(r.Context(), trace)
+
+	// Persist a single LLM span for the test call
+	now := time.Now().UTC()
+	llmStart := now.Add(-duration)
+	reqJSON, _ := json.Marshal(messages)
+	respJSON, _ := json.Marshal(map[string]interface{}{
+		"content":         resp.Content,
+		"thinking_blocks": resp.ThinkingBlocks,
+	})
+	llmSpan := models.Span{
+		ID:         uuid.New().String(),
+		TraceID:    trace.ID,
+		Name:       fmt.Sprintf("llm.%s", resp.Model),
+		Kind:       models.SpanKindLLM,
+		Status:     "completed",
+		StartTime:  llmStart,
+		EndTime:    now,
+		DurationMs: duration.Milliseconds(),
+		Input:      reqJSON,
+		Output:     respJSON,
+		Usage:      &traceUsage,
+		Model:      resp.Model,
+		Provider:   resp.Provider,
+	}
+	h.Store.CreateSpan(r.Context(), &llmSpan)
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"agent":           agentName,
@@ -1420,6 +1457,20 @@ func (h *Handlers) RegisterMCPTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate required fields
+	if strings.TrimSpace(req.Name) == "" {
+		respondError(w, http.StatusBadRequest, "Tool 'name' is required")
+		return
+	}
+	// Validate transport if provided
+	if req.Transport != "" {
+		validTransports := map[string]bool{"http": true, "sse": true, "stdio": true}
+		if !validTransports[req.Transport] {
+			respondError(w, http.StatusBadRequest, "Invalid transport: must be 'http', 'sse', or 'stdio'")
+			return
+		}
+	}
+
 	kitchen := middleware.GetKitchen(r.Context())
 	req.ID = uuid.New().String()
 	req.Kitchen = kitchen
@@ -1441,6 +1492,59 @@ func (h *Handlers) RegisterMCPTool(w http.ResponseWriter, r *http.Request) {
 
 	log.Info().Str("tool", req.Name).Str("transport", req.Transport).Str("kitchen", kitchen).Msg("MCP tool registered")
 	respondJSON(w, http.StatusCreated, req)
+}
+
+// BulkRegisterMCPTools registers multiple MCP tools in a single request.
+// POST /api/v1/tools/bulk
+// Body: { "tools": [ { "name": "...", ... }, ... ] }
+func (h *Handlers) BulkRegisterMCPTools(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Tools []models.MCPTool `json:"tools"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if len(req.Tools) == 0 {
+		respondError(w, http.StatusBadRequest, "No tools provided")
+		return
+	}
+
+	kitchen := middleware.GetKitchen(r.Context())
+	now := time.Now().UTC()
+	created := make([]models.MCPTool, 0, len(req.Tools))
+
+	for i := range req.Tools {
+		tool := &req.Tools[i]
+		if tool.Name == "" {
+			respondError(w, http.StatusBadRequest, fmt.Sprintf("Tool at index %d missing 'name'", i))
+			return
+		}
+		tool.ID = uuid.New().String()
+		tool.Kitchen = kitchen
+		tool.Enabled = true
+		tool.CreatedAt = now
+		tool.UpdatedAt = now
+		if tool.Transport == "" {
+			tool.Transport = "http"
+		}
+		if len(tool.Capabilities) == 0 {
+			tool.Capabilities = []string{"tool"}
+		}
+
+		if err := h.Store.CreateTool(r.Context(), tool); err != nil {
+			respondError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create tool '%s': %s", tool.Name, err.Error()))
+			return
+		}
+		created = append(created, *tool)
+	}
+
+	log.Info().Int("count", len(created)).Str("kitchen", kitchen).Msg("Bulk MCP tools registered")
+	respondJSON(w, http.StatusCreated, map[string]interface{}{
+		"created": len(created),
+		"tools":   created,
+	})
 }
 
 func (h *Handlers) GetMCPTool(w http.ResponseWriter, r *http.Request) {
@@ -1549,7 +1653,16 @@ func (h *Handlers) ListTraces(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) GetTrace(w http.ResponseWriter, r *http.Request) {
 	traceID := chi.URLParam(r, "traceId")
-	trace, err := h.Store.GetTrace(r.Context(), traceID)
+
+	// If ?spans=true, return trace with its spans attached for waterfall visualization
+	includeSpans := r.URL.Query().Get("spans") == "true"
+	var trace *models.Trace
+	var err error
+	if includeSpans {
+		trace, err = h.Store.GetTraceWithSpans(r.Context(), traceID)
+	} else {
+		trace, err = h.Store.GetTrace(r.Context(), traceID)
+	}
 	if err != nil {
 		if _, ok := err.(*store.ErrNotFound); ok {
 			respondError(w, http.StatusNotFound, err.Error())
@@ -1559,6 +1672,49 @@ func (h *Handlers) GetTrace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respondJSON(w, http.StatusOK, trace)
+}
+
+// ListSpans returns all spans for a given trace, ordered by start_time.
+// GET /api/v1/traces/{traceId}/spans
+func (h *Handlers) ListSpans(w http.ResponseWriter, r *http.Request) {
+	traceID := chi.URLParam(r, "traceId")
+
+	// Verify trace exists
+	_, err := h.Store.GetTrace(r.Context(), traceID)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	spans, err := h.Store.ListSpansByTrace(r.Context(), traceID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if spans == nil {
+		spans = []models.Span{}
+	}
+	respondJSON(w, http.StatusOK, spans)
+}
+
+// GetSpan returns a single span by ID.
+// GET /api/v1/spans/{spanId}
+func (h *Handlers) GetSpan(w http.ResponseWriter, r *http.Request) {
+	spanID := chi.URLParam(r, "spanId")
+	span, err := h.Store.GetSpan(r.Context(), spanID)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	respondJSON(w, http.StatusOK, span)
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1771,17 +1927,19 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 			execCtx := context.Background()
 			response, execTrace, err := h.Executor.Execute(execCtx, agent, userMessage, resolved, nil, false)
 
-			// Record trace with result
+			// Record trace with result — enriched with input/output and full usage
 			status := "completed"
 			costUSD := 0.0
 			totalTokens := int64(0)
-			_ = response // final text response stored in trace metadata below
+			var usage *models.TokenUsage
 			if err != nil {
 				status = "failed"
 				log.Warn().Err(err).Str("agent", agentName).Str("task_id", taskID).Msg("A2A agent execution failed")
 			} else if execTrace != nil {
 				costUSD = execTrace.Usage.EstimatedCost
 				totalTokens = execTrace.Usage.TotalTokens
+				traceUsage := execTrace.Usage
+				usage = &traceUsage
 			}
 
 			trace := &models.Trace{
@@ -1791,14 +1949,21 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 				Status:      status,
 				TotalTokens: totalTokens,
 				CostUSD:     costUSD,
+				InputText:   userMessage,
+				OutputText:  response,
+				Usage:       usage,
 				Metadata: map[string]interface{}{
-					"source":   "a2a",
-					"task_id":  taskID,
-					"response": response,
+					"source":  "a2a",
+					"task_id": taskID,
 				},
 				CreatedAt: time.Now().UTC(),
 			}
 			h.Store.CreateTrace(execCtx, trace)
+
+			// Persist executor spans for waterfall visualization
+			if execTrace != nil {
+				h.persistExecutorSpans(execCtx, execTrace)
+			}
 		}()
 
 		// Return immediately with submitted status (async execution)
@@ -1824,9 +1989,9 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 		AgentName: "a2a-gateway",
 		Kitchen:   kitchen,
 		Status:    "submitted",
+		InputText: userMessage,
 		Metadata: map[string]interface{}{
-			"source":  "a2a",
-			"message": userMessage,
+			"source": "a2a",
 		},
 		CreatedAt: time.Now().UTC(),
 	}
@@ -2595,7 +2760,8 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Record trace in store
+	// Record trace in store — enriched with full token breakdown, input, and session
+	traceUsage := trace.Usage
 	traceRecord := &models.Trace{
 		ID:          trace.TraceID,
 		AgentName:   agentName,
@@ -2604,6 +2770,10 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		DurationMs:  trace.TotalMs,
 		TotalTokens: trace.Usage.TotalTokens,
 		CostUSD:     trace.Usage.EstimatedCost,
+		InputText:   req.Message,
+		OutputText:  response,
+		SessionID:   trace.SessionID,
+		Usage:       &traceUsage,
 		Metadata: map[string]interface{}{
 			"mode":  "managed",
 			"turns": len(trace.Turns),
@@ -2612,6 +2782,9 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: time.Now().UTC(),
 	}
 	h.Store.CreateTrace(r.Context(), traceRecord)
+
+	// Persist executor turns as hierarchical spans
+	h.persistExecutorSpans(r.Context(), trace)
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"agent":           agentName,
@@ -2622,6 +2795,153 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		"latency_ms":      trace.TotalMs,
 		"execution_trace": trace,
 	})
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── Span Persistence Helpers ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// persistExecutorSpans converts an executor.ExecutionTrace into hierarchical Span records
+// and persists them in the store. Creates:
+//   - One root "agent" span covering the entire execution
+//   - One "llm" span per turn (LLM call)
+//   - One "tool" span per tool call within that turn
+//
+// This enables LangSmith-style waterfall visualization over the full execution tree.
+func (h *Handlers) persistExecutorSpans(ctx context.Context, execTrace *executor.ExecutionTrace) {
+	if execTrace == nil || len(execTrace.Turns) == 0 {
+		return
+	}
+
+	traceID := execTrace.TraceID
+	now := time.Now().UTC()
+	execStart := now.Add(-time.Duration(execTrace.TotalMs) * time.Millisecond)
+
+	// Root agent span
+	rootSpanID := uuid.New().String()
+	agentUsage := execTrace.Usage
+	inputJSON, _ := json.Marshal(map[string]interface{}{
+		"agent":   execTrace.AgentName,
+		"kitchen": execTrace.Kitchen,
+	})
+	outputJSON, _ := json.Marshal(map[string]interface{}{
+		"turns":        len(execTrace.Turns),
+		"total_ms":     execTrace.TotalMs,
+		"total_tokens": execTrace.Usage.TotalTokens,
+	})
+
+	spans := []models.Span{
+		{
+			ID:         rootSpanID,
+			TraceID:    traceID,
+			Name:       execTrace.AgentName,
+			Kind:       models.SpanKindAgent,
+			Status:     "completed",
+			StartTime:  execStart,
+			EndTime:    now,
+			DurationMs: execTrace.TotalMs,
+			Input:      inputJSON,
+			Output:     outputJSON,
+			Usage:      &agentUsage,
+			Metadata: map[string]interface{}{
+				"session_id": execTrace.SessionID,
+			},
+		},
+	}
+
+	// Track cumulative offset for turn timing
+	turnOffset := execStart
+
+	for _, turn := range execTrace.Turns {
+		turnStart := turnOffset
+		turnEnd := turnStart.Add(time.Duration(turn.LatencyMs) * time.Millisecond)
+		turnOffset = turnEnd
+
+		// LLM span for this turn
+		llmSpanID := uuid.New().String()
+		turnUsage := turn.Usage
+
+		// Serialize the request messages as input
+		reqJSON, _ := json.Marshal(turn.Request)
+		respJSON, _ := json.Marshal(map[string]interface{}{
+			"content":         turn.Response,
+			"thinking_blocks": turn.ThinkingBlocks,
+			"tool_calls":      turn.ToolCalls,
+		})
+
+		llmSpan := models.Span{
+			ID:           llmSpanID,
+			TraceID:      traceID,
+			ParentSpanID: rootSpanID,
+			Name:         fmt.Sprintf("llm.turn_%d", turn.Number),
+			Kind:         models.SpanKindLLM,
+			Status:       "completed",
+			StartTime:    turnStart,
+			EndTime:      turnEnd,
+			DurationMs:   turn.LatencyMs,
+			Input:        reqJSON,
+			Output:       respJSON,
+			Usage:        &turnUsage,
+			Metadata: map[string]interface{}{
+				"turn_number": turn.Number,
+			},
+		}
+		spans = append(spans, llmSpan)
+
+		// Tool spans for each tool call in this turn
+		if len(turn.ToolCalls) > 0 {
+			// Distribute tool time evenly within the turn (approximation)
+			toolDuration := turn.LatencyMs / int64(len(turn.ToolCalls)+1)
+			toolStart := turnStart.Add(time.Duration(toolDuration) * time.Millisecond) // after LLM response
+
+			for i, tc := range turn.ToolCalls {
+				toolEnd := toolStart.Add(time.Duration(toolDuration) * time.Millisecond)
+
+				tcInputJSON, _ := json.Marshal(tc.Arguments)
+				var tcOutputJSON json.RawMessage
+				var toolStatus string = "completed"
+				var toolError string
+
+				// Match tool result
+				if i < len(turn.ToolResults) {
+					tr := turn.ToolResults[i]
+					tcOutputJSON, _ = json.Marshal(map[string]interface{}{
+						"content":  tr.Content,
+						"is_error": tr.IsError,
+					})
+					if tr.IsError {
+						toolStatus = "failed"
+						toolError = tr.Content
+					}
+				}
+
+				toolSpan := models.Span{
+					ID:           uuid.New().String(),
+					TraceID:      traceID,
+					ParentSpanID: llmSpanID,
+					Name:         tc.Name,
+					Kind:         models.SpanKindTool,
+					Status:       toolStatus,
+					StartTime:    toolStart,
+					EndTime:      toolEnd,
+					DurationMs:   toolDuration,
+					Input:        tcInputJSON,
+					Output:       tcOutputJSON,
+					Error:        toolError,
+					Metadata: map[string]interface{}{
+						"tool_call_id": tc.ID,
+					},
+				}
+				spans = append(spans, toolSpan)
+				toolStart = toolEnd
+			}
+		}
+	}
+
+	// Batch persist all spans
+	if err := h.Store.CreateSpans(ctx, spans); err != nil {
+		log.Warn().Err(err).Str("trace_id", traceID).Int("span_count", len(spans)).Msg("Failed to persist executor spans")
+	}
 }
 
 // ══════════════════════════════════════════════════════════════

@@ -19,12 +19,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/agentoven/agentoven/control-plane/internal/notify"
 	"github.com/agentoven/agentoven/control-plane/internal/store"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
+	"github.com/expr-lang/expr"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
@@ -47,6 +49,9 @@ type Engine struct {
 	// Human gate approvals: runID:stepName → channel
 	gatesMu sync.RWMutex
 	gates   map[string]chan bool
+
+	// Parent trace IDs: runID → parentTraceID (for linking step traces to recipe trace)
+	parentTraceIDs sync.Map
 }
 
 // NewEngine creates a new workflow execution engine.
@@ -202,6 +207,29 @@ func (e *Engine) executeAsync(ctx context.Context, run *models.RecipeRun, recipe
 		e.runsMu.Unlock()
 	}()
 
+	// Create a parent trace for the entire recipe run
+	recipeStart := time.Now().UTC()
+	parentTraceID := uuid.New().String()
+	parentTrace := &models.Trace{
+		ID:         parentTraceID,
+		AgentName:  recipe.Name,
+		RecipeName: recipe.Name,
+		Kitchen:    run.Kitchen,
+		Status:     "running",
+		Metadata: map[string]interface{}{
+			"run_id": run.ID,
+			"type":   "recipe",
+			"steps":  len(recipe.Steps),
+		},
+		CreatedAt: recipeStart,
+	}
+	if err := e.store.CreateTrace(ctx, parentTrace); err != nil {
+		log.Error().Err(err).Str("run_id", run.ID).Msg("Failed to create parent recipe trace")
+	}
+
+	// Store parentTraceID for linking step traces to the recipe trace
+	e.parentTraceIDs.Store(run.ID, parentTraceID)
+
 	steps := recipe.Steps
 	if len(steps) == 0 {
 		e.completeRun(run, nil, nil)
@@ -214,8 +242,17 @@ func (e *Engine) executeAsync(ctx context.Context, run *models.RecipeRun, recipe
 		stepMap[steps[i].Name] = &steps[i]
 	}
 
+	// Build reverse dependency map: step → steps that depend on it
+	dependents := make(map[string][]string) // parent → list of children
+	for _, step := range steps {
+		for _, dep := range step.DependsOn {
+			dependents[dep] = append(dependents[dep], step.Name)
+		}
+	}
+
 	// Track completed steps and their outputs
 	completed := make(map[string]*models.StepResult)
+	skipped := make(map[string]bool) // R8: steps skipped by routing
 	var completedMu sync.Mutex
 	var stepResults []models.StepResult
 
@@ -228,11 +265,14 @@ func (e *Engine) executeAsync(ctx context.Context, run *models.RecipeRun, recipe
 		default:
 		}
 
-		// Find steps that are ready to run (all deps satisfied, not yet completed)
+		// Find steps that are ready to run (all deps satisfied, not yet completed, not skipped)
 		var ready []*models.Step
 		completedMu.Lock()
 		for _, step := range steps {
 			if _, done := completed[step.Name]; done {
+				continue
+			}
+			if skipped[step.Name] {
 				continue
 			}
 			allDepsMet := true
@@ -250,7 +290,7 @@ func (e *Engine) executeAsync(ctx context.Context, run *models.RecipeRun, recipe
 		completedMu.Unlock()
 
 		if len(ready) == 0 {
-			// Check if all steps are done
+			// Check if all steps are done (completed + skipped)
 			completedMu.Lock()
 			allDone := len(completed) == len(steps)
 			completedMu.Unlock()
@@ -276,6 +316,18 @@ func (e *Engine) executeAsync(ctx context.Context, run *models.RecipeRun, recipe
 				completedMu.Lock()
 				completed[s.Name] = result
 				stepResults = append(stepResults, *result)
+
+				// R8: Routing skip-set propagation.
+				// If this step has branches and BranchTaken is set, skip
+				// all dependent steps that are NOT the taken branch.
+				if result.BranchTaken != "" && (s.Kind == models.StepRouter || len(s.Branches) > 0) {
+					children := dependents[s.Name]
+					for _, child := range children {
+						if child != result.BranchTaken {
+							e.skipStepTransitive(child, skipped, completed, dependents, stepMap, &stepResults)
+						}
+					}
+				}
 				completedMu.Unlock()
 
 				if result.Status == "failed" {
@@ -306,7 +358,66 @@ func (e *Engine) executeAsync(ctx context.Context, run *models.RecipeRun, recipe
 	e.completeRun(run, stepResults, output)
 }
 
-// executeStep runs a single step with retry support.
+// skipStepTransitive marks a step as skipped and propagates the skip to
+// downstream steps that depend ONLY on skipped/completed steps.
+// Must be called with completedMu held.
+func (e *Engine) skipStepTransitive(name string, skipped map[string]bool, completed map[string]*models.StepResult, dependents map[string][]string, stepMap map[string]*models.Step, stepResults *[]models.StepResult) {
+	if _, done := completed[name]; done {
+		return // already completed, nothing to skip
+	}
+	if skipped[name] {
+		return // already skipped
+	}
+
+	skipped[name] = true
+
+	// Create a skipped StepResult so downstream steps see this as "done"
+	sr := &models.StepResult{
+		StepName:   name,
+		Status:     "skipped",
+		StartedAt:  time.Now(),
+		DurationMs: 0,
+	}
+	if s, ok := stepMap[name]; ok {
+		sr.StepKind = string(s.Kind)
+		sr.AgentRef = s.AgentRef
+	}
+	completed[name] = sr
+	*stepResults = append(*stepResults, *sr)
+
+	log.Info().Str("step", name).Msg("⏭️  Step skipped (branch not taken)")
+
+	// Propagate: skip children whose ALL deps are now complete/skipped
+	// Only skip children that have no non-skipped, non-completed dependencies
+	for _, child := range dependents[name] {
+		if _, done := completed[child]; done {
+			continue
+		}
+		childStep, ok := stepMap[child]
+		if !ok {
+			continue
+		}
+		// Check if ALL parents of this child are either skipped or completed
+		allParentsResolved := true
+		allParentsSkipped := true
+		for _, dep := range childStep.DependsOn {
+			if _, ok := completed[dep]; !ok {
+				allParentsResolved = false
+				break
+			}
+			if !skipped[dep] {
+				allParentsSkipped = false
+			}
+		}
+		// Only skip if all parents are resolved AND at least one is skipped
+		// (if a step has a non-skipped completed parent, it should still run)
+		if allParentsResolved && allParentsSkipped {
+			e.skipStepTransitive(child, skipped, completed, dependents, stepMap, stepResults)
+		}
+	}
+}
+
+// executeStep runs a single step with retry support and optional looping.
 func (e *Engine) executeStep(ctx context.Context, run *models.RecipeRun, step *models.Step, completed map[string]*models.StepResult, mu *sync.Mutex) *models.StepResult {
 	start := time.Now()
 
@@ -319,84 +430,127 @@ func (e *Engine) executeStep(ctx context.Context, run *models.RecipeRun, step *m
 
 	maxRetries := step.MaxRetries
 
-	var lastErr error
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if attempt > 0 {
-			// Simple exponential backoff: 1s, 2s, 4s, ...
-			delay := time.Duration(1<<(attempt-1)) * time.Second
-			log.Info().
-				Str("step", step.Name).
-				Int("attempt", attempt+1).
-				Dur("delay", delay).
-				Msg("Retrying step")
+	// R8: Outer loop — repeat while LoopCondition is true (max MaxIterations).
+	// Inner loop — retry on error (max MaxRetries).
+	maxIter := 1
+	if step.LoopCondition != "" && step.MaxIterations > 0 {
+		maxIter = step.MaxIterations
+	}
 
-			select {
-			case <-ctx.Done():
-				result.Status = "canceled"
-				result.DurationMs = time.Since(start).Milliseconds()
-				return result
-			case <-time.After(delay):
+	for iteration := 0; iteration < maxIter; iteration++ {
+		var lastErr error
+		succeeded := false
+
+		for attempt := 0; attempt <= maxRetries; attempt++ {
+			if attempt > 0 {
+				delay := time.Duration(1<<(attempt-1)) * time.Second
+				log.Info().
+					Str("step", step.Name).
+					Int("attempt", attempt+1).
+					Dur("delay", delay).
+					Msg("Retrying step")
+
+				select {
+				case <-ctx.Done():
+					result.Status = "canceled"
+					result.DurationMs = time.Since(start).Milliseconds()
+					return result
+				case <-time.After(delay):
+				}
 			}
+
+			err := e.executeStepOnce(ctx, run, step, result, completed, mu)
+			if err == nil {
+				succeeded = true
+				break
+			}
+			lastErr = err
 		}
 
-		err := e.executeStepOnce(ctx, run, step, result, completed, mu)
-		if err == nil {
-			result.Status = "completed"
+		if !succeeded {
+			result.Status = "failed"
+			result.Error = lastErr.Error()
 			result.DurationMs = time.Since(start).Milliseconds()
 
-			// Dispatch step_completed notifications
+			// Dispatch step_failed notifications
 			if len(step.NotifyTools) > 0 && e.notifier != nil {
 				evt := notify.Event{
-					Type:       string(notify.EventStepCompleted),
+					Type:       string(notify.EventStepFailed),
 					RunID:      run.ID,
 					RecipeName: run.RecipeID,
 					StepName:   step.Name,
 					Kitchen:    run.Kitchen,
+					Payload:    map[string]interface{}{"error": lastErr.Error()},
 					Timestamp:  time.Now().UTC(),
 				}
 				result.NotifyResults = e.notifier.DispatchAll(ctx, run.Kitchen, step.NotifyTools, evt)
 			}
 
-			// Evaluate branches for routing
-			if len(step.Branches) > 0 {
-				branch := e.evaluateBranches(step, result)
-				if branch != "" {
-					result.BranchTaken = branch
-				}
-			}
-
-			log.Info().
+			log.Error().
 				Str("step", step.Name).
-				Str("kind", string(step.Kind)).
-				Int64("duration_ms", result.DurationMs).
-				Msg("✅ Step completed")
+				Err(lastErr).
+				Msg("❌ Step failed after retries")
 			return result
 		}
-		lastErr = err
+
+		// Step succeeded — check loop condition
+		if step.LoopCondition != "" && step.MaxIterations > 0 {
+			result.LoopIterations = iteration + 1
+			if result.Output != nil {
+				historyCopy := make(map[string]interface{})
+				for k, v := range result.Output {
+					historyCopy[k] = v
+				}
+				result.LoopHistory = append(result.LoopHistory, historyCopy)
+			}
+
+			shouldContinue, evalErr := evalExprBool(step.LoopCondition, result.Output)
+			if evalErr != nil {
+				log.Warn().Err(evalErr).Str("step", step.Name).Msg("Loop condition evaluation error, exiting loop")
+				break
+			}
+			if !shouldContinue {
+				log.Info().Str("step", step.Name).Int("iterations", iteration+1).Msg("🔄 Loop condition false, exiting loop")
+				break
+			}
+			log.Info().Str("step", step.Name).Int("iteration", iteration+1).Msg("🔄 Loop condition true, continuing iteration")
+			continue
+		}
+
+		// No loop — we're done
+		break
 	}
 
-	result.Status = "failed"
-	result.Error = lastErr.Error()
+	result.Status = "completed"
 	result.DurationMs = time.Since(start).Milliseconds()
 
-	// Dispatch step_failed notifications
+	// Dispatch step_completed notifications
 	if len(step.NotifyTools) > 0 && e.notifier != nil {
 		evt := notify.Event{
-			Type:       string(notify.EventStepFailed),
+			Type:       string(notify.EventStepCompleted),
 			RunID:      run.ID,
 			RecipeName: run.RecipeID,
 			StepName:   step.Name,
 			Kitchen:    run.Kitchen,
-			Payload:    map[string]interface{}{"error": lastErr.Error()},
 			Timestamp:  time.Now().UTC(),
 		}
 		result.NotifyResults = e.notifier.DispatchAll(ctx, run.Kitchen, step.NotifyTools, evt)
 	}
 
-	log.Error().
+	// Evaluate branches for routing
+	if len(step.Branches) > 0 {
+		branch := e.evaluateBranches(step, result)
+		if branch != "" {
+			result.BranchTaken = branch
+		}
+	}
+
+	log.Info().
 		Str("step", step.Name).
-		Err(lastErr).
-		Msg("❌ Step failed after retries")
+		Str("kind", string(step.Kind)).
+		Int64("duration_ms", result.DurationMs).
+		Int("loop_iterations", result.LoopIterations).
+		Msg("✅ Step completed")
 	return result
 }
 
@@ -434,6 +588,15 @@ func (e *Engine) executeStepOnce(ctx context.Context, run *models.RecipeRun, ste
 	case models.StepRAG:
 		return e.executeRAGStep(ctx, run, step, result, completed, mu)
 
+	case models.StepRouter:
+		return e.executeRouter(ctx, run, step, result, completed, mu)
+
+	case models.StepMap:
+		return e.executeMap(ctx, run, step, result, completed, mu)
+
+	case models.StepSubRecipe:
+		return e.executeSubRecipe(ctx, run, step, result, completed, mu)
+
 	default:
 		return fmt.Errorf("unknown step kind: %s", step.Kind)
 	}
@@ -441,6 +604,12 @@ func (e *Engine) executeStepOnce(ctx context.Context, run *models.RecipeRun, ste
 
 // executeAgentStep calls an agent via the A2A protocol.
 func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, step *models.Step, result *models.StepResult, completed map[string]*models.StepResult, mu *sync.Mutex) error {
+	// Extract parent trace ID for linking step traces to the recipe trace
+	var parentTID string
+	if v, ok := e.parentTraceIDs.Load(run.ID); ok {
+		parentTID, _ = v.(string)
+	}
+
 	agentRef := step.AgentRef
 	if agentRef == "" {
 		return fmt.Errorf("agent step '%s' has no agent_ref", step.Name)
@@ -504,21 +673,21 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 
 	resp, err := e.client.Do(httpReq)
 	if err != nil {
-		e.createStepTrace(ctx, kitchen, agentRef, run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", err.Error())
+		e.createStepTrace(ctx, kitchen, agentRef, run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", err.Error(), parentTID)
 		return fmt.Errorf("A2A request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var rpcResp map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
-		e.createStepTrace(ctx, kitchen, agentRef, run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", err.Error())
+		e.createStepTrace(ctx, kitchen, agentRef, run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", err.Error(), parentTID)
 		return fmt.Errorf("decode A2A response: %w", err)
 	}
 
 	// Check for RPC error
 	if rpcErr, ok := rpcResp["error"].(map[string]interface{}); ok {
 		errMsg := fmt.Sprintf("%v", rpcErr["message"])
-		e.createStepTrace(ctx, kitchen, agentRef, run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", errMsg)
+		e.createStepTrace(ctx, kitchen, agentRef, run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", errMsg, parentTID)
 		return fmt.Errorf("A2A error: %v", rpcErr["message"])
 	}
 
@@ -530,14 +699,15 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 	result.CostUSD = costUSD
 
 	// Create a trace record for this step
-	e.createStepTrace(ctx, kitchen, agentRef, run.RecipeID, run.ID, step.Name, "completed", stepStart, tokens, costUSD, outputText, "")
+	e.createStepTrace(ctx, kitchen, agentRef, run.RecipeID, run.ID, step.Name, "completed", stepStart, tokens, costUSD, outputText, "", parentTID)
 
 	result.Output = rpcResp
 	return nil
 }
 
 // createStepTrace persists a Trace record for a single agent/RAG step execution.
-func (e *Engine) createStepTrace(ctx context.Context, kitchen, agentName, recipeName, runID, stepName, status string, start time.Time, tokens int64, costUSD float64, outputText, errMsg string) {
+// If parentTraceID is set, it links this step trace to a parent recipe trace.
+func (e *Engine) createStepTrace(ctx context.Context, kitchen, agentName, recipeName, runID, stepName, status string, start time.Time, tokens int64, costUSD float64, outputText, errMsg string, parentTraceID ...string) {
 	durationMs := time.Since(start).Milliseconds()
 	trace := &models.Trace{
 		ID:          uuid.New().String(),
@@ -554,6 +724,9 @@ func (e *Engine) createStepTrace(ctx context.Context, kitchen, agentName, recipe
 			"step_name": stepName,
 		},
 		CreatedAt: time.Now().UTC(),
+	}
+	if len(parentTraceID) > 0 && parentTraceID[0] != "" {
+		trace.ParentTraceID = parentTraceID[0]
 	}
 	if errMsg != "" {
 		trace.Metadata["error"] = errMsg
@@ -623,6 +796,12 @@ func extractA2AMetrics(rpcResp map[string]interface{}) (outputText string, token
 // contains the query text). If "question_from" is not set, the recipe
 // input is serialised as the question.
 func (e *Engine) executeRAGStep(ctx context.Context, run *models.RecipeRun, step *models.Step, result *models.StepResult, completed map[string]*models.StepResult, mu *sync.Mutex) error {
+	// Extract parent trace ID for linking step traces to the recipe trace
+	var parentTID string
+	if v, ok := e.parentTraceIDs.Load(run.ID); ok {
+		parentTID, _ = v.(string)
+	}
+
 	// Determine the question text
 	question := ""
 	if step.Config != nil {
@@ -681,26 +860,26 @@ func (e *Engine) executeRAGStep(ctx context.Context, run *models.RecipeRun, step
 
 	resp, err := e.client.Do(httpReq)
 	if err != nil {
-		e.createStepTrace(ctx, run.Kitchen, "rag-pipeline", run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", err.Error())
+		e.createStepTrace(ctx, run.Kitchen, "rag-pipeline", run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", err.Error(), parentTID)
 		return fmt.Errorf("RAG request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var ragResp map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&ragResp); err != nil {
-		e.createStepTrace(ctx, run.Kitchen, "rag-pipeline", run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", err.Error())
+		e.createStepTrace(ctx, run.Kitchen, "rag-pipeline", run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", err.Error(), parentTID)
 		return fmt.Errorf("decode RAG response: %w", err)
 	}
 
 	if resp.StatusCode >= 400 {
 		errMsg, _ := ragResp["error"].(string)
-		e.createStepTrace(ctx, run.Kitchen, "rag-pipeline", run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", errMsg)
+		e.createStepTrace(ctx, run.Kitchen, "rag-pipeline", run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", errMsg, parentTID)
 		return fmt.Errorf("RAG query failed (status %d): %s", resp.StatusCode, errMsg)
 	}
 
 	// Extract answer text from RAG response
 	answerText, _ := ragResp["answer"].(string)
-	e.createStepTrace(ctx, run.Kitchen, "rag-pipeline", run.RecipeID, run.ID, step.Name, "completed", stepStart, 0, 0, answerText, "")
+	e.createStepTrace(ctx, run.Kitchen, "rag-pipeline", run.RecipeID, run.ID, step.Name, "completed", stepStart, 0, 0, answerText, "", parentTID)
 
 	result.Output = ragResp
 	return nil
@@ -853,37 +1032,56 @@ func (e *Engine) resolveGate(ctx context.Context, run *models.RecipeRun, step *m
 	return nil
 }
 
-// executeCondition evaluates a condition and records which branch to take.
+// executeCondition evaluates an expression and records which branch to take.
 func (e *Engine) executeCondition(ctx context.Context, step *models.Step, result *models.StepResult, completed map[string]*models.StepResult, mu *sync.Mutex) error {
-	// Condition config should specify:
-	//   "expression": "step_name.output.field == value"
-	//   "true_branch": "step_a"
-	//   "false_branch": "step_b"
 	if step.Config == nil {
 		return fmt.Errorf("condition step '%s' has no config", step.Name)
 	}
 
-	var config map[string]interface{}
-	configBytes, _ := json.Marshal(step.Config)
-	json.Unmarshal(configBytes, &config)
+	expression, _ := step.Config["expression"].(string)
 
-	// Simple evaluation: check if a dep output exists
-	conditionMet := false
+	// Build environment from dependency outputs
+	env := make(map[string]interface{})
 	mu.Lock()
 	for _, dep := range step.DependsOn {
-		if sr, ok := completed[dep]; ok && sr.Status == "completed" {
-			conditionMet = true
-			break
+		if sr, ok := completed[dep]; ok && sr.Output != nil {
+			env[dep] = sr.Output
+			// Also flatten top-level keys for convenience
+			for k, v := range sr.Output {
+				env[k] = v
+			}
 		}
 	}
 	mu.Unlock()
 
+	conditionMet := false
+	if expression != "" {
+		val, err := evalExprBool(expression, env)
+		if err != nil {
+			log.Warn().Err(err).Str("step", step.Name).Str("expression", expression).Msg("Condition expression evaluation error")
+		} else {
+			conditionMet = val
+		}
+	} else {
+		// Fallback: check if any dep completed successfully
+		mu.Lock()
+		for _, dep := range step.DependsOn {
+			if sr, ok := completed[dep]; ok && sr.Status == "completed" {
+				conditionMet = true
+				break
+			}
+		}
+		mu.Unlock()
+	}
+
+	branch := "true"
+	if !conditionMet {
+		branch = "false"
+	}
+
 	result.Output = map[string]interface{}{
 		"condition_met": conditionMet,
-		"branch":        "true",
-	}
-	if !conditionMet {
-		result.Output["branch"] = "false"
+		"branch":        branch,
 	}
 
 	return nil
@@ -932,6 +1130,9 @@ func (e *Engine) completeRun(run *models.RecipeRun, stepResults []models.StepRes
 		log.Error().Err(err).Str("run_id", run.ID).Msg("Failed to update completed run")
 	}
 
+	// Finalize the parent recipe trace
+	e.finalizeParentTrace(run, "completed", totalTokens, totalCostUSD, "")
+
 	log.Info().
 		Str("run_id", run.ID).
 		Int64("duration_ms", run.DurationMs).
@@ -953,10 +1154,55 @@ func (e *Engine) failRun(run *models.RecipeRun, stepResults []models.StepResult,
 		log.Error().Err(err).Str("run_id", run.ID).Msg("Failed to update failed run")
 	}
 
+	// Aggregate whatever tokens were used before failure
+	var totalTokens int64
+	var totalCostUSD float64
+	for _, sr := range stepResults {
+		totalTokens += sr.Tokens
+		totalCostUSD += sr.CostUSD
+	}
+
+	// Finalize the parent recipe trace with error status
+	e.finalizeParentTrace(run, "error", totalTokens, totalCostUSD, errMsg)
+
 	log.Error().
 		Str("run_id", run.ID).
 		Str("error", errMsg).
 		Msg("💥 Recipe execution failed")
+}
+
+// finalizeParentTrace updates the parent recipe trace with final status, duration, and totals.
+func (e *Engine) finalizeParentTrace(run *models.RecipeRun, status string, totalTokens int64, totalCostUSD float64, errMsg string) {
+	v, ok := e.parentTraceIDs.LoadAndDelete(run.ID)
+	if !ok {
+		return
+	}
+	parentTID, _ := v.(string)
+	if parentTID == "" {
+		return
+	}
+
+	ctx := context.Background()
+	trace, err := e.store.GetTrace(ctx, parentTID)
+	if err != nil {
+		log.Error().Err(err).Str("trace_id", parentTID).Msg("Failed to get parent recipe trace for finalization")
+		return
+	}
+
+	trace.Status = status
+	trace.DurationMs = run.DurationMs
+	trace.TotalTokens = totalTokens
+	trace.CostUSD = totalCostUSD
+	trace.Usage = &models.TokenUsage{
+		TotalTokens: totalTokens,
+	}
+	if errMsg != "" {
+		trace.Metadata["error"] = errMsg
+	}
+
+	if err := e.store.UpdateTrace(ctx, trace); err != nil {
+		log.Error().Err(err).Str("trace_id", parentTID).Msg("Failed to finalize parent recipe trace")
+	}
 }
 
 // GetPendingGates returns the list of pending human gates for a run.
@@ -974,11 +1220,9 @@ func (e *Engine) GetPendingGates(runID string) []string {
 	return pending
 }
 
-// evaluateBranches checks step branches against the step's output.
-// Uses simple JSON-path-style matching: each branch condition is
-// "output_key == value" or "output_key != value".
-// Returns the next step name from the first matching branch,
-// or the step's DefaultNext if no branch matches.
+// evaluateBranches checks step branches against the step's output using
+// expr-lang/expr for expression evaluation. Returns the NextStep from the
+// first matching branch, or DefaultNext if no branch matches.
 func (e *Engine) evaluateBranches(step *models.Step, result *models.StepResult) string {
 	if result.Output == nil {
 		if step.DefaultNext != "" {
@@ -988,7 +1232,15 @@ func (e *Engine) evaluateBranches(step *models.Step, result *models.StepResult) 
 	}
 
 	for _, branch := range step.Branches {
-		if matchCondition(branch.Condition, result.Output) {
+		matched, err := evalExprBool(branch.Condition, result.Output)
+		if err != nil {
+			log.Warn().Err(err).
+				Str("step", step.Name).
+				Str("condition", branch.Condition).
+				Msg("Branch condition evaluation error, skipping branch")
+			continue
+		}
+		if matched {
 			log.Debug().
 				Str("step", step.Name).
 				Str("condition", branch.Condition).
@@ -1004,74 +1256,350 @@ func (e *Engine) evaluateBranches(step *models.Step, result *models.StepResult) 
 	return ""
 }
 
-// matchCondition evaluates a simple condition against output data.
-// Supports:
-//   - "key == value"    (string equality)
-//   - "key != value"    (string inequality)
-//   - "key"             (key exists and is truthy)
-//   - "status == completed"
-//
-// For more complex conditions, we can integrate expr-lang/expr later.
-func matchCondition(condition string, output map[string]interface{}) bool {
-	// Try "key == value"
-	for _, op := range []string{"==", "!="} {
-		parts := splitCondition(condition, op)
-		if len(parts) == 2 {
-			key := trimSpace(parts[0])
-			expected := trimSpace(parts[1])
+// ── Expression Engine (expr-lang/expr) ─────────────────────
 
-			actual, ok := output[key]
-			if !ok {
-				return op == "!="
-			}
-
-			actualStr := fmt.Sprintf("%v", actual)
-			if op == "==" {
-				return actualStr == expected
-			}
-			return actualStr != expected
-		}
+// evalExprBool evaluates an expression against an environment map and returns
+// a boolean result. The expression can use any syntax supported by expr-lang/expr:
+//   - Property access: category == "billing", output.score >= 4
+//   - Boolean operators: a && b, a || b, !a
+//   - Comparisons: ==, !=, <, >, <=, >=
+//   - String operations: contains(name, "test"), startsWith(name, "pre")
+//   - Membership: category in ["billing", "technical"]
+func evalExprBool(expression string, env map[string]interface{}) (bool, error) {
+	if expression == "" {
+		return false, nil
 	}
 
-	// Simple truthy check — key exists and is not false/nil/empty
-	key := trimSpace(condition)
-	val, ok := output[key]
+	program, err := expr.Compile(expression, expr.AsBool())
+	if err != nil {
+		return false, fmt.Errorf("compile expression %q: %w", expression, err)
+	}
+
+	output, err := expr.Run(program, env)
+	if err != nil {
+		return false, fmt.Errorf("evaluate expression %q: %w", expression, err)
+	}
+
+	result, ok := output.(bool)
 	if !ok {
-		return false
+		return false, fmt.Errorf("expression %q did not return bool, got %T", expression, output)
 	}
-	switch v := val.(type) {
-	case bool:
-		return v
-	case string:
-		return v != ""
-	case nil:
-		return false
-	default:
-		return true
-	}
+	return result, nil
 }
 
-func splitCondition(s, sep string) []string {
-	idx := -1
-	for i := 0; i <= len(s)-len(sep); i++ {
-		if s[i:i+len(sep)] == sep {
-			idx = i
-			break
+// resolveJSONPath traverses a dot-separated path (e.g. "results.documents")
+// into a nested map and returns the value at that path.
+func resolveJSONPath(data map[string]interface{}, path string) (interface{}, bool) {
+	parts := strings.Split(path, ".")
+	var current interface{} = data
+
+	for _, part := range parts {
+		m, ok := current.(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		current, ok = m[part]
+		if !ok {
+			return nil, false
 		}
 	}
-	if idx < 0 {
+	return current, true
+}
+
+// ── Router Step ────────────────────────────────────────────
+
+// executeRouter calls the router agent (if set), evaluates branches against
+// the agent's output, and sets BranchTaken. The scheduler in executeAsync
+// uses BranchTaken to skip non-selected downstream steps.
+func (e *Engine) executeRouter(ctx context.Context, run *models.RecipeRun, step *models.Step, result *models.StepResult, completed map[string]*models.StepResult, mu *sync.Mutex) error {
+	// If the router has an agent, call it to get the routing output
+	if step.AgentRef != "" {
+		if err := e.executeAgentStep(ctx, run, step, result, completed, mu); err != nil {
+			return err
+		}
+	} else {
+		// No agent — use dependency outputs as the routing input
+		env := make(map[string]interface{})
+		mu.Lock()
+		for _, dep := range step.DependsOn {
+			if sr, ok := completed[dep]; ok && sr.Output != nil {
+				for k, v := range sr.Output {
+					env[k] = v
+				}
+			}
+		}
+		mu.Unlock()
+		result.Output = env
+	}
+
+	// Evaluate branches — the scheduler reads BranchTaken to propagate skips
+	if len(step.Branches) > 0 {
+		branch := e.evaluateBranches(step, result)
+		if branch != "" {
+			result.BranchTaken = branch
+		}
+	}
+
+	return nil
+}
+
+// ── Map / Iteration Step ──────────────────────────────────
+
+// executeMap extracts an array from an upstream step's output and runs the
+// referenced agent once per item, collecting sub-results.
+func (e *Engine) executeMap(ctx context.Context, run *models.RecipeRun, step *models.Step, result *models.StepResult, completed map[string]*models.StepResult, mu *sync.Mutex) error {
+	if step.AgentRef == "" {
+		return fmt.Errorf("map step '%s' has no agent_ref", step.Name)
+	}
+	if step.SourcePath == "" {
+		return fmt.Errorf("map step '%s' has no source_path", step.Name)
+	}
+	if len(step.DependsOn) == 0 {
+		return fmt.Errorf("map step '%s' has no dependencies to read items from", step.Name)
+	}
+
+	// Find the array to iterate over
+	var items []interface{}
+	mu.Lock()
+	for _, dep := range step.DependsOn {
+		if sr, ok := completed[dep]; ok && sr.Output != nil {
+			val, found := resolveJSONPath(sr.Output, step.SourcePath)
+			if found {
+				if arr, ok := val.([]interface{}); ok {
+					items = arr
+					break
+				}
+			}
+		}
+	}
+	mu.Unlock()
+
+	if len(items) == 0 {
+		result.Output = map[string]interface{}{"items_processed": 0}
+		result.SubResults = nil
+		result.ItemCount = 0
 		return nil
 	}
-	return []string{s[:idx], s[idx+len(sep):]}
+
+	result.ItemCount = len(items)
+
+	// Determine concurrency
+	maxConc := len(items)
+	if step.MaxConcurrency > 0 && step.MaxConcurrency < maxConc {
+		maxConc = step.MaxConcurrency
+	}
+
+	// Semaphore for bounded concurrency
+	sem := make(chan struct{}, maxConc)
+	subResults := make([]models.StepResult, len(items))
+	var wg sync.WaitGroup
+	var mapErr error
+	var mapErrOnce sync.Once
+
+	onError := "continue" // default
+	if step.Config != nil {
+		if oe, ok := step.Config["on_error"].(string); ok {
+			onError = oe
+		}
+	}
+
+	for i, item := range items {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx int, itemData interface{}) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			subResult := &models.StepResult{
+				StepName:  fmt.Sprintf("%s[%d]", step.Name, idx),
+				StepKind:  "agent",
+				AgentRef:  step.AgentRef,
+				StartedAt: time.Now(),
+			}
+
+			// Build a synthetic completed map with just the item
+			itemCompleted := make(map[string]*models.StepResult)
+			var itemMu sync.Mutex
+			itemCompleted["_item"] = &models.StepResult{
+				StepName: "_item",
+				Status:   "completed",
+				Output: map[string]interface{}{
+					"item":  itemData,
+					"index": idx,
+				},
+			}
+			// Also include original deps
+			mu.Lock()
+			for k, v := range completed {
+				itemCompleted[k] = v
+			}
+			mu.Unlock()
+
+			// Create a synthetic step for the per-item agent call
+			itemStep := &models.Step{
+				Name:      fmt.Sprintf("%s[%d]", step.Name, idx),
+				Kind:      models.StepAgent,
+				AgentRef:  step.AgentRef,
+				DependsOn: append([]string{"_item"}, step.DependsOn...),
+			}
+
+			err := e.executeAgentStep(ctx, run, itemStep, subResult, itemCompleted, &itemMu)
+			if err != nil {
+				subResult.Status = "failed"
+				subResult.Error = err.Error()
+				if onError == "fail_fast" {
+					mapErrOnce.Do(func() { mapErr = err })
+				}
+			} else {
+				subResult.Status = "completed"
+			}
+			subResult.DurationMs = time.Since(subResult.StartedAt).Milliseconds()
+			subResults[idx] = *subResult
+		}(i, item)
+	}
+	wg.Wait()
+
+	result.SubResults = subResults
+
+	// Aggregate outputs
+	outputs := make([]interface{}, 0, len(subResults))
+	var totalTokens int64
+	var totalCost float64
+	for _, sr := range subResults {
+		outputs = append(outputs, sr.Output)
+		totalTokens += sr.Tokens
+		totalCost += sr.CostUSD
+	}
+	result.Output = map[string]interface{}{
+		"items_processed": len(items),
+		"results":         outputs,
+	}
+	result.Tokens = totalTokens
+	result.CostUSD = totalCost
+
+	if mapErr != nil {
+		return mapErr
+	}
+	return nil
 }
 
-func trimSpace(s string) string {
-	start, end := 0, len(s)
-	for start < end && (s[start] == ' ' || s[start] == '\t') {
-		start++
+// ── Sub-Recipe / Hierarchy Step ───────────────────────────
+
+// maxSubRecipeDepth limits nesting to prevent infinite recursion.
+const maxSubRecipeDepth = 5
+
+// executeSubRecipe invokes another recipe as a nested workflow.
+func (e *Engine) executeSubRecipe(ctx context.Context, run *models.RecipeRun, step *models.Step, result *models.StepResult, completed map[string]*models.StepResult, mu *sync.Mutex) error {
+	if step.RecipeRef == "" {
+		return fmt.Errorf("sub_recipe step '%s' has no recipe_ref", step.Name)
 	}
-	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
-		end--
+
+	// Check recursion depth
+	depth := getSubRecipeDepth(ctx)
+	if depth >= maxSubRecipeDepth {
+		return fmt.Errorf("sub_recipe step '%s' exceeded max nesting depth (%d)", step.Name, maxSubRecipeDepth)
 	}
-	return s[start:end]
+
+	// Look up the sub-recipe
+	subRecipe, err := e.store.GetRecipe(ctx, run.Kitchen, step.RecipeRef)
+	if err != nil {
+		return fmt.Errorf("sub_recipe '%s' lookup failed: %w", step.RecipeRef, err)
+	}
+
+	// Build input from InputMapping
+	subInput := make(map[string]interface{})
+	if run.Input != nil {
+		subInput["parent_input"] = run.Input
+	}
+	mu.Lock()
+	for _, dep := range step.DependsOn {
+		if sr, ok := completed[dep]; ok && sr.Output != nil {
+			subInput[dep] = sr.Output
+		}
+	}
+	mu.Unlock()
+
+	// Apply input mapping if provided
+	if step.InputMapping != nil {
+		mapped := make(map[string]interface{})
+		for targetKey, sourcePath := range step.InputMapping {
+			if val, ok := resolveJSONPath(subInput, sourcePath); ok {
+				mapped[targetKey] = val
+			}
+		}
+		subInput = mapped
+	}
+
+	// Execute the sub-recipe synchronously (with incremented depth)
+	subCtx := withSubRecipeDepth(ctx, depth+1)
+	subRunID := uuid.New().String()
+
+	subRun := &models.RecipeRun{
+		ID:          subRunID,
+		RecipeID:    subRecipe.ID,
+		Kitchen:     run.Kitchen,
+		Status:      models.RecipeRunRunning,
+		Input:       subInput,
+		ParentRunID: run.ID,
+		StartedAt:   time.Now().UTC(),
+	}
+
+	if err := e.store.CreateRecipeRun(ctx, subRun); err != nil {
+		return fmt.Errorf("create sub-recipe run: %w", err)
+	}
+
+	result.SubRunID = subRunID
+
+	log.Info().
+		Str("parent_run", run.ID).
+		Str("sub_run", subRunID).
+		Str("sub_recipe", step.RecipeRef).
+		Int("depth", depth+1).
+		Msg("🔀 Starting sub-recipe execution")
+
+	// Run synchronously (blocking) so the parent step waits
+	e.executeAsync(subCtx, subRun, subRecipe)
+
+	// Read the completed sub-run
+	completedSubRun, err := e.store.GetRecipeRun(ctx, subRunID)
+	if err != nil {
+		return fmt.Errorf("read sub-recipe run result: %w", err)
+	}
+
+	if completedSubRun.Status == models.RecipeRunFailed {
+		return fmt.Errorf("sub-recipe '%s' failed: %s", step.RecipeRef, completedSubRun.Error)
+	}
+
+	// Apply output mapping if provided
+	output := completedSubRun.Output
+	if step.OutputMapping != nil && output != nil {
+		mapped := make(map[string]interface{})
+		for targetKey, sourcePath := range step.OutputMapping {
+			if val, ok := resolveJSONPath(output, sourcePath); ok {
+				mapped[targetKey] = val
+			}
+		}
+		output = mapped
+	}
+
+	result.Output = output
+	result.Tokens = completedSubRun.TotalTokens
+	result.CostUSD = completedSubRun.TotalCostUSD
+
+	return nil
+}
+
+// ── Sub-recipe depth tracking via context ────────────────
+
+type subRecipeDepthKey struct{}
+
+func getSubRecipeDepth(ctx context.Context) int {
+	if v, ok := ctx.Value(subRecipeDepthKey{}).(int); ok {
+		return v
+	}
+	return 0
+}
+
+func withSubRecipeDepth(ctx context.Context, depth int) context.Context {
+	return context.WithValue(ctx, subRecipeDepthKey{}, depth)
 }
