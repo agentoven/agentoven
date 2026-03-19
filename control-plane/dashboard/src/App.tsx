@@ -7,6 +7,7 @@ import { PromptsPage } from './pages/Prompts';
 import { ProvidersPage } from './pages/Providers';
 import { ToolsPage } from './pages/Tools';
 import { TracesPage } from './pages/Traces';
+import { TraceDetailPage } from './pages/TraceDetail';
 import { OverviewPage } from './pages/Overview';
 import { EmbeddingsPage } from './pages/Embeddings';
 import { VectorStoresPage } from './pages/VectorStores';
@@ -32,6 +33,7 @@ function App() {
           <Route path="/catalog" element={<CatalogPage />} />
           <Route path="/tools" element={<ToolsPage />} />
           <Route path="/traces" element={<TracesPage />} />
+          <Route path="/traces/:traceId" element={<TraceDetailPage />} />
           <Route path="/embeddings" element={<EmbeddingsPage />} />
           <Route path="/vectorstores" element={<VectorStoresPage />} />
           <Route path="/rag" element={<RAGPipelinesPage />} />

@@ -25,10 +25,28 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// ctxKeySkipTrace is used by the executor to suppress router-level trace creation.
+// When the executor calls Route(), it sets this key so the router doesn't create
+// orphaned flat traces — the executor persists spans with full hierarchy instead.
+type ctxKeySkipTrace struct{}
+
+// ContextSkipTrace returns a context that tells the router to skip trace creation.
+// Used by the executor to prevent orphaned router traces when the executor
+// already persists rich hierarchical spans.
+func ContextSkipTrace(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ctxKeySkipTrace{}, true)
+}
+
+// shouldSkipTrace checks if trace creation should be skipped for this context.
+func shouldSkipTrace(ctx context.Context) bool {
+	v, _ := ctx.Value(ctxKeySkipTrace{}).(bool)
+	return v
+}
+
 // ModelRouter routes LLM requests to configured providers.
 type ModelRouter struct {
-	store   store.Store
-	client  *http.Client
+	store  store.Store
+	client *http.Client
 
 	// Round-robin counter (atomic)
 	rrCounter uint64
@@ -591,8 +609,8 @@ func (mr *ModelRouter) callProvider(ctx context.Context, provider *models.ModelP
 // ── OpenAI / Azure OpenAI Provider ──────────────────────────
 
 type openAIRequest struct {
-	Model    string                `json:"model"`
-	Messages []models.ChatMessage  `json:"messages"`
+	Model    string               `json:"model"`
+	Messages []models.ChatMessage `json:"messages"`
 }
 
 type openAIResponse struct {
@@ -694,15 +712,15 @@ func (mr *ModelRouter) callOpenAI(ctx context.Context, provider *models.ModelPro
 // ── Anthropic Provider ──────────────────────────────────────
 
 type anthropicRequest struct {
-	Model     string                `json:"model"`
-	Messages  []models.ChatMessage  `json:"messages"`
-	MaxTokens int                   `json:"max_tokens"`
+	Model     string               `json:"model"`
+	Messages  []models.ChatMessage `json:"messages"`
+	MaxTokens int                  `json:"max_tokens"`
 }
 
 type anthropicResponse struct {
 	ID      string `json:"id"`
 	Content []struct {
-		Type     string `json:"type"`      // "text", "thinking", "tool_use"
+		Type     string `json:"type"` // "text", "thinking", "tool_use"
 		Text     string `json:"text"`
 		Thinking string `json:"thinking"` // Anthropic extended thinking content
 	} `json:"content"`
@@ -1037,9 +1055,9 @@ func (mr *ModelRouter) callOpenAITest(ctx context.Context, provider *models.Mode
 	// and fall back to max_tokens for Azure and older models.
 	type testReq struct {
 		Model               string               `json:"model"`
-		Messages            []models.ChatMessage  `json:"messages"`
-		MaxTokens           *int                  `json:"max_tokens,omitempty"`
-		MaxCompletionTokens *int                  `json:"max_completion_tokens,omitempty"`
+		Messages            []models.ChatMessage `json:"messages"`
+		MaxTokens           *int                 `json:"max_tokens,omitempty"`
+		MaxCompletionTokens *int                 `json:"max_completion_tokens,omitempty"`
 	}
 
 	limit := 5
@@ -1135,7 +1153,13 @@ func (mr *ModelRouter) callAnthropicTest(ctx context.Context, provider *models.M
 }
 
 // recordTrace creates a trace record for the routed request.
+// Skipped when called from the executor (ContextSkipTrace) since the executor
+// persists rich hierarchical spans instead of flat router traces.
 func (mr *ModelRouter) recordTrace(ctx context.Context, req *models.RouteRequest, resp *models.RouteResponse) {
+	if shouldSkipTrace(ctx) {
+		return
+	}
+
 	kitchen := req.Kitchen
 	if kitchen == "" {
 		kitchen = "default"
@@ -1172,12 +1196,12 @@ func (mr *ModelRouter) recordTrace(ctx context.Context, req *models.RouteRequest
 
 // Known cost per 1K tokens (USD) — sensible defaults
 var defaultCosts = map[string]map[string]float64{
-	"gpt-4o":           {"input": 0.0025, "output": 0.01},
-	"gpt-4o-mini":      {"input": 0.00015, "output": 0.0006},
-	"gpt-4-turbo":      {"input": 0.01, "output": 0.03},
-	"claude-sonnet-4-20250514":    {"input": 0.003, "output": 0.015},
-	"claude-3-5-haiku-20241022":   {"input": 0.001, "output": 0.005},
-	"claude-opus-4-20250514":     {"input": 0.015, "output": 0.075},
+	"gpt-4o":                    {"input": 0.0025, "output": 0.01},
+	"gpt-4o-mini":               {"input": 0.00015, "output": 0.0006},
+	"gpt-4-turbo":               {"input": 0.01, "output": 0.03},
+	"claude-sonnet-4-20250514":  {"input": 0.003, "output": 0.015},
+	"claude-3-5-haiku-20241022": {"input": 0.001, "output": 0.005},
+	"claude-opus-4-20250514":    {"input": 0.015, "output": 0.075},
 }
 
 func (mr *ModelRouter) getModelCost(provider *models.ModelProvider, model, direction string) float64 {

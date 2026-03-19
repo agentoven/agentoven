@@ -200,12 +200,15 @@ func (e *Executor) Execute(ctx context.Context, agent *models.Agent, userMessage
 			routeReq.SessionID = session.ID
 		}
 
-		// Use backup provider failover if configured on the agent
+		// Use backup provider failover if configured on the agent.
+		// Set skip-trace context so the router doesn't create orphaned flat traces —
+		// the handler persists rich hierarchical spans from ExecutionTrace instead.
+		routeCtx := router.ContextSkipTrace(ctx)
 		var routeResp *models.RouteResponse
 		if agent.BackupProvider != "" {
-			routeResp, err = e.router.RouteWithBackup(ctx, routeReq, agent.BackupProvider, agent.BackupModel)
+			routeResp, err = e.router.RouteWithBackup(routeCtx, routeReq, agent.BackupProvider, agent.BackupModel)
 		} else {
-			routeResp, err = e.router.Route(ctx, routeReq)
+			routeResp, err = e.router.Route(routeCtx, routeReq)
 		}
 		if err != nil {
 			return "", trace, fmt.Errorf("model router call failed (turn %d): %w", turn, err)
@@ -514,7 +517,8 @@ func (e *Executor) summarizeMessages(ctx context.Context, agent *models.Agent, m
 		AgentRef: agent.Name + "_summarizer",
 	}
 
-	resp, err := e.router.Route(ctx, routeReq)
+	// Suppress router trace — summary calls are internal, not user-facing.
+	resp, err := e.router.Route(router.ContextSkipTrace(ctx), routeReq)
 	if err != nil {
 		log.Warn().Err(err).Str("agent", agent.Name).Msg("Summary generation failed, using truncation fallback")
 		text := sb.String()

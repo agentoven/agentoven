@@ -470,6 +470,21 @@ impl AgentOvenClient {
         Ok(resp.json().await?)
     }
 
+    /// Bulk-add multiple MCP tools in one request.
+    pub async fn bulk_add_tools(
+        &self,
+        payload: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let url = self.url("/api/v1/tools/bulk");
+        let resp = self
+            .authed_request(self.http.post(url))
+            .json(&payload)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
     /// Get a specific tool.
     pub async fn get_tool(&self, name: &str) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/tools/{name}"));

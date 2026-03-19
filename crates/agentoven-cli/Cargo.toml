@@ -25,6 +25,7 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
+uuid = { workspace = true }
 
 # CLI-specific
 colored = "2"
@@ -33,6 +34,7 @@ indicatif = "0.17"
 tabled = "0.16"
 dirs = "5"
 toml = "0.8"
+serde_yaml = "0.9"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

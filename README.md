@@ -15,7 +15,8 @@
 <p align="center">
   <a href="https://docs.agentoven.dev">Documentation</a> •
   <a href="https://docs.agentoven.dev/quickstart">Quickstart</a> •
-  <a href="https://github.com/agentoven/agentoven/discussions">Community</a> •
+  <a href="https://discord.gg/WxTn6rtpzT">Discord</a> •
+  <a href="https://github.com/agentoven/agentoven/discussions">Discussions</a> •
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
@@ -133,23 +134,38 @@ agentoven agent test summarizer --interactive
 
 ### Or use the Python SDK
 
-```python
-from agentoven import Agent, Ingredient, AgentOvenClient
+**Simple — single model, no extras:**
 
-# Define your agent with ingredients
+```python
+from agentoven import Agent, AgentOvenClient
+
 agent = Agent("summarizer",
     description="Summarizes documents with citations",
     model_provider="my-openai",
     model_name="gpt-4o",
     system_prompt="You are a document summarizer.",
+)
+
+client = AgentOvenClient()
+client.register(agent)
+client.bake(agent, environment="production")
+```
+
+**Advanced — multi-model fallback, tools, and MCP:**
+
+```python
+from agentoven import Agent, Ingredient, AgentOvenClient
+
+agent = Agent("summarizer",
+    description="Summarizes documents with citations",
     ingredients=[
         Ingredient.model("gpt-4o", provider="my-openai"),
         Ingredient.model("claude-sonnet", provider="anthropic", role="fallback"),
         Ingredient.tool("document-reader", protocol="mcp"),
+        Ingredient.prompt("system", text="You are a document summarizer."),
     ],
 )
 
-# Register and bake via the client
 client = AgentOvenClient()
 client.register(agent)
 client.bake(agent, environment="production")
@@ -313,7 +329,7 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## Open-Core Model
 
-| | OSS (MIT) | Enterprise |
+| | OSS (Apache 2.0) | Enterprise |
 |---|---|---|
 | Agent Registry | ✅ Single-tenant | Multi-tenant, org hierarchy |
 | A2A + MCP | ✅ Full protocol | + cross-org federation |
@@ -321,6 +337,7 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 | Model Router | ✅ Routing + fallback | + cost optimizer, budgets |
 | Sessions | ✅ Multi-turn chat | ✅ Multi-turn chat |
 | RAG Pipelines | ✅ 5 strategies | + quality monitor |
+| Workflow Patterns | ✅ All 6 patterns | + custom step plugins |
 | Observability | ✅ 7-day retention | 400-day, advanced analytics |
 | Auth | API keys, service tokens | SSO/SAML, OIDC, RBAC, audit logs |
 | Compliance | SOC2, GDPR | + FedRAMP, HIPAA, GxP |
@@ -328,7 +345,7 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
-[MIT](LICENSE) — free to use, modify, and distribute.
+[Apache License 2.0](LICENSE) — free to use, modify, and distribute.
 
 ---
 

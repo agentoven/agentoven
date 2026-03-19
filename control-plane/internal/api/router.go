@@ -175,6 +175,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 		r.Route("/tools", func(r chi.Router) {
 			r.Get("/", h.ListMCPTools)
 			r.Post("/", h.RegisterMCPTool)
+			r.Post("/bulk", h.BulkRegisterMCPTools)
 			r.Route("/{toolName}", func(r chi.Router) {
 				r.Get("/", h.GetMCPTool)
 				r.Put("/", h.UpdateMCPTool)
@@ -241,7 +242,11 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 		r.Route("/traces", func(r chi.Router) {
 			r.Get("/", h.ListTraces)
 			r.Get("/{traceId}", h.GetTrace)
+			r.Get("/{traceId}/spans", h.ListSpans) // hierarchical spans for waterfall
 		})
+
+		// Spans — direct span access
+		r.Get("/spans/{spanId}", h.GetSpan)
 
 		// Kitchens — CRUD for workspaces / tenant boundaries
 		r.Route("/kitchens", func(r chi.Router) {
