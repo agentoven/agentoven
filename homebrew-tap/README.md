@@ -63,4 +63,4 @@ The [release workflow](https://github.com/agentoven/agentoven/blob/main/.github/
 
 ## License
 
-MIT — see [LICENSE](https://github.com/agentoven/agentoven/blob/main/LICENSE)
+Apache2.0 — see [LICENSE](https://github.com/agentoven/agentoven/blob/main/LICENSE)

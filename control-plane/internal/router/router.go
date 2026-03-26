@@ -713,6 +713,7 @@ func (mr *ModelRouter) callOpenAI(ctx context.Context, provider *models.ModelPro
 
 type anthropicRequest struct {
 	Model     string               `json:"model"`
+	System    string               `json:"system,omitempty"`
 	Messages  []models.ChatMessage `json:"messages"`
 	MaxTokens int                  `json:"max_tokens"`
 }
@@ -746,7 +747,22 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 		maxTokens = int(mt)
 	}
 
-	body, _ := json.Marshal(anthropicRequest{Model: model, Messages: messages, MaxTokens: maxTokens})
+	// Anthropic Messages API requires system messages as a top-level "system"
+	// parameter, not as a message with role "system" in the messages array.
+	var systemText string
+	var filteredMessages []models.ChatMessage
+	for _, m := range messages {
+		if m.Role == "system" {
+			if systemText != "" {
+				systemText += "\n\n"
+			}
+			systemText += m.Content
+		} else {
+			filteredMessages = append(filteredMessages, m)
+		}
+	}
+
+	body, _ := json.Marshal(anthropicRequest{Model: model, System: systemText, Messages: filteredMessages, MaxTokens: maxTokens})
 
 	url := endpoint + "/v1/messages"
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))

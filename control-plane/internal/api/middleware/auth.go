@@ -97,6 +97,10 @@ func isAuthPublicPath(path string) bool {
 			return true
 		}
 	}
+	// Auth login endpoints must be publicly accessible (SSO callbacks too)
+	if path == "/auth/login" || strings.HasPrefix(path, "/auth/saml") || strings.HasPrefix(path, "/auth/oidc") {
+		return true
+	}
 	// A2A discovery endpoints
 	if strings.HasPrefix(path, "/a2a") {
 		return true

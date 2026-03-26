@@ -51,6 +51,20 @@ func (c *ProviderChain) RegisterProvider(provider contracts.AuthProvider) {
 		Msg("🔑 Auth provider registered")
 }
 
+// PrependProvider adds a provider to the FRONT of the chain.
+// Use this when a provider must run before existing providers
+// (e.g. Pro's dashboard token provider must run before the API key provider
+// to claim HMAC tokens before they're rejected as invalid API keys).
+func (c *ProviderChain) PrependProvider(provider contracts.AuthProvider) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.providers = append([]contracts.AuthProvider{provider}, c.providers...)
+	log.Info().
+		Str("provider", provider.Name()).
+		Bool("enabled", provider.Enabled()).
+		Msg("🔑 Auth provider prepended")
+}
+
 // Authenticate walks the chain of providers in order.
 //
 // Contract:

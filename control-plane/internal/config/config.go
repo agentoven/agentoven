@@ -45,7 +45,7 @@ func Load() *Config {
 			MigrationsPath: envStr("DATABASE_MIGRATIONS_PATH", "internal/db/migrations"),
 		},
 		Telemetry: TelemetryConfig{
-			Enabled:      envBool("OTEL_ENABLED", true),
+			Enabled:      envBool("OTEL_ENABLED", false),
 			OTLPEndpoint: envStr("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"),
 			ServiceName:  envStr("OTEL_SERVICE_NAME", "agentoven-control-plane"),
 		},
