@@ -11,6 +11,9 @@
 		},
 		{
 			"path": "../../Examples"
+		},
+		{
+			"path": "../../agentoven-cloud"
 		}
 	],
 	"settings": {}

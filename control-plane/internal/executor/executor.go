@@ -82,10 +82,18 @@ type Turn struct {
 
 // Executor runs managed-mode agents through an agentic tool-use loop.
 type Executor struct {
-	store    store.Store
-	router   *router.ModelRouter
-	gateway  *mcpgw.Gateway
-	sessions contracts.SessionStore
+	store       store.Store
+	router      *router.ModelRouter
+	gateway     *mcpgw.Gateway
+	sessions    contracts.SessionStore
+	ragRegistry RAGRegistry // optional: enables retriever ingredient consumption
+}
+
+// RAGRegistry provides access to registered RAG services.
+// Defined as interface to avoid circular import with internal/rag package.
+type RAGRegistry interface {
+	Get(name string) (contracts.RAGService, error)
+	Default() (contracts.RAGService, error)
 }
 
 // NewExecutor creates a new managed-agent executor.
@@ -96,6 +104,12 @@ func NewExecutor(s store.Store, r *router.ModelRouter, gw *mcpgw.Gateway, sess c
 		gateway:  gw,
 		sessions: sess,
 	}
+}
+
+// SetRAGRegistry sets the RAG service registry for retriever ingredient consumption.
+// Called after server initialization to avoid circular dependencies.
+func (e *Executor) SetRAGRegistry(reg RAGRegistry) {
+	e.ragRegistry = reg
 }
 
 // Execute runs the agentic loop for a managed agent.
@@ -168,7 +182,7 @@ func (e *Executor) Execute(ctx context.Context, agent *models.Agent, userMessage
 	if isAgentic && session != nil && len(session.Messages) > 0 {
 		messages = e.buildSlidingContext(ctx, agent, resolved, session, userMessage, promptVars)
 	} else {
-		messages = e.buildInitialMessages(agent, resolved, userMessage, promptVars)
+		messages = e.buildInitialMessages(ctx, agent, resolved, userMessage, promptVars)
 	}
 
 	// Append current user message to session history
@@ -345,10 +359,10 @@ func (e *Executor) Execute(ctx context.Context, agent *models.Agent, userMessage
 }
 
 // buildInitialMessages constructs the system prompt and user message for reactive agents.
-func (e *Executor) buildInitialMessages(agent *models.Agent, resolved *models.ResolvedIngredients, userMessage string, promptVars map[string]string) []models.ChatMessage {
+func (e *Executor) buildInitialMessages(ctx context.Context, agent *models.Agent, resolved *models.ResolvedIngredients, userMessage string, promptVars map[string]string) []models.ChatMessage {
 	messages := make([]models.ChatMessage, 0, 3)
 
-	systemPrompt := e.buildSystemPrompt(agent, resolved, promptVars)
+	systemPrompt := e.buildSystemPrompt(ctx, agent, resolved, userMessage, promptVars)
 	if systemPrompt != "" {
 		messages = append(messages, models.ChatMessage{
 			Role:    "system",
@@ -365,13 +379,23 @@ func (e *Executor) buildInitialMessages(agent *models.Agent, resolved *models.Re
 	return messages
 }
 
-// buildSystemPrompt constructs the system prompt from agent config and tools.
-func (e *Executor) buildSystemPrompt(agent *models.Agent, resolved *models.ResolvedIngredients, promptVars map[string]string) string {
+// buildSystemPrompt constructs the system prompt from agent config, tools, and RAG context.
+func (e *Executor) buildSystemPrompt(ctx context.Context, agent *models.Agent, resolved *models.ResolvedIngredients, userMessage string, promptVars map[string]string) string {
 	systemPrompt := ""
 	if resolved.Prompt != nil {
 		systemPrompt = resolver.RenderPrompt(resolved.Prompt.Template, promptVars)
 	} else if agent.Description != "" {
 		systemPrompt = agent.Description
+	}
+
+	// ── RAG retrieval injection ──────────────────────────────
+	// If the agent has retriever ingredients and a RAG registry is available,
+	// perform retrieval and inject context into the system prompt.
+	if len(resolved.Retrievers) > 0 && e.ragRegistry != nil && userMessage != "" {
+		ragContext := e.retrieveContext(ctx, agent.Kitchen, resolved.Retrievers, userMessage)
+		if ragContext != "" {
+			systemPrompt += "\n\n" + ragContext
+		}
 	}
 
 	// Add tool instructions to system prompt (fallback for models without native tool calling)
@@ -385,6 +409,75 @@ func (e *Executor) buildSystemPrompt(agent *models.Agent, resolved *models.Resol
 	}
 
 	return systemPrompt
+}
+
+// retrieveContext performs RAG retrieval using resolved retriever ingredients
+// and returns formatted context text for injection into the system prompt.
+func (e *Executor) retrieveContext(ctx context.Context, kitchen string, retrievers []models.ResolvedRetriever, userMessage string) string {
+	var contextParts []string
+
+	for _, ret := range retrievers {
+		providerName := ret.Provider
+		if providerName == "" {
+			providerName = "built-in"
+		}
+
+		svc, err := e.ragRegistry.Get(providerName)
+		if err != nil {
+			// Try default provider
+			svc, err = e.ragRegistry.Default()
+			if err != nil {
+				log.Warn().
+					Str("provider", providerName).
+					Msg("RAG provider not found for retriever, skipping")
+				continue
+			}
+		}
+
+		strategy := ret.Strategy
+		if strategy == "" {
+			strategy = models.RAGNaive
+		}
+
+		req := models.RAGQueryRequest{
+			Kitchen:   kitchen,
+			Question:  userMessage,
+			Strategy:  strategy,
+			TopK:      ret.TopK,
+			MinScore:  ret.ScoreThreshold,
+			Namespace: ret.Namespace,
+		}
+
+		result, err := svc.Query(ctx, kitchen, req)
+		if err != nil {
+			log.Warn().Err(err).
+				Str("provider", providerName).
+				Msg("RAG retrieval failed for retriever, skipping")
+			continue
+		}
+
+		if len(result.Sources) == 0 {
+			continue
+		}
+
+		// Format retrieved sources as context
+		var sb strings.Builder
+		sb.WriteString("## Retrieved Knowledge\n\n")
+		sb.WriteString("Use the following retrieved information to help answer the user's question:\n\n")
+		for i, s := range result.Sources {
+			sb.WriteString(fmt.Sprintf("### Source %d", i+1))
+			if src, ok := s.Doc.Metadata["source"]; ok {
+				sb.WriteString(fmt.Sprintf(" (%s)", src))
+			}
+			sb.WriteString(fmt.Sprintf(" [score: %.3f]\n", s.Score))
+			sb.WriteString(s.Doc.Content)
+			sb.WriteString("\n\n")
+		}
+
+		contextParts = append(contextParts, sb.String())
+	}
+
+	return strings.Join(contextParts, "\n")
 }
 
 // ── Sliding Context Window ──────────────────────────────────
@@ -402,8 +495,8 @@ func (e *Executor) buildSystemPrompt(agent *models.Agent, resolved *models.Resol
 func (e *Executor) buildSlidingContext(ctx context.Context, agent *models.Agent, resolved *models.ResolvedIngredients, session *models.Session, userMessage string, promptVars map[string]string) []models.ChatMessage {
 	budget := ctxwindow.EffectiveBudget(agent.ContextBudget, 0)
 
-	// Build the system prompt
-	systemPrompt := e.buildSystemPrompt(agent, resolved, promptVars)
+	// Build the system prompt (includes RAG retrieval for retriever ingredients)
+	systemPrompt := e.buildSystemPrompt(ctx, agent, resolved, userMessage, promptVars)
 	systemMsg := models.ChatMessage{Role: "system", Content: systemPrompt}
 
 	// Start with system + all session history + new user message

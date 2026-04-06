@@ -142,8 +142,13 @@ func (r *Resolver) Resolve(ctx context.Context, agent *models.Agent) (*models.Re
 		errors = append(errors, "managed agents require at least one model ingredient")
 	}
 
-	// Validate retriever cross-references
+	// Validate retriever cross-references.
+	// Skip validation for external providers — they manage their own embeddings/vectorstores.
 	for _, ret := range resolved.Retrievers {
+		if ret.Provider != "" && ret.Provider != "built-in" {
+			// External RAG provider — cross-refs to local embeddings/vectorstores are optional
+			continue
+		}
 		if ret.EmbeddingRef != "" {
 			found := false
 			for _, emb := range resolved.Embeddings {
@@ -433,7 +438,8 @@ func (r *Resolver) resolveVectorStore(ing models.Ingredient) (*models.ResolvedVe
 }
 
 // resolveRetriever validates and resolves a retriever ingredient.
-// Config fields: embedding_ref, vectorstore_ref, top_k, score_threshold, rerank_strategy.
+// Config fields: embedding_ref, vectorstore_ref, top_k, score_threshold,
+// rerank_strategy, hybrid_search, provider, strategy, namespace.
 func (r *Resolver) resolveRetriever(ing models.Ingredient) (*models.ResolvedRetriever, error) {
 	embRef, _ := ing.Config["embedding_ref"].(string)
 	vsRef, _ := ing.Config["vectorstore_ref"].(string)
@@ -458,6 +464,17 @@ func (r *Resolver) resolveRetriever(ing models.Ingredient) (*models.ResolvedRetr
 		hybridSearch = h
 	}
 
+	// Orchestrator-first fields: provider, strategy, namespace
+	provider, _ := ing.Config["provider"].(string)
+	if provider == "" {
+		provider = "built-in"
+	}
+
+	strategyStr, _ := ing.Config["strategy"].(string)
+	strategy := models.RAGStrategy(strategyStr) // empty is fine — defaults to naive at query time
+
+	namespace, _ := ing.Config["namespace"].(string)
+
 	return &models.ResolvedRetriever{
 		EmbeddingRef:   embRef,
 		VectorStoreRef: vsRef,
@@ -465,6 +482,9 @@ func (r *Resolver) resolveRetriever(ing models.Ingredient) (*models.ResolvedRetr
 		ScoreThreshold: scoreThreshold,
 		RerankStrategy: rerankStrategy,
 		HybridSearch:   hybridSearch,
+		Provider:       provider,
+		Strategy:       strategy,
+		Namespace:      namespace,
 	}, nil
 }
 

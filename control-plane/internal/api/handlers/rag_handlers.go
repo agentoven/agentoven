@@ -17,8 +17,7 @@ import (
 type RAGHandlers struct {
 	Embeddings  *embeddings.Registry
 	VectorStore *vectorstore.Registry
-	Pipeline    *ragpkg.Pipeline
-	Ingester    *ragpkg.Ingester
+	RAGRegistry *ragpkg.Registry // orchestrator: dispatches to registered RAG services
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -26,6 +25,7 @@ type RAGHandlers struct {
 // ══════════════════════════════════════════════════════════════
 
 // RAGQuery handles POST /api/v1/rag/query
+// Optionally accepts "provider" field to target a specific RAG service.
 func (h *RAGHandlers) RAGQuery(w http.ResponseWriter, r *http.Request) {
 	kitchen := middleware.GetKitchen(r.Context())
 
@@ -39,14 +39,30 @@ func (h *RAGHandlers) RAGQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.Pipeline == nil {
-		respondJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "RAG pipeline not configured"})
+	if h.RAGRegistry == nil {
+		respondJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "RAG service not configured"})
 		return
 	}
 
-	result, err := h.Pipeline.Query(r.Context(), kitchen, req)
+	// Resolve provider: use request field, query param, or default
+	providerName := r.URL.Query().Get("provider")
+	if providerName == "" {
+		providerName = "built-in" // default
+	}
+
+	svc, err := h.RAGRegistry.Get(providerName)
 	if err != nil {
-		log.Error().Err(err).Str("kitchen", kitchen).Msg("RAG query failed")
+		// Fall back to default provider
+		svc, err = h.RAGRegistry.Default()
+		if err != nil {
+			respondJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "no RAG services registered"})
+			return
+		}
+	}
+
+	result, err := svc.Query(r.Context(), kitchen, req)
+	if err != nil {
+		log.Error().Err(err).Str("kitchen", kitchen).Str("provider", svc.Name()).Msg("RAG query failed")
 		respondJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -55,6 +71,7 @@ func (h *RAGHandlers) RAGQuery(w http.ResponseWriter, r *http.Request) {
 }
 
 // RAGIngest handles POST /api/v1/rag/ingest
+// Optionally accepts "provider" query param to target a specific RAG service.
 func (h *RAGHandlers) RAGIngest(w http.ResponseWriter, r *http.Request) {
 	kitchen := middleware.GetKitchen(r.Context())
 
@@ -68,19 +85,127 @@ func (h *RAGHandlers) RAGIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.Ingester == nil {
-		respondJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "RAG ingester not configured"})
+	if h.RAGRegistry == nil {
+		respondJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "RAG service not configured"})
 		return
 	}
 
-	result, err := h.Ingester.Ingest(r.Context(), kitchen, req)
+	providerName := r.URL.Query().Get("provider")
+	if providerName == "" {
+		providerName = "built-in"
+	}
+
+	svc, err := h.RAGRegistry.Get(providerName)
 	if err != nil {
-		log.Error().Err(err).Str("kitchen", kitchen).Msg("RAG ingest failed")
+		svc, err = h.RAGRegistry.Default()
+		if err != nil {
+			respondJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "no RAG services registered"})
+			return
+		}
+	}
+
+	result, err := svc.Ingest(r.Context(), kitchen, req)
+	if err != nil {
+		log.Error().Err(err).Str("kitchen", kitchen).Str("provider", svc.Name()).Msg("RAG ingest failed")
 		respondJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
 	respondJSON(w, http.StatusOK, result)
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── RAG Providers ────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// ListRAGProviders handles GET /api/v1/rag/providers
+func (h *RAGHandlers) ListRAGProviders(w http.ResponseWriter, r *http.Request) {
+	if h.RAGRegistry == nil {
+		respondJSON(w, http.StatusOK, []interface{}{})
+		return
+	}
+
+	names := h.RAGRegistry.List()
+	type providerInfo struct {
+		Name       string   `json:"name"`
+		Strategies []string `json:"strategies"`
+	}
+	providers := make([]providerInfo, 0, len(names))
+	for _, name := range names {
+		svc, err := h.RAGRegistry.Get(name)
+		if err != nil {
+			continue
+		}
+		strategies := svc.Strategies()
+		strs := make([]string, len(strategies))
+		for i, s := range strategies {
+			strs[i] = string(s)
+		}
+		providers = append(providers, providerInfo{Name: name, Strategies: strs})
+	}
+	respondJSON(w, http.StatusOK, providers)
+}
+
+// RAGHealth handles GET /api/v1/rag/health
+func (h *RAGHandlers) RAGHealth(w http.ResponseWriter, r *http.Request) {
+	if h.RAGRegistry == nil {
+		respondJSON(w, http.StatusOK, map[string]string{})
+		return
+	}
+	results := h.RAGRegistry.HealthCheckAll(r.Context())
+	status := make(map[string]string, len(results))
+	for name, err := range results {
+		if err != nil {
+			status[name] = "error: " + err.Error()
+		} else {
+			status[name] = "ok"
+		}
+	}
+	respondJSON(w, http.StatusOK, status)
+}
+
+// RegisterExternalRAGProvider handles POST /api/v1/rag/providers
+func (h *RAGHandlers) RegisterExternalRAGProvider(w http.ResponseWriter, r *http.Request) {
+	if h.RAGRegistry == nil {
+		respondJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "RAG registry not initialized"})
+		return
+	}
+
+	var cfg ragpkg.ExternalRAGConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	svc, err := ragpkg.NewExternalRAGService(cfg)
+	if err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	h.RAGRegistry.Register(cfg.Name, svc)
+	log.Info().Str("name", cfg.Name).Str("endpoint", cfg.Endpoint).Msg("External RAG provider registered")
+
+	respondJSON(w, http.StatusCreated, map[string]string{
+		"name":     cfg.Name,
+		"endpoint": cfg.Endpoint,
+		"status":   "registered",
+	})
+}
+
+// DeleteRAGProvider handles DELETE /api/v1/rag/providers/{name}
+func (h *RAGHandlers) DeleteRAGProvider(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if name == "built-in" {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "cannot delete built-in provider"})
+		return
+	}
+	if h.RAGRegistry == nil {
+		respondJSON(w, http.StatusNotFound, map[string]string{"error": "RAG registry not initialized"})
+		return
+	}
+	h.RAGRegistry.Remove(name)
+	respondJSON(w, http.StatusOK, map[string]string{"status": "deleted", "name": name})
 }
 
 // ══════════════════════════════════════════════════════════════

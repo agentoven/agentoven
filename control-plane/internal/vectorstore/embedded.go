@@ -140,6 +140,48 @@ func (s *EmbeddedStore) Search(_ context.Context, kitchen string, vector []float
 	return results, nil
 }
 
+// List returns documents matching metadata filters without vector similarity.
+// Used by sentence-window and parent-document strategies to fetch adjacent chunks.
+func (s *EmbeddedStore) List(_ context.Context, kitchen string, filter map[string]string, limit int) ([]models.VectorDoc, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if limit <= 0 {
+		limit = 100
+	}
+
+	var results []models.VectorDoc
+	for _, d := range s.docs {
+		if d.Kitchen != kitchen {
+			continue
+		}
+		// Apply all metadata filters
+		match := true
+		for fk, fv := range filter {
+			if fk == "namespace" {
+				if d.Namespace != fv {
+					match = false
+					break
+				}
+				continue
+			}
+			if d.Metadata[fk] != fv {
+				match = false
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		cp := *d
+		results = append(results, cp)
+		if len(results) >= limit {
+			break
+		}
+	}
+	return results, nil
+}
+
 func (s *EmbeddedStore) Delete(_ context.Context, kitchen string, ids []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

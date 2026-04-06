@@ -1819,7 +1819,7 @@ func (h *Handlers) A2AEndpoint(w http.ResponseWriter, r *http.Request) {
 	case "tasks/send":
 		h.handleA2ATaskSend(w, r, rpcReq.Params, rpcReq.ID)
 	case "tasks/get":
-		h.handleA2ATaskGet(w, rpcReq.Params, rpcReq.ID)
+		h.handleA2ATaskGet(w, r, rpcReq.Params, rpcReq.ID)
 	default:
 		w.Header().Set("Content-Type", "application/a2a+json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1922,12 +1922,27 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 			return
 		}
 
-		// Execute agent asynchronously
+		// Create initial trace immediately so tasks/get can find it
+		initialTrace := &models.Trace{
+			ID:        taskID,
+			AgentName: agentName,
+			Kitchen:   kitchen,
+			Status:    "working",
+			InputText: userMessage,
+			Metadata: map[string]interface{}{
+				"source":  "a2a",
+				"task_id": taskID,
+			},
+			CreatedAt: time.Now().UTC(),
+		}
+		h.Store.CreateTrace(r.Context(), initialTrace)
+
+		// Execute agent asynchronously — updates trace on completion
 		go func() {
 			execCtx := context.Background()
 			response, execTrace, err := h.Executor.Execute(execCtx, agent, userMessage, resolved, nil, false)
 
-			// Record trace with result — enriched with input/output and full usage
+			// Update trace with final result — enriched with input/output and full usage
 			status := "completed"
 			costUSD := 0.0
 			totalTokens := int64(0)
@@ -1956,7 +1971,7 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 					"source":  "a2a",
 					"task_id": taskID,
 				},
-				CreatedAt: time.Now().UTC(),
+				CreatedAt: initialTrace.CreatedAt,
 			}
 			h.Store.CreateTrace(execCtx, trace)
 
@@ -2008,20 +2023,76 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 	})
 }
 
-func (h *Handlers) handleA2ATaskGet(w http.ResponseWriter, params json.RawMessage, rpcID interface{}) {
+func (h *Handlers) handleA2ATaskGet(w http.ResponseWriter, r *http.Request, params json.RawMessage, rpcID interface{}) {
 	var req struct {
 		ID string `json:"id"`
 	}
-	json.Unmarshal(params, &req)
+	if err := json.Unmarshal(params, &req); err != nil || req.ID == "" {
+		w.Header().Set("Content-Type", "application/a2a+json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"error": map[string]interface{}{
+				"code":    -32602,
+				"message": "Invalid params",
+				"data":    "task id is required",
+			},
+			"id": rpcID,
+		})
+		return
+	}
+
+	// Look up actual task state from the trace store
+	trace, err := h.Store.GetTrace(r.Context(), req.ID)
+	if err != nil || trace == nil {
+		w.Header().Set("Content-Type", "application/a2a+json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"error": map[string]interface{}{
+				"code":    -32001,
+				"message": "Task not found",
+				"data":    req.ID,
+			},
+			"id": rpcID,
+		})
+		return
+	}
+
+	// Map trace status to A2A task state
+	state := trace.Status
+	switch state {
+	case "completed", "failed", "submitted", "working", "canceled":
+		// valid A2A states, pass through
+	case "error":
+		state = "failed"
+	default:
+		state = "working"
+	}
+
+	result := map[string]interface{}{
+		"id":     trace.ID,
+		"status": map[string]string{"state": state},
+	}
+	if trace.AgentName != "" {
+		result["metadata"] = map[string]string{
+			"agent_name": trace.AgentName,
+			"kitchen":    trace.Kitchen,
+		}
+	}
+	if state == "completed" && trace.OutputText != "" {
+		result["artifacts"] = []map[string]interface{}{
+			{
+				"parts": []map[string]string{
+					{"type": "text", "text": trace.OutputText},
+				},
+			},
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/a2a+json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"jsonrpc": "2.0",
-		"result": map[string]interface{}{
-			"id":     req.ID,
-			"status": map[string]string{"state": "completed"},
-		},
-		"id": rpcID,
+		"result":  result,
+		"id":      rpcID,
 	})
 }
 

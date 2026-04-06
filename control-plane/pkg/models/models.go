@@ -1122,12 +1122,15 @@ type ResolvedVectorStore struct {
 
 // ResolvedRetriever is the output of resolving a "retriever" ingredient.
 type ResolvedRetriever struct {
-	EmbeddingRef   string  `json:"embedding_ref"`             // ingredient ID of the embedding
-	VectorStoreRef string  `json:"vectorstore_ref"`           // ingredient ID of the vector store
-	TopK           int     `json:"top_k"`                     // number of results
-	ScoreThreshold float64 `json:"score_threshold,omitempty"` // min similarity score
-	RerankStrategy string  `json:"rerank_strategy,omitempty"` // "none", "cross-encoder", "llm"
-	HybridSearch   bool    `json:"hybrid_search,omitempty"`   // combine dense + sparse
+	EmbeddingRef   string      `json:"embedding_ref"`             // ingredient ID of the embedding
+	VectorStoreRef string      `json:"vectorstore_ref"`           // ingredient ID of the vector store
+	TopK           int         `json:"top_k"`                     // number of results
+	ScoreThreshold float64     `json:"score_threshold,omitempty"` // min similarity score
+	RerankStrategy string      `json:"rerank_strategy,omitempty"` // "none", "cross-encoder", "llm"
+	HybridSearch   bool        `json:"hybrid_search,omitempty"`   // combine dense + sparse
+	Provider       string      `json:"provider,omitempty"`        // RAG service name (e.g. "built-in", "llamaindex")
+	Strategy       RAGStrategy `json:"strategy,omitempty"`        // retrieval strategy to use
+	Namespace      string      `json:"namespace,omitempty"`       // vector store namespace/partition
 }
 
 // ── RAG ───────────────────────────────────────────────────────

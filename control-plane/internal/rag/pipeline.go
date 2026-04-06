@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
@@ -12,21 +13,74 @@ import (
 
 // Pipeline executes RAG queries with support for 5 strategies:
 // naive, sentence-window, parent-document, HyDE, agentic.
+//
+// Pipeline implements contracts.RAGService — it is the built-in RAG provider.
+// External systems (LlamaIndex, Haystack) register as separate RAGService providers.
 type Pipeline struct {
 	embeddings contracts.EmbeddingDriver
 	vectorDB   contracts.VectorStoreDriver
-	// modelRouter is used by HyDE strategy to generate hypothetical answers.
-	// Can be nil if HyDE is not used.
+	// modelRouter is used by HyDE strategy to generate hypothetical answers
+	// and for answer generation after retrieval.
+	// Can be nil if HyDE/answer-gen is not used.
 	modelRouter contracts.ModelRouterService
+	// ingester handles document chunking, embedding, and upserting.
+	ingester *Ingester
 }
 
-// NewPipeline creates a RAG pipeline.
-func NewPipeline(emb contracts.EmbeddingDriver, vs contracts.VectorStoreDriver, router contracts.ModelRouterService) *Pipeline {
+// Compile-time check that Pipeline implements RAGService.
+var _ contracts.RAGService = (*Pipeline)(nil)
+
+// NewPipeline creates a RAG pipeline with integrated ingestion.
+func NewPipeline(emb contracts.EmbeddingDriver, vs contracts.VectorStoreDriver, router contracts.ModelRouterService, chunkerCfg ...ChunkerConfig) *Pipeline {
+	cfg := DefaultChunkerConfig()
+	if len(chunkerCfg) > 0 {
+		cfg = chunkerCfg[0]
+	}
 	return &Pipeline{
 		embeddings:  emb,
 		vectorDB:    vs,
 		modelRouter: router,
+		ingester:    NewIngester(emb, vs, cfg),
 	}
+}
+
+// Name returns the unique identifier for the built-in RAG service.
+func (p *Pipeline) Name() string { return "built-in" }
+
+// Ingest processes raw documents into the pipeline's vector store.
+func (p *Pipeline) Ingest(ctx context.Context, kitchen string, req models.RAGIngestRequest) (*models.RAGIngestResult, error) {
+	if p.ingester == nil {
+		return nil, fmt.Errorf("ingester not configured on built-in RAG pipeline")
+	}
+	return p.ingester.Ingest(ctx, kitchen, req)
+}
+
+// Strategies returns the list of retrieval strategies the built-in pipeline supports.
+func (p *Pipeline) Strategies() []models.RAGStrategy {
+	return []models.RAGStrategy{
+		models.RAGNaive,
+		models.RAGSentenceWindow,
+		models.RAGParentDocument,
+		models.RAGHyDE,
+		models.RAGAgentic,
+	}
+}
+
+// HealthCheck verifies that the embedding driver and vector store are operational.
+func (p *Pipeline) HealthCheck(ctx context.Context) error {
+	if p.embeddings == nil {
+		return fmt.Errorf("embedding driver not configured")
+	}
+	if p.vectorDB == nil {
+		return fmt.Errorf("vector store not configured")
+	}
+	if err := p.embeddings.HealthCheck(ctx); err != nil {
+		return fmt.Errorf("embedding driver unhealthy: %w", err)
+	}
+	if err := p.vectorDB.HealthCheck(ctx); err != nil {
+		return fmt.Errorf("vector store unhealthy: %w", err)
+	}
+	return nil
 }
 
 // Query executes a RAG query using the specified strategy.
@@ -71,18 +125,31 @@ func (p *Pipeline) Query(ctx context.Context, kitchen string, req models.RAGQuer
 		results = filtered
 	}
 
+	// ── Answer generation ───────────────────────────────────
+	// If we have a model router AND retrieved sources, synthesize an answer.
+	var answer string
+	var tokensUsed int64
+	if p.modelRouter != nil && len(results) > 0 {
+		answer, tokensUsed = p.generateAnswer(ctx, kitchen, req.Question, results)
+	}
+
 	elapsed := time.Since(start)
+	latencyMs := elapsed.Milliseconds()
+
 	log.Info().
 		Str("strategy", string(strategy)).
 		Int("results", len(results)).
-		Dur("elapsed", elapsed).
+		Int64("latency_ms", latencyMs).
 		Str("kitchen", kitchen).
 		Msg("RAG query complete")
 
 	return &models.RAGQueryResult{
+		Answer:          answer,
 		Sources:         results,
 		Strategy:        strategy,
 		ChunksRetrieved: len(results),
+		TokensUsed:      tokensUsed,
+		LatencyMs:       latencyMs,
 	}, nil
 }
 
@@ -112,7 +179,7 @@ func (p *Pipeline) naiveQuery(ctx context.Context, kitchen string, req models.RA
 }
 
 // sentenceWindowQuery: same as naive, but retrieves extra context
-// around each result by looking up neighboring chunks.
+// around each result by looking up neighboring chunks via VectorStoreDriver.List.
 func (p *Pipeline) sentenceWindowQuery(ctx context.Context, kitchen string, req models.RAGQueryRequest) ([]models.SearchResult, error) {
 	// First, get naive results
 	results, err := p.naiveQuery(ctx, kitchen, req)
@@ -120,26 +187,153 @@ func (p *Pipeline) sentenceWindowQuery(ctx context.Context, kitchen string, req 
 		return nil, err
 	}
 
-	// Sentence window expands context by fetching chunks with adjacent doc_index.
-	// For now, this is a passthrough — full implementation would fetch parent docs
-	// and reconstruct windows. This gives users the framework to extend.
-	log.Debug().Msg("Sentence-window strategy: returning naive results (window expansion planned)")
-	return results, nil
+	// Expand context: for each result, look up adjacent chunks (same source, neighboring doc_index)
+	expanded := make([]models.SearchResult, 0, len(results))
+	windowSize := 1 // fetch 1 chunk before and after
+
+	for _, r := range results {
+		source := r.Doc.Metadata["source"]
+		docIndexStr := r.Doc.Metadata["doc_index"]
+		if source == "" || docIndexStr == "" {
+			// No source metadata — can't expand, keep original
+			expanded = append(expanded, r)
+			continue
+		}
+
+		docIndex := 0
+		fmt.Sscanf(docIndexStr, "%d", &docIndex)
+
+		// Fetch neighboring chunks from the same source document
+		var neighborTexts []string
+		for delta := -windowSize; delta <= windowSize; delta++ {
+			if delta == 0 {
+				continue // skip the original chunk
+			}
+			neighborIdx := docIndex + delta
+			if neighborIdx < 0 {
+				continue
+			}
+			filter := map[string]string{
+				"source":    source,
+				"doc_index": fmt.Sprintf("%d", neighborIdx),
+			}
+			if r.Doc.Namespace != "" {
+				filter["namespace"] = r.Doc.Namespace
+			}
+			neighbors, listErr := p.vectorDB.List(ctx, kitchen, filter, 1)
+			if listErr != nil || len(neighbors) == 0 {
+				continue
+			}
+			neighborTexts = append(neighborTexts, neighbors[0].Content)
+		}
+
+		// Reconstruct expanded content: [before] + original + [after]
+		if len(neighborTexts) > 0 {
+			expandedContent := ""
+			// Prepend neighbors that came before
+			for i := 0; i < len(neighborTexts) && i < windowSize; i++ {
+				expandedContent += neighborTexts[i] + "\n"
+			}
+			expandedContent += r.Doc.Content
+			// Append neighbors that came after
+			for i := windowSize; i < len(neighborTexts); i++ {
+				expandedContent += "\n" + neighborTexts[i]
+			}
+			cp := r
+			cp.Doc.Content = expandedContent
+			expanded = append(expanded, cp)
+		} else {
+			expanded = append(expanded, r)
+		}
+	}
+
+	return expanded, nil
 }
 
-// parentDocumentQuery: searches child chunks but returns parent documents.
+// parentDocumentQuery: searches child chunks but deduplicates by parent source,
+// returning the full parent content when available.
 func (p *Pipeline) parentDocumentQuery(ctx context.Context, kitchen string, req models.RAGQueryRequest) ([]models.SearchResult, error) {
-	// Search for matching chunks
-	results, err := p.naiveQuery(ctx, kitchen, req)
+	// Search for matching chunks — fetch extra to account for deduplication
+	fetchK := req.TopK
+	if fetchK <= 0 {
+		fetchK = 5
+	}
+	expandedReq := req
+	expandedReq.TopK = fetchK * 3 // over-fetch since we'll deduplicate by parent
+
+	results, err := p.naiveQuery(ctx, kitchen, expandedReq)
 	if err != nil {
 		return nil, err
 	}
 
-	// Parent document strategy: look up source document for each chunk.
-	// Chunks carry metadata["source"] which references the parent.
-	// Full implementation would deduplicate by source and return full parent docs.
-	log.Debug().Msg("Parent-document strategy: returning chunk results with source metadata")
-	return results, nil
+	// Deduplicate by source (parent document) and collect all chunks per parent
+	type parentEntry struct {
+		source    string
+		bestScore float64
+		chunks    []string
+	}
+	seen := make(map[string]*parentEntry)
+	var order []string
+
+	for _, r := range results {
+		source := r.Doc.Metadata["source"]
+		if source == "" {
+			source = r.Doc.ID // fallback: treat each chunk as its own parent
+		}
+		if entry, ok := seen[source]; ok {
+			entry.chunks = append(entry.chunks, r.Doc.Content)
+			if r.Score > entry.bestScore {
+				entry.bestScore = r.Score
+			}
+		} else {
+			seen[source] = &parentEntry{
+				source:    source,
+				bestScore: r.Score,
+				chunks:    []string{r.Doc.Content},
+			}
+			order = append(order, source)
+		}
+	}
+
+	// Build results: for each unique parent, concatenate child chunks
+	topK := req.TopK
+	if topK <= 0 {
+		topK = 5
+	}
+	if topK > len(order) {
+		topK = len(order)
+	}
+
+	parentResults := make([]models.SearchResult, 0, topK)
+	for _, src := range order[:topK] {
+		entry := seen[src]
+		// Try to fetch the full parent from vector store by source metadata
+		fullContent := ""
+		filter := map[string]string{"source": src, "doc_index": "0"}
+		parents, listErr := p.vectorDB.List(ctx, kitchen, filter, 1)
+		if listErr == nil && len(parents) > 0 {
+			fullContent = parents[0].Content
+		}
+		if fullContent == "" {
+			// Fallback: concatenate matched chunks
+			fullContent = strings.Join(entry.chunks, "\n---\n")
+		}
+
+		parentResults = append(parentResults, models.SearchResult{
+			Doc: models.VectorDoc{
+				ID:      src,
+				Kitchen: kitchen,
+				Content: fullContent,
+				Metadata: map[string]string{
+					"source":      src,
+					"child_count": fmt.Sprintf("%d", len(entry.chunks)),
+				},
+			},
+			Score: entry.bestScore,
+		})
+	}
+
+	return parentResults, nil
 }
 
 // hydeQuery: generate hypothetical answer via LLM, embed that, search.
@@ -267,6 +461,57 @@ Sub-questions:`, req.Question)
 	}
 
 	return merged, nil
+}
+
+// ── Answer Generation ────────────────────────────────────────
+
+// generateAnswer uses the model router to synthesize an answer from retrieved sources.
+// Returns the answer text and tokens used. On failure, returns empty answer (graceful).
+func (p *Pipeline) generateAnswer(ctx context.Context, kitchen string, question string, sources []models.SearchResult) (string, int64) {
+	if p.modelRouter == nil || len(sources) == 0 {
+		return "", 0
+	}
+
+	// Build context from sources
+	var contextBuilder strings.Builder
+	for i, s := range sources {
+		if i > 0 {
+			contextBuilder.WriteString("\n---\n")
+		}
+		contextBuilder.WriteString(fmt.Sprintf("[Source %d", i+1))
+		if src, ok := s.Doc.Metadata["source"]; ok {
+			contextBuilder.WriteString(fmt.Sprintf(" (%s)", src))
+		}
+		contextBuilder.WriteString(fmt.Sprintf(", score: %.3f]\n", s.Score))
+		contextBuilder.WriteString(s.Doc.Content)
+	}
+
+	prompt := fmt.Sprintf(`Answer the following question using ONLY the provided context. If the context does not contain enough information, say so. Be concise and accurate.
+
+Context:
+%s
+
+Question: %s
+
+Answer:`, contextBuilder.String(), question)
+
+	routeReq := &models.RouteRequest{
+		Kitchen: kitchen,
+		Messages: []models.ChatMessage{
+			{Role: "user", Content: prompt},
+		},
+	}
+	resp, err := p.modelRouter.Route(ctx, routeReq)
+	if err != nil {
+		log.Warn().Err(err).Msg("RAG answer generation failed, returning sources only")
+		return "", 0
+	}
+
+	var tokensUsed int64
+	if resp.Usage.TotalTokens > 0 {
+		tokensUsed = int64(resp.Usage.TotalTokens)
+	}
+	return resp.Content, tokensUsed
 }
 
 // ── Helpers ─────────────────────────────────────────────────

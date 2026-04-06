@@ -96,6 +96,12 @@ type Server struct {
 	// Exposed so Pro can call Register() to add enterprise drivers.
 	VectorStoreRegistry *vectorstore.Registry
 
+	// RAGRegistry holds registered RAG service providers.
+	// The built-in pipeline registers automatically. External systems
+	// (LlamaIndex, Haystack, etc.) can be registered at runtime or via API.
+	// Exposed so Pro can register enterprise RAG providers.
+	RAGRegistry *ragpkg.Registry
+
 	// Config is the server configuration.
 	Config *Config
 
@@ -353,29 +359,40 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 	vsReg.Register("embedded", embeddedVS)
 	log.Info().Msg("✅ Embedded vector store registered (in-memory, 50K max)")
 
-	// Auto-register pgvector if connection URL is set
-	// Users bring their own PG + vector extension
+	// Auto-register pgvector if a dedicated URL is set
 	if pgURL := os.Getenv("AGENTOVEN_PGVECTOR_URL"); pgURL != "" {
 		dims := 1536 // default for OpenAI text-embedding-3-small
 		pgvs, err := vectorstore.NewPgvectorStore(ctx, pgURL, dims)
 		if err != nil {
-			log.Warn().Err(err).Msg("⚠️  pgvector store init failed, using embedded only")
+			log.Warn().Err(err).Msg("⚠️  pgvector store init failed (AGENTOVEN_PGVECTOR_URL), using embedded only")
 		} else {
 			vsReg.Register("pgvector", pgvs)
-			log.Info().Msg("✅ pgvector store registered")
+			log.Info().Msg("✅ pgvector store registered (dedicated URL)")
+		}
+	} else if dbURL := os.Getenv("DATABASE_URL"); dbURL != "" {
+		// Fallback: reuse the main DATABASE_URL for pgvector.
+		// The same PostgreSQL instance used for the data store can host
+		// the pgvector extension. This enables pgvector automatically
+		// when running `agentoven local up` with PostgreSQL.
+		dims := 1536
+		pgvs, err := vectorstore.NewPgvectorStore(ctx, dbURL, dims)
+		if err != nil {
+			log.Warn().Err(err).Msg("ℹ️  pgvector not available on DATABASE_URL (install the vector extension to enable)")
+		} else {
+			vsReg.Register("pgvector", pgvs)
+			log.Info().Msg("✅ pgvector store auto-registered from DATABASE_URL")
 		}
 	}
 
-	// Build RAG pipeline (uses first available embedding driver + default vector store)
-	var ragPipeline *ragpkg.Pipeline
-	var ragIngester *ragpkg.Ingester
+	// Build RAG registry (orchestrator-first: multiple RAG services can be registered)
+	ragRegistry := ragpkg.NewRegistry()
 	embDriverNames := embReg.List()
 	if len(embDriverNames) > 0 {
 		defaultEmb, _ := embReg.Get(embDriverNames[0])
 		defaultVS, _ := vsReg.Get("embedded")
-		ragPipeline = ragpkg.NewPipeline(defaultEmb, defaultVS, mr)
-		ragIngester = ragpkg.NewIngester(defaultEmb, defaultVS, ragpkg.DefaultChunkerConfig())
-		log.Info().Str("embedding", embDriverNames[0]).Msg("✅ RAG pipeline initialized")
+		ragPipeline := ragpkg.NewPipeline(defaultEmb, defaultVS, mr)
+		ragRegistry.Register("built-in", ragPipeline)
+		log.Info().Str("embedding", embDriverNames[0]).Msg("✅ Built-in RAG pipeline registered")
 	} else {
 		log.Info().Msg("ℹ️  No embedding drivers configured — RAG pipeline disabled (set OPENAI_API_KEY or OLLAMA_URL)")
 	}
@@ -383,9 +400,12 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 	rh := &handlers.RAGHandlers{
 		Embeddings:  embReg,
 		VectorStore: vsReg,
-		Pipeline:    ragPipeline,
-		Ingester:    ragIngester,
+		RAGRegistry: ragRegistry,
 	}
+
+	// Wire RAG registry into the Executor so retriever ingredients
+	// can perform automatic RAG retrieval at invoke time.
+	h.Executor.SetRAGRegistry(ragRegistry)
 
 	// ── PicoClaw IoT Integration ────────────────────────────
 	// Create PicoClaw adapter, gateway manager, and heartbeat monitor.
@@ -429,6 +449,7 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 		RAGHandlers:         rh,
 		EmbeddingRegistry:   embReg,
 		VectorStoreRegistry: vsReg,
+		RAGRegistry:         ragRegistry,
 		Config:              pubCfg,
 		Port:                cfg.Port,
 		RetentionJanitor:    janitor,

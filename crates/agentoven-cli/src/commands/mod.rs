@@ -14,6 +14,7 @@ pub mod prompt;
 pub mod provider;
 pub mod rag;
 pub mod recipe;
+pub mod server;
 pub mod service_account;
 pub mod session;
 pub mod test_suite;
@@ -106,6 +107,9 @@ pub enum Commands {
     #[command(subcommand)]
     Local(local::LocalCommands),
 
+    /// 🚀 Start the control plane server in the foreground.
+    Server(server::ServerArgs),
+
     /// 🌐 Start the control plane and open the dashboard UI.
     Dashboard(dashboard::DashboardArgs),
 
@@ -157,6 +161,7 @@ pub async fn execute(cli: Cli) -> anyhow::Result<()> {
         Commands::Trace(cmd) => trace::execute(cmd).await,
         Commands::Rag(cmd) => rag::execute(cmd).await,
         Commands::Local(cmd) => local::execute(cmd).await,
+        Commands::Server(args) => server::execute(args).await,
         Commands::Dashboard(args) => dashboard::execute(args).await,
         Commands::Login(args) => login::execute(args).await,
         Commands::Config(cmd) => config_cmd::execute(cmd).await,

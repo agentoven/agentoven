@@ -66,3 +66,8 @@ control-plane/server
 IMPL-PLAN.md
 
 .github/copilot-instructions.md
+ADR/0014-microsoft-mcp-gateway-upstream.md
+ADR/0015-operational-hardening-plan.md
+pitch/*
+
+*.workspace

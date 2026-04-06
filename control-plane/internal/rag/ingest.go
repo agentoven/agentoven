@@ -46,18 +46,22 @@ func (ing *Ingester) Ingest(ctx context.Context, kitchen string, req models.RAGI
 
 	// Step 1: Chunk all documents
 	var allChunks []Chunk
-	var chunkSources []int // track which document each chunk came from
 	for docIdx, doc := range req.Documents {
+		// Auto-generate document ID if not provided
+		if doc.ID == "" {
+			doc.ID = uuid.NewString()
+			req.Documents[docIdx].ID = doc.ID
+		}
 		chunks := ChunkText(doc.Content, config)
-		for _, c := range chunks {
+		for chunkIdx, c := range chunks {
 			// Merge document metadata into chunk metadata
 			for k, v := range doc.Metadata {
 				c.Metadata[k] = v
 			}
 			c.Metadata["source"] = doc.ID
 			c.Metadata["doc_index"] = fmt.Sprintf("%d", docIdx)
+			c.Metadata["chunk_index"] = fmt.Sprintf("%d", chunkIdx)
 			allChunks = append(allChunks, c)
-			chunkSources = append(chunkSources, docIdx)
 		}
 	}
 
@@ -125,5 +129,6 @@ func (ing *Ingester) Ingest(ctx context.Context, kitchen string, req models.RAGI
 		DocumentsProcessed: len(req.Documents),
 		ChunksCreated:      len(allChunks),
 		VectorsStored:      len(docs),
+		LatencyMs:          elapsed.Milliseconds(),
 	}, nil
 }

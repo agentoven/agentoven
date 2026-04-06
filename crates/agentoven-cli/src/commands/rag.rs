@@ -21,6 +21,12 @@ pub struct QueryArgs {
     /// Maximum results to return.
     #[arg(long, default_value = "5")]
     pub top_k: u32,
+    /// RAG provider name (default: built-in).
+    #[arg(long, default_value = "built-in")]
+    pub provider: String,
+    /// Namespace/collection for scoped retrieval.
+    #[arg(long, default_value = "default")]
+    pub namespace: String,
     /// Include source documents in output.
     #[arg(long)]
     pub sources: bool,
@@ -31,14 +37,14 @@ pub struct IngestArgs {
     /// Path to file or directory to ingest.
     pub path: String,
     /// Chunk size in characters.
-    #[arg(long, default_value = "1000")]
+    #[arg(long, default_value = "512")]
     pub chunk_size: u32,
     /// Chunk overlap in characters.
-    #[arg(long, default_value = "200")]
+    #[arg(long, default_value = "50")]
     pub chunk_overlap: u32,
-    /// Collection/index name.
+    /// Namespace/collection name for document scoping.
     #[arg(long, default_value = "default")]
-    pub collection: String,
+    pub namespace: String,
 }
 
 pub async fn execute(cmd: RagCommands) -> anyhow::Result<()> {
@@ -52,9 +58,10 @@ async fn query(args: QueryArgs) -> anyhow::Result<()> {
     println!("\n  🔍 RAG Query (strategy: {})\n", args.strategy.bold());
 
     let body = serde_json::json!({
-        "query": args.query,
+        "question": args.query,
         "strategy": args.strategy,
         "top_k": args.top_k,
+        "namespace": args.namespace,
     });
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
@@ -76,21 +83,19 @@ async fn query(args: QueryArgs) -> anyhow::Result<()> {
             if args.sources {
                 if let Some(sources) = result["sources"]
                     .as_array()
-                    .or_else(|| result["documents"].as_array())
-                    .or_else(|| result["context"].as_array())
                 {
                     if !sources.is_empty() {
                         println!("  {} ({}):", "Sources".bold(), sources.len());
                         println!("  {}", "─".repeat(60).dimmed());
                         for (i, src) in sources.iter().enumerate() {
-                            let title = src["title"]
+                            let title = src["doc"]["metadata"]["source"]
                                 .as_str()
-                                .or_else(|| src["source"].as_str())
+                                .or_else(|| src["doc"]["id"].as_str())
                                 .unwrap_or("(untitled)");
                             let score = src["score"].as_f64().unwrap_or(0.0);
                             println!("  {}. {} (score: {:.3})", i + 1, title.cyan(), score);
                             if let Some(chunk) =
-                                src["content"].as_str().or_else(|| src["text"].as_str())
+                                src["doc"]["content"].as_str()
                             {
                                 let preview = if chunk.len() > 120 {
                                     format!("{}...", &chunk[..120])
@@ -105,15 +110,14 @@ async fn query(args: QueryArgs) -> anyhow::Result<()> {
                 }
             }
 
-            // Display metrics if present
-            if let Some(metrics) = result.get("metrics") {
-                println!(
-                    "  {} Latency: {}ms | Tokens: {}",
-                    "→".dimmed(),
-                    metrics["latency_ms"].as_u64().unwrap_or(0),
-                    metrics["tokens"].as_u64().unwrap_or(0),
-                );
-            }
+            // Display metrics
+            println!(
+                "  {} Latency: {}ms | Tokens: {} | Chunks: {}",
+                "→".dimmed(),
+                result["latency_ms"].as_u64().unwrap_or(0),
+                result["tokens_used"].as_u64().unwrap_or(0),
+                result["chunks_retrieved"].as_u64().unwrap_or(0),
+            );
         }
         Err(e) => {
             println!(
@@ -134,7 +138,7 @@ async fn ingest(args: IngestArgs) -> anyhow::Result<()> {
     let documents = if path.is_file() {
         let content = tokio::fs::read_to_string(path).await?;
         vec![serde_json::json!({
-            "title": path.file_name().and_then(|f| f.to_str()).unwrap_or("file"),
+            "id": path.file_name().and_then(|f| f.to_str()).unwrap_or("file"),
             "content": content,
         })]
     } else if path.is_dir() {
@@ -145,7 +149,7 @@ async fn ingest(args: IngestArgs) -> anyhow::Result<()> {
             if p.is_file() {
                 if let Ok(content) = tokio::fs::read_to_string(&p).await {
                     docs.push(serde_json::json!({
-                        "title": p.file_name().and_then(|f| f.to_str()).unwrap_or("file"),
+                        "id": p.file_name().and_then(|f| f.to_str()).unwrap_or("file"),
                         "content": content,
                     }));
                 }
@@ -166,7 +170,7 @@ async fn ingest(args: IngestArgs) -> anyhow::Result<()> {
         "documents": documents,
         "chunk_size": args.chunk_size,
         "chunk_overlap": args.chunk_overlap,
-        "collection": args.collection,
+        "namespace": args.namespace,
     });
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
@@ -183,7 +187,6 @@ async fn ingest(args: IngestArgs) -> anyhow::Result<()> {
             pb.finish_and_clear();
             let chunks = result["chunks_created"]
                 .as_u64()
-                .or_else(|| result["total_chunks"].as_u64())
                 .unwrap_or(0);
             let docs = result["documents_processed"]
                 .as_u64()
@@ -193,7 +196,7 @@ async fn ingest(args: IngestArgs) -> anyhow::Result<()> {
                 "✓".green().bold(),
                 docs,
                 chunks,
-                args.collection
+                args.namespace
             );
         }
         Err(e) => {

@@ -147,6 +147,55 @@ func (s *PgvectorStore) Search(ctx context.Context, kitchen string, vector []flo
 	return results, rows.Err()
 }
 
+// List returns documents matching metadata filters without vector similarity.
+// Used by sentence-window and parent-document strategies to fetch adjacent chunks.
+func (s *PgvectorStore) List(ctx context.Context, kitchen string, filter map[string]string, limit int) ([]models.VectorDoc, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+
+	query := `SELECT id, kitchen, namespace, content, metadata, created_at
+		FROM ao_vectors
+		WHERE kitchen = $1`
+	args := []interface{}{kitchen}
+	argIdx := 2
+
+	if ns, ok := filter["namespace"]; ok && ns != "" {
+		query += fmt.Sprintf(" AND namespace = $%d", argIdx)
+		args = append(args, ns)
+		argIdx++
+	}
+
+	// Apply metadata JSONB filters
+	for k, v := range filter {
+		if k == "namespace" {
+			continue
+		}
+		query += fmt.Sprintf(" AND metadata->>$%d = $%d", argIdx, argIdx+1)
+		args = append(args, k, v)
+		argIdx += 2
+	}
+
+	query += fmt.Sprintf(" ORDER BY created_at ASC LIMIT $%d", argIdx)
+	args = append(args, limit)
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("pgvector list: %w", err)
+	}
+	defer rows.Close()
+
+	var results []models.VectorDoc
+	for rows.Next() {
+		var doc models.VectorDoc
+		if err := rows.Scan(&doc.ID, &doc.Kitchen, &doc.Namespace, &doc.Content, &doc.Metadata, &doc.CreatedAt); err != nil {
+			return nil, fmt.Errorf("pgvector list scan: %w", err)
+		}
+		results = append(results, doc)
+	}
+	return results, rows.Err()
+}
+
 func (s *PgvectorStore) Delete(ctx context.Context, kitchen string, ids []string) error {
 	if len(ids) == 0 {
 		return nil

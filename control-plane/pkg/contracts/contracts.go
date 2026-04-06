@@ -231,6 +231,10 @@ type VectorStoreDriver interface {
 	// Search performs similarity search returning top-k results.
 	Search(ctx context.Context, kitchen string, vector []float64, topK int, filter map[string]string) ([]models.SearchResult, error)
 
+	// List returns documents matching metadata filters without vector similarity.
+	// Used by sentence-window and parent-document strategies to fetch adjacent/related chunks.
+	List(ctx context.Context, kitchen string, filter map[string]string, limit int) ([]models.VectorDoc, error)
+
 	// Delete removes documents by ID from the vector index.
 	Delete(ctx context.Context, kitchen string, ids []string) error
 
@@ -238,6 +242,32 @@ type VectorStoreDriver interface {
 	Count(ctx context.Context, kitchen string) (int, error)
 
 	// HealthCheck verifies the vector store is reachable.
+	HealthCheck(ctx context.Context) error
+}
+
+// ── RAG Service (R8) ─────────────────────────────────────────
+
+// RAGService abstracts retrieval-augmented generation pipelines.
+// AgentOven is an orchestrator: the built-in pipeline is one implementation
+// (internal/rag.Pipeline) but external systems (LlamaIndex, Haystack, etc.)
+// can register as alternative RAGService providers.
+//
+// OSS implementation: internal/rag.Pipeline (embed → search → generate)
+// Pro implementation: external proxy, custom pipelines, managed services
+type RAGService interface {
+	// Name returns a unique identifier for this RAG service (e.g. "built-in", "llamaindex").
+	Name() string
+
+	// Query runs a RAG retrieval + optional answer generation.
+	Query(ctx context.Context, kitchen string, req models.RAGQueryRequest) (*models.RAGQueryResult, error)
+
+	// Ingest processes raw documents into the pipeline's storage.
+	Ingest(ctx context.Context, kitchen string, req models.RAGIngestRequest) (*models.RAGIngestResult, error)
+
+	// Strategies returns the list of retrieval strategies this service supports.
+	Strategies() []models.RAGStrategy
+
+	// HealthCheck verifies the RAG service is operational.
 	HealthCheck(ctx context.Context) error
 }
 

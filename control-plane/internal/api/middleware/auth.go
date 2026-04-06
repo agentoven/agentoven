@@ -89,6 +89,8 @@ func (am *AuthMiddleware) Handler(next http.Handler) http.Handler {
 func isAuthPublicPath(path string) bool {
 	publicPaths := []string{
 		"/health",
+		"/healthz",
+		"/readyz",
 		"/version",
 		"/.well-known/agent.json",
 	}

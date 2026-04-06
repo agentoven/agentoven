@@ -258,11 +258,15 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 
 		// ── RAG & Intelligence (Release 5) ──────────────────
 
-		// RAG Pipeline — query and ingest
+		// RAG Pipeline — query, ingest, and provider management
 		if rh != nil {
 			r.Route("/rag", func(r chi.Router) {
 				r.Post("/query", rh.RAGQuery)
 				r.Post("/ingest", rh.RAGIngest)
+				r.Get("/providers", rh.ListRAGProviders)
+				r.Post("/providers", rh.RegisterExternalRAGProvider)
+				r.Delete("/providers/{name}", rh.DeleteRAGProvider)
+				r.Get("/health", rh.RAGHealth)
 			})
 
 			// Embedding Drivers — list and invoke

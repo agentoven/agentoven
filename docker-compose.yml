@@ -12,9 +12,9 @@
 #   - otel:     OpenTelemetry Collector         → gRPC :4317
 
 services:
-  # ── PostgreSQL ───────────────────────────────────────────────
+  # ── PostgreSQL (with pgvector for RAG) ────────────────────────
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: agentoven
       POSTGRES_PASSWORD: agentoven
