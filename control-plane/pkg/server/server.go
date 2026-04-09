@@ -244,6 +244,7 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 	// ── Model Catalog (Release 8) ──────────────────────────
 	cat := catalog.NewCatalog("")
 	cat.Start(ctx)
+	mr.SetCatalog(cat) // wire catalog into router for model-level pricing
 	log.Info().Msg("✅ Model catalog initialized")
 
 	// ── Session Store (Release 8) ───────────────────────────

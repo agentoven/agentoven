@@ -1,11 +1,17 @@
 {
   "name": "@agentoven/sdk",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "AgentOven TypeScript SDK — enterprise agent orchestration",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "license": "Apache-2.0",
-  "keywords": ["agents", "ai", "orchestration", "a2a", "mcp"],
+  "keywords": [
+    "agents",
+    "ai",
+    "orchestration",
+    "a2a",
+    "mcp"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/agentoven/agentoven"
@@ -37,12 +43,12 @@
     "vitest": "^2.0.0"
   },
   "optionalDependencies": {
-    "@agentoven/sdk-win32-x64-msvc": "0.3.0",
-    "@agentoven/sdk-darwin-x64": "0.3.0",
-    "@agentoven/sdk-darwin-arm64": "0.3.0",
-    "@agentoven/sdk-linux-x64-gnu": "0.3.0",
-    "@agentoven/sdk-linux-x64-musl": "0.3.0",
-    "@agentoven/sdk-linux-arm64-gnu": "0.3.0"
+    "@agentoven/sdk-win32-x64-msvc": "0.6.1",
+    "@agentoven/sdk-darwin-x64": "0.6.1",
+    "@agentoven/sdk-linux-x64-gnu": "0.6.1",
+    "@agentoven/sdk-darwin-arm64": "0.6.1",
+    "@agentoven/sdk-linux-arm64-gnu": "0.6.1",
+    "@agentoven/sdk-linux-x64-musl": "0.6.1"
   },
   "engines": {
     "node": ">= 18"

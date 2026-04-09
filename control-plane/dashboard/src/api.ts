@@ -262,6 +262,16 @@ export interface ProviderTestResult {
   error?: string;
 }
 
+export interface ProviderTemplate {
+  kind: string;
+  display_name: string;
+  description: string;
+  default_endpoint: string;
+  default_models: string[];
+  required_config: string[];
+  help_url: string;
+}
+
 export const providers = {
   list: () => request<ModelProvider[]>('/models/providers'),
   get: (name: string) => request<ModelProvider>(`/models/providers/${name}`),
@@ -276,6 +286,8 @@ export const providers = {
     request<void>(`/models/providers/${name}`, { method: 'DELETE' }),
   test: (name: string) =>
     request<ProviderTestResult>(`/models/providers/${name}/test`, { method: 'POST' }),
+  templates: () =>
+    request<ProviderTemplate[]>('/models/providers/templates'),
 };
 
 // ── MCP Tools ─────────────────────────────────────────────────

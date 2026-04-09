@@ -91,6 +91,12 @@ pub async fn execute(args: ServerArgs) -> anyhow::Result<()> {
         cmd.env("OLLAMA_URL", url);
     }
 
+    // Dashboard — auto-detect and serve the built dashboard
+    let dashboard_dir = find_dashboard_dir();
+    if let Some(ref dir) = dashboard_dir {
+        cmd.env("AGENTOVEN_DASHBOARD_DIR", dir);
+    }
+
     println!("  Port:      {}", port.to_string().cyan());
     println!("  Store:     {}", store_mode.cyan());
     if args.pgvector_url.is_some() || args.database_url.is_some() {
@@ -99,6 +105,14 @@ pub async fn execute(args: ServerArgs) -> anyhow::Result<()> {
         println!(
             "  pgvector:  {} (set --database-url or --pgvector-url to enable)",
             "disabled".yellow()
+        );
+    }
+    if let Some(ref dir) = dashboard_dir {
+        println!("  Dashboard: {} ({})", "enabled".green(), dir.dimmed());
+    } else {
+        println!(
+            "  Dashboard: {} (build with: cd control-plane/dashboard && npm run build)",
+            "not found".yellow()
         );
     }
     println!("  Binary:    {}", server_bin.dimmed());
@@ -212,4 +226,55 @@ fn find_server_binary() -> anyhow::Result<String> {
          2. Specify:   agentoven server --bin /path/to/agentoven-server\n    \
          3. Use Docker: agentoven local up"
     ))
+}
+
+/// Find the dashboard static files directory.
+///
+/// Search order:
+/// 1. Relative to the current CLI binary (Homebrew / packaged installs)
+///    e.g. binary at /opt/homebrew/bin/agentoven → ../share/agentoven/dashboard/
+/// 2. CWD-relative paths (dev mode)
+fn find_dashboard_dir() -> Option<String> {
+    use std::path::PathBuf;
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // 1. Relative to the CLI binary (handles both symlink and resolved paths)
+    if let Ok(exe) = std::env::current_exe() {
+        let raw_dir = exe.parent().unwrap_or(&exe).to_path_buf();
+        candidates.push(
+            raw_dir
+                .join("..")
+                .join("share")
+                .join("agentoven")
+                .join("dashboard"),
+        );
+
+        // Also try the symlink-resolved path
+        if let Ok(resolved) = std::fs::canonicalize(&exe) {
+            let resolved_dir = resolved.parent().unwrap_or(&resolved).to_path_buf();
+            candidates.push(
+                resolved_dir
+                    .join("..")
+                    .join("share")
+                    .join("agentoven")
+                    .join("dashboard"),
+            );
+        }
+    }
+
+    // 2. CWD-relative paths (dev mode)
+    candidates.push("dashboard/dist".into());
+    candidates.push("control-plane/dashboard/dist".into());
+
+    for candidate in &candidates {
+        let index = candidate.join("index.html");
+        if index.exists() {
+            if let Ok(abs) = std::fs::canonicalize(candidate) {
+                return Some(abs.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    None
 }

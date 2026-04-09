@@ -27,9 +27,17 @@ build-typescript:
 
 # ── Development ───────────────────────────────
 
-# Run everything in dev mode (Go server + Vite HMR dashboard)
-dev:
+# Run in dev mode — builds dashboard first, then serves via Go server
+dev: build-dashboard
 	@echo "🏺 Starting AgentOven dev mode..."
+	@echo ""
+	@echo "  API + Dashboard → http://localhost:8080"
+	@echo ""
+	cd control-plane && go run ./cmd/server
+
+# Run in dev-hmr mode — Go server + Vite HMR (hot-reload dashboard)
+dev-hmr:
+	@echo "🏺 Starting AgentOven dev mode (HMR)..."
 	@echo ""
 	@echo "  API server  → http://localhost:8080"
 	@echo "  Dashboard   → http://localhost:5173"

@@ -633,6 +633,21 @@ type ProviderTestResult struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// ProviderTemplate is a pre-built template for a known provider kind.
+// Users can "copy from catalogue" when adding a provider — the template
+// pre-fills kind, endpoint, and default models so they only need to paste
+// their API key.  Templates are hardcoded in the binary so they work even
+// when the model catalogue is unreachable.
+type ProviderTemplate struct {
+	Kind            string   `json:"kind"`
+	DisplayName     string   `json:"display_name"`
+	Description     string   `json:"description"`
+	DefaultEndpoint string   `json:"default_endpoint"`
+	DefaultModels   []string `json:"default_models"`
+	RequiredConfig  []string `json:"required_config"` // e.g. ["api_key"] or ["api_key","resource_name"]
+	HelpURL         string   `json:"help_url"`
+}
+
 // ── Recipe Run ───────────────────────────────────────────────
 
 type RecipeRunStatus string

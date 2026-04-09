@@ -46,8 +46,8 @@ const (
 
 // Catalog is a thread-safe, auto-refreshing model capability database.
 type Catalog struct {
-	mu       sync.RWMutex
-	models   map[string]*models.ModelCapability // key: "provider/model" or model_id
+	mu     sync.RWMutex
+	models map[string]*models.ModelCapability // key: "provider/model" or model_id
 
 	client   *http.Client
 	cacheDir string
@@ -239,18 +239,18 @@ func (c *Catalog) Count() int {
 
 // litellmEntry is the structure from LiteLLM's model_prices_and_context_window.json.
 type litellmEntry struct {
-	MaxTokens          int      `json:"max_tokens"`
-	MaxInputTokens     int      `json:"max_input_tokens"`
-	MaxOutputTokens    int      `json:"max_output_tokens"`
-	InputCostPerToken  float64  `json:"input_cost_per_token"`
-	OutputCostPerToken float64  `json:"output_cost_per_token"`
-	LitellmProvider    string   `json:"litellm_provider"`
-	Mode               string   `json:"mode"`
-	SupportsVision     bool     `json:"supports_vision"`
-	SupportsToolChoice bool     `json:"supports_tool_choice"`
-	SupportsResponseSchema bool `json:"supports_response_schema"`
-	SupportsAssistantPrefill bool `json:"supports_assistant_prefill"`
-	SupportsFunctionCalling bool `json:"supports_function_calling"`
+	MaxTokens                int     `json:"max_tokens"`
+	MaxInputTokens           int     `json:"max_input_tokens"`
+	MaxOutputTokens          int     `json:"max_output_tokens"`
+	InputCostPerToken        float64 `json:"input_cost_per_token"`
+	OutputCostPerToken       float64 `json:"output_cost_per_token"`
+	LitellmProvider          string  `json:"litellm_provider"`
+	Mode                     string  `json:"mode"`
+	SupportsVision           bool    `json:"supports_vision"`
+	SupportsToolChoice       bool    `json:"supports_tool_choice"`
+	SupportsResponseSchema   bool    `json:"supports_response_schema"`
+	SupportsAssistantPrefill bool    `json:"supports_assistant_prefill"`
+	SupportsFunctionCalling  bool    `json:"supports_function_calling"`
 }
 
 func (c *Catalog) fetchLiteLLMData(ctx context.Context) error {
@@ -317,19 +317,19 @@ func (c *Catalog) fetchLiteLLMData(ctx context.Context) error {
 		}
 
 		cap := &models.ModelCapability{
-			ModelID:          modelKey,
-			ProviderKind:     providerKind,
-			ModelName:        modelName,
-			ContextWindow:    contextWindow,
-			MaxOutputTokens:  entry.MaxOutputTokens,
-			InputCostPer1K:   entry.InputCostPerToken * 1000,
-			OutputCostPer1K:  entry.OutputCostPerToken * 1000,
-			SupportsTools:    entry.SupportsFunctionCalling || entry.SupportsToolChoice,
-			SupportsVision:   entry.SupportsVision,
+			ModelID:           modelKey,
+			ProviderKind:      providerKind,
+			ModelName:         modelName,
+			ContextWindow:     contextWindow,
+			MaxOutputTokens:   entry.MaxOutputTokens,
+			InputCostPer1K:    entry.InputCostPerToken * 1000,
+			OutputCostPer1K:   entry.OutputCostPerToken * 1000,
+			SupportsTools:     entry.SupportsFunctionCalling || entry.SupportsToolChoice,
+			SupportsVision:    entry.SupportsVision,
 			SupportsStreaming: true, // most chat models support streaming
-			SupportsJSON:     entry.SupportsResponseSchema,
-			TokenParamName:   tokenParam,
-			Source:           "catalog",
+			SupportsJSON:      entry.SupportsResponseSchema,
+			TokenParamName:    tokenParam,
+			Source:            "catalog",
 		}
 
 		// Check for thinking/reasoning support
@@ -366,6 +366,8 @@ func mapLiteLLMProvider(litellmProvider string) string {
 		return "bedrock"
 	case "vertex_ai", "vertex_ai_beta", "google":
 		return "vertex"
+	case "gemini":
+		return "gemini"
 	case "sagemaker":
 		return "sagemaker"
 	case "together_ai":
@@ -465,6 +467,28 @@ func (c *Catalog) loadBuiltinDefaults() {
 			InputCostPer1K: 0.001, OutputCostPer1K: 0.005,
 			SupportsTools: true, SupportsStreaming: true,
 			TokenParamName: "max_tokens", Source: "builtin"},
+
+		// Gemini
+		{ModelID: "gemini/gemini-2.5-pro", ProviderKind: "gemini", ModelName: "gemini-2.5-pro",
+			ContextWindow: 1048576, MaxOutputTokens: 65536,
+			InputCostPer1K: 0.00125, OutputCostPer1K: 0.01,
+			SupportsTools: true, SupportsVision: true, SupportsStreaming: true, SupportsThinking: true, SupportsJSON: true,
+			TokenParamName: "max_output_tokens", Source: "builtin"},
+		{ModelID: "gemini/gemini-2.5-flash", ProviderKind: "gemini", ModelName: "gemini-2.5-flash",
+			ContextWindow: 1048576, MaxOutputTokens: 65536,
+			InputCostPer1K: 0.00015, OutputCostPer1K: 0.0006,
+			SupportsTools: true, SupportsVision: true, SupportsStreaming: true, SupportsThinking: true, SupportsJSON: true,
+			TokenParamName: "max_output_tokens", Source: "builtin"},
+		{ModelID: "gemini/gemini-2.0-flash", ProviderKind: "gemini", ModelName: "gemini-2.0-flash",
+			ContextWindow: 1048576, MaxOutputTokens: 8192,
+			InputCostPer1K: 0.0001, OutputCostPer1K: 0.0004,
+			SupportsTools: true, SupportsVision: true, SupportsStreaming: true, SupportsJSON: true,
+			TokenParamName: "max_output_tokens", Source: "builtin"},
+		{ModelID: "gemini/gemini-2.0-flash-lite", ProviderKind: "gemini", ModelName: "gemini-2.0-flash-lite",
+			ContextWindow: 1048576, MaxOutputTokens: 8192,
+			InputCostPer1K: 0.000075, OutputCostPer1K: 0.0003,
+			SupportsTools: true, SupportsStreaming: true, SupportsJSON: true,
+			TokenParamName: "max_output_tokens", Source: "builtin"},
 	}
 
 	c.mu.Lock()

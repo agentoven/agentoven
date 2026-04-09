@@ -291,18 +291,21 @@ func (e *Executor) Execute(ctx context.Context, agent *models.Agent, userMessage
 		trace.Turns = append(trace.Turns, turnRecord)
 
 		// Add assistant message with tool call info to conversation
+		// OpenAI requires assistant messages to include tool_calls when finish_reason is "tool_calls"
 		assistantMsg := models.ChatMessage{
-			Role:    "assistant",
-			Content: routeResp.Content,
+			Role:      "assistant",
+			Content:   routeResp.Content,
+			ToolCalls: routeResp.ToolCalls, // include native tool calls for multi-turn
 		}
 		messages = append(messages, assistantMsg)
 
-		// Add tool results as messages
+		// Add tool results as messages with tool_call_id for proper correlation
 		for _, tr := range toolResults {
 			toolMsg := models.ChatMessage{
-				Role:    "tool",
-				Content: fmt.Sprintf("[Tool: %s] %s", tr.Name, tr.Content),
-				Name:    tr.Name,
+				Role:       "tool",
+				Content:    tr.Content,
+				Name:       tr.Name,
+				ToolCallID: tr.ToolCallID,
 			}
 			messages = append(messages, toolMsg)
 		}
@@ -312,9 +315,10 @@ func (e *Executor) Execute(ctx context.Context, agent *models.Agent, userMessage
 			session.Messages = append(session.Messages, assistantMsg)
 			for _, tr := range toolResults {
 				session.Messages = append(session.Messages, models.ChatMessage{
-					Role:    "tool",
-					Content: fmt.Sprintf("[Tool: %s] %s", tr.Name, tr.Content),
-					Name:    tr.Name,
+					Role:       "tool",
+					Content:    tr.Content,
+					Name:       tr.Name,
+					ToolCallID: tr.ToolCallID,
 				})
 			}
 			session.TotalTokens += routeResp.Usage.TotalTokens

@@ -63,10 +63,20 @@ type ModelRouter struct {
 	costs  map[string]*models.CostSummary
 
 	// ProviderDriver registry — maps provider kind to its driver.
-	// OSS registers openai, azure-openai, anthropic, ollama at init.
+	// OSS registers openai, azure-openai, anthropic, ollama, gemini at init.
 	// Pro calls RegisterDriver("bedrock", ...) etc. to add enterprise drivers.
 	driversMu sync.RWMutex
 	drivers   map[string]ProviderDriver
+
+	// catalog provides model-level pricing and capability lookups.
+	// Optional — when nil, falls back to defaultCosts map.
+	catalog CatalogLookup
+}
+
+// CatalogLookup is the interface the router needs from the model catalog.
+// Defined here to avoid an import cycle (catalog → models ← router).
+type CatalogLookup interface {
+	Lookup(providerKind, modelName string) *models.ModelCapability
 }
 
 // ProviderDriver is the interface for model provider integrations.
@@ -160,6 +170,13 @@ func (mr *ModelRouter) RegisterDriver(driver ProviderDriver) {
 	mr.drivers[driver.Kind()] = driver
 	mr.driversMu.Unlock()
 	log.Info().Str("kind", driver.Kind()).Msg("Provider driver registered")
+}
+
+// SetCatalog wires the model catalog into the router for model-level pricing.
+// Called after both router and catalog are initialized in buildServer().
+func (mr *ModelRouter) SetCatalog(cat CatalogLookup) {
+	mr.catalog = cat
+	log.Info().Msg("Model catalog wired into router for pricing")
 }
 
 // GetDriver returns the registered driver for a provider kind, or nil.
@@ -609,17 +626,21 @@ func (mr *ModelRouter) callProvider(ctx context.Context, provider *models.ModelP
 // ── OpenAI / Azure OpenAI Provider ──────────────────────────
 
 type openAIRequest struct {
-	Model    string               `json:"model"`
-	Messages []models.ChatMessage `json:"messages"`
+	Model      string                  `json:"model"`
+	Messages   []models.ChatMessage    `json:"messages"`
+	Tools      []models.ToolDefinition `json:"tools,omitempty"`
+	ToolChoice interface{}             `json:"tool_choice,omitempty"`
 }
 
 type openAIResponse struct {
 	ID      string `json:"id"`
 	Choices []struct {
 		Message struct {
-			Content          string `json:"content"`
-			ReasoningContent string `json:"reasoning_content,omitempty"` // OpenAI o-series reasoning
+			Content          string                  `json:"content"`
+			ReasoningContent string                  `json:"reasoning_content,omitempty"` // OpenAI o-series reasoning
+			ToolCalls        []models.ToolCallResult `json:"tool_calls,omitempty"`
 		} `json:"message"`
+		FinishReason string `json:"finish_reason,omitempty"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int64 `json:"prompt_tokens"`
@@ -629,7 +650,10 @@ type openAIResponse struct {
 	} `json:"usage"`
 }
 
-func (mr *ModelRouter) callOpenAI(ctx context.Context, provider *models.ModelProvider, model string, messages []models.ChatMessage) (*models.RouteResponse, error) {
+func (mr *ModelRouter) callOpenAI(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) (*models.RouteResponse, error) {
+	model := req.Model
+	messages := req.Messages
+
 	endpoint := provider.Endpoint
 	if endpoint == "" {
 		endpoint = "https://api.openai.com/v1"
@@ -640,7 +664,15 @@ func (mr *ModelRouter) callOpenAI(ctx context.Context, provider *models.ModelPro
 		return nil, fmt.Errorf("openai: api_key not configured for provider %s", provider.Name)
 	}
 
-	body, _ := json.Marshal(openAIRequest{Model: model, Messages: messages})
+	oaiReq := openAIRequest{Model: model, Messages: messages}
+	// Include tool definitions if provided by the executor
+	if len(req.Tools) > 0 {
+		oaiReq.Tools = req.Tools
+		if req.ToolChoice != nil {
+			oaiReq.ToolChoice = req.ToolChoice
+		}
+	}
+	body, _ := json.Marshal(oaiReq)
 
 	url := endpoint + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
@@ -674,10 +706,15 @@ func (mr *ModelRouter) callOpenAI(ctx context.Context, provider *models.ModelPro
 
 	content := ""
 	var thinkingBlocks []models.ThinkingBlock
+	var toolCalls []models.ToolCallResult
+	finishReason := ""
 	if len(oaiResp.Choices) > 0 {
-		content = oaiResp.Choices[0].Message.Content
+		choice := oaiResp.Choices[0]
+		content = choice.Message.Content
+		finishReason = choice.FinishReason
+		toolCalls = choice.Message.ToolCalls
 		// Capture reasoning_content from OpenAI o-series models
-		if rc := oaiResp.Choices[0].Message.ReasoningContent; rc != "" {
+		if rc := choice.Message.ReasoningContent; rc != "" {
 			thinkingBlocks = append(thinkingBlocks, models.ThinkingBlock{
 				Content:    rc,
 				TokenCount: oaiResp.Usage.ReasoningTokens,
@@ -699,6 +736,8 @@ func (mr *ModelRouter) callOpenAI(ctx context.Context, provider *models.ModelPro
 		Model:          model,
 		Content:        content,
 		ThinkingBlocks: thinkingBlocks,
+		FinishReason:   finishReason,
+		ToolCalls:      toolCalls,
 		Usage: models.TokenUsage{
 			InputTokens:    oaiResp.Usage.PromptTokens,
 			OutputTokens:   oaiResp.Usage.CompletionTokens,
@@ -711,19 +750,31 @@ func (mr *ModelRouter) callOpenAI(ctx context.Context, provider *models.ModelPro
 
 // ── Anthropic Provider ──────────────────────────────────────
 
+// anthropicTool describes a tool in Anthropic's format.
+type anthropicTool struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	InputSchema map[string]interface{} `json:"input_schema"`
+}
+
 type anthropicRequest struct {
 	Model     string               `json:"model"`
 	System    string               `json:"system,omitempty"`
 	Messages  []models.ChatMessage `json:"messages"`
 	MaxTokens int                  `json:"max_tokens"`
+	Tools     []anthropicTool      `json:"tools,omitempty"`
 }
 
 type anthropicResponse struct {
-	ID      string `json:"id"`
-	Content []struct {
-		Type     string `json:"type"` // "text", "thinking", "tool_use"
-		Text     string `json:"text"`
-		Thinking string `json:"thinking"` // Anthropic extended thinking content
+	ID         string `json:"id"`
+	StopReason string `json:"stop_reason,omitempty"` // "end_turn", "tool_use", "max_tokens"
+	Content    []struct {
+		Type     string                 `json:"type"` // "text", "thinking", "tool_use"
+		Text     string                 `json:"text"`
+		Thinking string                 `json:"thinking"`        // Anthropic extended thinking content
+		ID       string                 `json:"id,omitempty"`    // tool_use block ID
+		Name     string                 `json:"name,omitempty"`  // tool_use function name
+		Input    map[string]interface{} `json:"input,omitempty"` // tool_use arguments
 	} `json:"content"`
 	Usage struct {
 		InputTokens  int64 `json:"input_tokens"`
@@ -731,7 +782,10 @@ type anthropicResponse struct {
 	} `json:"usage"`
 }
 
-func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.ModelProvider, model string, messages []models.ChatMessage) (*models.RouteResponse, error) {
+func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) (*models.RouteResponse, error) {
+	model := req.Model
+	messages := req.Messages
+
 	endpoint := provider.Endpoint
 	if endpoint == "" {
 		endpoint = "https://api.anthropic.com"
@@ -762,7 +816,19 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 		}
 	}
 
-	body, _ := json.Marshal(anthropicRequest{Model: model, System: systemText, Messages: filteredMessages, MaxTokens: maxTokens})
+	anthReq := anthropicRequest{Model: model, System: systemText, Messages: filteredMessages, MaxTokens: maxTokens}
+	// Convert tool definitions to Anthropic format
+	if len(req.Tools) > 0 {
+		for _, td := range req.Tools {
+			anthReq.Tools = append(anthReq.Tools, anthropicTool{
+				Name:        td.Function.Name,
+				Description: td.Function.Description,
+				InputSchema: td.Function.Parameters,
+			})
+		}
+	}
+
+	body, _ := json.Marshal(anthReq)
 
 	url := endpoint + "/v1/messages"
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
@@ -791,6 +857,7 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 
 	content := ""
 	var thinkingBlocks []models.ThinkingBlock
+	var toolCalls []models.ToolCallResult
 	for _, c := range anthResp.Content {
 		switch c.Type {
 		case "text":
@@ -803,7 +870,29 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 				Provider:  provider.Name,
 				Timestamp: time.Now().UTC(),
 			})
+		case "tool_use":
+			// Anthropic tool_use block → convert to ToolCallResult
+			argsJSON, _ := json.Marshal(c.Input)
+			toolCalls = append(toolCalls, models.ToolCallResult{
+				ID:   c.ID,
+				Type: "function",
+				Function: struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				}{
+					Name:      c.Name,
+					Arguments: string(argsJSON),
+				},
+			})
 		}
+	}
+
+	// Map Anthropic stop_reason to OpenAI-style finish_reason
+	finishReason := anthResp.StopReason
+	if finishReason == "tool_use" {
+		finishReason = "tool_calls"
+	} else if finishReason == "end_turn" {
+		finishReason = "stop"
 	}
 
 	totalTokens := anthResp.Usage.InputTokens + anthResp.Usage.OutputTokens
@@ -818,6 +907,8 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 		Model:          model,
 		Content:        content,
 		ThinkingBlocks: thinkingBlocks,
+		FinishReason:   finishReason,
+		ToolCalls:      toolCalls,
 		Usage: models.TokenUsage{
 			InputTokens:   anthResp.Usage.InputTokens,
 			OutputTokens:  anthResp.Usage.OutputTokens,
@@ -829,13 +920,26 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 
 // ── Ollama Provider ─────────────────────────────────────────
 
-func (mr *ModelRouter) callOllama(ctx context.Context, provider *models.ModelProvider, model string, messages []models.ChatMessage) (*models.RouteResponse, error) {
+func (mr *ModelRouter) callOllama(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) (*models.RouteResponse, error) {
+	model := req.Model
 	endpoint := provider.Endpoint
 	if endpoint == "" {
 		endpoint = "http://localhost:11434"
 	}
 
-	body, _ := json.Marshal(openAIRequest{Model: model, Messages: messages})
+	oaiReq := openAIRequest{Model: model, Messages: req.Messages}
+
+	// Include tools if provided
+	if len(req.Tools) > 0 {
+		oaiReq.Tools = req.Tools
+		if req.ToolChoice != nil {
+			oaiReq.ToolChoice = req.ToolChoice
+		} else {
+			oaiReq.ToolChoice = "auto"
+		}
+	}
+
+	body, _ := json.Marshal(oaiReq)
 
 	url := endpoint + "/v1/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
@@ -861,15 +965,21 @@ func (mr *ModelRouter) callOllama(ctx context.Context, provider *models.ModelPro
 	}
 
 	content := ""
+	var toolCalls []models.ToolCallResult
+	finishReason := ""
 	if len(oaiResp.Choices) > 0 {
 		content = oaiResp.Choices[0].Message.Content
+		toolCalls = oaiResp.Choices[0].Message.ToolCalls
+		finishReason = oaiResp.Choices[0].FinishReason
 	}
 
 	return &models.RouteResponse{
-		ID:       uuid.New().String(),
-		Provider: provider.Name,
-		Model:    model,
-		Content:  content,
+		ID:           uuid.New().String(),
+		Provider:     provider.Name,
+		Model:        model,
+		Content:      content,
+		FinishReason: finishReason,
+		ToolCalls:    toolCalls,
 		Usage: models.TokenUsage{
 			InputTokens:  oaiResp.Usage.PromptTokens,
 			OutputTokens: oaiResp.Usage.CompletionTokens,
@@ -1210,7 +1320,7 @@ func (mr *ModelRouter) recordTrace(ctx context.Context, req *models.RouteRequest
 
 // ── Cost Helpers ────────────────────────────────────────────
 
-// Known cost per 1K tokens (USD) — sensible defaults
+// Known cost per 1K tokens (USD) — sensible defaults (fallback when catalog is unavailable)
 var defaultCosts = map[string]map[string]float64{
 	"gpt-4o":                    {"input": 0.0025, "output": 0.01},
 	"gpt-4o-mini":               {"input": 0.00015, "output": 0.0006},
@@ -1218,15 +1328,33 @@ var defaultCosts = map[string]map[string]float64{
 	"claude-sonnet-4-20250514":  {"input": 0.003, "output": 0.015},
 	"claude-3-5-haiku-20241022": {"input": 0.001, "output": 0.005},
 	"claude-opus-4-20250514":    {"input": 0.015, "output": 0.075},
+	// Gemini
+	"gemini-2.5-pro":        {"input": 0.00125, "output": 0.01},
+	"gemini-2.5-flash":      {"input": 0.00015, "output": 0.0006},
+	"gemini-2.0-flash":      {"input": 0.0001, "output": 0.0004},
+	"gemini-2.0-flash-lite": {"input": 0.000075, "output": 0.0003},
 }
 
 func (mr *ModelRouter) getModelCost(provider *models.ModelProvider, model, direction string) float64 {
-	// Check provider config first
+	// 1. Check provider config override (user-set per-provider)
 	key := "cost_per_1k_" + direction
 	if v, ok := provider.Config[key].(float64); ok {
 		return v
 	}
-	// Fall back to defaults
+
+	// 2. Check model catalog (auto-fetched per-model pricing from LiteLLM + builtins)
+	if mr.catalog != nil {
+		if cap := mr.catalog.Lookup(provider.Kind, model); cap != nil {
+			if direction == "input" && cap.InputCostPer1K > 0 {
+				return cap.InputCostPer1K
+			}
+			if direction == "output" && cap.OutputCostPer1K > 0 {
+				return cap.OutputCostPer1K
+			}
+		}
+	}
+
+	// 3. Fall back to hardcoded defaults
 	if costs, ok := defaultCosts[model]; ok {
 		return costs[direction]
 	}
@@ -1247,12 +1375,13 @@ var _ = rand.Int
 // ── Built-in Provider Drivers ────────────────────────────────
 // ══════════════════════════════════════════════════════════════
 
-// registerBuiltinDrivers registers the four OSS community drivers.
+// registerBuiltinDrivers registers the OSS community drivers.
 func (mr *ModelRouter) registerBuiltinDrivers() {
 	mr.RegisterDriver(&OpenAIDriver{router: mr})
 	mr.RegisterDriver(&AzureOpenAIDriver{router: mr})
 	mr.RegisterDriver(&AnthropicDriver{router: mr})
 	mr.RegisterDriver(&OllamaDriver{router: mr})
+	mr.RegisterDriver(&GeminiDriver{router: mr})
 	mr.RegisterDriver(&LiteLLMDriver{router: mr})
 }
 
@@ -1263,7 +1392,7 @@ type OpenAIDriver struct{ router *ModelRouter }
 func (d *OpenAIDriver) Kind() string { return "openai" }
 
 func (d *OpenAIDriver) Call(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) (*models.RouteResponse, error) {
-	return d.router.callOpenAI(ctx, provider, req.Model, req.Messages)
+	return d.router.callOpenAI(ctx, provider, req)
 }
 
 func (d *OpenAIDriver) HealthCheck(ctx context.Context, provider *models.ModelProvider) error {
@@ -1416,7 +1545,7 @@ type AzureOpenAIDriver struct{ router *ModelRouter }
 func (d *AzureOpenAIDriver) Kind() string { return "azure-openai" }
 
 func (d *AzureOpenAIDriver) Call(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) (*models.RouteResponse, error) {
-	return d.router.callOpenAI(ctx, provider, req.Model, req.Messages)
+	return d.router.callOpenAI(ctx, provider, req)
 }
 
 func (d *AzureOpenAIDriver) HealthCheck(ctx context.Context, provider *models.ModelProvider) error {
@@ -1521,7 +1650,7 @@ type AnthropicDriver struct{ router *ModelRouter }
 func (d *AnthropicDriver) Kind() string { return "anthropic" }
 
 func (d *AnthropicDriver) Call(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) (*models.RouteResponse, error) {
-	return d.router.callAnthropic(ctx, provider, req.Model, req.Messages)
+	return d.router.callAnthropic(ctx, provider, req)
 }
 
 func (d *AnthropicDriver) HealthCheck(ctx context.Context, provider *models.ModelProvider) error {
@@ -1542,7 +1671,7 @@ type OllamaDriver struct{ router *ModelRouter }
 func (d *OllamaDriver) Kind() string { return "ollama" }
 
 func (d *OllamaDriver) Call(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) (*models.RouteResponse, error) {
-	return d.router.callOllama(ctx, provider, req.Model, req.Messages)
+	return d.router.callOllama(ctx, provider, req)
 }
 
 func (d *OllamaDriver) HealthCheck(ctx context.Context, provider *models.ModelProvider) error {
@@ -1691,7 +1820,7 @@ func (d *LiteLLMDriver) Kind() string { return "litellm" }
 
 func (d *LiteLLMDriver) Call(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) (*models.RouteResponse, error) {
 	// LiteLLM exposes an OpenAI-compatible /chat/completions endpoint
-	return d.router.callOpenAI(ctx, provider, req.Model, req.Messages)
+	return d.router.callOpenAI(ctx, provider, req)
 }
 
 func (d *LiteLLMDriver) HealthCheck(ctx context.Context, provider *models.ModelProvider) error {

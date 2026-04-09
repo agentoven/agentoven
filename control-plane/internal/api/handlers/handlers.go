@@ -1153,6 +1153,72 @@ func (h *Handlers) ApproveGate(w http.ResponseWriter, r *http.Request) {
 // ── Model Router Handlers ────────────────────────────────────
 // ══════════════════════════════════════════════════════════════
 
+// builtinProviderTemplates are hardcoded so they work even when the model
+// catalogue is unreachable.  Users pick a template, paste their API key,
+// and everything else is pre-filled.
+var builtinProviderTemplates = []models.ProviderTemplate{
+	{
+		Kind:            "openai",
+		DisplayName:     "OpenAI",
+		Description:     "GPT-4o, GPT-4.1, o3/o4-mini and other OpenAI models",
+		DefaultEndpoint: "https://api.openai.com/v1",
+		DefaultModels:   []string{"gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o", "gpt-4o-mini", "o3", "o4-mini"},
+		RequiredConfig:  []string{"api_key"},
+		HelpURL:         "https://platform.openai.com/api-keys",
+	},
+	{
+		Kind:            "azure-openai",
+		DisplayName:     "Azure OpenAI",
+		Description:     "OpenAI models hosted on Azure with your own deployments",
+		DefaultEndpoint: "https://{resource}.openai.azure.com",
+		DefaultModels:   []string{"gpt-4o", "gpt-4o-mini"},
+		RequiredConfig:  []string{"api_key", "resource_name", "deployment_name", "api_version"},
+		HelpURL:         "https://learn.microsoft.com/azure/ai-services/openai/",
+	},
+	{
+		Kind:            "anthropic",
+		DisplayName:     "Anthropic",
+		Description:     "Claude 4 Opus, Sonnet, and Haiku models",
+		DefaultEndpoint: "https://api.anthropic.com/v1",
+		DefaultModels:   []string{"claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-20250514"},
+		RequiredConfig:  []string{"api_key"},
+		HelpURL:         "https://console.anthropic.com/settings/keys",
+	},
+	{
+		Kind:            "gemini",
+		DisplayName:     "Google Gemini",
+		Description:     "Gemini 2.5 Pro/Flash and 2.0 Flash models via Google AI Studio",
+		DefaultEndpoint: "https://generativelanguage.googleapis.com/v1beta",
+		DefaultModels:   []string{"gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"},
+		RequiredConfig:  []string{"api_key"},
+		HelpURL:         "https://aistudio.google.com/apikey",
+	},
+	{
+		Kind:            "ollama",
+		DisplayName:     "Ollama (Local)",
+		Description:     "Run open-source models locally — Llama 4, Qwen, Gemma, etc.",
+		DefaultEndpoint: "http://localhost:11434",
+		DefaultModels:   []string{"llama3.1", "qwen2.5", "gemma2"},
+		RequiredConfig:  []string{},
+		HelpURL:         "https://ollama.com/library",
+	},
+	{
+		Kind:            "litellm",
+		DisplayName:     "LiteLLM Proxy",
+		Description:     "Unified proxy to 100+ LLM providers via LiteLLM",
+		DefaultEndpoint: "http://localhost:4000",
+		DefaultModels:   []string{},
+		RequiredConfig:  []string{"api_key"},
+		HelpURL:         "https://docs.litellm.ai/docs/",
+	},
+}
+
+// ListProviderTemplates returns hardcoded provider templates so the
+// dashboard can pre-fill the "Add Provider" form.
+func (h *Handlers) ListProviderTemplates(w http.ResponseWriter, r *http.Request) {
+	respondJSON(w, http.StatusOK, builtinProviderTemplates)
+}
+
 func (h *Handlers) ListProviders(w http.ResponseWriter, r *http.Request) {
 	providers, err := h.Store.ListProviders(r.Context())
 	if err != nil {

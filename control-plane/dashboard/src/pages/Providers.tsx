@@ -1,11 +1,12 @@
-import { useState } from 'react';
-import { Cpu, Plus, Trash2, Star, Pencil, HeartPulse, Eye, EyeOff } from 'lucide-react';
-import { providers, type ModelProvider, type ProviderTestResult } from '../api';
+import { useState, useEffect } from 'react';
+import { Cpu, Plus, Trash2, Star, Pencil, HeartPulse, Eye, EyeOff, Library, X } from 'lucide-react';
+import { providers, type ModelProvider, type ProviderTestResult, type ProviderTemplate, type ModelCapability } from '../api';
 import { useAPI } from '../hooks';
 import {
   PageHeader, Card, EmptyState,
   Spinner, ErrorBanner, Button, StatusBadge,
 } from '../components/UI';
+import { ModelCatalogPicker } from '../components/ModelCatalogPicker';
 
 export function ProvidersPage() {
   const { data, loading, error, refetch } = useAPI(providers.list);
@@ -61,7 +62,7 @@ export function ProvidersPage() {
         <EmptyState
           icon={<Cpu size={48} />}
           title="No providers configured"
-          description="Add an OpenAI, Azure OpenAI, Anthropic, or Ollama provider."
+          description="Add an OpenAI, Azure OpenAI, Anthropic, Gemini, or Ollama provider."
           action={<Button onClick={() => setShowForm(true)}>Add Provider</Button>}
         />
       )}
@@ -221,6 +222,24 @@ function ProviderForm({
   const [showKey, setShowKey] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [templates, setTemplates] = useState<ProviderTemplate[]>([]);
+  const [showCatalogPicker, setShowCatalogPicker] = useState(false);
+
+  useEffect(() => {
+    if (!isEdit) {
+      providers.templates().then(setTemplates).catch(() => setTemplates([]));
+    }
+  }, [isEdit]);
+
+  const applyTemplate = (t: ProviderTemplate) => {
+    setForm((f) => ({
+      ...f,
+      kind: t.kind,
+      endpoint: t.default_endpoint,
+      models: t.default_models.join(', '),
+      name: f.name || t.kind,
+    }));
+  };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -265,6 +284,29 @@ function ProviderForm({
       </div>
       {err && <ErrorBanner message={err} />}
       <form onSubmit={submit} className="space-y-4">
+        {/* Template quick-pick (only for new providers) */}
+        {!isEdit && templates.length > 0 && (
+          <div>
+            <label className="block text-xs text-[var(--ao-text-muted)] mb-2">Quick start — pick a template</label>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+              {templates.map((t) => (
+                <button
+                  key={t.kind}
+                  type="button"
+                  onClick={() => applyTemplate(t)}
+                  className={`text-left p-2.5 rounded-lg border transition-all text-xs ${
+                    form.kind === t.kind
+                      ? 'border-[var(--ao-brand)] bg-[var(--ao-brand)]/10 text-[var(--ao-brand-light)]'
+                      : 'border-[var(--ao-border)] bg-[var(--ao-bg)] text-[var(--ao-text-muted)] hover:border-[var(--ao-brand-light)]'
+                  }`}
+                >
+                  <div className="font-semibold text-[0.8125rem] mb-0.5">{t.display_name}</div>
+                  <div className="opacity-70 leading-tight">{t.description}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         {/* Row 1: name, kind */}
         <div className="flex flex-wrap gap-3">
           <div className="w-40">
@@ -287,7 +329,9 @@ function ProviderForm({
               <option value="openai">OpenAI</option>
               <option value="azure-openai">Azure OpenAI</option>
               <option value="anthropic">Anthropic</option>
+              <option value="gemini">Google Gemini</option>
               <option value="ollama">Ollama</option>
+              <option value="litellm">LiteLLM</option>
             </select>
           </div>
           <div className="flex-1 min-w-[200px]">
@@ -301,15 +345,57 @@ function ProviderForm({
           </div>
         </div>
 
-        {/* Row 2: models, api key */}
+        {/* Row 2: models (with catalog picker), api key */}
         <div className="flex flex-wrap gap-3">
           <div className="flex-1 min-w-[200px]">
-            <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Models (comma-sep)</label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-xs text-[var(--ao-text-muted)]">Models</label>
+              <button
+                type="button"
+                onClick={() => setShowCatalogPicker(true)}
+                className="inline-flex items-center gap-1 text-xs text-[var(--ao-brand-light)] hover:underline"
+              >
+                <Library size={12} />
+                Browse Catalog
+              </button>
+            </div>
+            {/* Model chips */}
+            {form.models && form.models.split(',').filter(s => s.trim()).length > 0 ? (
+              <div className="flex flex-wrap gap-1.5 p-2 rounded-lg bg-[var(--ao-bg)] border border-[var(--ao-border)] min-h-[38px]">
+                {form.models.split(',').map(m => m.trim()).filter(Boolean).map((m) => (
+                  <span
+                    key={m}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[var(--ao-surface-hover)] border border-[var(--ao-border)] text-xs"
+                  >
+                    {m}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const updated = form.models.split(',').map(s => s.trim()).filter(s => s && s !== m).join(', ');
+                        setForm({ ...form, models: updated });
+                      }}
+                      className="text-[var(--ao-text-muted)] hover:text-red-400 ml-0.5"
+                    >
+                      <X size={10} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setShowCatalogPicker(true)}
+                className={`${inputCls} text-[var(--ao-text-muted)] text-left cursor-pointer hover:border-[var(--ao-brand-light)]`}
+              >
+                Click to browse catalog or type below…
+              </button>
+            )}
+            {/* Fallback text input for manual entry */}
             <input
               value={form.models}
               onChange={(e) => setForm({ ...form, models: e.target.value })}
-              className={inputCls}
-              placeholder="gpt-4o, gpt-4o-mini"
+              className={`${inputCls} mt-1.5 text-xs`}
+              placeholder="Or type model names (comma-separated)"
             />
           </div>
           <div className="flex-1 min-w-[200px]">
@@ -338,7 +424,10 @@ function ProviderForm({
         {/* Row 3: cost, default toggle */}
         <div className="flex flex-wrap gap-3 items-end">
           <div className="w-36">
-            <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Cost / 1K input ($)</label>
+            <label className="block text-xs text-[var(--ao-text-muted)] mb-1">
+              Cost / 1K input ($)
+              {form.cost_input && <span className="text-[var(--ao-brand-light)] ml-1" title="Auto-populated from catalog">✦</span>}
+            </label>
             <input
               type="number"
               step="0.0001"
@@ -349,7 +438,10 @@ function ProviderForm({
             />
           </div>
           <div className="w-36">
-            <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Cost / 1K output ($)</label>
+            <label className="block text-xs text-[var(--ao-text-muted)] mb-1">
+              Cost / 1K output ($)
+              {form.cost_output && <span className="text-[var(--ao-brand-light)] ml-1" title="Auto-populated from catalog">✦</span>}
+            </label>
             <input
               type="number"
               step="0.0001"
@@ -375,6 +467,41 @@ function ProviderForm({
           </div>
         </div>
       </form>
+
+      {/* Model Catalog Picker Modal */}
+      <ModelCatalogPicker
+        open={showCatalogPicker}
+        onClose={() => setShowCatalogPicker(false)}
+        providerKind={form.kind}
+        selectedModels={form.models.split(',').map(s => s.trim()).filter(Boolean)}
+        onConfirm={(models: string[], catalogModels: ModelCapability[]) => {
+          setShowCatalogPicker(false);
+          setForm((f) => {
+            const updated = { ...f, models: models.join(', ') };
+            // Auto-fill cost from the first selected catalog model that has pricing
+            const withCost = catalogModels.find(
+              (m) => (m.input_cost_per_1k ?? 0) > 0 || (m.output_cost_per_1k ?? 0) > 0,
+            );
+            if (withCost) {
+              // Average costs across all selected models that have pricing
+              const priced = catalogModels.filter(
+                (m) => (m.input_cost_per_1k ?? 0) > 0 || (m.output_cost_per_1k ?? 0) > 0,
+              );
+              if (priced.length === 1) {
+                updated.cost_input = String(priced[0].input_cost_per_1k ?? 0);
+                updated.cost_output = String(priced[0].output_cost_per_1k ?? 0);
+              }
+              // If multiple models with different costs, use the first (most relevant)
+              // User can adjust manually
+              if (priced.length > 1 && !f.cost_input && !f.cost_output) {
+                updated.cost_input = String(priced[0].input_cost_per_1k ?? 0);
+                updated.cost_output = String(priced[0].output_cost_per_1k ?? 0);
+              }
+            }
+            return updated;
+          });
+        }}
+      />
     </Card>
   );
 }

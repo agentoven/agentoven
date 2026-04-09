@@ -161,6 +161,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 			r.Route("/providers", func(r chi.Router) {
 				r.Get("/", h.ListProviders)
 				r.Post("/", h.CreateProvider)
+				r.Get("/templates", h.ListProviderTemplates)
 				r.Route("/{providerName}", func(r chi.Router) {
 					r.Get("/", h.GetProvider)
 					r.Put("/", h.UpdateProvider)
