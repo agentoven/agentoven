@@ -29,6 +29,11 @@ We adopt the **clay oven / kitchen metaphor** 🏺 as the domain language for al
 | **Re-cook** | Redeploy with updated config | Redeploy / update |
 | **Baker** | A user / team building agents | Developer / operator |
 | **Menu** | The agent catalog / registry | Registry / catalog |
+| **Pantry** | The persistent memory system (facts, episodes, KBs) | Memory / knowledge store |
+| **Staples** | Long-term facts stored in the Pantry | Memory facts |
+| **Leftovers** | Episodic summaries of past sessions | Episodic memory |
+| **Shelves** | Curated knowledge-base sections inside the Pantry | Knowledge bases |
+| **Mise en place** | Pre-fetched memory context injected before a session turn | Memory context injection |
 
 ### Where It Applies
 
@@ -43,6 +48,30 @@ We adopt the **clay oven / kitchen metaphor** 🏺 as the domain language for al
 - **Internal package names:** Use standard Go/Rust naming (`internal/router`, not `internal/oven`)
 - **Wire protocols:** A2A and MCP use their own standard terminology
 - **Error messages to external systems:** Use clear technical language, not metaphors
+
+### Dual Vocabulary — Kitchen + Technical
+
+Every kitchen term has an **exact technical alias** that is **fully supported everywhere** —
+API endpoints, CLI flags, SDK parameters, and dashboard labels. The two vocabularies are
+identical in behaviour; choose whichever feels natural.
+
+| Kitchen Term | Technical Alias | Applies To |
+|-------------|----------------|-----------|
+| `pantry` | `memory` | API path prefix, CLI noun |
+| `staples` | `facts` | API resource name, field name |
+| `leftovers` | `episodes` | API resource name, field name |
+| `shelves` | `knowledge-bases` / `kb` | API resource name, CLI noun |
+| `mise-en-place` | `memory-context` | API response field, log label |
+
+**Rules:**
+- Both aliases are accepted on inbound requests (API, CLI). The router normalises them
+  before hitting any handler — no dual code paths.
+- Responses always return the **kitchen term** by default. Set
+  `Accept-Language: x-agentoven-vocab=technical` (header) or `--vocab=technical` (CLI flag)
+  to receive technical terms instead.
+- Documentation shows both: `pantry (memory)`, `staples (facts)`, etc.
+- The kitchen term is the canonical identifier in the database and Go structs;
+  the technical alias is a translation layer only.
 
 ## Consequences
 

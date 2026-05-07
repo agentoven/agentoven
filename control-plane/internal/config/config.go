@@ -9,15 +9,8 @@ import (
 type Config struct {
 	Port      int
 	Version   string
-	Database  DatabaseConfig
 	Telemetry TelemetryConfig
 	Auth      AuthConfig
-}
-
-type DatabaseConfig struct {
-	URL            string
-	MaxConnections int
-	MigrationsPath string
 }
 
 type TelemetryConfig struct {
@@ -39,11 +32,6 @@ func Load() *Config {
 	return &Config{
 		Port:    envInt("AGENTOVEN_PORT", 8080),
 		Version: envStr("AGENTOVEN_VERSION", "0.5.1"),
-		Database: DatabaseConfig{
-			URL:            envStr("DATABASE_URL", "postgres://agentoven:agentoven@localhost:5432/agentoven?sslmode=disable"),
-			MaxConnections: envInt("DATABASE_MAX_CONNECTIONS", 25),
-			MigrationsPath: envStr("DATABASE_MIGRATIONS_PATH", "internal/db/migrations"),
-		},
 		Telemetry: TelemetryConfig{
 			Enabled:      envBool("OTEL_ENABLED", false),
 			OTLPEndpoint: envStr("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"),

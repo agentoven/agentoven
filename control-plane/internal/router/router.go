@@ -688,6 +688,15 @@ func (mr *ModelRouter) callOpenAI(ctx context.Context, provider *models.ModelPro
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
+	// Optional attribution headers used by OpenRouter (and any provider that sets them
+	// via provider.Config["http_referer"] / provider.Config["x_title"]).
+	if referer, ok := provider.Config["http_referer"].(string); ok && referer != "" {
+		httpReq.Header.Set("HTTP-Referer", referer)
+	}
+	if title, ok := provider.Config["x_title"].(string); ok && title != "" {
+		httpReq.Header.Set("X-Title", title)
+	}
+
 	httpResp, err := mr.client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("openai: request failed: %w", err)
@@ -1383,6 +1392,7 @@ func (mr *ModelRouter) registerBuiltinDrivers() {
 	mr.RegisterDriver(&OllamaDriver{router: mr})
 	mr.RegisterDriver(&GeminiDriver{router: mr})
 	mr.RegisterDriver(&LiteLLMDriver{router: mr})
+	mr.RegisterDriver(&OpenRouterDriver{router: mr})
 }
 
 // ── OpenAI Driver ───────────────────────────────────────────
@@ -1908,4 +1918,138 @@ func (d *LiteLLMDriver) DiscoverModels(ctx context.Context, provider *models.Mod
 var (
 	_ ProviderDriver       = (*LiteLLMDriver)(nil)
 	_ ModelDiscoveryDriver = (*LiteLLMDriver)(nil)
+)
+
+// ── OpenRouter Driver ───────────────────────────────────────
+//
+// OpenRouter is an OpenAI-compatible gateway that routes to 200+ models.
+// It uses the same /chat/completions wire format as OpenAI but:
+//   - Base URL is https://openrouter.ai/api/v1
+//   - Model names use "provider/model" convention (e.g. "openai/gpt-4.1")
+//   - Optionally sends HTTP-Referer + X-Title headers for attribution
+//
+// Provider config:
+//
+//	{
+//	  "kind": "openrouter",
+//	  "endpoint": "https://openrouter.ai/api/v1",
+//	  "config": {
+//	    "api_key": "sk-or-...",
+//	    "http_referer": "https://your-app.com",   // optional
+//	    "x_title": "Your App Name"                // optional
+//	  }
+//	}
+type OpenRouterDriver struct{ router *ModelRouter }
+
+func (d *OpenRouterDriver) Kind() string { return "openrouter" }
+
+func (d *OpenRouterDriver) Call(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) (*models.RouteResponse, error) {
+	// Inject OpenRouter attribution headers via provider config override.
+	// callOpenAI respects provider.Endpoint and provider.Config["api_key"].
+	// For HTTP-Referer and X-Title we piggyback on the existing extra-headers
+	// convention by cloning the provider and adding them.
+	p := *provider // shallow copy — safe to mutate local fields
+	if p.Endpoint == "" {
+		p.Endpoint = "https://openrouter.ai/api/v1"
+	}
+	if p.Config == nil {
+		p.Config = map[string]interface{}{}
+	}
+	// Copy config so we don't mutate the shared provider object.
+	cfg := make(map[string]interface{}, len(provider.Config))
+	for k, v := range provider.Config {
+		cfg[k] = v
+	}
+	if _, ok := cfg["http_referer"]; !ok {
+		cfg["http_referer"] = "https://agentoven.dev"
+	}
+	if _, ok := cfg["x_title"]; !ok {
+		cfg["x_title"] = "AgentOven"
+	}
+	p.Config = cfg
+	return d.router.callOpenAI(ctx, &p, req)
+}
+
+func (d *OpenRouterDriver) HealthCheck(ctx context.Context, provider *models.ModelProvider) error {
+	endpoint := provider.Endpoint
+	if endpoint == "" {
+		endpoint = "https://openrouter.ai/api/v1"
+	}
+	apiKey, _ := provider.Config["api_key"].(string)
+	if apiKey == "" {
+		return fmt.Errorf("openrouter: api_key not configured")
+	}
+	// OpenRouter exposes GET /api/v1/auth/key to validate a key.
+	url := endpoint + "/auth/key"
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := d.router.client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("openrouter unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("openrouter: status %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+func (d *OpenRouterDriver) DiscoverModels(ctx context.Context, provider *models.ModelProvider) ([]models.DiscoveredModel, error) {
+	endpoint := provider.Endpoint
+	if endpoint == "" {
+		endpoint = "https://openrouter.ai/api/v1"
+	}
+	apiKey, _ := provider.Config["api_key"].(string)
+
+	// OpenRouter's model list is at GET /api/v1/models — no auth required but
+	// the key filters to models the account can use.
+	url := endpoint + "/models"
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	httpResp, err := d.router.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("openrouter discover: %w", err)
+	}
+	defer httpResp.Body.Close()
+	if httpResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(httpResp.Body)
+		return nil, fmt.Errorf("openrouter discover: status %d: %s", httpResp.StatusCode, string(body))
+	}
+
+	var resp struct {
+		Data []struct {
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
+		return nil, fmt.Errorf("openrouter discover: decode: %w", err)
+	}
+
+	result := make([]models.DiscoveredModel, 0, len(resp.Data))
+	for _, m := range resp.Data {
+		result = append(result, models.DiscoveredModel{
+			ID:       m.ID,
+			Provider: provider.Name,
+			Kind:     "openrouter",
+		})
+	}
+	return result, nil
+}
+
+// Compile-time assertions for OpenRouterDriver.
+var (
+	_ ProviderDriver       = (*OpenRouterDriver)(nil)
+	_ ModelDiscoveryDriver = (*OpenRouterDriver)(nil)
 )

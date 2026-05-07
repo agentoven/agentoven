@@ -59,7 +59,8 @@ AgentOven provides a unified control plane with:
 | 🔄 **Workflow Engine** | DAG-based multi-agent orchestration via A2A task lifecycle |
 | 📝 **Prompt Studio** | Versioned prompt management with diff view and A/B variants |
 | 💬 **Sessions** | Multi-turn chat sessions with history, thinking mode, and streaming |
-| 🛡️ **Guardrails** | Pre/post processing content filters and safety checks |
+| 🧠 **Pantry (Memory)** | Three-layer agent memory: Facts (long-term), Episodes (conversation history), Shelves (knowledge bases) |
+| 🛡️ **Guardrails** | Pre/post processing content filters and safety checks; workspace-level defaults with per-agent exceptions |
 | 🧪 **Evaluation** | Automated evals with LLM judges and regression detection |
 | 💰 **Cost Tracking** | Per-request token counting, tenant-level chargeback |
 | 🔐 **Governance** | Pluggable auth (API keys, service accounts, SSO), RBAC, audit logs |
@@ -93,8 +94,8 @@ brew install agentoven/tap/agentoven
 # Cargo
 cargo install agentoven-cli
 
-# Or download the binary
-curl -fsSL https://agentoven.dev/install.sh | sh
+# Or download the binary (Linux, macOS)
+curl -fsSL https://raw.githubusercontent.com/agentoven/agentoven/main/install.sh | sh
 ```
 
 ### Install the Python SDK
@@ -115,8 +116,11 @@ npm install @agentoven/sdk
 # Initialize a project
 agentoven init --name my-agent --framework openai-sdk
 
-# Set up a model provider
+# Set up a model provider (OpenAI, Anthropic, Gemini, OpenRouter, Ollama, or LiteLLM)
 agentoven provider add my-openai --kind openai --api-key $OPENAI_API_KEY
+
+# Or use OpenRouter for access to 200+ models with one API key
+agentoven provider add my-router --kind openrouter --api-key $OPENROUTER_API_KEY
 
 # Register an agent
 agentoven agent register summarizer \
@@ -198,6 +202,59 @@ client.bake(recipe, input='{"document_url": "https://..."}')
 
 ---
 
+## Pantry — Agent Memory 🧠
+
+AgentOven ships a three-layer memory system called the **Pantry**. Every agent gets persistent
+memory without any extra setup:
+
+| Layer | Kitchen Name | Technical Name | What it stores |
+|---|---|---|---|
+| 1 | **Staples** | Facts | Long-term key/value facts per user or team. Persists across sessions. |
+| 2 | **Leftovers** | Episodes | Auto-summarised conversation history. Written when a session closes. |
+| 3 | **Shelves** | Knowledge Bases | Indexed document collections with vector search. |
+
+At session start, the Pantry assembles a **Mise en place** (memory context) — a pre-fetched
+bundle of relevant facts, episodes, and knowledge-base chunks — injected into the agent's
+context window before the first turn.
+
+```bash
+# Store a fact about a user
+agentoven pantry staples set --agent my-agent --key "preferred_language" --value "Python"
+
+# Query a knowledge base
+agentoven pantry shelves search "how does authentication work?" --kb internal-docs
+
+# Review episodic memory
+agentoven pantry leftovers list --agent my-agent --user alice --limit 5
+```
+
+> Both kitchen vocab and plain technical terms work in the CLI and API:
+> `pantry/staples` ↔ `memory/facts`, `pantry/leftovers` ↔ `memory/episodes`, `pantry/shelves` ↔ `memory/knowledge-bases`
+
+---
+
+## Model Providers
+
+| Provider | Kind | Notes |
+|---|---|---|
+| OpenAI | `openai` | GPT-4.1, o3/o4-mini, GPT-4o |
+| Azure OpenAI | `azure-openai` | Bring your own deployments |
+| Anthropic | `anthropic` | Claude Opus 4, Sonnet 4, Haiku |
+| Google Gemini | `gemini` | Gemini 2.5 Pro/Flash via AI Studio |
+| **OpenRouter** | `openrouter` | **200+ models via one API key** — GPT, Claude, Llama, Mistral, Gemini, DeepSeek |
+| Ollama | `ollama` | Local open-source models |
+| LiteLLM Proxy | `litellm` | Bring your existing LiteLLM proxy |
+
+```bash
+# OpenRouter — single key, any model
+agentoven provider add my-router --kind openrouter --api-key sk-or-...
+agentoven agent register researcher \
+  --model-provider my-router \
+  --model-name "anthropic/claude-opus-4"
+```
+
+---
+
 ## CLI Reference
 
 The `agentoven` CLI provides **55+ commands** across **13 command groups** for complete control of your agent infrastructure.
@@ -218,7 +275,7 @@ The `agentoven` CLI provides **55+ commands** across **13 command groups** for c
 |---|---|---|
 | `agentoven init` | — | Initialize a new project with `agentoven.toml` |
 | `agentoven agent` | `register`, `list`, `get`, `update`, `delete`, `bake`, `recook`, `cool`, `rewarm`, `retire`, `test`, `invoke`, `config`, `card`, `versions` | Full agent lifecycle management |
-| `agentoven provider` | `list`, `add`, `get`, `update`, `remove`, `test`, `discover` | Model provider management (OpenAI, Anthropic, Ollama, LiteLLM) |
+| `agentoven provider` | `list`, `add`, `get`, `update`, `remove`, `test`, `discover` | Model provider management (OpenAI, Anthropic, Gemini, OpenRouter, Ollama, LiteLLM) |
 | `agentoven tool` | `list`, `add`, `get`, `update`, `remove` | MCP tool management |
 | `agentoven prompt` | `list`, `add`, `get`, `update`, `remove`, `validate`, `versions` | Versioned prompt template management |
 | `agentoven recipe` | `create`, `list`, `get`, `delete`, `bake`, `runs`, `approve` | Multi-agent workflow orchestration |
@@ -296,6 +353,11 @@ AgentOven uses a **clay oven** metaphor throughout:
 | **Kitchen** | A workspace/project (tenant boundary) |
 | **Baker** | A user/team building agents |
 | **Menu** | The agent catalog/registry |
+| **Pantry** | The agent memory system (also: memory) |
+| **Staples** | Long-term persistent facts per agent (also: facts) |
+| **Leftovers** | Episodic session summaries — what was discussed before (also: episodes) |
+| **Shelves** | Knowledge bases with document ingestion and vector search (also: knowledge-bases) |
+| **Mise en place** | Pre-fetched memory context assembled before an agent run (also: memory context) |
 
 ## Project Structure
 
@@ -315,6 +377,18 @@ agentoven/
 ├── infra/                    # Docker, Helm, Terraform
 └── site/                     # Static landing page
 ```
+
+## Examples
+
+Ready-to-run examples are in the [`examples/`](https://github.com/agentoven/agentoven/tree/main/examples) directory at the root of this repository:
+
+| Example | Description |
+|---|---|
+| [`weather-agent`](https://github.com/agentoven/agentoven/tree/main/examples/weather-agent) | Tool calling, multi-turn reasoning, and OTel span waterfall via a local MCP weather server |
+
+Each example contains a `README.md` with full setup instructions.
+
+---
 
 ## Contributing
 
@@ -336,9 +410,11 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 | CLI + SDKs | ✅ Full (55+ commands) | ✅ Full |
 | Model Router | ✅ Routing + fallback | + cost optimizer, budgets |
 | Sessions | ✅ Multi-turn chat | ✅ Multi-turn chat |
+| **Pantry (Memory)** | ✅ Facts, Episodes, Knowledge Bases | + team-scoped memory, memory policies |
 | RAG Pipelines | ✅ 5 strategies | + quality monitor |
 | Workflow Patterns | ✅ All 6 patterns | + custom step plugins |
 | Observability | ✅ 7-day retention | 400-day, advanced analytics |
+| Guardrails | ✅ Built-in + workspace defaults | + LLM-judge, PII detection, compliance validators |
 | Auth | API keys, service tokens | SSO/SAML, OIDC, RBAC, audit logs |
 | Compliance | SOC2, GDPR | + FedRAMP, HIPAA, GxP |
 | Deployment | Self-hosted | + managed cloud, BYOC, SLA |

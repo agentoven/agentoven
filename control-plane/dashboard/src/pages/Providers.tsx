@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { Cpu, Plus, Trash2, Star, Pencil, HeartPulse, Eye, EyeOff, Library, X } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Cpu, Plus, Trash2, Star, Pencil, HeartPulse, Eye, EyeOff, Library, X, ChevronLeft, ChevronRight } from 'lucide-react';
 import { providers, type ModelProvider, type ProviderTestResult, type ProviderTemplate, type ModelCapability } from '../api';
 import { useAPI } from '../hooks';
 import {
@@ -62,7 +62,7 @@ export function ProvidersPage() {
         <EmptyState
           icon={<Cpu size={48} />}
           title="No providers configured"
-          description="Add an OpenAI, Azure OpenAI, Anthropic, Gemini, or Ollama provider."
+          description="Add an OpenAI, Anthropic, Gemini, OpenRouter, Ollama, or LiteLLM provider."
           action={<Button onClick={() => setShowForm(true)}>Add Provider</Button>}
         />
       )}
@@ -203,6 +203,101 @@ interface ProviderFormState {
   cost_output: string;
 }
 
+// ── Template carousel ──────────────────────────────────────────────────────────
+
+const CARD_W = 168; // px — width of each template card incl. gap
+
+function TemplateCarousel({
+  templates,
+  selectedKind,
+  onSelect,
+}: {
+  templates: ProviderTemplate[];
+  selectedKind: string;
+  onSelect: (t: ProviderTemplate) => void;
+}) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const [canLeft, setCanLeft] = useState(false);
+  const [canRight, setCanRight] = useState(false);
+
+  const sync = () => {
+    const el = trackRef.current;
+    if (!el) return;
+    setCanLeft(el.scrollLeft > 4);
+    setCanRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 4);
+  };
+
+  useEffect(() => {
+    sync();
+    const el = trackRef.current;
+    if (!el) return;
+    el.addEventListener('scroll', sync, { passive: true });
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    return () => { el.removeEventListener('scroll', sync); ro.disconnect(); };
+  }, [templates]);
+
+  const scroll = (dir: -1 | 1) => {
+    trackRef.current?.scrollBy({ left: dir * CARD_W * 2, behavior: 'smooth' });
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <label className="text-xs text-[var(--ao-text-muted)]">Quick start \u2014 pick a template</label>
+        <div className="flex gap-1">
+          <button
+            type="button"
+            onClick={() => scroll(-1)}
+            disabled={!canLeft}
+            className={`p-0.5 rounded transition-opacity ${canLeft ? 'opacity-80 hover:opacity-100' : 'opacity-20 cursor-default'}`}
+            aria-label="Scroll templates left"
+          >
+            <ChevronLeft size={16} />
+          </button>
+          <button
+            type="button"
+            onClick={() => scroll(1)}
+            disabled={!canRight}
+            className={`p-0.5 rounded transition-opacity ${canRight ? 'opacity-80 hover:opacity-100' : 'opacity-20 cursor-default'}`}
+            aria-label="Scroll templates right"
+          >
+            <ChevronRight size={16} />
+          </button>
+        </div>
+      </div>
+
+      {/* overflow-hidden wrapper hides the scrollbar entirely */}
+      <div className="overflow-hidden">
+        <div
+          ref={trackRef}
+          className="flex gap-2 overflow-x-auto"
+          style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' } as React.CSSProperties}
+        >
+          {templates.map((t) => (
+            <button
+              key={t.kind}
+              type="button"
+              onClick={() => onSelect(t)}
+              style={{ minWidth: `${CARD_W - 8}px`, maxWidth: `${CARD_W - 8}px` }}
+              className={`flex-shrink-0 text-left p-2.5 rounded-lg border transition-all text-xs ${
+                selectedKind === t.kind
+                  ? 'border-[var(--ao-brand)] bg-[var(--ao-brand)]/10 text-[var(--ao-brand-light)]'
+                  : 'border-[var(--ao-border)] bg-[var(--ao-bg)] text-[var(--ao-text-muted)] hover:border-[var(--ao-brand-light)]'
+              }`}
+            >
+              <div className="font-semibold text-[0.8125rem] mb-0.5">{t.display_name}</div>
+              <div className="opacity-70 leading-tight">{t.description}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Provider form ──────────────────────────────────────────────────────────────
+
 function ProviderForm({
   existing, onDone, onCancel,
 }: {
@@ -284,28 +379,13 @@ function ProviderForm({
       </div>
       {err && <ErrorBanner message={err} />}
       <form onSubmit={submit} className="space-y-4">
-        {/* Template quick-pick (only for new providers) */}
+        {/* Template quick-pick carousel (only for new providers) */}
         {!isEdit && templates.length > 0 && (
-          <div>
-            <label className="block text-xs text-[var(--ao-text-muted)] mb-2">Quick start — pick a template</label>
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-              {templates.map((t) => (
-                <button
-                  key={t.kind}
-                  type="button"
-                  onClick={() => applyTemplate(t)}
-                  className={`text-left p-2.5 rounded-lg border transition-all text-xs ${
-                    form.kind === t.kind
-                      ? 'border-[var(--ao-brand)] bg-[var(--ao-brand)]/10 text-[var(--ao-brand-light)]'
-                      : 'border-[var(--ao-border)] bg-[var(--ao-bg)] text-[var(--ao-text-muted)] hover:border-[var(--ao-brand-light)]'
-                  }`}
-                >
-                  <div className="font-semibold text-[0.8125rem] mb-0.5">{t.display_name}</div>
-                  <div className="opacity-70 leading-tight">{t.description}</div>
-                </button>
-              ))}
-            </div>
-          </div>
+          <TemplateCarousel
+            templates={templates}
+            selectedKind={form.kind}
+            onSelect={applyTemplate}
+          />
         )}
         {/* Row 1: name, kind */}
         <div className="flex flex-wrap gap-3">

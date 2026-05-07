@@ -31,6 +31,10 @@ import (
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 // DefaultMaxTurns is the maximum number of LLM ↔ tool loops.
@@ -41,6 +45,10 @@ const DefaultContextBudget = 16000
 
 // SummaryPrefix is prepended to the compressed summary message.
 const SummaryPrefix = "[Summary of earlier conversation]\n"
+
+// tracer is the OpenTelemetry tracer for the executor package.
+// Spans emitted here appear as children of the outer HTTP span in Jaeger / Tempo.
+var tracer = otel.Tracer("agentoven/executor")
 
 // ToolCall represents a tool invocation requested by the LLM.
 type ToolCall struct {
@@ -131,6 +139,29 @@ func (e *Executor) Execute(ctx context.Context, agent *models.Agent, userMessage
 		Kitchen:   agent.Kitchen,
 	}
 
+	// Root OTel span — child of the incoming HTTP span (if any).
+	// This makes every agent invocation visible in Jaeger / Tempo with full
+	// children for each LLM call and tool execution.
+	ctx, rootSpan := tracer.Start(ctx, "agent.run",
+		oteltrace.WithSpanKind(oteltrace.SpanKindInternal),
+		oteltrace.WithAttributes(
+			attribute.String("agent.name", agent.Name),
+			attribute.String("agent.kitchen", agent.Kitchen),
+			attribute.String("agent.mode", string(agent.Mode)),
+			attribute.String("agent.behavior", string(agent.Behavior)),
+			attribute.String("agentoven.trace_id", traceID),
+		),
+	)
+	defer func() {
+		rootSpan.SetAttributes(
+			attribute.Int64("agent.total_ms", trace.TotalMs),
+			attribute.Int("agent.turns", len(trace.Turns)),
+			attribute.Int64("agent.total_tokens", trace.Usage.TotalTokens),
+			attribute.Float64("agent.cost_usd", trace.Usage.EstimatedCost),
+		)
+		rootSpan.End()
+	}()
+
 	start := time.Now()
 	maxTurns := agent.MaxTurns
 	if maxTurns <= 0 {
@@ -217,7 +248,16 @@ func (e *Executor) Execute(ctx context.Context, agent *models.Agent, userMessage
 		// Use backup provider failover if configured on the agent.
 		// Set skip-trace context so the router doesn't create orphaned flat traces —
 		// the handler persists rich hierarchical spans from ExecutionTrace instead.
-		routeCtx := router.ContextSkipTrace(ctx)
+		// OTel child spans are emitted here instead so Jaeger sees LLM + tool spans.
+		llmCtx, llmSpan := tracer.Start(ctx, fmt.Sprintf("llm.turn_%d", turn),
+			oteltrace.WithSpanKind(oteltrace.SpanKindClient),
+			oteltrace.WithAttributes(
+				attribute.String("llm.model", routeReq.Model),
+				attribute.Int("llm.turn", turn),
+				attribute.Int("llm.tools_available", len(toolDefs)),
+			),
+		)
+		routeCtx := router.ContextSkipTrace(llmCtx)
 		var routeResp *models.RouteResponse
 		if agent.BackupProvider != "" {
 			routeResp, err = e.router.RouteWithBackup(routeCtx, routeReq, agent.BackupProvider, agent.BackupModel)
@@ -225,8 +265,19 @@ func (e *Executor) Execute(ctx context.Context, agent *models.Agent, userMessage
 			routeResp, err = e.router.Route(routeCtx, routeReq)
 		}
 		if err != nil {
+			llmSpan.RecordError(err)
+			llmSpan.SetStatus(codes.Error, err.Error())
+			llmSpan.End()
 			return "", trace, fmt.Errorf("model router call failed (turn %d): %w", turn, err)
 		}
+		llmSpan.SetAttributes(
+			attribute.Int64("llm.input_tokens", routeResp.Usage.InputTokens),
+			attribute.Int64("llm.output_tokens", routeResp.Usage.OutputTokens),
+			attribute.Float64("llm.cost_usd", routeResp.Usage.EstimatedCost),
+			attribute.String("llm.finish_reason", routeResp.FinishReason),
+			attribute.String("llm.provider", routeResp.Provider),
+		)
+		llmSpan.End()
 
 		// Accumulate token usage
 		totalUsage.InputTokens += routeResp.Usage.InputTokens
@@ -282,7 +333,22 @@ func (e *Executor) Execute(ctx context.Context, agent *models.Agent, userMessage
 		var toolResults []ToolResult
 
 		for _, tc := range toolCalls {
+			_, toolSpan := tracer.Start(ctx, "tool."+tc.Name,
+				oteltrace.WithSpanKind(oteltrace.SpanKindClient),
+				oteltrace.WithAttributes(
+					attribute.String("tool.name", tc.Name),
+					attribute.String("tool.call_id", tc.ID),
+					attribute.String("agent.name", agent.Name),
+				),
+			)
 			result := e.executeTool(ctx, agent.Kitchen, tc)
+			if result.IsError {
+				toolSpan.SetStatus(codes.Error, result.Content)
+			} else {
+				toolSpan.SetStatus(codes.Ok, "")
+			}
+			toolSpan.SetAttributes(attribute.Bool("tool.is_error", result.IsError))
+			toolSpan.End()
 			toolResults = append(toolResults, result)
 		}
 

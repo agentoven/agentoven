@@ -15,6 +15,7 @@ import (
 	"context"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
@@ -34,6 +35,81 @@ func (s *CommunityGuardrailService) EvaluateInput(ctx context.Context, guardrail
 // EvaluateOutput runs output-stage guardrails against the model response.
 func (s *CommunityGuardrailService) EvaluateOutput(ctx context.Context, guardrails []models.Guardrail, response string) (*models.GuardrailEvaluation, error) {
 	return evaluate(guardrails, response, "output")
+}
+
+// MergeWithWorkspace merges workspace-level default guardrails with agent-level
+// guardrails following the precedence rules in ADR-0013:
+//
+//  1. Mandatory workspace rules (Overridable=false) are always included and take
+//     precedence over any agent rule of the same kind+stage — UNLESS an approved
+//     exception exists for this agent (exceptions is the pre-filtered list for
+//     the calling agent from workspace_guardrail_exceptions).
+//  2. Overridable workspace rules (Overridable=true) are included only if no agent
+//     rule of the same kind+stage exists.
+//  3. Agent-only rules are appended as-is.
+//
+// exceptions must contain only the exceptions for the specific agent being invoked.
+// Expired exceptions (ExpiresAt non-zero and in the past) are silently ignored.
+//
+// The caller should pass the result of MergeWithWorkspace to EvaluateInput/EvaluateOutput.
+func MergeWithWorkspace(workspaceRules, agentRules []models.Guardrail, exceptions []models.WorkspaceGuardrailException) []models.Guardrail {
+	type key struct {
+		kind  models.GuardrailKind
+		stage models.GuardrailStage
+	}
+
+	// Build a set of guardrail IDs that are excepted for this agent (ignore expired).
+	now := time.Now()
+	exceptedIDs := make(map[string]struct{}, len(exceptions))
+	for _, ex := range exceptions {
+		if !ex.ExpiresAt.IsZero() && ex.ExpiresAt.Before(now) {
+			continue // expired — treat as no exception
+		}
+		exceptedIDs[ex.GuardrailID] = struct{}{}
+	}
+
+	// Index agent rules by kind+stage for O(1) lookup.
+	agentByKey := make(map[key]struct{}, len(agentRules))
+	for _, r := range agentRules {
+		agentByKey[key{r.Kind, r.Stage}] = struct{}{}
+	}
+
+	merged := make([]models.Guardrail, 0, len(workspaceRules)+len(agentRules))
+
+	// Track which kind+stage slots are covered by a mandatory (non-excepted) workspace rule.
+	mandatoryByKey := make(map[key]struct{}, len(workspaceRules))
+
+	// Step 1: add mandatory workspace rules, skipping any with an approved exception.
+	for _, r := range workspaceRules {
+		if r.Overridable {
+			continue
+		}
+		if _, excepted := exceptedIDs[r.ID]; excepted {
+			continue // agent has an approved exemption — skip this mandatory rule
+		}
+		merged = append(merged, r)
+		mandatoryByKey[key{r.Kind, r.Stage}] = struct{}{}
+	}
+
+	// Step 2: add overridable workspace rules only when no agent rule covers the slot.
+	for _, r := range workspaceRules {
+		if !r.Overridable {
+			continue
+		}
+		if _, agentHas := agentByKey[key{r.Kind, r.Stage}]; !agentHas {
+			merged = append(merged, r)
+		}
+	}
+
+	// Step 3: add agent rules except where a non-excepted mandatory workspace rule
+	// already covers the slot (running both would double-evaluate unnecessarily).
+	for _, r := range agentRules {
+		if _, blocked := mandatoryByKey[key{r.Kind, r.Stage}]; !blocked {
+			merged = append(merged, r)
+		}
+	}
+
+	return merged
 }
 
 // evaluate runs all applicable guardrails for the given stage.

@@ -1,13 +1,99 @@
 import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Bot, Plus, Flame, Snowflake, Trash2, FlaskConical, AlertTriangle, Sun, RefreshCw, Code, Copy, Check, Shield, Terminal } from 'lucide-react';
-import { agents, providers, type Agent, type Ingredient, type IngredientKind, APIError } from '../api';
+import { Bot, Plus, Flame, Snowflake, Trash2, FlaskConical, AlertTriangle, Sun, RefreshCw, Code, Copy, Check, Shield, Terminal, BrainCircuit, Wrench, Eye, Zap, Braces } from 'lucide-react';
+import { agents, providers, catalog, type Agent, type Ingredient, type IngredientKind, type ModelCapability, APIError } from '../api';
 import { useAPI } from '../hooks';
 import {
   PageHeader, Card, StatusBadge, EmptyState,
   Spinner, ErrorBanner, Button, Modal,
 } from '../components/UI';
 import { AgentLogViewer } from '../components/AgentLogViewer';
+
+// ── Catalog Info Helpers ─────────────────────────────────────
+
+function fmtCtxTokens(n?: number): string {
+  if (!n) return '—';
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
+  return String(n);
+}
+
+function fmtCostPer1k(c?: number): string {
+  if (c == null || c === 0) return '—';
+  if (c < 0.001) return `$${c.toFixed(6)}`;
+  return `$${c.toFixed(4)}`;
+}
+
+// ── Model Catalog Info Card ───────────────────────────────────
+// Shown inline when a model is selected in the agent form.
+// Displays context window, cost per 1K tokens, and capability badges.
+
+function ModelCatalogInfo({ providerKind, modelName }: { providerKind: string; modelName: string }) {
+  const [info, setInfo] = useState<ModelCapability | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!providerKind || !modelName) { setInfo(null); return; }
+    setLoading(true);
+    catalog.get(`${providerKind}/${modelName}`)
+      .then(setInfo)
+      .catch(() => setInfo(null))
+      .finally(() => setLoading(false));
+  }, [providerKind, modelName]);
+
+  if (!providerKind || !modelName) return null;
+  if (loading) return <p className="text-[10px] text-[var(--ao-text-muted)] mt-1.5 animate-pulse">Loading model info…</p>;
+  if (!info) return null;
+
+  return (
+    <div className="mt-2 p-2.5 rounded-lg bg-[var(--ao-bg)] border border-[var(--ao-brand)]/20 space-y-1.5">
+      <div className="flex items-center gap-3 flex-wrap text-[10px] text-[var(--ao-text-muted)]">
+        {info.context_window != null && (
+          <span className="flex items-center gap-1">
+            <BrainCircuit size={10} className="text-[var(--ao-brand-light)]" />
+            {fmtCtxTokens(info.context_window)} ctx
+          </span>
+        )}
+        {info.input_cost_per_1k != null && info.input_cost_per_1k > 0 && (
+          <span>↓ {fmtCostPer1k(info.input_cost_per_1k)}/1K in</span>
+        )}
+        {info.output_cost_per_1k != null && info.output_cost_per_1k > 0 && (
+          <span>↑ {fmtCostPer1k(info.output_cost_per_1k)}/1K out</span>
+        )}
+        {info.max_output_tokens != null && (
+          <span>{fmtCtxTokens(info.max_output_tokens)} max out</span>
+        )}
+      </div>
+      <div className="flex items-center gap-1 flex-wrap">
+        {info.supports_tools && (
+          <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/15 text-emerald-400">
+            <Wrench size={9} /> Tools
+          </span>
+        )}
+        {info.supports_vision && (
+          <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-blue-500/15 text-blue-400">
+            <Eye size={9} /> Vision
+          </span>
+        )}
+        {info.supports_streaming && (
+          <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/15 text-amber-400">
+            <Zap size={9} /> Streaming
+          </span>
+        )}
+        {info.supports_thinking && (
+          <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-purple-500/15 text-purple-400">
+            <BrainCircuit size={9} /> Thinking
+          </span>
+        )}
+        {info.supports_json && (
+          <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-slate-500/15 text-slate-400">
+            <Braces size={9} /> JSON
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
 
 // ── Main Page ─────────────────────────────────────────────────
 
@@ -655,6 +741,9 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
                   )}
                 </div>
               </div>
+              {selectedProvider && form.model_name && (
+                <ModelCatalogInfo providerKind={selectedProvider.kind} modelName={form.model_name} />
+              )}
             </div>
 
             {/* Backup model */}
@@ -1072,6 +1161,9 @@ function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => void }) 
                   )}
                 </div>
               </div>
+              {selectedProvider && form.model_name && (
+                <ModelCatalogInfo providerKind={selectedProvider.kind} modelName={form.model_name} />
+              )}
             </div>
 
             {/* Backup model */}

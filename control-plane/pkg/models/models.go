@@ -1979,13 +1979,53 @@ const (
 
 // Guardrail defines a single validation rule applied to agent I/O.
 type Guardrail struct {
-	ID        string                 `json:"id"`
-	Name      string                 `json:"name,omitempty"`
-	Kind      GuardrailKind          `json:"kind"`
-	Stage     GuardrailStage         `json:"stage"`
-	Config    map[string]interface{} `json:"config,omitempty"` // kind-specific configuration
-	Enabled   bool                   `json:"enabled"`
-	CreatedAt time.Time              `json:"created_at,omitempty"`
+	ID          string                 `json:"id"`
+	Name        string                 `json:"name,omitempty"`
+	Kind        GuardrailKind          `json:"kind"`
+	Stage       GuardrailStage         `json:"stage"`
+	Config      map[string]interface{} `json:"config,omitempty"` // kind-specific configuration
+	Enabled     bool                   `json:"enabled"`
+	// Overridable controls whether an agent may replace this rule with its own
+	// configuration when it appears in a WorkspaceGuardrailPolicy.
+	// False (default) = mandatory; the workspace rule always runs.
+	// True = default; an agent guardrail of the same kind+stage takes precedence.
+	Overridable bool                   `json:"overridable,omitempty"`
+	Priority    int                    `json:"priority,omitempty"`
+	CreatedAt   time.Time              `json:"created_at,omitempty"`
+}
+
+// WorkspaceGuardrailPolicy holds the kitchen-level default guardrail rules.
+// Kitchen vocabulary: "kitchen safety rules"
+// Technical vocabulary: workspace guardrail policy
+//
+// Rules with Overridable=false are mandatory and always enforced.
+// Rules with Overridable=true are defaults that agent-level rules may replace.
+type WorkspaceGuardrailPolicy struct {
+	ID         string      `json:"id"`
+	KitchenID  string      `json:"kitchen_id"`
+	Guardrails []Guardrail `json:"guardrails"`
+	UpdatedAt  time.Time   `json:"updated_at"`
+}
+
+// WorkspaceGuardrailException is an operator-approved exemption that allows a
+// specific agent to skip a particular workspace guardrail (including mandatory ones).
+//
+// Kitchen vocabulary: "kitchen safety exemption"
+// Technical vocabulary: workspace guardrail exception
+//
+// Exceptions must be created by a workspace operator or owner — agent authors
+// cannot self-approve exceptions. An optional ExpiresAt enforces time-limited
+// exemptions (e.g. during a migration window).
+type WorkspaceGuardrailException struct {
+	ID          string    `json:"id"`
+	KitchenID   string    `json:"kitchen_id"`
+	AgentName   string    `json:"agent_name"`
+	GuardrailID string    `json:"guardrail_id"` // references workspace_guardrails.id
+	Reason      string    `json:"reason"`
+	ApprovedBy  string    `json:"approved_by"`
+	ApprovedAt  time.Time `json:"approved_at"`
+	ExpiresAt   time.Time `json:"expires_at,omitempty"` // zero = no expiry
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // GuardrailResult is the outcome of a single guardrail evaluation.

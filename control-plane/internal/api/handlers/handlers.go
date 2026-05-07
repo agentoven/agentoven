@@ -346,8 +346,9 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 		agent.Version = req.Version
 		agent.VersionBump = "" // no auto-bump, caller controls
 	} else {
-		// Auto-bump minor on bake (0.1.0 → 0.2.0)
-		agent.VersionBump = "minor"
+		// Bake is a status transition only — do not bump the version.
+		// Version bumps happen on UpdateAgent (patch) and RecookAgent (minor).
+		agent.VersionBump = ""
 	}
 	agent.A2AEndpoint = "/agents/" + agentName + "/a2a"
 
@@ -1210,6 +1211,15 @@ var builtinProviderTemplates = []models.ProviderTemplate{
 		DefaultModels:   []string{},
 		RequiredConfig:  []string{"api_key"},
 		HelpURL:         "https://docs.litellm.ai/docs/",
+	},
+	{
+		Kind:            "openrouter",
+		DisplayName:     "OpenRouter",
+		Description:     "Access 200+ models (GPT-5, Claude, Llama, Gemini, Mistral, and more) via a single OpenAI-compatible endpoint",
+		DefaultEndpoint: "https://openrouter.ai/api/v1",
+		DefaultModels:   []string{"openai/gpt-4.1", "anthropic/claude-opus-4", "google/gemini-2.5-pro", "meta-llama/llama-4-maverick", "mistralai/mistral-large", "deepseek/deepseek-r2"},
+		RequiredConfig:  []string{"api_key"},
+		HelpURL:         "https://openrouter.ai/keys",
 	},
 }
 

@@ -380,6 +380,8 @@ func mapLiteLLMProvider(litellmProvider string) string {
 		return "mistral"
 	case "cohere", "cohere_chat":
 		return "cohere"
+	case "openrouter":
+		return "openrouter"
 	default:
 		return litellmProvider
 	}
@@ -489,6 +491,39 @@ func (c *Catalog) loadBuiltinDefaults() {
 			InputCostPer1K: 0.000075, OutputCostPer1K: 0.0003,
 			SupportsTools: true, SupportsStreaming: true, SupportsJSON: true,
 			TokenParamName: "max_output_tokens", Source: "builtin"},
+
+		// OpenRouter — unified gateway for 200+ models
+		// OpenRouter uses "provider/model" naming (same model strings it sends upstream)
+		{ModelID: "openrouter/openai/gpt-4.1", ProviderKind: "openrouter", ModelName: "openai/gpt-4.1",
+			ContextWindow: 1047576, MaxOutputTokens: 32768,
+			InputCostPer1K: 0.002, OutputCostPer1K: 0.008,
+			SupportsTools: true, SupportsVision: true, SupportsStreaming: true, SupportsJSON: true,
+			TokenParamName: "max_tokens", Source: "builtin"},
+		{ModelID: "openrouter/anthropic/claude-opus-4", ProviderKind: "openrouter", ModelName: "anthropic/claude-opus-4",
+			ContextWindow: 200000, MaxOutputTokens: 32000,
+			InputCostPer1K: 0.015, OutputCostPer1K: 0.075,
+			SupportsTools: true, SupportsVision: true, SupportsStreaming: true, SupportsThinking: true,
+			TokenParamName: "max_tokens", Source: "builtin"},
+		{ModelID: "openrouter/google/gemini-2.5-pro", ProviderKind: "openrouter", ModelName: "google/gemini-2.5-pro",
+			ContextWindow: 1048576, MaxOutputTokens: 65536,
+			InputCostPer1K: 0.00125, OutputCostPer1K: 0.01,
+			SupportsTools: true, SupportsVision: true, SupportsStreaming: true, SupportsThinking: true, SupportsJSON: true,
+			TokenParamName: "max_tokens", Source: "builtin"},
+		{ModelID: "openrouter/meta-llama/llama-4-maverick", ProviderKind: "openrouter", ModelName: "meta-llama/llama-4-maverick",
+			ContextWindow: 1048576, MaxOutputTokens: 16384,
+			InputCostPer1K: 0.00022, OutputCostPer1K: 0.00088,
+			SupportsTools: true, SupportsStreaming: true, SupportsJSON: true,
+			TokenParamName: "max_tokens", Source: "builtin"},
+		{ModelID: "openrouter/mistralai/mistral-large", ProviderKind: "openrouter", ModelName: "mistralai/mistral-large",
+			ContextWindow: 131072, MaxOutputTokens: 8192,
+			InputCostPer1K: 0.002, OutputCostPer1K: 0.006,
+			SupportsTools: true, SupportsStreaming: true, SupportsJSON: true,
+			TokenParamName: "max_tokens", Source: "builtin"},
+		{ModelID: "openrouter/deepseek/deepseek-r2", ProviderKind: "openrouter", ModelName: "deepseek/deepseek-r2",
+			ContextWindow: 65536, MaxOutputTokens: 8192,
+			InputCostPer1K: 0.00055, OutputCostPer1K: 0.00219,
+			SupportsTools: true, SupportsStreaming: true, SupportsThinking: true,
+			TokenParamName: "max_tokens", Source: "builtin"},
 	}
 
 	c.mu.Lock()
