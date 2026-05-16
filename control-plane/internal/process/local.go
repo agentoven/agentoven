@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +33,7 @@ type LocalExecutor struct {
 	mu        sync.Mutex
 	processes map[string]*localProcess // key: kitchen/agentName
 	scriptDir string                   // temp dir for extracted scripts
+	repoDir   string                   // base dir for git-cloned agent repos
 }
 
 // NewLocalExecutor creates a new local executor.
@@ -41,12 +43,19 @@ func NewLocalExecutor() *LocalExecutor {
 	}
 }
 
-// Start launches a Python process running the embedded agent_runner.py template.
+// Start launches a Python process for the agent.
+// For framework-native agents with a RepoURL, the repo is cloned/pulled first.
+// If agent.Entrypoint is set, it is used instead of the embedded agent_runner.py.
 func (le *LocalExecutor) Start(ctx context.Context, agent *models.Agent, info *models.ProcessInfo, env map[string]string) error {
-	// Extract the embedded agent runner script to a temp directory
-	scriptPath, err := le.ensureScript()
-	if err != nil {
-		return fmt.Errorf("failed to extract agent runner script: %w", err)
+	// ── Git pull for supported framework runtimes ─────────
+	var workDir string
+	if agent.NeedsGitPull() {
+		dir, err := le.ensureRepo(ctx, agent)
+		if err != nil {
+			return fmt.Errorf("git sync failed for %s: %w", agent.RepoURL, err)
+		}
+		workDir = dir
+		log.Info().Str("agent", agent.Name).Str("repo", agent.RepoURL).Str("dir", dir).Msg("Repo ready")
 	}
 
 	// Find Python executable
@@ -55,10 +64,31 @@ func (le *LocalExecutor) Start(ctx context.Context, agent *models.Agent, info *m
 		return fmt.Errorf("python3 not found in PATH — install Python 3.10+ to use local execution mode")
 	}
 
-	// Create a cancellable context for the process
+	// ── Select command: entrypoint override or embedded runner ──
+	var cmd *exec.Cmd
 	procCtx, cancel := context.WithCancel(context.Background())
 
-	cmd := exec.CommandContext(procCtx, pythonBin, scriptPath)
+	if agent.Entrypoint != "" {
+		parts := strings.Fields(agent.Entrypoint)
+		if len(parts) == 0 {
+			cancel()
+			return fmt.Errorf("agent entrypoint is empty after parsing")
+		}
+		cmd = exec.CommandContext(procCtx, parts[0], parts[1:]...)
+	} else {
+		// Default: embedded agent_runner.py
+		scriptPath, err := le.ensureScript()
+		if err != nil {
+			cancel()
+			return fmt.Errorf("failed to extract agent runner script: %w", err)
+		}
+		cmd = exec.CommandContext(procCtx, pythonBin, scriptPath)
+	}
+
+	// Set working directory to cloned repo (if applicable)
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
 
 	// Build environment: inherit parent env + add agent-specific vars
 	cmdEnv := os.Environ()
@@ -85,7 +115,7 @@ func (le *LocalExecutor) Start(ctx context.Context, agent *models.Agent, info *m
 	// Start the process
 	if err := cmd.Start(); err != nil {
 		cancel()
-		return fmt.Errorf("failed to start python process: %w", err)
+		return fmt.Errorf("failed to start agent process: %w", err)
 	}
 
 	info.PID = cmd.Process.Pid
@@ -114,7 +144,7 @@ func (le *LocalExecutor) Start(ctx context.Context, agent *models.Agent, info *m
 		Str("agent", agent.Name).
 		Int("pid", cmd.Process.Pid).
 		Int("port", info.Port).
-		Msg("Python agent process started")
+		Msg("Agent process started")
 
 	// Wait for the "AGENT_READY" signal from stdout (with timeout)
 	readyCh := make(chan bool, 1)
@@ -165,6 +195,58 @@ func (le *LocalExecutor) Start(ctx context.Context, agent *models.Agent, info *m
 	}()
 
 	return nil
+}
+
+// ensureRepo clones or pulls the agent's git repo for supported framework runtimes.
+// Returns the path to the cloned repo directory.
+func (le *LocalExecutor) ensureRepo(ctx context.Context, agent *models.Agent) (string, error) {
+	le.mu.Lock()
+	baseDir := le.repoDir
+	le.mu.Unlock()
+
+	if baseDir == "" {
+		dir, err := os.MkdirTemp("", "agentoven-repos-")
+		if err != nil {
+			return "", fmt.Errorf("failed to create repo base dir: %w", err)
+		}
+		le.mu.Lock()
+		le.repoDir = dir
+		baseDir = dir
+		le.mu.Unlock()
+	}
+
+	// Stable per-agent directory derived from kitchen + name
+	repoDir := filepath.Join(baseDir, agent.Kitchen, agent.Name)
+
+	if _, err := os.Stat(filepath.Join(repoDir, ".git")); os.IsNotExist(err) {
+		// First bake — clone the repo
+		log.Info().Str("agent", agent.Name).Str("url", agent.RepoURL).Msg("Cloning agent repo")
+		args := []string{"clone", agent.RepoURL, repoDir}
+		if agent.RepoBranch != "" {
+			args = []string{"clone", "--branch", agent.RepoBranch, "--single-branch", agent.RepoURL, repoDir}
+		}
+		cmd := exec.CommandContext(ctx, "git", args...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("git clone failed: %s: %w", strings.TrimSpace(string(out)), err)
+		}
+	} else {
+		// Subsequent bakes — pull latest
+		log.Info().Str("agent", agent.Name).Str("dir", repoDir).Msg("Pulling latest agent repo")
+		args := []string{"pull", "--ff-only"}
+		if agent.RepoBranch != "" {
+			args = []string{"pull", "--ff-only", "origin", agent.RepoBranch}
+		}
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Dir = repoDir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			// Log but don't fail — stale repo is better than no repo
+			log.Warn().Str("agent", agent.Name).Str("output", strings.TrimSpace(string(out))).Msg("git pull failed, proceeding with existing checkout")
+		}
+	}
+
+	return repoDir, nil
 }
 
 // Stop kills a running Python process.

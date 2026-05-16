@@ -18,6 +18,7 @@ package process
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -66,12 +67,13 @@ func processKey(kitchen, agentName string) string {
 // Manager orchestrates agent process lifecycles across execution modes.
 // It implements contracts.AgentProcessExecutor.
 type Manager struct {
-	mu        sync.RWMutex
-	processes map[string]*models.ProcessInfo // key: kitchen/agentName
-	local     *LocalExecutor
-	docker    *DockerExecutor
-	k8s       *K8sExecutor
-	ports     *portAllocator
+	mu              sync.RWMutex
+	processes       map[string]*models.ProcessInfo // key: kitchen/agentName
+	local           *LocalExecutor
+	docker          *DockerExecutor
+	k8s             *K8sExecutor
+	ports           *portAllocator
+	controlPlaneURL string // injected for AGENTOVEN_CONTROL_PLANE_URL env var
 }
 
 // NewManager creates a new ProcessManager with all executors initialized.
@@ -84,6 +86,12 @@ func NewManager() *Manager {
 		k8s:       NewK8sExecutor(),
 		ports:     ports,
 	}
+}
+
+// SetControlPlaneURL configures the URL injected as AGENTOVEN_CONTROL_PLANE_URL
+// into every agent process environment. Called during server startup.
+func (m *Manager) SetControlPlaneURL(u string) {
+	m.controlPlaneURL = u
 }
 
 // Start spawns an agent process using the appropriate executor.
@@ -280,6 +288,11 @@ func (m *Manager) buildEnvironment(agent *models.Agent, port int) map[string]str
 		"AGENT_PORT":    fmt.Sprintf("%d", port),
 	}
 
+	// Runtime — tells the SDK which adapter to use
+	if agent.Runtime != "" {
+		env["AGENT_RUNTIME"] = string(agent.Runtime)
+	}
+
 	// Description / system prompt
 	if agent.Description != "" {
 		env["AGENT_DESCRIPTION"] = agent.Description
@@ -304,6 +317,32 @@ func (m *Manager) buildEnvironment(agent *models.Agent, port int) map[string]str
 		}
 	}
 
+	// Tools — inject as JSON array so the SDK can build MCP tool wrappers
+	if agent.ResolvedConfig != nil && len(agent.ResolvedConfig.Tools) > 0 {
+		toolsJSON, err := json.Marshal(agent.ResolvedConfig.Tools)
+		if err == nil {
+			env["AGENT_TOOLS_JSON"] = string(toolsJSON)
+		}
+	}
+
+	// Prompt template — inject raw template text
+	if agent.ResolvedConfig != nil && agent.ResolvedConfig.Prompt != nil && agent.ResolvedConfig.Prompt.Template != "" {
+		env["AGENT_PROMPT_TEMPLATE"] = agent.ResolvedConfig.Prompt.Template
+	}
+
+	// Data sources — inject as JSON array
+	if agent.ResolvedConfig != nil && len(agent.ResolvedConfig.Data) > 0 {
+		dataJSON, err := json.Marshal(agent.ResolvedConfig.Data)
+		if err == nil {
+			env["AGENT_DATA_SOURCES_JSON"] = string(dataJSON)
+		}
+	}
+
+	// Control plane URL — SDK uses this for callbacks (e.g. Pro checkpointer)
+	if cpURL := m.controlPlaneURL; cpURL != "" {
+		env["AGENTOVEN_CONTROL_PLANE_URL"] = cpURL
+	}
+
 	// Skills
 	if len(agent.Skills) > 0 {
 		skills := ""
@@ -321,7 +360,7 @@ func (m *Manager) buildEnvironment(agent *models.Agent, port int) map[string]str
 		env["AGENT_MAX_TURNS"] = fmt.Sprintf("%d", agent.MaxTurns)
 	}
 
-	// System prompt from resolved prompt ingredient
+	// System prompt from resolved prompt ingredient (legacy path — also covered above)
 	if agent.ResolvedConfig != nil && agent.ResolvedConfig.Prompt != nil {
 		env["AGENT_DESCRIPTION"] = agent.ResolvedConfig.Prompt.Template
 	}

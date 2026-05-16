@@ -74,6 +74,11 @@ func (de *DockerExecutor) Start(ctx context.Context, agent *models.Agent, info *
 
 	args = append(args, image)
 
+	// Entrypoint override — for framework-native agents, append the custom CMD
+	if agent.Entrypoint != "" {
+		args = append(args, strings.Fields(agent.Entrypoint)...)
+	}
+
 	log.Info().
 		Str("agent", agent.Name).
 		Str("container", containerName).

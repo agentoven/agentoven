@@ -131,6 +131,24 @@ const (
 	ExecModeK8s ExecutionMode = "k8s"
 )
 
+// AgentRuntime identifies which framework runs the LLM loop.
+// "agentoven" (default) means the built-in Go executor owns the loop.
+// Any other value means the user's process owns it and AgentOven proxies calls.
+type AgentRuntime string
+
+const (
+	// RuntimeAgentOven is the default — the Go executor runs the LLM loop.
+	RuntimeAgentOven AgentRuntime = "agentoven"
+	// RuntimeLangChain — user's process wraps a LangChain Runnable/AgentExecutor.
+	RuntimeLangChain AgentRuntime = "langchain"
+	// RuntimeLangGraph — user's process wraps a compiled LangGraph graph (atomic).
+	RuntimeLangGraph AgentRuntime = "langgraph"
+	// RuntimeCrewAI — user's process wraps a CrewAI Crew.
+	RuntimeCrewAI AgentRuntime = "crewai"
+	// RuntimeCustom — user's process implements the /invoke protocol directly.
+	RuntimeCustom AgentRuntime = "custom"
+)
+
 // ProcessStatus describes the lifecycle of a spawned agent process.
 type ProcessStatus string
 
@@ -166,6 +184,9 @@ type Agent struct {
 	Kitchen     string      `json:"kitchen" db:"kitchen"`
 	Version     string      `json:"version" db:"version"`
 
+	// Order is the display/priority sort order within a kitchen (0 = unset).
+	Order int `json:"order,omitempty" db:"order"`
+
 	// VersionBump controls how the store should bump the version on update.
 	// "patch" → 0.1.0→0.1.1, "minor" → 0.1.1→0.2.0, "major" → 0.2.0→1.0.0
 	// Empty string → no version bump (status-only updates). Not persisted.
@@ -174,6 +195,27 @@ type Agent struct {
 	// ExecutionMode determines how the agent process is spawned (local/docker/k8s).
 	// Defaults to "local" if not specified.
 	ExecutionMode ExecutionMode `json:"execution_mode,omitempty" db:"execution_mode"`
+
+	// Runtime identifies which framework runs the LLM loop.
+	// "agentoven" (default) = built-in Go executor.
+	// "langchain" / "langgraph" / "crewai" / "custom" = user's process owns the loop.
+	// Only meaningful when Mode = "managed".
+	Runtime AgentRuntime `json:"runtime,omitempty" db:"runtime"`
+
+	// Entrypoint is the shell command used to start the user's process (local mode).
+	// Example: "python myagent.py"
+	// When Runtime != "agentoven" and Entrypoint is set, this replaces the embedded
+	// agent_runner.py. Docker mode uses it as a CMD override; K8s sets container command.
+	Entrypoint string `json:"entrypoint,omitempty" db:"entrypoint"`
+
+	// RepoURL is an optional Git repository to clone/pull before starting the process
+	// (local execution mode only). Supported for langchain, langgraph, crewai runtimes.
+	// Example: "https://github.com/acme/my-langchain-agent.git"
+	RepoURL string `json:"repo_url,omitempty" db:"repo_url"`
+
+	// RepoBranch is the branch/tag to check out when cloning RepoURL.
+	// Defaults to the repo's default branch if empty.
+	RepoBranch string `json:"repo_branch,omitempty" db:"repo_branch"`
 
 	// Managed mode configuration
 	MaxTurns int `json:"max_turns,omitempty" db:"max_turns"`
@@ -221,6 +263,34 @@ type Agent struct {
 	CreatedAt time.Time         `json:"created_at" db:"created_at"`
 	UpdatedAt time.Time         `json:"updated_at" db:"updated_at"`
 	CreatedBy string            `json:"created_by,omitempty" db:"created_by"`
+}
+
+// IsFrameworkNative returns true when the agent's LLM loop runs in a user-managed
+// process rather than AgentOven's built-in Go executor. When true, InvokeAgent
+// proxies the call to the spawned process's /invoke endpoint instead of running
+// the executor directly.
+func (a *Agent) IsFrameworkNative() bool {
+	return a.Runtime != "" && a.Runtime != RuntimeAgentOven
+}
+
+// SupportedFrameworks returns the set of runtimes that support git-based auto-pull.
+// For these runtimes, a RepoURL on the agent triggers a git clone/pull before baking.
+func SupportedFrameworks() []AgentRuntime {
+	return []AgentRuntime{RuntimeLangChain, RuntimeLangGraph, RuntimeCrewAI}
+}
+
+// NeedsGitPull returns true when the agent should have its source repo cloned/pulled
+// before the process is started. Only applies to local execution mode.
+func (a *Agent) NeedsGitPull() bool {
+	if a.RepoURL == "" || a.ExecutionMode == ExecModeDocker || a.ExecutionMode == ExecModeK8s {
+		return false
+	}
+	for _, rt := range SupportedFrameworks() {
+		if a.Runtime == rt {
+			return true
+		}
+	}
+	return false
 }
 
 // ── Ingredient ───────────────────────────────────────────────
@@ -319,9 +389,12 @@ type Recipe struct {
 	Kitchen     string    `json:"kitchen" db:"kitchen"`
 	Steps       []Step    `json:"steps"`
 	Version     string    `json:"version" db:"version"`
-	CreatedAt   time.Time `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
-	CreatedBy   string    `json:"created_by,omitempty" db:"created_by"`
+	// DefaultEnvironment is the environment slug that recipe runs target when no
+	// explicit environment is provided. Pro-only: OSS ignores this field.
+	DefaultEnvironment string    `json:"default_environment,omitempty" db:"default_environment"`
+	CreatedAt          time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at" db:"updated_at"`
+	CreatedBy          string    `json:"created_by,omitempty" db:"created_by"`
 }
 
 // ── Kitchen (Workspace/Tenant) ───────────────────────────────
@@ -665,6 +738,10 @@ type RecipeRun struct {
 	ID           string                 `json:"id" db:"id"`
 	RecipeID     string                 `json:"recipe_id" db:"recipe_id"`
 	Kitchen      string                 `json:"kitchen" db:"kitchen"`
+	// Environment is the target environment slug for this run (e.g. "staging", "prod").
+	// When set, executeAgentStep resolves agents to their version-pinned deployment in this
+	// environment via GetActiveDeployment → GetAgentVersion. Pro-only: OSS stores but ignores.
+	Environment  string                 `json:"environment,omitempty" db:"environment"`
 	Status       RecipeRunStatus        `json:"status" db:"status"`
 	Input        map[string]interface{} `json:"input,omitempty"`
 	Output       map[string]interface{} `json:"output,omitempty"`

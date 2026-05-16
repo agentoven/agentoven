@@ -280,7 +280,7 @@ func TestRoutingSkipsNonTaken(t *testing.T) {
 	}
 	eng.store.CreateRecipe(ctx, recipe)
 
-	runID, err := eng.ExecuteRecipe(ctx, recipe, "default", map[string]interface{}{"ticket": "refund please"})
+	runID, err := eng.ExecuteRecipe(ctx, recipe, "default", map[string]interface{}{"ticket": "refund please"}, "")
 	if err != nil {
 		t.Fatalf("ExecuteRecipe: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestChainingPattern(t *testing.T) {
 	}
 	eng.store.CreateRecipe(ctx, recipe)
 
-	runID, err := eng.ExecuteRecipe(ctx, recipe, "default", nil)
+	runID, err := eng.ExecuteRecipe(ctx, recipe, "default", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +400,7 @@ func TestParallelPattern(t *testing.T) {
 	}
 	eng.store.CreateRecipe(ctx, recipe)
 
-	runID, err := eng.ExecuteRecipe(ctx, recipe, "default", nil)
+	runID, err := eng.ExecuteRecipe(ctx, recipe, "default", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,7 +427,7 @@ func TestEmptyRecipe(t *testing.T) {
 	}
 	eng.store.CreateRecipe(context.Background(), recipe)
 
-	runID, err := eng.ExecuteRecipe(context.Background(), recipe, "default", nil)
+	runID, err := eng.ExecuteRecipe(context.Background(), recipe, "default", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}

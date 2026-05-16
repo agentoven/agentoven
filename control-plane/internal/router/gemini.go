@@ -120,7 +120,7 @@ func (d *GeminiDriver) HealthCheck(ctx context.Context, provider *models.ModelPr
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("gemini: status %d: %s", resp.StatusCode, string(body))
+		return parseGoogleAPIError("gemini", resp.StatusCode, body, "")
 	}
 	return nil
 }
@@ -381,6 +381,20 @@ func (mr *ModelRouter) callGemini(ctx context.Context, provider *models.ModelPro
 
 	if httpResp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(httpResp.Body)
+		// Google API errors: {"error":{"code":404,"message":"...","status":"NOT_FOUND"}}
+		var gErr struct {
+			Error struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+				Status  string `json:"status"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(respBody, &gErr) == nil && gErr.Error.Message != "" {
+			if gErr.Error.Status == "NOT_FOUND" {
+				return nil, fmt.Errorf("gemini: model %q not found — check the model name in your provider config (e.g. gemini-2.0-flash)", model)
+			}
+			return nil, fmt.Errorf("gemini: status %d: %s (%s)", httpResp.StatusCode, gErr.Error.Message, gErr.Error.Status)
+		}
 		return nil, fmt.Errorf("gemini: status %d: %s", httpResp.StatusCode, string(respBody))
 	}
 

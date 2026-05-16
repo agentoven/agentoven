@@ -705,7 +705,7 @@ func (mr *ModelRouter) callOpenAI(ctx context.Context, provider *models.ModelPro
 
 	if httpResp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(httpResp.Body)
-		return nil, fmt.Errorf("openai: status %d: %s", httpResp.StatusCode, string(respBody))
+		return nil, parseOpenAIError("openai", httpResp.StatusCode, respBody, req.Model)
 	}
 
 	var oaiResp openAIResponse
@@ -792,13 +792,16 @@ type anthropicResponse struct {
 }
 
 func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) (*models.RouteResponse, error) {
-	model := req.Model
+	model := normalizeAnthropicModel(req.Model)
 	messages := req.Messages
 
 	endpoint := provider.Endpoint
 	if endpoint == "" {
 		endpoint = "https://api.anthropic.com"
 	}
+	// Normalize: strip trailing slash and /v1 suffix so we can always append /v1/...
+	endpoint = strings.TrimRight(endpoint, "/")
+	endpoint = strings.TrimSuffix(endpoint, "/v1")
 
 	apiKey, _ := provider.Config["api_key"].(string)
 	if apiKey == "" {
@@ -856,7 +859,7 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 
 	if httpResp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(httpResp.Body)
-		return nil, fmt.Errorf("anthropic: status %d: %s", httpResp.StatusCode, string(respBody))
+		return nil, parseAnthropicError("anthropic", httpResp.StatusCode, respBody, model)
 	}
 
 	var anthResp anthropicResponse
@@ -965,6 +968,13 @@ func (mr *ModelRouter) callOllama(ctx context.Context, provider *models.ModelPro
 
 	if httpResp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(httpResp.Body)
+		// Ollama returns {"error": "model 'x' not found, try pulling it first"}
+		var ollamaErr struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(respBody, &ollamaErr) == nil && ollamaErr.Error != "" {
+			return nil, fmt.Errorf("ollama: %s", ollamaErr.Error)
+		}
 		return nil, fmt.Errorf("ollama: status %d: %s", httpResp.StatusCode, string(respBody))
 	}
 
@@ -1086,7 +1096,14 @@ func (mr *ModelRouter) TestProvider(ctx context.Context, provider *models.ModelP
 
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
-			result.Error = fmt.Sprintf("ollama: status %d: %s", resp.StatusCode, string(body))
+			var ollamaErr struct {
+				Error string `json:"error"`
+			}
+			if json.Unmarshal(body, &ollamaErr) == nil && ollamaErr.Error != "" {
+				result.Error = fmt.Sprintf("ollama: %s", ollamaErr.Error)
+			} else {
+				result.Error = fmt.Sprintf("ollama: status %d", resp.StatusCode)
+			}
 			result.LatencyMs = time.Since(start).Milliseconds()
 			return result
 		}
@@ -1123,7 +1140,7 @@ func (mr *ModelRouter) TestProvider(ctx context.Context, provider *models.ModelP
 			case "azure-openai":
 				model = "gpt-4o-mini"
 			case "anthropic":
-				model = "claude-3-5-haiku-20241022"
+				model = "claude-haiku-4-5"
 			}
 		}
 
@@ -1171,6 +1188,65 @@ func (mr *ModelRouter) TestProvider(ctx context.Context, provider *models.ModelP
 		result.Model = model
 		return result
 	}
+}
+
+// parseGoogleAPIError extracts a human-readable message from a Google API JSON
+// error body. Falls back to the raw string if the body is not JSON.
+func parseGoogleAPIError(prefix string, status int, body []byte, model string) error {
+	var gErr struct {
+		Error struct {
+			Message string `json:"message"`
+			Status  string `json:"status"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &gErr) == nil && gErr.Error.Message != "" {
+		if gErr.Error.Status == "NOT_FOUND" && model != "" {
+			return fmt.Errorf("%s: model %q not found — check the model name in your provider config (e.g. gemini-2.0-flash)", prefix, model)
+		}
+		if gErr.Error.Status != "" {
+			return fmt.Errorf("%s: status %d: %s (%s)", prefix, status, gErr.Error.Message, gErr.Error.Status)
+		}
+		return fmt.Errorf("%s: status %d: %s", prefix, status, gErr.Error.Message)
+	}
+	return fmt.Errorf("%s: status %d: %s", prefix, status, string(body))
+}
+
+// parseOpenAIError extracts a human-readable message from an OpenAI-compatible JSON error body.
+// Falls back to the raw string if the body is not JSON or has no message.
+func parseOpenAIError(prefix string, status int, body []byte, model string) error {
+	var apiErr struct {
+		Error struct {
+			Message string `json:"message"`
+			Code    string `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &apiErr) == nil && apiErr.Error.Message != "" {
+		if apiErr.Error.Code == "model_not_found" || (status == 404 && model != "") {
+			return fmt.Errorf("%s: model %q not found — check the model name in your provider config", prefix, model)
+		}
+		if apiErr.Error.Code != "" {
+			return fmt.Errorf("%s: status %d: %s (%s)", prefix, status, apiErr.Error.Message, apiErr.Error.Code)
+		}
+		return fmt.Errorf("%s: status %d: %s", prefix, status, apiErr.Error.Message)
+	}
+	return fmt.Errorf("%s: status %d: %s", prefix, status, string(body))
+}
+
+// parseAnthropicError extracts a human-readable message from an Anthropic JSON error body.
+func parseAnthropicError(prefix string, status int, body []byte, model string) error {
+	var apiErr struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &apiErr) == nil && apiErr.Error.Message != "" {
+		if apiErr.Error.Type == "not_found_error" {
+			return fmt.Errorf("%s: model %q not found — check the model name (e.g. claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5). Note: Claude 4.6+ uses dateless IDs — do not append a date suffix", prefix, model)
+		}
+		return fmt.Errorf("%s: status %d: %s (%s)", prefix, status, apiErr.Error.Message, apiErr.Error.Type)
+	}
+	return fmt.Errorf("%s: status %d: %s", prefix, status, string(body))
 }
 
 // callOpenAITest sends a minimal 1-token request to validate OpenAI/Azure credentials.
@@ -1234,6 +1310,19 @@ func (mr *ModelRouter) callOpenAITest(ctx context.Context, provider *models.Mode
 		if httpResp.StatusCode == 400 && (strings.Contains(errStr, "max_tokens") || strings.Contains(errStr, "max_completion_tokens")) {
 			return &models.RouteResponse{Provider: provider.Name, Model: model}, nil
 		}
+		// Extract human-readable message from OpenAI-compatible JSON error bodies
+		var apiErr struct {
+			Error struct {
+				Message string `json:"message"`
+				Code    string `json:"code"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(respBody, &apiErr) == nil && apiErr.Error.Message != "" {
+			if apiErr.Error.Code != "" {
+				return nil, fmt.Errorf("status %d: %s (%s)", httpResp.StatusCode, apiErr.Error.Message, apiErr.Error.Code)
+			}
+			return nil, fmt.Errorf("status %d: %s", httpResp.StatusCode, apiErr.Error.Message)
+		}
 		return nil, fmt.Errorf("status %d: %s", httpResp.StatusCode, errStr)
 	}
 
@@ -1242,10 +1331,14 @@ func (mr *ModelRouter) callOpenAITest(ctx context.Context, provider *models.Mode
 
 // callAnthropicTest sends a minimal 1-token request to validate Anthropic credentials.
 func (mr *ModelRouter) callAnthropicTest(ctx context.Context, provider *models.ModelProvider, model string) (*models.RouteResponse, error) {
+	model = normalizeAnthropicModel(model)
 	endpoint := provider.Endpoint
 	if endpoint == "" {
 		endpoint = "https://api.anthropic.com"
 	}
+	// Normalize: strip trailing slash and /v1 suffix so we can always append /v1/...
+	endpoint = strings.TrimRight(endpoint, "/")
+	endpoint = strings.TrimSuffix(endpoint, "/v1")
 
 	apiKey, _ := provider.Config["api_key"].(string)
 	if apiKey == "" {
@@ -1281,6 +1374,19 @@ func (mr *ModelRouter) callAnthropicTest(ctx context.Context, provider *models.M
 
 	if httpResp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(httpResp.Body)
+		// Extract human-readable message from Anthropic JSON error bodies
+		var apiErr struct {
+			Error struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(respBody, &apiErr) == nil && apiErr.Error.Message != "" {
+			if apiErr.Error.Type == "not_found_error" {
+				return nil, fmt.Errorf("model %q not found — check the model name (e.g. claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5). Note: Claude 4.6+ uses dateless IDs — do not append a date suffix", model)
+			}
+			return nil, fmt.Errorf("status %d: %s (%s)", httpResp.StatusCode, apiErr.Error.Message, apiErr.Error.Type)
+		}
 		return nil, fmt.Errorf("status %d: %s", httpResp.StatusCode, string(respBody))
 	}
 
@@ -1668,11 +1774,76 @@ func (d *AnthropicDriver) HealthCheck(ctx context.Context, provider *models.Mode
 	if len(provider.Models) > 0 {
 		model = provider.Models[0]
 	} else {
-		model = "claude-3-5-haiku-20241022"
+		model = "claude-haiku-4-5"
 	}
 	_, err := d.router.callAnthropicTest(ctx, provider, model)
 	return err
 }
+
+// ── Anthropic Model Discovery ───────────────────────────────
+
+// DiscoverModels queries Anthropic's GET /v1/models endpoint to return the
+// list of models available to the configured API key.
+func (d *AnthropicDriver) DiscoverModels(ctx context.Context, provider *models.ModelProvider) ([]models.DiscoveredModel, error) {
+	endpoint := provider.Endpoint
+	if endpoint == "" {
+		endpoint = "https://api.anthropic.com"
+	}
+	// Normalize: strip trailing slash and /v1 suffix so we can always append /v1/...
+	endpoint = strings.TrimRight(endpoint, "/")
+	endpoint = strings.TrimSuffix(endpoint, "/v1")
+	apiKey, _ := provider.Config["api_key"].(string)
+	if apiKey == "" {
+		return nil, fmt.Errorf("anthropic discover: api_key not configured")
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", endpoint+"/v1/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("x-api-key", apiKey)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+
+	httpResp, err := d.router.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic discover: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(httpResp.Body)
+		return nil, fmt.Errorf("anthropic discover: status %d: %s", httpResp.StatusCode, string(body))
+	}
+
+	var resp struct {
+		Data []struct {
+			ID          string `json:"id"`
+			DisplayName string `json:"display_name"`
+			CreatedAt   string `json:"created_at"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
+		return nil, fmt.Errorf("anthropic discover: decode: %w", err)
+	}
+
+	result := make([]models.DiscoveredModel, 0, len(resp.Data))
+	for _, m := range resp.Data {
+		md := map[string]string{}
+		if m.DisplayName != "" {
+			md["display_name"] = m.DisplayName
+		}
+		result = append(result, models.DiscoveredModel{
+			ID:       m.ID,
+			Provider: provider.Name,
+			Kind:     "anthropic",
+			Metadata: md,
+		})
+	}
+	return result, nil
+}
+
+// Compile-time assertion: AnthropicDriver implements ModelDiscoveryDriver.
+var _ ModelDiscoveryDriver = (*AnthropicDriver)(nil)
 
 // ── Ollama Driver ───────────────────────────────────────────
 
@@ -1857,7 +2028,7 @@ func (d *LiteLLMDriver) HealthCheck(ctx context.Context, provider *models.ModelP
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("litellm: status %d: %s", resp.StatusCode, string(body))
+		return parseOpenAIError("litellm", resp.StatusCode, body, "")
 	}
 	return nil
 }
@@ -1993,7 +2164,7 @@ func (d *OpenRouterDriver) HealthCheck(ctx context.Context, provider *models.Mod
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("openrouter: status %d: %s", resp.StatusCode, string(body))
+		return parseOpenAIError("openrouter", resp.StatusCode, body, "")
 	}
 	return nil
 }
@@ -2053,3 +2224,28 @@ var (
 	_ ProviderDriver       = (*OpenRouterDriver)(nil)
 	_ ModelDiscoveryDriver = (*OpenRouterDriver)(nil)
 )
+
+// normalizeAnthropicModel strips the trailing date suffix from Claude model IDs.
+// Claude 4.6+ uses dateless IDs (e.g. "claude-sonnet-4-6"), but older stored
+// agents may have date-suffixed names like "claude-opus-4-7-20260416". Anthropic's
+// API rejects the date-suffixed form, so we strip "-YYYYMMDD" before calling.
+func normalizeAnthropicModel(model string) string {
+	// A date suffix is a "-" followed by exactly 8 ASCII digits at the end.
+	if len(model) > 9 {
+		suffix := model[len(model)-9:] // e.g. "-20260416"
+		if suffix[0] == '-' {
+			digits := suffix[1:]
+			allDigits := true
+			for _, c := range digits {
+				if c < '0' || c > '9' {
+					allDigits = false
+					break
+				}
+			}
+			if allDigits {
+				return model[:len(model)-9]
+			}
+		}
+	}
+	return model
+}

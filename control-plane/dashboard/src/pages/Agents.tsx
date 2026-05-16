@@ -195,8 +195,11 @@ function AgentCard({ agent, onAction, onIntegrate, onRecook, onViewLogs }: { age
       if (successMsg) setToast({ message: successMsg, type: 'success' });
       onAction();
     } catch (e) {
-      if (e instanceof APIError && e.details) {
-        setBakeError(e.details);
+      if (e instanceof APIError) {
+        setToast({ message: e.message, type: 'error' });
+        if (e.details && e.details.length > 0) {
+          setBakeError(e.details);
+        }
       } else if (e instanceof Error) {
         setToast({ message: e.message, type: 'error' });
       } else {
@@ -236,7 +239,12 @@ function AgentCard({ agent, onAction, onIntegrate, onRecook, onViewLogs }: { age
             <span className="text-[var(--ao-text-muted)]">max {agent.max_turns || 10} turns</span>
           )}
         </div>
-        <p>Framework: {agent.framework || '—'}</p>
+        <p className="flex items-center gap-2">
+          Framework: {agent.framework || '—'}
+          {agent.runtime && agent.runtime !== 'agentoven' && (
+            <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-[var(--ao-brand)]/20 text-[var(--ao-brand)]">{agent.runtime}</span>
+          )}
+        </p>
         <p>Model: {agent.model_provider ? `${agent.model_provider} / ${agent.model_name}` : '—'}</p>
         {(agent as any).backup_provider && (
           <p>Backup: <span className="text-amber-400">{(agent as any).backup_provider}</span></p>
@@ -538,6 +546,10 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
     context_budget: 16000,
     summary_model: '',
     reasoning_strategy: 'react' as 'react' | 'plan-and-execute' | 'reflexion',
+    runtime: 'agentoven' as 'agentoven' | 'langchain' | 'langgraph' | 'crewai' | 'custom',
+    entrypoint: '',
+    repo_url: '',
+    repo_branch: '',
   });
   const [ingredients, setIngredients] = useState<IngredientRow[]>([]);
   const [guardrails, setGuardrails] = useState<GuardrailRow[]>([]);
@@ -608,6 +620,10 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
         context_budget: form.behavior === 'agentic' ? form.context_budget : undefined,
         summary_model: form.behavior === 'agentic' && form.summary_model ? form.summary_model : undefined,
         reasoning_strategy: form.behavior === 'agentic' ? form.reasoning_strategy : undefined,
+        runtime: form.mode === 'managed' ? form.runtime : undefined,
+        entrypoint: form.mode === 'managed' && form.runtime !== 'agentoven' && form.entrypoint ? form.entrypoint : undefined,
+        repo_url: form.mode === 'managed' && ['langchain', 'langgraph', 'crewai'].includes(form.runtime) && form.repo_url ? form.repo_url : undefined,
+        repo_branch: form.mode === 'managed' && form.repo_url && form.repo_branch ? form.repo_branch : undefined,
       } as any);
       onCreated();
     } catch (e) {
@@ -679,6 +695,49 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
                 </div>
               )}
             </div>
+
+            {/* Runtime (managed only) */}
+            {form.mode === 'managed' && (
+              <div className="p-3 rounded-lg border border-[var(--ao-brand)]/20 bg-[var(--ao-brand)]/5">
+                <p className="text-xs font-semibold text-[var(--ao-brand)] uppercase tracking-wider mb-3">Runtime</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Runtime Engine</label>
+                    <select value={form.runtime} onChange={(e) => setForm({ ...form, runtime: e.target.value as typeof form.runtime })} className={inputCls}>
+                      <option value="agentoven">AgentOven (built-in)</option>
+                      <option value="langchain">LangChain</option>
+                      <option value="langgraph">LangGraph</option>
+                      <option value="crewai">CrewAI</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                  </div>
+                  {form.runtime !== 'agentoven' && (
+                    <div>
+                      <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Entrypoint</label>
+                      <input value={form.entrypoint} onChange={(e) => setForm({ ...form, entrypoint: e.target.value })} className={inputCls} placeholder="python my_agent.py" />
+                    </div>
+                  )}
+                </div>
+                {form.runtime !== 'agentoven' && ['langchain', 'langgraph', 'crewai'].includes(form.runtime) && (
+                  <div className="grid grid-cols-2 gap-3 mt-3">
+                    <div>
+                      <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Repo URL <span className="font-normal opacity-60">(auto git clone/pull on bake)</span></label>
+                      <input value={form.repo_url} onChange={(e) => setForm({ ...form, repo_url: e.target.value })} className={inputCls} placeholder="https://github.com/org/repo" />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Branch <span className="font-normal opacity-60">(optional)</span></label>
+                      <input value={form.repo_branch} onChange={(e) => setForm({ ...form, repo_branch: e.target.value })} className={inputCls} placeholder="main" />
+                    </div>
+                  </div>
+                )}
+                {form.runtime !== 'agentoven' && (
+                  <div className="mt-3 p-2.5 rounded bg-[var(--ao-bg)] border border-[var(--ao-border)]">
+                    <p className="text-[10px] font-mono text-[var(--ao-text-muted)]">pip install &quot;agentoven[runtime]&quot;</p>
+                    <p className="text-[10px] text-[var(--ao-text-muted)] mt-1">Then use <code className="font-mono">from agentoven.runtime import serve, AgentOvenRuntime</code> in your agent.</p>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Agent behavior (managed only) */}
             {form.mode === 'managed' && (
@@ -952,6 +1011,10 @@ function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => void }) 
     context_budget: agent.context_budget || 16000,
     summary_model: agent.summary_model || '',
     reasoning_strategy: agent.reasoning_strategy || 'react' as 'react' | 'plan-and-execute' | 'reflexion',
+    runtime: (agent.runtime || 'agentoven') as 'agentoven' | 'langchain' | 'langgraph' | 'crewai' | 'custom',
+    entrypoint: agent.entrypoint || '',
+    repo_url: agent.repo_url || '',
+    repo_branch: agent.repo_branch || '',
   });
   const [ingredients, setIngredients] = useState<IngredientRow[]>(otherIngredients);
   const [guardrails, setGuardrails] = useState<GuardrailRow[]>(existingGuardrails);
@@ -1020,6 +1083,10 @@ function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => void }) 
         context_budget: form.mode === 'managed' && form.behavior === 'agentic' ? form.context_budget : undefined,
         summary_model: form.mode === 'managed' && form.behavior === 'agentic' ? (form.summary_model || undefined) : undefined,
         reasoning_strategy: form.mode === 'managed' && form.behavior === 'agentic' ? form.reasoning_strategy : undefined,
+        runtime: form.mode === 'managed' ? form.runtime : undefined,
+        entrypoint: form.mode === 'managed' && form.runtime !== 'agentoven' && form.entrypoint ? form.entrypoint : undefined,
+        repo_url: form.mode === 'managed' && ['langchain', 'langgraph', 'crewai'].includes(form.runtime) && form.repo_url ? form.repo_url : undefined,
+        repo_branch: form.mode === 'managed' && form.repo_url && form.repo_branch ? form.repo_branch : undefined,
       } as any);
       onDone();
     } catch (e) {
@@ -1099,6 +1166,49 @@ function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => void }) 
                 </div>
               )}
             </div>
+
+            {/* Runtime (managed only) */}
+            {form.mode === 'managed' && (
+              <div className="p-3 rounded-lg border border-[var(--ao-brand)]/20 bg-[var(--ao-brand)]/5">
+                <p className="text-xs font-semibold text-[var(--ao-brand)] uppercase tracking-wider mb-3">Runtime</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Runtime Engine</label>
+                    <select value={form.runtime} onChange={(e) => setForm({ ...form, runtime: e.target.value as typeof form.runtime })} className={inputCls}>
+                      <option value="agentoven">AgentOven (built-in)</option>
+                      <option value="langchain">LangChain</option>
+                      <option value="langgraph">LangGraph</option>
+                      <option value="crewai">CrewAI</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                  </div>
+                  {form.runtime !== 'agentoven' && (
+                    <div>
+                      <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Entrypoint</label>
+                      <input value={form.entrypoint} onChange={(e) => setForm({ ...form, entrypoint: e.target.value })} className={inputCls} placeholder="python my_agent.py" />
+                    </div>
+                  )}
+                </div>
+                {form.runtime !== 'agentoven' && ['langchain', 'langgraph', 'crewai'].includes(form.runtime) && (
+                  <div className="grid grid-cols-2 gap-3 mt-3">
+                    <div>
+                      <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Repo URL <span className="font-normal opacity-60">(auto git clone/pull on bake)</span></label>
+                      <input value={form.repo_url} onChange={(e) => setForm({ ...form, repo_url: e.target.value })} className={inputCls} placeholder="https://github.com/org/repo" />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Branch <span className="font-normal opacity-60">(optional)</span></label>
+                      <input value={form.repo_branch} onChange={(e) => setForm({ ...form, repo_branch: e.target.value })} className={inputCls} placeholder="main" />
+                    </div>
+                  </div>
+                )}
+                {form.runtime !== 'agentoven' && (
+                  <div className="mt-3 p-2.5 rounded bg-[var(--ao-bg)] border border-[var(--ao-border)]">
+                    <p className="text-[10px] font-mono text-[var(--ao-text-muted)]">pip install &quot;agentoven[runtime]&quot;</p>
+                    <p className="text-[10px] text-[var(--ao-text-muted)] mt-1">Then use <code className="font-mono">from agentoven.runtime import serve, AgentOvenRuntime</code> in your agent.</p>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Agent behavior (managed only) */}
             {form.mode === 'managed' && (

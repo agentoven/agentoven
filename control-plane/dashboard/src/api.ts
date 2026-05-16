@@ -10,7 +10,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new APIError(body.error || `API error ${res.status}`, res.status, body.details);
+    // Normalize details: backend may return a newline-delimited string or an array
+    let details: string[] | undefined;
+    if (Array.isArray(body.details)) {
+      details = body.details;
+    } else if (typeof body.details === 'string' && body.details) {
+      details = body.details
+        .split('\n')
+        .map((s: string) => s.replace(/^\s*-\s*/, '').trim())
+        .filter(Boolean);
+    }
+    throw new APIError(body.error || `API error ${res.status}`, res.status, details);
   }
   // 204 No Content or empty body — return without parsing JSON
   if (res.status === 204 || res.headers.get('content-length') === '0') {
@@ -74,6 +84,11 @@ export interface Agent {
   ingredients: Ingredient[];
   guardrails: Guardrail[];
   tags: Record<string, string>;
+  // Framework-native managed agent fields
+  runtime?: 'agentoven' | 'langchain' | 'langgraph' | 'crewai' | 'custom';
+  entrypoint?: string;
+  repo_url?: string;
+  repo_branch?: string;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -278,7 +293,7 @@ export const providers = {
   create: (provider: Partial<ModelProvider>) =>
     request<ModelProvider>('/models/providers', { method: 'POST', body: JSON.stringify(provider) }),
   update: (name: string, provider: Partial<ModelProvider>) =>
-    request<ModelProvider>(`/models/providers/${name}`, {
+    request<{ provider: ModelProvider; agents_burnt: number }>(`/models/providers/${name}`, {
       method: 'PUT',
       body: JSON.stringify(provider),
     }),

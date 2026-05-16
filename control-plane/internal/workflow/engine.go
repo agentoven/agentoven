@@ -75,16 +75,27 @@ func NewEngine(s store.Store, notifier *notify.Service, baseURL string) *Engine 
 
 // ExecuteRecipe starts an async recipe execution.
 // Returns the run ID immediately; execution happens in background.
-func (e *Engine) ExecuteRecipe(ctx context.Context, recipe *models.Recipe, kitchen string, input map[string]interface{}) (string, error) {
+//
+// envSlug optionally pins the run to a specific environment (e.g. "staging", "prod").
+// When set, each agent step resolves the version-pinned deployment in that environment
+// via GetActiveDeployment → GetAgentVersion. Pass "" to resolve the live agent (OSS default).
+// If envSlug is empty, recipe.DefaultEnvironment is used as a fallback.
+func (e *Engine) ExecuteRecipe(ctx context.Context, recipe *models.Recipe, kitchen string, input map[string]interface{}, envSlug string) (string, error) {
 	runID := uuid.New().String()
 
+	// Resolve environment: explicit > recipe default > none
+	if envSlug == "" {
+		envSlug = recipe.DefaultEnvironment
+	}
+
 	run := &models.RecipeRun{
-		ID:        runID,
-		RecipeID:  recipe.ID,
-		Kitchen:   kitchen,
-		Status:    models.RecipeRunRunning,
-		Input:     input,
-		StartedAt: time.Now().UTC(),
+		ID:          runID,
+		RecipeID:    recipe.ID,
+		Kitchen:     kitchen,
+		Environment: envSlug,
+		Status:      models.RecipeRunRunning,
+		Input:       input,
+		StartedAt:   time.Now().UTC(),
 	}
 
 	if err := e.store.CreateRecipeRun(ctx, run); err != nil {
@@ -100,6 +111,7 @@ func (e *Engine) ExecuteRecipe(ctx context.Context, recipe *models.Recipe, kitch
 	log.Info().
 		Str("run_id", runID).
 		Str("recipe", recipe.Name).
+		Str("environment", envSlug).
 		Int("steps", len(recipe.Steps)).
 		Msg("🍳 Recipe execution started")
 
@@ -615,11 +627,28 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 		return fmt.Errorf("agent step '%s' has no agent_ref", step.Name)
 	}
 
-	// Get the agent to find its A2A endpoint
+	// Get the agent to find its A2A endpoint.
+	// When run.Environment is set (Pro: env-targeted run), attempt to resolve the
+	// version-pinned agent snapshot from the active deployment in that environment.
+	// Falls back to the live agent if no active deployment exists (graceful degradation).
 	kitchen := run.Kitchen
 	agent, err := e.store.GetAgent(ctx, kitchen, agentRef)
 	if err != nil {
 		return fmt.Errorf("agent lookup failed: %w", err)
+	}
+
+	if run.Environment != "" {
+		dep, depErr := e.store.GetActiveDeployment(ctx, kitchen, agentRef, run.Environment)
+		if depErr == nil && dep != nil && dep.Version != "" {
+			if pinned, verErr := e.store.GetAgentVersion(ctx, kitchen, agentRef, dep.Version); verErr == nil {
+				agent = pinned
+				log.Debug().
+					Str("agent", agentRef).
+					Str("environment", run.Environment).
+					Str("version", dep.Version).
+					Msg("engine: resolved version-pinned agent for environment")
+			}
+		}
 	}
 
 	if agent.Status != models.AgentStatusReady {
@@ -670,6 +699,11 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 		return fmt.Errorf("create A2A request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if run.Environment != "" {
+		// Forward the environment context so the CP gateway and target agent
+		// can observe which environment triggered this invocation.
+		httpReq.Header.Set("X-AO-Environment", run.Environment)
+	}
 
 	resp, err := e.client.Do(httpReq)
 	if err != nil {

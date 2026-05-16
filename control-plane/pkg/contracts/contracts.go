@@ -73,7 +73,9 @@ type MCPGatewayService interface {
 type WorkflowService interface {
 	// ExecuteRecipe starts an async recipe execution.
 	// Returns the run ID immediately; execution happens in background.
-	ExecuteRecipe(ctx context.Context, recipe *models.Recipe, kitchen string, input map[string]interface{}) (string, error)
+	// envSlug optionally pins execution to a specific environment (Pro: version-pinned agents).
+	// Pass "" for OSS behaviour (live agent, no env routing).
+	ExecuteRecipe(ctx context.Context, recipe *models.Recipe, kitchen string, input map[string]interface{}, envSlug string) (string, error)
 
 	// CancelRun cancels a running recipe execution. Returns true if the run was found and canceled.
 	CancelRun(runID string) bool

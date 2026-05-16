@@ -453,7 +453,23 @@ func (c *Catalog) loadBuiltinDefaults() {
 			SupportsTools: true, SupportsVision: true, SupportsStreaming: true, SupportsJSON: true,
 			TokenParamName: "max_completion_tokens", Source: "builtin"},
 
-		// Anthropic
+		// Anthropic — Claude 4.6+ uses dateless pinned IDs (no date suffix)
+		{ModelID: "anthropic/claude-opus-4-7", ProviderKind: "anthropic", ModelName: "claude-opus-4-7",
+			ContextWindow: 1000000, MaxOutputTokens: 128000,
+			InputCostPer1K: 0.005, OutputCostPer1K: 0.025,
+			SupportsTools: true, SupportsVision: true, SupportsStreaming: true, SupportsThinking: true, SupportsJSON: true,
+			TokenParamName: "max_tokens", Source: "builtin"},
+		{ModelID: "anthropic/claude-sonnet-4-6", ProviderKind: "anthropic", ModelName: "claude-sonnet-4-6",
+			ContextWindow: 1000000, MaxOutputTokens: 64000,
+			InputCostPer1K: 0.003, OutputCostPer1K: 0.015,
+			SupportsTools: true, SupportsVision: true, SupportsStreaming: true, SupportsThinking: true, SupportsJSON: true,
+			TokenParamName: "max_tokens", Source: "builtin"},
+		{ModelID: "anthropic/claude-haiku-4-5", ProviderKind: "anthropic", ModelName: "claude-haiku-4-5",
+			ContextWindow: 200000, MaxOutputTokens: 64000,
+			InputCostPer1K: 0.001, OutputCostPer1K: 0.005,
+			SupportsTools: true, SupportsVision: true, SupportsStreaming: true, SupportsJSON: true,
+			TokenParamName: "max_tokens", Source: "builtin"},
+		// Legacy dated snapshot IDs (still valid on Anthropic API)
 		{ModelID: "anthropic/claude-sonnet-4-20250514", ProviderKind: "anthropic", ModelName: "claude-sonnet-4-20250514",
 			ContextWindow: 200000, MaxOutputTokens: 8192,
 			InputCostPer1K: 0.003, OutputCostPer1K: 0.015,

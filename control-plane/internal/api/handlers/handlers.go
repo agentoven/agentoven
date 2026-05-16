@@ -50,9 +50,21 @@ type Handlers struct {
 	Sessions        contracts.SessionStore
 	Guardrails      contracts.GuardrailService
 
+	// RecipeExecutor is the pluggable execution backend for POST /{name}/bake.
+	// OSS: nil — BakeRecipe falls through to h.Workflow.ExecuteRecipe directly.
+	// Pro: ProRecipeRunner — adds role-based env gating before delegating to the engine.
+	RecipeExecutor RecipeExecutorService
+
 	// ServerInfo is the response for GET /api/v1/info.
 	// OSS sets CommunityServerInfo; Pro overrides with license data.
 	ServerInfo *models.ServerInfo
+}
+
+// RecipeExecutorService is the interface for executing recipe runs.
+// The OSS Workflow Engine satisfies this interface directly.
+// Pro wraps it with role-based environment gating.
+type RecipeExecutorService interface {
+	ExecuteRecipe(ctx context.Context, recipe *models.Recipe, kitchen string, input map[string]interface{}, envSlug string) (string, error)
 }
 
 // New creates a new Handlers instance with all dependencies.
@@ -489,7 +501,7 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if agent.ModelProvider == "" {
+	if agent.ModelProvider == "" && !agent.IsFrameworkNative() {
 		respondError(w, http.StatusBadRequest, "Agent has no model provider configured")
 		return
 	}
@@ -515,6 +527,30 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+	}
+
+	// Framework-native agents: proxy the test call to the running process
+	if agent.IsFrameworkNative() {
+		if agent.Status != models.AgentStatusReady {
+			respondError(w, http.StatusBadRequest,
+				fmt.Sprintf("Agent '%s' is not ready (status: %s) — bake it first to test framework-native agents", agentName, agent.Status))
+			return
+		}
+		response, traceRecord, err := h.proxyToProcess(r.Context(), agent, req.Message, nil, kitchen)
+		if err != nil {
+			respondError(w, http.StatusBadGateway, "Framework agent test failed: "+err.Error())
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"agent":      agentName,
+			"response":   response,
+			"provider":   string(agent.Runtime),
+			"model":      agent.ModelName,
+			"usage":      traceRecord.Usage,
+			"latency_ms": traceRecord.DurationMs,
+			"trace_id":   traceRecord.ID,
+		})
+		return
 	}
 
 	// When thinking is enabled, extend request timeout
@@ -1037,28 +1073,47 @@ func (h *Handlers) BakeRecipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse optional input
-	var input map[string]interface{}
-	json.NewDecoder(r.Body).Decode(&input)
+	// Parse request body: { "input": {...}, "environment": "staging" }
+	var req struct {
+		Input       map[string]interface{} `json:"input"`
+		Environment string                 `json:"environment"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
 
-	runID, err := h.Workflow.ExecuteRecipe(r.Context(), recipe, kitchen, input)
+	// Resolve the executor: Pro sets h.RecipeExecutor for role-gated env execution;
+	// OSS falls back directly to the workflow engine.
+	executor := h.RecipeExecutor
+	if executor == nil {
+		executor = h.Workflow
+	}
+
+	runID, err := executor.ExecuteRecipe(r.Context(), recipe, kitchen, req.Input, req.Environment)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		if err.Error() == "permission_denied" || len(err.Error()) > 0 && err.Error()[:16] == "permission_denied" {
+			respondError(w, http.StatusForbidden, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 
 	log.Info().
 		Str("recipe", recipeName).
 		Str("run_id", runID).
+		Str("environment", req.Environment).
 		Int("steps", len(recipe.Steps)).
 		Msg("Recipe execution started")
 
-	respondJSON(w, http.StatusAccepted, map[string]string{
+	resp := map[string]string{
 		"recipe": recipeName,
 		"status": "running",
 		"run_id": runID,
 		"poll":   "/api/v1/recipes/" + recipeName + "/runs/" + runID,
-	})
+	}
+	if req.Environment != "" {
+		resp["environment"] = req.Environment
+	}
+	respondJSON(w, http.StatusAccepted, resp)
 }
 
 func (h *Handlers) RecipeHistory(w http.ResponseWriter, r *http.Request) {
@@ -1181,7 +1236,7 @@ var builtinProviderTemplates = []models.ProviderTemplate{
 		DisplayName:     "Anthropic",
 		Description:     "Claude 4 Opus, Sonnet, and Haiku models",
 		DefaultEndpoint: "https://api.anthropic.com/v1",
-		DefaultModels:   []string{"claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-20250514"},
+		DefaultModels:   []string{"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"},
 		RequiredConfig:  []string{"api_key"},
 		HelpURL:         "https://console.anthropic.com/settings/keys",
 	},
@@ -1328,13 +1383,53 @@ func (h *Handlers) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	provider.IsDefault = req.IsDefault
 
+	// Capture old model list before saving so we can detect removed models.
+	oldModels := make(map[string]bool, len(provider.Models))
+	for _, m := range provider.Models {
+		oldModels[m] = true
+	}
+
 	if err := h.Store.UpdateProvider(r.Context(), provider); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	log.Info().Str("provider", name).Msg("Model provider updated")
-	respondJSON(w, http.StatusOK, maskProviderKeys(provider))
+	// If the model list shrank, burn any ready/active agents whose model was removed.
+	burntCount := 0
+	if len(req.Models) > 0 {
+		newModels := make(map[string]bool, len(req.Models))
+		for _, m := range req.Models {
+			newModels[m] = true
+		}
+		kitchen := middleware.GetKitchen(r.Context())
+		if allAgents, listErr := h.Store.ListAgents(r.Context(), kitchen); listErr == nil {
+			for i := range allAgents {
+				ag := &allAgents[i]
+				if ag.ModelProvider != name {
+					continue
+				}
+				if ag.Status != models.AgentStatusReady && ag.Status != models.AgentStatusBaking {
+					continue
+				}
+				if ag.ModelName != "" && !newModels[ag.ModelName] {
+					ag.Status = models.AgentStatusBurnt
+					ag.UpdatedAt = time.Now().UTC()
+					if updateErr := h.Store.UpdateAgent(r.Context(), ag); updateErr != nil {
+						log.Warn().Err(updateErr).Str("agent", ag.Name).Msg("Failed to burn agent after provider update")
+					} else {
+						burntCount++
+						log.Info().Str("provider", name).Str("agent", ag.Name).Str("model", ag.ModelName).Msg("Agent burnt — model removed from provider")
+					}
+				}
+			}
+		}
+	}
+
+	log.Info().Str("provider", name).Int("agents_burnt", burntCount).Msg("Model provider updated")
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"provider":     maskProviderKeys(provider),
+		"agents_burnt": burntCount,
+	})
 }
 
 func (h *Handlers) RouteModel(w http.ResponseWriter, r *http.Request) {
@@ -2016,21 +2111,46 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 		// Execute agent asynchronously — updates trace on completion
 		go func() {
 			execCtx := context.Background()
-			response, execTrace, err := h.Executor.Execute(execCtx, agent, userMessage, resolved, nil, false)
 
-			// Update trace with final result — enriched with input/output and full usage
-			status := "completed"
-			costUSD := 0.0
-			totalTokens := int64(0)
+			var response string
+			var status string
+			var totalTokens int64
+			var costUSD float64
 			var usage *models.TokenUsage
-			if err != nil {
-				status = "failed"
-				log.Warn().Err(err).Str("agent", agentName).Str("task_id", taskID).Msg("A2A agent execution failed")
-			} else if execTrace != nil {
-				costUSD = execTrace.Usage.EstimatedCost
-				totalTokens = execTrace.Usage.TotalTokens
-				traceUsage := execTrace.Usage
-				usage = &traceUsage
+			var execTrace *executor.ExecutionTrace
+
+			if agent.IsFrameworkNative() {
+				// Framework-native: proxy to the running process
+				resp, traceRecord, proxyErr := h.proxyToProcess(execCtx, agent, userMessage, nil, kitchen)
+				if proxyErr != nil {
+					status = "failed"
+					log.Warn().Err(proxyErr).Str("agent", agentName).Str("task_id", taskID).Msg("A2A framework-native execution failed")
+				} else {
+					response = resp
+					status = "completed"
+					if traceRecord.Usage != nil {
+						totalTokens = traceRecord.Usage.TotalTokens
+						costUSD = traceRecord.CostUSD
+						u := *traceRecord.Usage
+						usage = &u
+					}
+				}
+			} else {
+				resp, et, execErr := h.Executor.Execute(execCtx, agent, userMessage, resolved, nil, false)
+				response = resp
+				execTrace = et
+				if execErr != nil {
+					status = "failed"
+					log.Warn().Err(execErr).Str("agent", agentName).Str("task_id", taskID).Msg("A2A agent execution failed")
+				} else {
+					status = "completed"
+					if execTrace != nil {
+						costUSD = execTrace.Usage.EstimatedCost
+						totalTokens = execTrace.Usage.TotalTokens
+						traceUsage := execTrace.Usage
+						usage = &traceUsage
+					}
+				}
 			}
 
 			trace := &models.Trace{
@@ -2774,6 +2894,112 @@ func (h *Handlers) GetAgentLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 // ══════════════════════════════════════════════════════════════
+// ── Framework-Native Proxy Helper ────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// proxyInvokeResponse is the expected response shape from a framework-native
+// agent's POST /invoke endpoint (as served by agentoven.runtime.AgentOvenServer).
+type proxyInvokeResponse struct {
+	Response string `json:"response"`
+	Usage    struct {
+		InputTokens  int64 `json:"input_tokens"`
+		OutputTokens int64 `json:"output_tokens"`
+		TotalTokens  int64 `json:"total_tokens"`
+	} `json:"usage"`
+}
+
+// proxyToProcess forwards an invoke call to a framework-native agent's running
+// process. It handles the full invoke lifecycle: OTel trace, HTTP call, trace
+// storage. Guardrails are expected to have run before and after this call in
+// the calling handler.
+func (h *Handlers) proxyToProcess(
+	ctx context.Context,
+	agent *models.Agent,
+	message string,
+	variables map[string]string,
+	kitchen string,
+) (string, *models.Trace, error) {
+	if agent.Process == nil || agent.Process.Status != models.ProcessRunning {
+		return "", nil, fmt.Errorf("agent '%s' process is not running — bake it first", agent.Name)
+	}
+
+	traceID := uuid.New().String()
+	start := time.Now()
+
+	// Build the invoke request body
+	body := map[string]interface{}{
+		"message":  message,
+		"trace_id": traceID,
+	}
+	if len(variables) > 0 {
+		body["variables"] = variables
+	}
+	reqBody, err := json.Marshal(body)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to marshal proxy request: %w", err)
+	}
+
+	invokeURL := strings.TrimRight(agent.Process.Endpoint, "/") + "/invoke"
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, invokeURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to build proxy request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	httpResp, err := client.Do(httpReq)
+	if err != nil {
+		return "", nil, fmt.Errorf("proxy request to agent process failed: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	rawBody, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read proxy response: %w", err)
+	}
+
+	if httpResp.StatusCode != http.StatusOK {
+		return "", nil, fmt.Errorf("agent process returned %d: %s", httpResp.StatusCode, string(rawBody))
+	}
+
+	var proxyResp proxyInvokeResponse
+	if err := json.Unmarshal(rawBody, &proxyResp); err != nil {
+		// If the response isn't the expected shape, treat the raw body as the response text.
+		proxyResp.Response = strings.TrimSpace(string(rawBody))
+	}
+
+	durationMs := time.Since(start).Milliseconds()
+
+	usage := models.TokenUsage{
+		InputTokens:  proxyResp.Usage.InputTokens,
+		OutputTokens: proxyResp.Usage.OutputTokens,
+		TotalTokens:  proxyResp.Usage.TotalTokens,
+	}
+
+	traceRecord := &models.Trace{
+		ID:          traceID,
+		AgentName:   agent.Name,
+		Kitchen:     kitchen,
+		Status:      "completed",
+		DurationMs:  durationMs,
+		TotalTokens: usage.TotalTokens,
+		InputText:   message,
+		OutputText:  proxyResp.Response,
+		Usage:       &usage,
+		Metadata: map[string]interface{}{
+			"mode":    "managed",
+			"runtime": string(agent.Runtime),
+			"type":    "invoke",
+		},
+		CreatedAt: time.Now().UTC(),
+	}
+	h.Store.CreateTrace(ctx, traceRecord)
+
+	return proxyResp.Response, traceRecord, nil
+}
+
+// ══════════════════════════════════════════════════════════════
 // ── Managed Agent Invoke Handler ─────────────────────────────
 // ══════════════════════════════════════════════════════════════
 
@@ -2884,6 +3110,40 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	}
+
+	// Execute: framework-native agents proxy to their running process;
+	// AgentOven-native agents use the built-in executor.
+	if agent.IsFrameworkNative() {
+		response, traceRecord, err := h.proxyToProcess(r.Context(), agent, req.Message, sanitizedVars, kitchen)
+		if err != nil {
+			respondError(w, http.StatusBadGateway, "Framework agent execution failed: "+err.Error())
+			return
+		}
+
+		// ── Output Guardrails ─────────────────────────────────
+		if h.Guardrails != nil && len(agent.Guardrails) > 0 {
+			eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), agent.Guardrails, response)
+			if gErr != nil {
+				log.Warn().Err(gErr).Str("agent", agentName).Msg("Output guardrail evaluation error")
+			} else if !eval.Passed {
+				respondJSON(w, http.StatusForbidden, map[string]interface{}{
+					"error":      "Output blocked by guardrails",
+					"guardrails": eval.Results,
+				})
+				return
+			}
+		}
+
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"agent":      agentName,
+			"response":   response,
+			"trace_id":   traceRecord.ID,
+			"turns":      1,
+			"usage":      traceRecord.Usage,
+			"latency_ms": traceRecord.DurationMs,
+		})
+		return
 	}
 
 	// Execute the agentic loop

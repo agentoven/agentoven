@@ -38,7 +38,7 @@ export function Layout() {
       <aside className="w-60 flex flex-col border-r border-[var(--ao-border)] bg-[var(--ao-surface)]">
         {/* Logo */}
         <div className="flex items-center gap-2 px-5 py-5">
-          <img src="/logo.png" alt="AgentOven" className="w-8 h-8" />
+          <img src="/logo.png" alt="AgentOven" className="w-8 h-8 rounded-full object-cover" />
           <span className="text-lg font-bold text-[var(--ao-brand-light)]">
             AgentOven
           </span>

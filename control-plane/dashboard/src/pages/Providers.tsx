@@ -317,6 +317,7 @@ function ProviderForm({
   const [showKey, setShowKey] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [burnedToast, setBurnedToast] = useState<string | null>(null);
   const [templates, setTemplates] = useState<ProviderTemplate[]>([]);
   const [showCatalogPicker, setShowCatalogPicker] = useState(false);
 
@@ -358,7 +359,13 @@ function ProviderForm({
 
     try {
       if (isEdit) {
-        await providers.update(existing.name, payload);
+        const res = await providers.update(existing.name, payload);
+        if (res.agents_burnt > 0) {
+          setBurnedToast(`${res.agents_burnt} agent${res.agents_burnt === 1 ? '' : 's'} marked burnt — model removed from provider. Re-bake from the Agents page.`);
+          setSubmitting(false);
+          onDone();
+          return;
+        }
       } else {
         await providers.create(payload);
       }
@@ -378,6 +385,12 @@ function ProviderForm({
         <button onClick={onCancel} className="text-xs text-[var(--ao-text-muted)] hover:text-[var(--ao-text)]">Cancel</button>
       </div>
       {err && <ErrorBanner message={err} />}
+      {burnedToast && (
+        <div className="mb-3 px-3 py-2 rounded-lg text-xs font-medium flex items-center justify-between bg-amber-500/15 text-amber-400 border border-amber-500/30">
+          <span>⚠️ {burnedToast}</span>
+          <button onClick={() => setBurnedToast(null)} className="ml-2 opacity-60 hover:opacity-100">✕</button>
+        </div>
+      )}
       <form onSubmit={submit} className="space-y-4">
         {/* Template quick-pick carousel (only for new providers) */}
         {!isEdit && templates.length > 0 && (

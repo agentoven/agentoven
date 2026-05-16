@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.0] — 2026-05-14
+
+### 🤝 Framework-Native Managed Agents
+- **`runtime` field on Agent** — `agentoven` (default) | `langchain` | `langgraph` | `crewai` | `custom`; AgentOven still owns lifecycle, tracing, guardrails, and provider management — only the LLM loop moves to the user's process
+- **`entrypoint` field on Agent** — shell command for user's process (local mode); Docker CMD override (docker mode); K8s container command (k8s mode)
+- **`IsFrameworkNative()`** helper — routes InvokeAgent / TestAgent / A2A `tasks/send` to `proxyToProcess()` instead of the Go executor
+- **`proxyToProcess()`** — opens OTel `agent.run` span, POSTs to `{process.endpoint}/invoke`, stores Trace record; 30-second timeout; input/output guardrails still apply
+- **Richer env injection** — `AGENT_RUNTIME`, `AGENT_TOOLS_JSON`, `AGENT_PROMPT_TEMPLATE`, `AGENT_DATA_SOURCES_JSON`, `AGENTOVEN_CONTROL_PLANE_URL` injected by ProcessManager
+- **`agentoven.runtime` Python SDK module** — `AgentOvenRuntime` (reads env vars, builds LLM + MCP tools), `AgentOvenServer` (FastAPI, prints `AGENT_READY`, serves `/invoke` + `/status` + `/.well-known/agent-card.json`), `LangChainAdapter`, `LangGraphAdapter`, `serve()` convenience entry point
+- **LangGraph → Recipe mapping** — recommended pattern: LangGraph nodes → Recipe `agent` steps; `interrupt_before` → `human_gate` steps (no engine changes needed)
+- **Dashboard** — runtime dropdown + entrypoint field + SDK install snippet in AgentForm (mode=managed only)
+- **ADR-0017** — framework-native managed agents
+
+---
+
 ## [0.5.2] — 2026-03-16
 
 ### 🚀 Declarative Agent Management
