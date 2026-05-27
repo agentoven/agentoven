@@ -72,12 +72,16 @@ func (p *ScopedKeyProvider) Authenticate(ctx context.Context, r *http.Request) (
 		fmt.Printf("WARN: failed to increment scoped key usage: %v\n", err)
 	}
 
-	// Build identity — role is always "viewer" for scoped keys
+	// Build identity — role comes from the scoped key record; defaults to "viewer"
+	role := scopedKey.Role
+	if role == "" {
+		role = "viewer"
+	}
 	identity := &contracts.Identity{
 		Subject:     "scopedkey:" + scopedKey.ID,
 		Provider:    "scoped-key",
 		Kitchen:     scopedKey.Kitchen,
-		Role:        "viewer",
+		Role:        role,
 		DisplayName: scopedKey.Label,
 		ExpiresAt:   time.Now().Add(1 * time.Hour), // session-level expiry
 		Claims: map[string]string{

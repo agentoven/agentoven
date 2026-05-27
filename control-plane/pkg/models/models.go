@@ -383,12 +383,12 @@ type Step struct {
 }
 
 type Recipe struct {
-	ID          string    `json:"id" db:"id"`
-	Name        string    `json:"name" db:"name"`
-	Description string    `json:"description" db:"description"`
-	Kitchen     string    `json:"kitchen" db:"kitchen"`
-	Steps       []Step    `json:"steps"`
-	Version     string    `json:"version" db:"version"`
+	ID          string `json:"id" db:"id"`
+	Name        string `json:"name" db:"name"`
+	Description string `json:"description" db:"description"`
+	Kitchen     string `json:"kitchen" db:"kitchen"`
+	Steps       []Step `json:"steps"`
+	Version     string `json:"version" db:"version"`
 	// DefaultEnvironment is the environment slug that recipe runs target when no
 	// explicit environment is provided. Pro-only: OSS ignores this field.
 	DefaultEnvironment string    `json:"default_environment,omitempty" db:"default_environment"`
@@ -735,9 +735,9 @@ const (
 )
 
 type RecipeRun struct {
-	ID           string                 `json:"id" db:"id"`
-	RecipeID     string                 `json:"recipe_id" db:"recipe_id"`
-	Kitchen      string                 `json:"kitchen" db:"kitchen"`
+	ID       string `json:"id" db:"id"`
+	RecipeID string `json:"recipe_id" db:"recipe_id"`
+	Kitchen  string `json:"kitchen" db:"kitchen"`
 	// Environment is the target environment slug for this run (e.g. "staging", "prod").
 	// When set, executeAgentStep resolves agents to their version-pinned deployment in this
 	// environment via GetActiveDeployment → GetAgentVersion. Pro-only: OSS stores but ignores.
@@ -2056,19 +2056,19 @@ const (
 
 // Guardrail defines a single validation rule applied to agent I/O.
 type Guardrail struct {
-	ID          string                 `json:"id"`
-	Name        string                 `json:"name,omitempty"`
-	Kind        GuardrailKind          `json:"kind"`
-	Stage       GuardrailStage         `json:"stage"`
-	Config      map[string]interface{} `json:"config,omitempty"` // kind-specific configuration
-	Enabled     bool                   `json:"enabled"`
+	ID      string                 `json:"id"`
+	Name    string                 `json:"name,omitempty"`
+	Kind    GuardrailKind          `json:"kind"`
+	Stage   GuardrailStage         `json:"stage"`
+	Config  map[string]interface{} `json:"config,omitempty"` // kind-specific configuration
+	Enabled bool                   `json:"enabled"`
 	// Overridable controls whether an agent may replace this rule with its own
 	// configuration when it appears in a WorkspaceGuardrailPolicy.
 	// False (default) = mandatory; the workspace rule always runs.
 	// True = default; an agent guardrail of the same kind+stage takes precedence.
-	Overridable bool                   `json:"overridable,omitempty"`
-	Priority    int                    `json:"priority,omitempty"`
-	CreatedAt   time.Time              `json:"created_at,omitempty"`
+	Overridable bool      `json:"overridable,omitempty"`
+	Priority    int       `json:"priority,omitempty"`
+	CreatedAt   time.Time `json:"created_at,omitempty"`
 }
 
 // WorkspaceGuardrailPolicy holds the kitchen-level default guardrail rules.
@@ -2148,6 +2148,7 @@ type ScopedAPIKey struct {
 	Label      string     `json:"label"`       // human-readable name ("marketing-team", "demo-key")
 	MaxCalls   int        `json:"max_calls"`   // 0 = unlimited
 	CallCount  int        `json:"call_count"`  // current usage
+	Role       string     `json:"role"`        // one of: admin, chef, baker, auditor, finance, viewer (default: viewer)
 	ExpiresAt  *time.Time `json:"expires_at"`  // nil = never expires
 	CreatedBy  string     `json:"created_by"`  // Identity.Subject who created this key
 	CreatedAt  time.Time  `json:"created_at"`

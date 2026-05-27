@@ -210,6 +210,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 			r.Post("/", h.HandleCreateScopedKey)
 			r.Route("/{keyID}", func(r chi.Router) {
 				r.Get("/", h.HandleGetScopedKey)
+				r.Delete("/", h.HandleDeleteScopedKey)
 				r.Post("/revoke", h.HandleRevokeScopedKey)
 				r.Get("/usage", h.HandleGetScopedKeyUsage)
 			})

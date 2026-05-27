@@ -1,0 +1,374 @@
+syntax = "proto3";
+
+// ProviderService is the gRPC contract between the AgentOven control plane
+// (always the client) and provider plugin servers (always the server).
+//
+// Provider servers implement this service in any language. The control plane
+// wraps each registered server in a RemoteProviderShim that satisfies the
+// internal ProviderDriver, StreamingProviderDriver, EmbeddingCapableDriver,
+// and ModelDiscoveryDriver interfaces — making remote providers
+// indistinguishable from compiled-in drivers.
+//
+// Connection lifecycle:
+//   1. Control plane connects (Unix socket / mTLS TCP).
+//   2. Control plane calls Configure() once — provider stores secrets in memory.
+//   3. Control plane calls Capabilities() — result cached; optional RPCs only
+//      called if the corresponding Feature flag is present.
+//   4. ProviderWatcher goroutine polls HealthCheck() every 10 seconds.
+//   5. Call / Stream / Embed / ListModels on every agent request.
+package agentoven.provider.v1;
+
+option go_package = "github.com/agentoven/agentoven/control-plane/pkg/provider/v1;providerv1";
+option java_package = "io.agentoven.provider.v1";
+option java_multiple_files = true;
+
+// ─────────────────────────────────────────────
+// Service
+// ─────────────────────────────────────────────
+
+service ProviderService {
+  // ── Lifecycle ────────────────────────────────────────────────────────────
+
+  // Configure is called once after connection. The control plane injects
+  // provider-specific secrets and configuration. The provider stores the
+  // config keyed by provider_id; subsequent calls reference provider_id only.
+  // Transmitted over Unix socket (managed) or mTLS TCP (supervised-external);
+  // the channel is always encrypted or unexposed before this RPC is called.
+  rpc Configure(ConfigureRequest) returns (ConfigureResponse);
+
+  // Capabilities returns the provider's declared feature set and cost table.
+  // Called once after Configure; the result is cached by the control plane.
+  // Optional RPCs (Stream, Embed, ListModels) are only invoked if the
+  // corresponding Feature flag is present in the response.
+  rpc Capabilities(CapabilitiesRequest) returns (CapabilitiesResponse);
+
+  // HealthCheck is polled by the control plane's ProviderWatcher goroutine
+  // every 10 seconds. The provider should check connectivity to the upstream
+  // API and return a meaningful status rather than always returning HEALTHY.
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
+  // ── Core operations ──────────────────────────────────────────────────────
+
+  // Call makes a single (non-streaming) LLM inference request.
+  rpc Call(CallRequest) returns (CallResponse);
+
+  // ── Optional capability RPCs ─────────────────────────────────────────────
+  // The control plane checks Capabilities.features before calling these.
+  // Providers that do not support a feature MUST return UNIMPLEMENTED — but
+  // the control plane will never call them unless the feature flag is set,
+  // so UNIMPLEMENTED is a safety net, not the expected path.
+
+  // Stream makes a streaming LLM inference request and returns chunks as they
+  // arrive from the upstream API. Requires Feature.STREAMING.
+  rpc Stream(CallRequest) returns (stream StreamChunk);
+
+  // Embed generates dense vector embeddings for a batch of input texts.
+  // Requires Feature.EMBEDDINGS.
+  rpc Embed(EmbedRequest) returns (EmbedResponse);
+
+  // ListModels returns the models currently available from this provider.
+  // Requires Feature.MODEL_DISCOVERY. The control plane calls this on
+  // registration and periodically to refresh the model catalogue.
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+}
+
+// ─────────────────────────────────────────────
+// Lifecycle messages
+// ─────────────────────────────────────────────
+
+message ConfigureRequest {
+  // Stable UUID assigned by the control plane for this provider registration.
+  // Providers that serve multiple configured providers use this to route calls.
+  string provider_id = 1;
+
+  // Key-value pairs carrying API keys, base URLs, and other configuration.
+  // Values are resolved from the AgentOven secret store at dispatch time.
+  // Provider servers MUST NOT log this map.
+  map<string, string> config = 2;
+}
+
+message ConfigureResponse {
+  bool ok = 1;
+  // Human-readable error if ok == false.
+  string error = 2;
+}
+
+message CapabilitiesRequest {}
+
+message CapabilitiesResponse {
+  // Unique identifier for the driver kind (matches manifest spec.driverKind).
+  string kind = 1;
+
+  // Semver of the provider binary (e.g. "1.2.0").
+  string version = 2;
+
+  // Proto schema version implemented by this binary ("v1", "v2", …).
+  string proto_version = 3;
+
+  // Optional features this provider supports.
+  repeated Feature features = 4;
+
+  // Model IDs handled by this provider. Used to route calls and for the
+  // model catalogue in the dashboard.
+  repeated string supported_models = 5;
+
+  // Per-model cost table. Keys are model IDs. Overrides any hardcoded
+  // defaults in the control plane for the models listed here.
+  map<string, CostEntry> cost_table = 6;
+}
+
+// Feature flags that gate optional RPC calls.
+enum Feature {
+  FEATURE_UNSPECIFIED   = 0;
+  FEATURE_STREAMING     = 1;  // provider supports Stream RPC
+  FEATURE_EMBEDDINGS    = 2;  // provider supports Embed RPC
+  FEATURE_MODEL_DISCOVERY = 3; // provider supports ListModels RPC
+  FEATURE_VISION        = 4;  // provider accepts image_url content parts
+  FEATURE_FUNCTION_CALLING = 5; // provider supports tool_calls / function calling
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  HealthStatus status = 1;
+  // Human-readable explanation (e.g. "upstream API returned 503").
+  string message = 2;
+  // Round-trip latency to the upstream API in milliseconds, if measured.
+  // 0 if not measured.
+  int64 upstream_latency_ms = 3;
+}
+
+enum HealthStatus {
+  HEALTH_STATUS_UNSPECIFIED = 0;
+  HEALTH_STATUS_HEALTHY     = 1;
+  HEALTH_STATUS_DEGRADED    = 2;  // elevated errors or latency; calls allowed
+  HEALTH_STATUS_UNHEALTHY   = 3;  // provider should not receive calls
+}
+
+// ─────────────────────────────────────────────
+// Call (non-streaming inference)
+// ─────────────────────────────────────────────
+
+message CallRequest {
+  // provider_id matches what was passed in ConfigureRequest.
+  string provider_id = 1;
+
+  // Model identifier (e.g. "gpt-4o", "claude-3-5-sonnet-20241022").
+  string model = 2;
+
+  // Conversation history and the new user message.
+  repeated Message messages = 3;
+
+  // Sampling / generation parameters. Keys follow OpenAI conventions:
+  //   temperature, max_tokens, top_p, frequency_penalty, presence_penalty, seed.
+  // Providers map these to their upstream API's parameter names.
+  map<string, google.protobuf.Value> parameters = 4;
+
+  // Tools available for function calling. Empty if not applicable.
+  repeated Tool tools = 5;
+
+  // Correlation ID for distributed tracing (passed as a baggage header to
+  // the upstream API where supported).
+  string request_id = 6;
+}
+
+message CallResponse {
+  // Generated text content (empty if finish_reason is TOOL_CALLS).
+  string content = 1;
+
+  FinishReason finish_reason = 2;
+
+  // Token usage for this call.
+  TokenUsage usage = 3;
+
+  // Actual model used (may differ from request if the provider auto-routes).
+  string model = 4;
+
+  // Tool calls the model wants to invoke. Non-empty when finish_reason == TOOL_CALLS.
+  repeated ToolCall tool_calls = 5;
+
+  // Cost in USD as calculated by the provider, if known. 0 if not calculated.
+  // The control plane uses this when non-zero; falls back to its own cost table
+  // when zero.
+  double cost_usd = 6;
+}
+
+enum FinishReason {
+  FINISH_REASON_UNSPECIFIED = 0;
+  FINISH_REASON_STOP        = 1;  // natural end of generation
+  FINISH_REASON_LENGTH      = 2;  // max_tokens reached
+  FINISH_REASON_TOOL_CALLS  = 3;  // model requested tool call(s)
+  FINISH_REASON_ERROR       = 4;  // provider-side error mid-generation
+}
+
+// ─────────────────────────────────────────────
+// Stream (streaming inference)
+// ─────────────────────────────────────────────
+
+// StreamChunk is one delta in a server-sent-events style stream.
+// The control plane re-encodes these as SSE or OpenAI delta format for clients.
+message StreamChunk {
+  // Incremental text delta for this chunk (may be empty for the last chunk).
+  string delta = 1;
+
+  // Non-empty only in the final chunk.
+  FinishReason finish_reason = 2;
+
+  // Populated only in the final chunk.
+  TokenUsage usage = 3;
+
+  // Tool call deltas — built up incrementally across chunks.
+  repeated ToolCallDelta tool_call_deltas = 4;
+
+  // Zero-based index of this chunk within the stream.
+  int32 index = 5;
+}
+
+// ─────────────────────────────────────────────
+// Embeddings
+// ─────────────────────────────────────────────
+
+message EmbedRequest {
+  string provider_id = 1;
+  string model       = 2;
+  // Batch of texts to embed (max batch size is provider-specific; control
+  // plane splits larger batches automatically).
+  repeated string texts = 3;
+  string request_id     = 4;
+}
+
+message EmbedResponse {
+  repeated Embedding embeddings = 1;
+  TokenUsage usage              = 2;
+}
+
+message Embedding {
+  // Zero-based index matching the input texts array.
+  int32 index = 1;
+  // The embedding vector. Float32 for storage efficiency.
+  repeated float values = 2;
+}
+
+// ─────────────────────────────────────────────
+// Model discovery
+// ─────────────────────────────────────────────
+
+message ListModelsRequest {
+  string provider_id = 1;
+}
+
+message ListModelsResponse {
+  repeated ModelInfo models = 1;
+}
+
+message ModelInfo {
+  // Canonical model ID (must match IDs in CapabilitiesResponse.supported_models).
+  string id = 1;
+  // Display name.
+  string name = 2;
+  // Maximum context window size in tokens.
+  int32 context_window = 3;
+  // Capabilities this specific model supports (subset of provider Feature flags).
+  repeated Feature capabilities = 4;
+  // Pricing for this model. Overrides the provider-level cost_table entry.
+  CostEntry cost = 5;
+  // Whether the model is currently available (may be false during maintenance).
+  bool available = 6;
+}
+
+// ─────────────────────────────────────────────
+// Shared sub-messages
+// ─────────────────────────────────────────────
+
+message Message {
+  MessageRole role = 1;
+  // Text content. For multimodal messages, use content_parts instead.
+  string content = 2;
+  // Multimodal content parts (text + image_url). Non-empty overrides content.
+  repeated ContentPart content_parts = 3;
+  // For tool result messages: the ID of the ToolCall being answered.
+  string tool_call_id = 4;
+  // For assistant messages that included tool calls.
+  repeated ToolCall tool_calls = 5;
+  // Optional display name (some providers surface this).
+  string name = 6;
+}
+
+enum MessageRole {
+  MESSAGE_ROLE_UNSPECIFIED = 0;
+  MESSAGE_ROLE_SYSTEM      = 1;
+  MESSAGE_ROLE_USER        = 2;
+  MESSAGE_ROLE_ASSISTANT   = 3;
+  MESSAGE_ROLE_TOOL        = 4;  // result of a tool call
+}
+
+message ContentPart {
+  ContentPartType type = 1;
+  string text      = 2;  // type == TEXT
+  string image_url = 3;  // type == IMAGE_URL; must be HTTPS or data URI
+}
+
+enum ContentPartType {
+  CONTENT_PART_TYPE_UNSPECIFIED = 0;
+  CONTENT_PART_TYPE_TEXT        = 1;
+  CONTENT_PART_TYPE_IMAGE_URL   = 2;
+}
+
+message Tool {
+  string type = 1;  // always "function" in this version
+  FunctionDefinition function = 2;
+}
+
+message FunctionDefinition {
+  string name        = 1;
+  string description = 2;
+  // JSON Schema for parameters, serialised as a JSON string.
+  string parameters_schema = 3;
+}
+
+message ToolCall {
+  string id   = 1;
+  string type = 2;  // always "function"
+  FunctionCall function = 3;
+}
+
+message ToolCallDelta {
+  // Index into the tool_calls array being built up.
+  int32 index = 1;
+  string id   = 2;  // populated in the first chunk for this tool call
+  string type = 3;
+  FunctionCallDelta function = 4;
+}
+
+message FunctionCall {
+  string name      = 1;
+  // JSON-encoded arguments.
+  string arguments = 2;
+}
+
+message FunctionCallDelta {
+  string name      = 1;  // populated in the first delta chunk
+  // Partial JSON fragment; concatenate across all chunks to build full arguments.
+  string arguments = 2;
+}
+
+message TokenUsage {
+  int32 prompt_tokens     = 1;
+  int32 completion_tokens = 2;
+  int32 total_tokens      = 3;
+}
+
+message CostEntry {
+  // Cost in USD per 1,000 input (prompt) tokens.
+  double input_per_1k_tokens = 1;
+  // Cost in USD per 1,000 output (completion) tokens.
+  double output_per_1k_tokens = 2;
+  // ISO 4217 currency code. Default "USD".
+  string currency = 3;
+}
+
+// ─────────────────────────────────────────────
+// Imports
+// ─────────────────────────────────────────────
+// google/protobuf/struct.proto is needed for the parameters map in CallRequest.
+import "google/protobuf/struct.proto";

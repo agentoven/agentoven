@@ -2047,8 +2047,14 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 
 	// If an agent is specified, try to invoke it
 	agentName := taskReq.Metadata.AgentName
+	targetKitchen := kitchen
+	// Cross-kitchen A2A: "otherkitchen/agentname" format (ADR-0014 / ADR-0007)
+	if idx := strings.Index(agentName, "/"); idx > 0 {
+		targetKitchen = agentName[:idx]
+		agentName = agentName[idx+1:]
+	}
 	if agentName != "" && h.Executor != nil {
-		agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
+		agent, err := h.Store.GetAgent(r.Context(), targetKitchen, agentName)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/a2a+json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2385,6 +2391,11 @@ func (h *Handlers) A2AAgentEndpoint(w http.ResponseWriter, r *http.Request) {
 // For managed agents, it returns the process endpoint (subprocess/docker/k8s).
 // For external agents, it returns the user-provided backend URL.
 func (h *Handlers) ResolveBackendEndpoint(agent *models.Agent) string {
+	// K8s-deployed agents: operator writes backend_endpoint when workload Running (ADR-0014)
+	if agent.BackendEndpoint != "" {
+		return agent.BackendEndpoint
+	}
+
 	// Managed agents: use the spawned process endpoint
 	if agent.Mode == models.AgentModeManaged || agent.Mode == "" {
 		if agent.Process != nil && agent.Process.Status == models.ProcessRunning {
@@ -4497,4 +4508,22 @@ func (h *Handlers) HandleGetScopedKeyUsage(w http.ResponseWriter, r *http.Reques
 		"expired":         key.IsExpired(),
 		"quota_exceeded":  key.IsQuotaExceeded(),
 	})
+}
+
+// HandleDeleteScopedKey permanently removes a scoped key.
+// DELETE /api/v1/keys/{keyID}
+func (h *Handlers) HandleDeleteScopedKey(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+	keyID := chi.URLParam(r, "keyID")
+
+	if err := h.Store.DeleteScopedKey(r.Context(), kitchen, keyID); err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
