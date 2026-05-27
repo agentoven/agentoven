@@ -765,11 +765,11 @@ func (e *Executor) buildToolDefinitions(tools []models.ResolvedTool) []models.To
 		defs = append(defs, def)
 	}
 
-	// Add agentoven.delegate virtual tool for agent-to-agent delegation
+	// Add agentoven_delegate virtual tool for agent-to-agent delegation
 	defs = append(defs, models.ToolDefinition{
 		Type: "function",
 		Function: models.ToolFunction{
-			Name:        "agentoven.delegate",
+			Name:        "agentoven_delegate",
 			Description: "Delegate a subtask to another agent in the same kitchen. Use this when a task is better handled by a specialized agent.",
 			Parameters: map[string]interface{}{
 				"type": "object",
@@ -833,10 +833,10 @@ func (e *Executor) parseToolCalls(content string) []ToolCall {
 }
 
 // executeTool calls an MCP tool via the Gateway and returns the result.
-// Intercepts the virtual "agentoven.delegate" tool for agent-to-agent delegation.
+// Intercepts the virtual "agentoven_delegate" tool for agent-to-agent delegation.
 func (e *Executor) executeTool(ctx context.Context, kitchen string, tc ToolCall) ToolResult {
 	// Handle virtual delegation tool
-	if tc.Name == "agentoven.delegate" {
+	if tc.Name == "agentoven_delegate" {
 		return e.executeDelegation(ctx, kitchen, tc)
 	}
 
@@ -889,7 +889,7 @@ func (e *Executor) executeTool(ctx context.Context, kitchen string, tc ToolCall)
 	}
 }
 
-// executeDelegation handles the agentoven.delegate virtual tool call.
+// executeDelegation handles the agentoven_delegate virtual tool call.
 // It invokes another agent in the same kitchen and returns its response.
 func (e *Executor) executeDelegation(ctx context.Context, kitchen string, tc ToolCall) ToolResult {
 	targetAgent, _ := tc.Arguments["agent"].(string)
@@ -899,7 +899,7 @@ func (e *Executor) executeDelegation(ctx context.Context, kitchen string, tc Too
 		return ToolResult{
 			ToolCallID: tc.ID,
 			Name:       tc.Name,
-			Content:    "Error: agentoven.delegate requires 'agent' and 'message' arguments",
+			Content:    "Error: agentoven_delegate requires 'agent' and 'message' arguments",
 			IsError:    true,
 		}
 	}
