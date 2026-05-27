@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -110,10 +111,15 @@ func (m *Manager) Start(ctx context.Context, agent *models.Agent) (*models.Proce
 	}
 	m.mu.RUnlock()
 
-	// Determine execution mode
+	// Determine execution mode; AGENTOVEN_DEFAULT_EXEC_MODE lets deployments
+	// override the default without changing agent records (e.g. "k8s" in AKS).
 	mode := agent.ExecutionMode
 	if mode == "" {
-		mode = models.ExecModeLocal // default
+		if dflt := models.ExecutionMode(os.Getenv("AGENTOVEN_DEFAULT_EXEC_MODE")); dflt != "" {
+			mode = dflt
+		} else {
+			mode = models.ExecModeLocal
+		}
 	}
 
 	// Allocate a port
