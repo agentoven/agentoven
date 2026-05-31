@@ -4,17 +4,22 @@ const API = '/api/v1';
 
 type RAGStrategy = 'naive' | 'sentence_window' | 'parent_document' | 'hyde' | 'agentic';
 
-interface SearchResult {
-  id: string;
-  content: string;
+interface RAGSearchResult {
+  doc: {
+    id: string;
+    content: string;
+    metadata?: Record<string, string>;
+  };
   score: number;
-  metadata?: Record<string, string>;
 }
 
 interface RAGQueryResult {
+  answer: string;
+  sources: RAGSearchResult[];
   strategy: string;
-  results: SearchResult[];
-  total_chunks: number;
+  chunks_retrieved: number;
+  tokens_used?: number;
+  latency_ms?: number;
 }
 
 export function RAGPipelinesPage() {
@@ -45,7 +50,7 @@ export function RAGPipelinesPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          query,
+          question: query,
           kitchen_id: '',
           namespace,
           strategy,
@@ -199,22 +204,28 @@ export function RAGPipelinesPage() {
               <div className="flex items-center gap-3 text-sm text-[var(--ao-text-muted)]">
                 <span>Strategy: {queryResult.strategy}</span>
                 <span>•</span>
-                <span>{queryResult.results.length} results</span>
+                <span>{queryResult.sources.length} sources</span>
                 <span>•</span>
-                <span>{queryResult.total_chunks} total chunks</span>
+                <span>{queryResult.chunks_retrieved} chunks retrieved</span>
               </div>
-              {queryResult.results.map((r, i) => (
+              {queryResult.answer && (
+                <div className="rounded-xl border border-[var(--ao-border)] bg-[var(--ao-surface)] p-4">
+                  <div className="text-xs text-[var(--ao-text-muted)] mb-2">Answer</div>
+                  <p className="text-sm text-[var(--ao-text)] whitespace-pre-wrap">{queryResult.answer}</p>
+                </div>
+              )}
+              {queryResult.sources.map((r, i) => (
                 <div
-                  key={r.id}
+                  key={r.doc.id || i}
                   className="rounded-xl border border-[var(--ao-border)] bg-[var(--ao-surface)] p-4"
                 >
                   <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs text-[var(--ao-text-muted)]">#{i + 1}</span>
+                    <span className="text-xs text-[var(--ao-text-muted)]">#{i + 1} · {r.doc.id}</span>
                     <span className="text-xs px-2 py-0.5 rounded-full bg-[var(--ao-primary)]/20 text-[var(--ao-primary)]">
                       {(r.score * 100).toFixed(1)}% match
                     </span>
                   </div>
-                  <p className="text-sm text-[var(--ao-text)] whitespace-pre-wrap">{r.content}</p>
+                  <p className="text-sm text-[var(--ao-text)] whitespace-pre-wrap">{r.doc.content}</p>
                 </div>
               ))}
             </div>

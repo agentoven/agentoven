@@ -49,6 +49,9 @@ func TenantExtractor(next http.Handler) http.Handler {
 			kitchen = "default"
 		}
 
+		// Expose resolved kitchen on the shared request for outer audit middleware.
+		r.Header.Set("X-AgentOven-Audit-Kitchen", kitchen)
+
 		// Use pkg/middleware for the kitchen context key (shared with enterprise repo)
 		ctx := pkgmw.SetKitchen(r.Context(), kitchen)
 		ctx = context.WithValue(ctx, TenantIDKey, kitchen)

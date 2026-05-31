@@ -344,7 +344,7 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, http.StatusBadRequest, map[string]interface{}{
 			"error":   "Agent cannot be baked — ingredient resolution failed",
 			"details": err.Error(),
-			"partial": resolved,
+			"partial": sanitizeResolvedIngredients(resolved),
 		})
 		return
 	}
@@ -609,23 +609,31 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Record trace — enriched with input/output text and full token usage
 	traceUsage := resp.Usage
+	traceMetadata := map[string]interface{}{
+		"provider": resp.Provider,
+		"model":    resp.Model,
+		"type":     "test",
+	}
+	if req.ThinkingEnabled {
+		traceMetadata["thinking_enabled"] = true
+		if resp.Usage.ThinkingTokens > 0 {
+			traceMetadata["thinking_tokens"] = resp.Usage.ThinkingTokens
+		}
+	}
 	trace := &models.Trace{
-		ID:          uuid.New().String(),
-		AgentName:   agentName,
-		Kitchen:     kitchen,
-		Status:      "completed",
-		DurationMs:  duration.Milliseconds(),
-		TotalTokens: resp.Usage.TotalTokens,
-		CostUSD:     resp.Usage.EstimatedCost,
-		InputText:   req.Message,
-		OutputText:  resp.Content,
-		Usage:       &traceUsage,
-		Metadata: map[string]interface{}{
-			"provider": resp.Provider,
-			"model":    resp.Model,
-			"type":     "test",
-		},
-		CreatedAt: time.Now().UTC(),
+		ID:             uuid.New().String(),
+		AgentName:      agentName,
+		Kitchen:        kitchen,
+		Status:         "completed",
+		DurationMs:     duration.Milliseconds(),
+		TotalTokens:    resp.Usage.TotalTokens,
+		CostUSD:        resp.Usage.EstimatedCost,
+		InputText:      req.Message,
+		OutputText:     resp.Content,
+		Usage:          &traceUsage,
+		ThinkingBlocks: resp.ThinkingBlocks,
+		Metadata:       traceMetadata,
+		CreatedAt:      time.Now().UTC(),
 	}
 	h.Store.CreateTrace(r.Context(), trace)
 
@@ -654,7 +662,11 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	h.Store.CreateSpan(r.Context(), &llmSpan)
 
-	respondJSON(w, http.StatusOK, map[string]interface{}{
+	thinkingBlocks := resp.ThinkingBlocks
+	if thinkingBlocks == nil {
+		thinkingBlocks = []models.ThinkingBlock{}
+	}
+	response := map[string]interface{}{
 		"agent":           agentName,
 		"response":        resp.Content,
 		"provider":        resp.Provider,
@@ -662,8 +674,15 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 		"usage":           resp.Usage,
 		"latency_ms":      duration.Milliseconds(),
 		"trace_id":        trace.ID,
-		"thinking_blocks": resp.ThinkingBlocks,
-	})
+		"thinking_blocks": thinkingBlocks,
+	}
+	if req.ThinkingEnabled {
+		response["thinking_supported"] = len(resp.ThinkingBlocks) > 0
+		if len(resp.ThinkingBlocks) == 0 {
+			response["thinking_reason"] = "provider/model did not return thinking blocks"
+		}
+	}
+	respondJSON(w, http.StatusOK, response)
 }
 
 // RecookAgent edits a baked agent's configuration and re-bakes it.
@@ -785,7 +804,7 @@ func (h *Handlers) RecookAgent(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, http.StatusBadRequest, map[string]interface{}{
 			"error":   "Agent cannot be re-cooked — ingredient resolution failed",
 			"details": err.Error(),
-			"partial": resolved,
+			"partial": sanitizeResolvedIngredients(resolved),
 		})
 		return
 	}
@@ -2769,7 +2788,7 @@ func (h *Handlers) GetAgentConfig(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, http.StatusBadRequest, map[string]interface{}{
 			"error":   "Ingredient resolution failed",
 			"details": err.Error(),
-			"partial": resolved,
+			"partial": sanitizeResolvedIngredients(resolved),
 		})
 		return
 	}

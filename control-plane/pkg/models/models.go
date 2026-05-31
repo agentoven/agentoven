@@ -966,6 +966,13 @@ type TokenUsage struct {
 	CacheSavingsUSD float64 `json:"cache_savings_usd,omitempty"` // estimated $ saved via caching
 }
 
+// AgentTestResult is the result of a single-shot in-process agent test invocation.
+type AgentTestResult struct {
+	Response string     `json:"response"`
+	TraceID  string     `json:"trace_id"`
+	Usage    TokenUsage `json:"usage"`
+}
+
 type CostSummary struct {
 	TotalCostUSD float64            `json:"total_cost_usd"`
 	TotalTokens  int64              `json:"total_tokens"`
