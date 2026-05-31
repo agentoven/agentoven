@@ -507,16 +507,21 @@ export const vectorStoresAPI = {
 // ── RAG ───────────────────────────────────────────────────────
 
 export interface RAGSearchResult {
-  id: string;
-  content: string;
+  doc: {
+    id: string;
+    content: string;
+    metadata?: Record<string, string>;
+  };
   score: number;
-  metadata?: Record<string, string>;
 }
 
 export interface RAGQueryResult {
+  answer: string;
+  sources: RAGSearchResult[];
   strategy: string;
-  results: RAGSearchResult[];
-  total_chunks: number;
+  chunks_retrieved: number;
+  tokens_used?: number;
+  latency_ms?: number;
 }
 
 export interface RAGIngestResult {
@@ -526,10 +531,10 @@ export interface RAGIngestResult {
 }
 
 export const ragAPI = {
-  query: (query: string, opts?: { namespace?: string; strategy?: string; top_k?: number }) =>
+  query: (question: string, opts?: { namespace?: string; strategy?: string; top_k?: number }) =>
     request<RAGQueryResult>('/rag/query', {
       method: 'POST',
-      body: JSON.stringify({ query, kitchen_id: '', ...opts }),
+      body: JSON.stringify({ question, kitchen_id: '', ...opts }),
     }),
   ingest: (documents: { id: string; content: string; metadata?: Record<string, string> }[], namespace?: string) =>
     request<RAGIngestResult>('/rag/ingest', {

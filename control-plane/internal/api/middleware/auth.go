@@ -75,9 +75,25 @@ func (am *AuthMiddleware) Handler(next http.Handler) http.Handler {
 		if identity != nil {
 			ctx = pkgmw.SetIdentity(ctx, identity)
 
+			// Expose identity on the shared request headers so outer Pro audit
+			// middleware (which wraps the full handler chain) can record actor info.
+			if identity.Subject != "" {
+				r.Header.Set("X-AgentOven-Audit-Subject", identity.Subject)
+			}
+			if identity.Email != "" {
+				r.Header.Set("X-AgentOven-Audit-Email", identity.Email)
+			}
+			if identity.DisplayName != "" {
+				r.Header.Set("X-AgentOven-Audit-Display-Name", identity.DisplayName)
+			}
+			if identity.Provider != "" {
+				r.Header.Set("X-AgentOven-Audit-Provider", identity.Provider)
+			}
+
 			// If the identity carries a kitchen scope, override the tenant
 			if identity.Kitchen != "" {
 				ctx = pkgmw.SetKitchen(ctx, identity.Kitchen)
+				r.Header.Set("X-AgentOven-Audit-Kitchen", identity.Kitchen)
 			}
 		}
 
