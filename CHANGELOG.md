@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.0] — 2026-05-31
+
+### 📈 Release 8 Observability Hardening
+- **OTEL metrics runtime enabled** — control plane now initializes both tracer and meter providers; metrics are exported over OTLP alongside traces
+- **Canonical telemetry instruments added** — HTTP request totals/failures/latency, provider call duration, token counters, cost counter, provider errors, audit event counters, guardrail block counters, compliance stream concurrency
+- **Executor metrics emission** — every model-router turn now emits provider/model latency, token, and cost metrics for time-series analysis
+- **Compliance stream metrics** — active SSE compliance stream connections are tracked as live up/down counters
+- **Guardrail audit metrics** — persisted guardrail events now emit audit and blocked-operation counters
+
+### 🧱 Collector + Sink Pipeline Alignment
+- **Prometheus exporter enabled** — collector now exposes AgentOven metrics on `:8889` (`agentoven.*` namespace)
+- **Multi-sink external pipelines** — opt-in OTLP HTTP forwarding pipelines for traces, metrics, and logs via `OTEL_SINK_ENDPOINT` + `OTEL_SINK_TOKEN`
+- **Docker compose update** — collector Prometheus scrape port (`8889`) is published for local dashboards
+
+### 🛡️ Consistency + Tech Debt Fixes
+- **Trace/span tenant hardening** — trace and span detail endpoints now enforce kitchen scoping before returning data
+- **Audit tenant source unification** — audit list/count now resolve kitchen from middleware context instead of raw request header reads
+- **Audit contract compatibility** — audit API now includes `created_at` alias mapped from canonical `timestamp` to keep older dashboard consumers stable
+- **Audit filter parity** — `count` endpoint now supports the same `action`, `user_id`, and `resource` filters as `list`
+- **Stream relay robustness** — fixed missing scanner error check in managed stream relay path
+
 ## [0.7.0] — 2026-05-14
 
 ### 🤝 Framework-Native Managed Agents

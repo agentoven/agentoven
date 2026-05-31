@@ -2,7 +2,10 @@ package middleware
 
 import (
 	"net/http"
+	"time"
 
+	inttelemetry "github.com/agentoven/agentoven/control-plane/internal/telemetry"
+	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
@@ -14,6 +17,9 @@ var tracer = otel.Tracer("agentoven-control-plane")
 // Telemetry returns OpenTelemetry tracing middleware.
 func Telemetry(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		kitchen := GetKitchen(r.Context())
+
 		// Extract propagated context from incoming headers
 		ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
 
@@ -25,7 +31,7 @@ func Telemetry(next http.Handler) http.Handler {
 				attribute.String("http.request.method", r.Method),
 				attribute.String("url.path", r.URL.Path),
 				attribute.String("url.scheme", scheme(r)),
-				attribute.String("agentoven.kitchen", GetKitchen(ctx)),
+				attribute.String("agentoven.kitchen", kitchen),
 			),
 		)
 		defer span.End()
@@ -39,6 +45,14 @@ func Telemetry(next http.Handler) http.Handler {
 			attribute.Int("http.response.status_code", rw.statusCode),
 			attribute.Int("http.response_content_length", rw.bytes),
 		)
+
+		routePattern := r.URL.Path
+		if rctx := chi.RouteContext(r.Context()); rctx != nil {
+			if p := rctx.RoutePattern(); p != "" {
+				routePattern = p
+			}
+		}
+		inttelemetry.RecordHTTPRequest(ctx, r.Method, routePattern, kitchen, rw.statusCode, time.Since(start))
 	})
 }
 

@@ -121,6 +121,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 
 		// Processes — running agent processes
 		r.Get("/processes", h.ListProcesses)
+		r.Get("/compliance/failures/stream", h.StreamComplianceFailures)
 
 		// Recipes (workflows)
 		r.Route("/recipes", func(r chi.Router) {

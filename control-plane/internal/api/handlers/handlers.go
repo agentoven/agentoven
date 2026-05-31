@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/agentoven/agentoven/control-plane/internal/resolver"
 	"github.com/agentoven/agentoven/control-plane/internal/router"
 	"github.com/agentoven/agentoven/control-plane/internal/store"
+	inttelemetry "github.com/agentoven/agentoven/control-plane/internal/telemetry"
 	"github.com/agentoven/agentoven/control-plane/internal/workflow"
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	pkgmw "github.com/agentoven/agentoven/control-plane/pkg/middleware"
@@ -622,13 +624,16 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 		OutputText:  resp.Content,
 		Usage:       &traceUsage,
 		Metadata: map[string]interface{}{
-			"provider": resp.Provider,
-			"model":    resp.Model,
-			"type":     "test",
+			"provider":        resp.Provider,
+			"model":           resp.Model,
+			"type":            "test",
+			"thinking_blocks": resp.ThinkingBlocks,
+			"thinking_tokens": resp.Usage.ThinkingTokens,
 		},
 		CreatedAt: time.Now().UTC(),
 	}
 	h.Store.CreateTrace(r.Context(), trace)
+	h.emitThinkingAudit(r.Context(), kitchen, agentName, "test", req.ThinkingEnabled, resp.ThinkingBlocks, resp.Usage.ThinkingTokens)
 
 	// Persist a single LLM span for the test call
 	now := time.Now().UTC()
@@ -1824,6 +1829,7 @@ func (h *Handlers) ListTraces(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) GetTrace(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
 	traceID := chi.URLParam(r, "traceId")
 
 	// If ?spans=true, return trace with its spans attached for waterfall visualization
@@ -1843,22 +1849,31 @@ func (h *Handlers) GetTrace(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if trace.Kitchen != "" && trace.Kitchen != kitchen {
+		respondError(w, http.StatusNotFound, "trace not found")
+		return
+	}
 	respondJSON(w, http.StatusOK, trace)
 }
 
 // ListSpans returns all spans for a given trace, ordered by start_time.
 // GET /api/v1/traces/{traceId}/spans
 func (h *Handlers) ListSpans(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
 	traceID := chi.URLParam(r, "traceId")
 
 	// Verify trace exists
-	_, err := h.Store.GetTrace(r.Context(), traceID)
+	trace, err := h.Store.GetTrace(r.Context(), traceID)
 	if err != nil {
 		if _, ok := err.(*store.ErrNotFound); ok {
 			respondError(w, http.StatusNotFound, err.Error())
 		} else {
 			respondError(w, http.StatusInternalServerError, err.Error())
 		}
+		return
+	}
+	if trace.Kitchen != "" && trace.Kitchen != kitchen {
+		respondError(w, http.StatusNotFound, "trace not found")
 		return
 	}
 
@@ -1876,6 +1891,7 @@ func (h *Handlers) ListSpans(w http.ResponseWriter, r *http.Request) {
 // GetSpan returns a single span by ID.
 // GET /api/v1/spans/{spanId}
 func (h *Handlers) GetSpan(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
 	spanID := chi.URLParam(r, "spanId")
 	span, err := h.Store.GetSpan(r.Context(), spanID)
 	if err != nil {
@@ -1884,6 +1900,19 @@ func (h *Handlers) GetSpan(w http.ResponseWriter, r *http.Request) {
 		} else {
 			respondError(w, http.StatusInternalServerError, err.Error())
 		}
+		return
+	}
+	trace, err := h.Store.GetTrace(r.Context(), span.TraceID)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	if trace.Kitchen != "" && trace.Kitchen != kitchen {
+		respondError(w, http.StatusNotFound, "span not found")
 		return
 	}
 	respondJSON(w, http.StatusOK, span)
@@ -2176,6 +2205,15 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 				},
 				CreatedAt: initialTrace.CreatedAt,
 			}
+			if execTrace != nil {
+				thinkingBlocks, thinkingTokens := summarizeThinking(execTrace)
+				if len(thinkingBlocks) > 0 {
+					trace.Metadata["thinking_blocks"] = thinkingBlocks
+				}
+				if thinkingTokens > 0 {
+					trace.Metadata["thinking_tokens"] = thinkingTokens
+				}
+			}
 			h.Store.CreateTrace(execCtx, trace)
 
 			// Persist executor spans for waterfall visualization
@@ -2363,7 +2401,7 @@ func (h *Handlers) A2AAgentEndpoint(w http.ResponseWriter, r *http.Request) {
 	//   - Managed agents: ProcessInfo.Endpoint (local/docker/k8s subprocess)
 	//   - External agents: BackendEndpoint (user-provided URL)
 	// This ensures auth, RBAC, observability, and rate-limiting for every call.
-	backendURL := h.ResolveBackendEndpoint(agent)
+	backendURL, backendReason := h.ResolveBackendEndpoint(agent)
 	if backendURL == "" {
 		w.Header().Set("Content-Type", "application/a2a+json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2371,7 +2409,13 @@ func (h *Handlers) A2AAgentEndpoint(w http.ResponseWriter, r *http.Request) {
 			"error": map[string]interface{}{
 				"code":    -32003,
 				"message": "No backend available",
-				"data":    "Agent '" + agentName + "' has no running process or backend endpoint configured",
+				"data": map[string]interface{}{
+					"message":        "Agent has no running process or backend endpoint configured",
+					"backend_reason": backendReason,
+					"agent":          agentName,
+					"mode":           string(agent.Mode),
+					"status":         string(agent.Status),
+				},
 			},
 			"id": nil,
 		})
@@ -2380,8 +2424,9 @@ func (h *Handlers) A2AAgentEndpoint(w http.ResponseWriter, r *http.Request) {
 
 	log.Info().
 		Str("agent", agentName).
-		Str("backend", backendURL).
+		Str("backend", sanitizeURLForLog(backendURL)).
 		Str("mode", string(agent.Mode)).
+		Str("reason", backendReason).
 		Msg("Proxying A2A request to agent backend")
 
 	// ── Proxy the request ───────────────────────────────────
@@ -2391,26 +2436,53 @@ func (h *Handlers) A2AAgentEndpoint(w http.ResponseWriter, r *http.Request) {
 // ResolveBackendEndpoint determines where to proxy A2A calls for an agent.
 // For managed agents, it returns the process endpoint (subprocess/docker/k8s).
 // For external agents, it returns the user-provided backend URL.
-func (h *Handlers) ResolveBackendEndpoint(agent *models.Agent) string {
+func (h *Handlers) ResolveBackendEndpoint(agent *models.Agent) (string, string) {
 	// K8s-deployed agents: operator writes backend_endpoint when workload Running (ADR-0014)
 	if agent.BackendEndpoint != "" {
-		return agent.BackendEndpoint
+		return agent.BackendEndpoint, "agent_backend_endpoint"
 	}
 
 	// Managed agents: use the spawned process endpoint
 	if agent.Mode == models.AgentModeManaged || agent.Mode == "" {
 		if agent.Process != nil && agent.Process.Status == models.ProcessRunning {
-			return agent.Process.Endpoint
+			if agent.Process.Endpoint != "" {
+				return agent.Process.Endpoint, "managed_process_endpoint"
+			}
 		}
-		return ""
+
+		// Fallback for k8s mode during endpoint propagation lag.
+		if agent.ExecutionMode == models.ExecModeK8s ||
+			(agent.Process != nil && agent.Process.Mode == models.ExecModeK8s) {
+			namespace := os.Getenv("AGENTOVEN_K8S_NAMESPACE")
+			if namespace == "" {
+				namespace = "agentoven"
+			}
+			svcName := fmt.Sprintf("agent-%s-%s-svc", agent.Kitchen, agent.Name)
+			return fmt.Sprintf("http://%s.%s.svc.cluster.local:9000", svcName, namespace), "k8s_service_dns_fallback"
+		}
+
+		return "", "managed_process_not_running"
 	}
 
 	// External agents: use the configured backend endpoint
 	if agent.Mode == models.AgentModeExternal {
-		return agent.BackendEndpoint
+		if agent.A2AEndpoint != "" {
+			return strings.TrimRight(agent.A2AEndpoint, "/"), "external_a2a_endpoint"
+		}
+		return "", "external_backend_endpoint_missing"
 	}
 
-	return ""
+	return "", "unsupported_agent_mode"
+}
+
+func sanitizeURLForLog(raw string) string {
+	if raw == "" {
+		return raw
+	}
+	if i := strings.Index(raw, "?"); i >= 0 {
+		return raw[:i] + "?<redacted>"
+	}
+	return raw
 }
 
 // proxyA2ARequest relays an HTTP request to a backend agent endpoint and
@@ -2836,9 +2908,50 @@ func (h *Handlers) StreamAgentLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logBuf := h.ProcessManager.GetLogBuffer(kitchen, agentName)
+
 	if logBuf == nil {
-		respondError(w, http.StatusNotFound, fmt.Sprintf("no running process for agent '%s'", agentName))
-		return
+		// K8s fallback: stream directly from pod logs when no local log buffer exists.
+		entries, err := h.ProcessManager.GetK8sRecentLogs(r.Context(), kitchen, agentName, 200)
+		if err != nil {
+			respondError(w, http.StatusNotFound, fmt.Sprintf("no log source for agent '%s': %v", agentName, err))
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			respondError(w, http.StatusInternalServerError, "streaming not supported")
+			return
+		}
+
+		for _, entry := range entries {
+			data, _ := json.Marshal(entry)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+		}
+		flusher.Flush()
+
+		ch, err := h.ProcessManager.SubscribeK8sLogs(r.Context(), kitchen, agentName, 100)
+		if err != nil {
+			return
+		}
+		ctx := r.Context()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case entry, ok := <-ch:
+				if !ok {
+					return
+				}
+				data, _ := json.Marshal(entry)
+				fmt.Fprintf(w, "data: %s\n\n", data)
+				flusher.Flush()
+			}
+		}
 	}
 
 	// Set SSE headers
@@ -2894,7 +3007,12 @@ func (h *Handlers) GetAgentLogs(w http.ResponseWriter, r *http.Request) {
 
 	logBuf := h.ProcessManager.GetLogBuffer(kitchen, agentName)
 	if logBuf == nil {
-		respondError(w, http.StatusNotFound, fmt.Sprintf("no running process for agent '%s'", agentName))
+		entries, err := h.ProcessManager.GetK8sRecentLogs(r.Context(), kitchen, agentName, 500)
+		if err != nil {
+			respondError(w, http.StatusNotFound, fmt.Sprintf("no log source for agent '%s': %v", agentName, err))
+			return
+		}
+		respondJSON(w, http.StatusOK, entries)
 		return
 	}
 
@@ -3074,6 +3192,9 @@ func (h *Handlers) proxyToProcessStream(
 			flusher.Flush()
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error relaying agent pod stream: %w", err)
+	}
 	return nil
 }
 
@@ -3132,7 +3253,9 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		eval, gErr := h.Guardrails.EvaluateInput(r.Context(), agent.Guardrails, req.Message)
 		if gErr != nil {
 			log.Warn().Err(gErr).Str("agent", agentName).Msg("Input guardrail evaluation error")
+			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "input", nil, gErr)
 		} else if !eval.Passed {
+			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "input", eval, nil)
 			respondJSON(w, http.StatusForbidden, map[string]interface{}{
 				"error":      "Input blocked by guardrails",
 				"guardrails": eval.Results,
@@ -3238,7 +3361,9 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), agent.Guardrails, response)
 		if gErr != nil {
 			log.Warn().Err(gErr).Str("agent", agentName).Msg("Output guardrail evaluation error")
+			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "output", nil, gErr)
 		} else if !eval.Passed {
+			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "output", eval, nil)
 			respondJSON(w, http.StatusForbidden, map[string]interface{}{
 				"error":      "Output blocked by guardrails",
 				"guardrails": eval.Results,
@@ -3268,7 +3393,15 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		},
 		CreatedAt: time.Now().UTC(),
 	}
+	thinkingBlocks, thinkingTokens := summarizeThinking(trace)
+	if len(thinkingBlocks) > 0 {
+		traceRecord.Metadata["thinking_blocks"] = thinkingBlocks
+	}
+	if thinkingTokens > 0 {
+		traceRecord.Metadata["thinking_tokens"] = thinkingTokens
+	}
 	h.Store.CreateTrace(r.Context(), traceRecord)
+	h.emitThinkingAudit(r.Context(), kitchen, agentName, "invoke", req.ThinkingEnabled, thinkingBlocks, thinkingTokens)
 
 	// Persist executor turns as hierarchical spans
 	h.persistExecutorSpans(r.Context(), trace)
@@ -3471,6 +3604,99 @@ func (h *Handlers) persistExecutorSpans(ctx context.Context, execTrace *executor
 	// Batch persist all spans
 	if err := h.Store.CreateSpans(ctx, spans); err != nil {
 		log.Warn().Err(err).Str("trace_id", traceID).Int("span_count", len(spans)).Msg("Failed to persist executor spans")
+	}
+}
+
+func summarizeThinking(execTrace *executor.ExecutionTrace) ([]models.ThinkingBlock, int64) {
+	if execTrace == nil || len(execTrace.Turns) == 0 {
+		return nil, 0
+	}
+
+	const maxBlocks = 16
+	blocks := make([]models.ThinkingBlock, 0, maxBlocks)
+	var thinkingTokens int64
+
+	for _, turn := range execTrace.Turns {
+		thinkingTokens += turn.Usage.ThinkingTokens
+		for _, b := range turn.ThinkingBlocks {
+			if len(blocks) >= maxBlocks {
+				break
+			}
+			blocks = append(blocks, b)
+		}
+		if len(blocks) >= maxBlocks {
+			break
+		}
+	}
+
+	if len(blocks) == 0 {
+		return nil, thinkingTokens
+	}
+	return blocks, thinkingTokens
+}
+
+func (h *Handlers) emitThinkingAudit(ctx context.Context, kitchen, agentName, source string, thinkingEnabled bool, blocks []models.ThinkingBlock, thinkingTokens int64) {
+	if h.Store == nil {
+		return
+	}
+
+	settings, err := h.Store.GetKitchenSettings(ctx, kitchen)
+	if err != nil {
+		return
+	}
+	if settings == nil || !settings.RequireThinkingAudit {
+		return
+	}
+
+	identity := pkgmw.GetIdentity(ctx)
+	userID := ""
+	userEmail := ""
+	if identity != nil {
+		userID = identity.Subject
+		userEmail = identity.Email
+		if userEmail == "" {
+			userEmail = identity.DisplayName
+		}
+	}
+
+	status := http.StatusOK
+	action := "thinking.captured"
+	if thinkingEnabled && len(blocks) == 0 {
+		status = http.StatusConflict
+		action = "thinking.missing"
+	}
+
+	details := map[string]interface{}{
+		"agent":            agentName,
+		"source":           source,
+		"thinking_enabled": thinkingEnabled,
+		"block_count":      len(blocks),
+		"thinking_tokens":  thinkingTokens,
+	}
+	if len(blocks) > 0 {
+		// Keep payload bounded for audit list queries while still preserving evidence.
+		max := len(blocks)
+		if max > 8 {
+			max = 8
+		}
+		details["thinking_blocks"] = blocks[:max]
+	}
+
+	if err := h.Store.CreateAuditEvent(ctx, &models.AuditEvent{
+		ID:                 uuid.New().String(),
+		Timestamp:          time.Now().UTC(),
+		UserID:             userID,
+		UserEmail:          userEmail,
+		Action:             action,
+		Resource:           "thinking",
+		ResourceID:         agentName,
+		Kitchen:            kitchen,
+		Details:            details,
+		ResponseStatus:     status,
+		RegulationTags:     []string{"compliance", "reasoning", "gxp"},
+		DataClassification: "restricted",
+	}); err != nil {
+		log.Warn().Err(err).Str("agent", agentName).Str("action", action).Msg("failed to persist thinking audit event")
 	}
 }
 
@@ -3828,7 +4054,7 @@ func (h *Handlers) DeleteChannel(w http.ResponseWriter, r *http.Request) {
 
 // ListAuditEvents returns audit events for the current kitchen.
 func (h *Handlers) ListAuditEvents(w http.ResponseWriter, r *http.Request) {
-	kitchen := r.Header.Get("X-Kitchen")
+	kitchen := middleware.GetKitchen(r.Context())
 	filter := models.AuditFilter{
 		Kitchen: kitchen,
 		Limit:   100,
@@ -3851,13 +4077,33 @@ func (h *Handlers) ListAuditEvents(w http.ResponseWriter, r *http.Request) {
 	if events == nil {
 		events = []models.AuditEvent{}
 	}
-	respondJSON(w, http.StatusOK, events)
+
+	// Backward-compatible payload for dashboard consumers still reading created_at.
+	type auditEventView struct {
+		models.AuditEvent
+		CreatedAt time.Time `json:"created_at"`
+	}
+	view := make([]auditEventView, 0, len(events))
+	for _, evt := range events {
+		view = append(view, auditEventView{AuditEvent: evt, CreatedAt: evt.Timestamp})
+	}
+
+	respondJSON(w, http.StatusOK, view)
 }
 
 // CountAuditEvents returns the count of audit events matching the filter.
 func (h *Handlers) CountAuditEvents(w http.ResponseWriter, r *http.Request) {
-	kitchen := r.Header.Get("X-Kitchen")
+	kitchen := middleware.GetKitchen(r.Context())
 	filter := models.AuditFilter{Kitchen: kitchen}
+	if q := r.URL.Query().Get("action"); q != "" {
+		filter.Action = q
+	}
+	if q := r.URL.Query().Get("user_id"); q != "" {
+		filter.UserID = q
+	}
+	if q := r.URL.Query().Get("resource"); q != "" {
+		filter.Resource = q
+	}
 
 	count, err := h.Store.CountAuditEvents(r.Context(), filter)
 	if err != nil {
@@ -4187,9 +4433,11 @@ func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
 		eval, gErr := h.Guardrails.EvaluateInput(r.Context(), agent.Guardrails, req.Content)
 		if gErr != nil {
 			log.Warn().Err(gErr).Str("agent", agentName).Msg("Session input guardrail error")
+			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "input", nil, gErr)
 		} else if !eval.Passed {
 			// Remove the user message we just appended
 			session.Messages = session.Messages[:len(session.Messages)-1]
+			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "input", eval, nil)
 			respondJSON(w, http.StatusForbidden, map[string]interface{}{
 				"error":      "Input blocked by guardrails",
 				"guardrails": eval.Results,
@@ -4288,9 +4536,11 @@ func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
 		eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), agent.Guardrails, routeResp.Content)
 		if gErr != nil {
 			log.Warn().Err(gErr).Str("agent", agentName).Msg("Session output guardrail error")
+			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "output", nil, gErr)
 		} else if !eval.Passed {
 			// Remove the user message we appended (response never reaches the user)
 			session.Messages = session.Messages[:len(session.Messages)-1]
+			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "output", eval, nil)
 			respondJSON(w, http.StatusForbidden, map[string]interface{}{
 				"error":      "Output blocked by guardrails",
 				"guardrails": eval.Results,
@@ -4339,6 +4589,123 @@ func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusOK, resp)
+}
+
+// StreamComplianceFailures streams guardrail-related compliance failures from audit events.
+// GET /api/v1/compliance/failures/stream
+func (h *Handlers) StreamComplianceFailures(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+	inttelemetry.ComplianceStreamConnected(r.Context(), kitchen)
+	defer inttelemetry.ComplianceStreamDisconnected(r.Context(), kitchen)
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		respondError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	seen := map[string]struct{}{}
+	emit := func(events []models.AuditEvent) {
+		for i := len(events) - 1; i >= 0; i-- {
+			e := events[i]
+			if !strings.HasPrefix(e.Action, "guardrail.") {
+				continue
+			}
+			if _, ok := seen[e.ID]; ok {
+				continue
+			}
+			seen[e.ID] = struct{}{}
+			data, _ := json.Marshal(e)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+		}
+		flusher.Flush()
+	}
+
+	initial, err := h.Store.ListAuditEvents(r.Context(), models.AuditFilter{Kitchen: kitchen, Limit: 200})
+	if err == nil {
+		emit(initial)
+	}
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			events, err := h.Store.ListAuditEvents(r.Context(), models.AuditFilter{Kitchen: kitchen, Limit: 200})
+			if err != nil {
+				continue
+			}
+			emit(events)
+		}
+	}
+}
+
+func (h *Handlers) emitGuardrailAudit(ctx context.Context, kitchen, agentName, stage string, eval *models.GuardrailEvaluation, guardrailErr error) {
+	if h.Store == nil {
+		return
+	}
+
+	identity := pkgmw.GetIdentity(ctx)
+	userID := ""
+	userEmail := ""
+	provider := ""
+	if identity != nil {
+		userID = identity.Subject
+		userEmail = identity.Email
+		if userEmail == "" {
+			userEmail = identity.DisplayName
+		}
+		provider = identity.Provider
+	}
+
+	action := "guardrail." + stage + "_blocked"
+	status := http.StatusForbidden
+	details := map[string]interface{}{
+		"agent":    agentName,
+		"stage":    stage,
+		"provider": provider,
+	}
+
+	if guardrailErr != nil {
+		action = "guardrail." + stage + "_error"
+		status = http.StatusInternalServerError
+		details["error"] = guardrailErr.Error()
+	}
+	if eval != nil {
+		details["results"] = eval.Results
+		details["passed"] = eval.Passed
+	}
+
+	if err := h.Store.CreateAuditEvent(ctx, &models.AuditEvent{
+		ID:                 uuid.New().String(),
+		Timestamp:          time.Now().UTC(),
+		UserID:             userID,
+		UserEmail:          userEmail,
+		Action:             action,
+		Resource:           "guardrails",
+		ResourceID:         agentName,
+		Kitchen:            kitchen,
+		Details:            details,
+		ResponseStatus:     status,
+		RegulationTags:     []string{"compliance", "guardrails"},
+		DataClassification: "restricted",
+	}); err != nil {
+		log.Warn().Err(err).Str("agent", agentName).Str("action", action).Msg("failed to persist guardrail audit event")
+		return
+	}
+
+	inttelemetry.RecordAuditEvent(ctx, kitchen, action, status)
+	if strings.Contains(action, "_blocked") {
+		inttelemetry.RecordGuardrailBlocked(ctx, kitchen, stage)
+	}
 }
 
 // ══════════════════════════════════════════════════════════════

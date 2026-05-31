@@ -2042,6 +2042,7 @@ const (
 	GuardrailMaxLength        GuardrailKind = "max_length"
 	GuardrailRegexFilter      GuardrailKind = "regex_filter"
 	GuardrailPromptInjection  GuardrailKind = "prompt_injection"
+	GuardrailLlamaGuard       GuardrailKind = "llamaguard" // ML-based content safety via LlamaGuard 3
 	GuardrailCustom           GuardrailKind = "custom"
 )
 

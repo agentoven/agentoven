@@ -27,6 +27,7 @@ import (
 	"github.com/agentoven/agentoven/control-plane/internal/resolver"
 	"github.com/agentoven/agentoven/control-plane/internal/router"
 	"github.com/agentoven/agentoven/control-plane/internal/store"
+	inttelemetry "github.com/agentoven/agentoven/control-plane/internal/telemetry"
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/google/uuid"
@@ -267,9 +268,21 @@ func (e *Executor) Execute(ctx context.Context, agent *models.Agent, userMessage
 		if err != nil {
 			llmSpan.RecordError(err)
 			llmSpan.SetStatus(codes.Error, err.Error())
+			inttelemetry.RecordProviderCall(ctx, agent.Kitchen, "unknown", routeReq.Model, "error", time.Since(turnStart), 0, 0, 0)
 			llmSpan.End()
 			return "", trace, fmt.Errorf("model router call failed (turn %d): %w", turn, err)
 		}
+		inttelemetry.RecordProviderCall(
+			ctx,
+			agent.Kitchen,
+			routeResp.Provider,
+			routeReq.Model,
+			"ok",
+			time.Since(turnStart),
+			routeResp.Usage.InputTokens,
+			routeResp.Usage.OutputTokens,
+			routeResp.Usage.EstimatedCost,
+		)
 		llmSpan.SetAttributes(
 			attribute.Int64("llm.input_tokens", routeResp.Usage.InputTokens),
 			attribute.Int64("llm.output_tokens", routeResp.Usage.OutputTokens),

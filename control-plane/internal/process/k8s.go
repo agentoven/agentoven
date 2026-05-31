@@ -1,6 +1,7 @@
 package process
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -342,6 +343,102 @@ func (ke *K8sExecutor) waitForHealth(endpoint string, timeout time.Duration) err
 	}
 
 	return fmt.Errorf("k8s agent health check timed out after %s", timeout)
+}
+
+// RecentLogs fetches recent pod logs for a k8s-managed agent.
+func (ke *K8sExecutor) RecentLogs(ctx context.Context, podName string, tailLines int) ([]LogEntry, error) {
+	if podName == "" {
+		return nil, fmt.Errorf("pod name is required")
+	}
+	if tailLines <= 0 {
+		tailLines = 200
+	}
+
+	client, err := newK8sClient()
+	if err != nil {
+		return nil, fmt.Errorf("k8s client init failed: %w", err)
+	}
+
+	path := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/log?tailLines=%d", ke.namespace, podName, tailLines)
+	status, body, err := client.do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("get pod logs failed: %w", err)
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("get pod logs returned HTTP %d", status)
+	}
+
+	text := strings.TrimSpace(string(body))
+	if text == "" {
+		return []LogEntry{}, nil
+	}
+
+	lines := strings.Split(text, "\n")
+	now := time.Now().UTC()
+	entries := make([]LogEntry, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		entries = append(entries, LogEntry{Timestamp: now, Stream: "stdout", Line: line})
+	}
+
+	return entries, nil
+}
+
+// StreamLogs follows pod logs and emits entries until the context is cancelled.
+func (ke *K8sExecutor) StreamLogs(ctx context.Context, podName string, tailLines int) (<-chan LogEntry, error) {
+	if podName == "" {
+		return nil, fmt.Errorf("pod name is required")
+	}
+	if tailLines <= 0 {
+		tailLines = 100
+	}
+
+	client, err := newK8sClient()
+	if err != nil {
+		return nil, fmt.Errorf("k8s client init failed: %w", err)
+	}
+
+	path := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/log?follow=true&tailLines=%d", ke.namespace, podName, tailLines)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, client.apiServer+path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build pod log stream request failed: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+client.token)
+
+	resp, err := client.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("pod log stream request failed: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("pod log stream returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	out := make(chan LogEntry, 128)
+	go func() {
+		defer close(out)
+		defer resp.Body.Close()
+
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			entry := LogEntry{Timestamp: time.Now().UTC(), Stream: "stdout", Line: line}
+			select {
+			case <-ctx.Done():
+				return
+			case out <- entry:
+			}
+		}
+	}()
+
+	return out, nil
 }
 
 // buildDeploymentManifest returns a Deployment map ready for JSON encoding.

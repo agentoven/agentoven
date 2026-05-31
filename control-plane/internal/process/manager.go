@@ -296,6 +296,46 @@ func (m *Manager) GetLogBuffer(kitchen, agentName string) *LogBuffer {
 	return m.local.GetLogBuffer(kitchen, agentName)
 }
 
+// GetK8sRecentLogs returns recent pod logs for a k8s-managed agent.
+func (m *Manager) GetK8sRecentLogs(ctx context.Context, kitchen, agentName string, tailLines int) ([]LogEntry, error) {
+	key := processKey(kitchen, agentName)
+
+	m.mu.RLock()
+	info, ok := m.processes[key]
+	m.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("agent process not found")
+	}
+	if info.Mode != models.ExecModeK8s {
+		return nil, fmt.Errorf("agent is not running in k8s mode")
+	}
+	if info.PodName == "" {
+		return nil, fmt.Errorf("k8s pod name not available yet")
+	}
+
+	return m.k8s.RecentLogs(ctx, info.PodName, tailLines)
+}
+
+// SubscribeK8sLogs returns a channel of live pod logs for a k8s-managed agent.
+func (m *Manager) SubscribeK8sLogs(ctx context.Context, kitchen, agentName string, tailLines int) (<-chan LogEntry, error) {
+	key := processKey(kitchen, agentName)
+
+	m.mu.RLock()
+	info, ok := m.processes[key]
+	m.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("agent process not found")
+	}
+	if info.Mode != models.ExecModeK8s {
+		return nil, fmt.Errorf("agent is not running in k8s mode")
+	}
+	if info.PodName == "" {
+		return nil, fmt.Errorf("k8s pod name not available yet")
+	}
+
+	return m.k8s.StreamLogs(ctx, info.PodName, tailLines)
+}
+
 // buildEnvironment creates the env vars map for the agent process.
 func (m *Manager) buildEnvironment(agent *models.Agent, port int) map[string]string {
 	env := map[string]string{

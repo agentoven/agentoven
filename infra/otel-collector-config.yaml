@@ -24,6 +24,23 @@ exporters:
     tls:
       insecure: true
 
+  # Prometheus scrape endpoint for canonical AgentOven metrics.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: agentoven
+
+  # Optional external OTLP sink for traces/metrics/logs.
+  # Set OTEL_SINK_ENDPOINT to enable forwarding.
+  otlphttp/custom:
+    endpoint: ${env:OTEL_SINK_ENDPOINT}
+    headers:
+      X-Sink-Token: ${env:OTEL_SINK_TOKEN}
+    sending_queue:
+      enabled: true
+      num_consumers: 4
+    retry_on_failure:
+      enabled: true
+
   # Log to stdout for debugging
   debug:
     verbosity: basic
@@ -32,13 +49,28 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [batch, resource]
+      processors: [resource, batch]
       exporters: [otlp/jaeger, debug]
     metrics:
       receivers: [otlp]
-      processors: [batch]
-      exporters: [debug]
+      processors: [resource, batch]
+      exporters: [prometheus, debug]
     logs:
       receivers: [otlp]
-      processors: [batch]
+      processors: [resource, batch]
       exporters: [debug]
+
+    traces/external:
+      receivers: [otlp]
+      processors: [resource, batch]
+      exporters: [otlphttp/custom]
+
+    metrics/external:
+      receivers: [otlp]
+      processors: [resource, batch]
+      exporters: [otlphttp/custom]
+
+    logs/external:
+      receivers: [otlp]
+      processors: [resource, batch]
+      exporters: [otlphttp/custom]

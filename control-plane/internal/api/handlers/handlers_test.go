@@ -599,9 +599,12 @@ func TestResolveBackendEndpoint_ManagedRunning(t *testing.T) {
 			Endpoint: "http://localhost:9100",
 		},
 	}
-	got := h.ResolveBackendEndpoint(agent)
+	got, reason := h.ResolveBackendEndpoint(agent)
 	if got != "http://localhost:9100" {
 		t.Errorf("resolveBackend(managed+running) = %q, want process endpoint", got)
+	}
+	if reason != "managed_process_endpoint" {
+		t.Errorf("resolveBackend(managed+running) reason = %q, want managed_process_endpoint", reason)
 	}
 }
 
@@ -611,9 +614,12 @@ func TestResolveBackendEndpoint_ManagedNoProcess(t *testing.T) {
 		Mode:    models.AgentModeManaged,
 		Process: nil,
 	}
-	got := h.ResolveBackendEndpoint(agent)
+	got, reason := h.ResolveBackendEndpoint(agent)
 	if got != "" {
 		t.Errorf("resolveBackend(managed, no process) = %q, want empty", got)
+	}
+	if reason != "managed_process_not_running" {
+		t.Errorf("resolveBackend(managed, no process) reason = %q, want managed_process_not_running", reason)
 	}
 }
 
@@ -623,9 +629,12 @@ func TestResolveBackendEndpoint_External(t *testing.T) {
 		Mode:            models.AgentModeExternal,
 		BackendEndpoint: "https://external.example.com/a2a",
 	}
-	got := h.ResolveBackendEndpoint(agent)
+	got, reason := h.ResolveBackendEndpoint(agent)
 	if got != "https://external.example.com/a2a" {
 		t.Errorf("resolveBackend(external) = %q, want backend_endpoint", got)
+	}
+	if reason != "agent_backend_endpoint" {
+		t.Errorf("resolveBackend(external) reason = %q, want agent_backend_endpoint", reason)
 	}
 }
 
@@ -639,8 +648,11 @@ func TestResolveBackendEndpoint_EmptyMode(t *testing.T) {
 			Endpoint: "http://localhost:9200",
 		},
 	}
-	got := h.ResolveBackendEndpoint(agent)
+	got, reason := h.ResolveBackendEndpoint(agent)
 	if got != "http://localhost:9200" {
 		t.Errorf("resolveBackend(empty mode, running) = %q, want process endpoint", got)
+	}
+	if reason != "managed_process_endpoint" {
+		t.Errorf("resolveBackend(empty mode, running) reason = %q, want managed_process_endpoint", reason)
 	}
 }

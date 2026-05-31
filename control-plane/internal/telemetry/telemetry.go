@@ -3,13 +3,16 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/agentoven/agentoven/control-plane/internal/config"
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
@@ -25,13 +28,22 @@ func Init(cfg config.TelemetryConfig) (func(context.Context) error, error) {
 
 	ctx := context.Background()
 
-	// Create OTLP gRPC exporter
-	exporter, err := otlptracegrpc.New(ctx,
+	// Create OTLP gRPC trace exporter
+	traceExporter, err := otlptracegrpc.New(ctx,
 		otlptracegrpc.WithEndpoint(cfg.OTLPEndpoint),
 		otlptracegrpc.WithInsecure(), // Phase 1: insecure for local dev; production should use TLS via OTEL_EXPORTER_OTLP_CERTIFICATE
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create OTLP exporter: %w", err)
+		return nil, fmt.Errorf("failed to create OTLP trace exporter: %w", err)
+	}
+
+	// Create OTLP gRPC metric exporter
+	metricExporter, err := otlpmetricgrpc.New(ctx,
+		otlpmetricgrpc.WithEndpoint(cfg.OTLPEndpoint),
+		otlpmetricgrpc.WithInsecure(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create OTLP metric exporter: %w", err)
 	}
 
 	// Create resource with service metadata
@@ -53,13 +65,20 @@ func Init(cfg config.TelemetryConfig) (func(context.Context) error, error) {
 
 	// Create trace provider
 	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
+		sdktrace.WithBatcher(traceExporter),
 		sdktrace.WithResource(res),
 		sdktrace.WithSampler(sampler),
 	)
 
+	// Create meter provider
+	mp := sdkmetric.NewMeterProvider(
+		sdkmetric.WithResource(res),
+		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter, sdkmetric.WithInterval(5*time.Second))),
+	)
+
 	// Register globally
 	otel.SetTracerProvider(tp)
+	otel.SetMeterProvider(mp)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},
@@ -68,7 +87,12 @@ func Init(cfg config.TelemetryConfig) (func(context.Context) error, error) {
 	log.Info().
 		Str("endpoint", cfg.OTLPEndpoint).
 		Str("service", cfg.ServiceName).
-		Msg("📡 OpenTelemetry tracing initialized")
+		Msg("📡 OpenTelemetry tracing + metrics initialized")
 
-	return tp.Shutdown, nil
+	return func(ctx context.Context) error {
+		if err := mp.Shutdown(ctx); err != nil {
+			return err
+		}
+		return tp.Shutdown(ctx)
+	}, nil
 }

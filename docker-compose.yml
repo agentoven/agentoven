@@ -12,7 +12,7 @@
 # Services:
 #   - server:   AgentOven control plane (Go)   → http://localhost:8080
 #   - jaeger:   Jaeger (traces)                → http://localhost:16686
-#   - otel:     OpenTelemetry Collector        → gRPC :4317
+#   - otel:     OpenTelemetry Collector        → gRPC :4317, Prometheus :8889
 
 services:
   # ── AgentOven Control Plane ──────────────────────────────────
@@ -42,7 +42,8 @@ services:
     ports:
       - "4317:4317"   # OTLP gRPC
       - "4318:4318"   # OTLP HTTP
-      - "8888:8888"   # Metrics
+      - "8888:8888"   # Collector self-metrics
+      - "8889:8889"   # Prometheus scrape endpoint (agentoven.* metrics)
     depends_on:
       - jaeger
 
@@ -56,6 +57,35 @@ services:
       - "14268:14268"  # Accept traces from OTel Collector
       - "14250:14250"  # gRPC
     restart: unless-stopped
+
+  # ── Ollama (LlamaGuard / local model inference) ─────────────
+  # CPU-only sidecar.  Use llama-guard3:1b for ~700 MB RAM footprint.
+  # To enable: docker compose --profile guardrails up -d
+  # First-run model pull (one-time):
+  #   docker compose exec ollama ollama pull llama-guard3:1b
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["guardrails"]
+    volumes:
+      - ollama_data:/root/.ollama
+    # No GPU required for 1B model — CPU inference is fast enough.
+    # Add the block below to enable GPU passthrough if available:
+    #   deploy:
+    #     resources:
+    #       reservations:
+    #         devices:
+    #           - driver: nvidia
+    #             count: 1
+    #             capabilities: [gpu]
+    ports:
+      - "11434:11434"  # OpenAI-compat endpoint for host access
+    restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: "24h"   # keep model warm between requests
+      OLLAMA_NUM_PARALLEL: "2"   # allow 2 concurrent guardrail evaluations
+
+volumes:
+  ollama_data: {}   # persist downloaded models across restarts
 
 networks:
   default: {}

@@ -167,6 +167,8 @@ func evaluateOne(g models.Guardrail, text string, stage string) models.Guardrail
 		return evalRegexFilter(g, text, stage)
 	case models.GuardrailPromptInjection:
 		return evalPromptInjection(g, text, stage)
+	case models.GuardrailLlamaGuard:
+		return evalLlamaGuard(g, text, stage)
 	case models.GuardrailCustom:
 		// Custom guardrails are a no-op in OSS (Pro adds webhook/LLM-judge)
 		return models.GuardrailResult{Passed: true, Kind: g.Kind, Stage: stage}
