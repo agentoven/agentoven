@@ -19,23 +19,29 @@ Usage:
 from agentoven._native import (
     Agent,
     AgentStatus,
-    AgentOvenClient,
+    AgentOvenClient as _NativeClient,
     Branch,
     Ingredient,
     IngredientKind,
     Recipe,
     Step,
 )
+from agentoven.client import AgentOvenClient, AgentOvenAPIError
 
 __all__ = [
+    # Full client (OSS + Pro REST coverage) — use this in new code
+    "AgentOvenClient",
+    "AgentOvenAPIError",
+    # Data types
     "Agent",
     "AgentStatus",
-    "AgentOvenClient",
     "Branch",
     "Ingredient",
     "IngredientKind",
     "Recipe",
     "Step",
+    # Native client (OSS-only, kept for backwards compat)
+    "_NativeClient",
 ]
 
-__version__ = "0.3.2"
+__version__ = "0.8.0"
