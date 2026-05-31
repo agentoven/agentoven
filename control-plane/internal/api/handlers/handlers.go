@@ -5,6 +5,7 @@
 package handlers
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -3010,6 +3011,72 @@ func (h *Handlers) proxyToProcess(
 	return proxyResp.Response, traceRecord, nil
 }
 
+// proxyToProcessStream proxies an invoke call to a running agent pod's
+// POST /invoke/stream endpoint and relays the SSE stream to the client.
+func (h *Handlers) proxyToProcessStream(
+	ctx context.Context,
+	w http.ResponseWriter,
+	agent *models.Agent,
+	message string,
+	variables map[string]string,
+) error {
+	if agent.Process == nil || agent.Process.Status != models.ProcessRunning {
+		return fmt.Errorf("agent '%s' process is not running — bake it first", agent.Name)
+	}
+
+	traceID := uuid.New().String()
+	streamURL := strings.TrimRight(agent.Process.Endpoint, "/") + "/invoke/stream"
+
+	body := map[string]interface{}{
+		"message":  message,
+		"trace_id": traceID,
+	}
+	if len(variables) > 0 {
+		body["variables"] = variables
+	}
+	reqBody, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("failed to marshal stream request: %w", err)
+	}
+
+	podReq, err := http.NewRequestWithContext(ctx, http.MethodPost, streamURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("failed to build stream request: %w", err)
+	}
+	podReq.Header.Set("Content-Type", "application/json")
+
+	// Use a long timeout — stream can run for the full agentic loop duration.
+	client := &http.Client{Timeout: 10 * time.Minute}
+	podResp, err := client.Do(podReq)
+	if err != nil {
+		return fmt.Errorf("stream request to agent pod failed: %w", err)
+	}
+	defer podResp.Body.Close()
+
+	if podResp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(podResp.Body)
+		return fmt.Errorf("agent pod returned %d: %s", podResp.StatusCode, string(raw))
+	}
+
+	// Set SSE headers and relay the stream line by line.
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	flusher, canFlush := w.(http.Flusher)
+	scanner := bufio.NewScanner(podResp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fmt.Fprintf(w, "%s\n", line)
+		if line == "" && canFlush {
+			flusher.Flush()
+		}
+	}
+	return nil
+}
+
 // ══════════════════════════════════════════════════════════════
 // ── Managed Agent Invoke Handler ─────────────────────────────
 // ══════════════════════════════════════════════════════════════
@@ -3123,12 +3190,14 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Execute: framework-native agents proxy to their running process;
-	// AgentOven-native agents use the built-in executor.
-	if agent.IsFrameworkNative() {
+	// Execute: if a pod is already running for this agent, proxy to it.
+	// This works for all runtimes (agentoven-native and framework-native alike).
+	// Framework-native agents without a running process are an error; agentoven-
+	// native agents without a process fall back to the in-process Go executor.
+	if agent.Process != nil && agent.Process.Status == models.ProcessRunning {
 		response, traceRecord, err := h.proxyToProcess(r.Context(), agent, req.Message, sanitizedVars, kitchen)
 		if err != nil {
-			respondError(w, http.StatusBadGateway, "Framework agent execution failed: "+err.Error())
+			respondError(w, http.StatusBadGateway, "Agent pod execution failed: "+err.Error())
 			return
 		}
 
@@ -3213,6 +3282,49 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		"latency_ms":      trace.TotalMs,
 		"execution_trace": trace,
 	})
+}
+
+// StreamInvokeAgent proxies a streaming agentic-loop call (SSE) to the agent pod.
+// POST /api/v1/agents/{agentName}/invoke/stream
+func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
+	agentName := chi.URLParam(r, "agentName")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	var req struct {
+		Message   string            `json:"message"`
+		Variables map[string]string `json:"variables"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Message == "" {
+		respondError(w, http.StatusBadRequest, "message is required")
+		return
+	}
+
+	agent, err := h.Store.GetAgent(r.Context(), agentName, kitchen)
+	if err != nil || agent == nil {
+		respondError(w, http.StatusNotFound, fmt.Sprintf("agent '%s' not found", agentName))
+		return
+	}
+	if agent.Process == nil || agent.Process.Status != models.ProcessRunning {
+		respondError(w, http.StatusBadRequest,
+			fmt.Sprintf("agent '%s' process is not running — bake it first", agentName))
+		return
+	}
+
+	// Sanitize variables (pass-through for streaming; validation handled per-agent at bake time)
+	sanitizedVars := req.Variables
+	if sanitizedVars == nil {
+		sanitizedVars = map[string]string{}
+	}
+
+	if err := h.proxyToProcessStream(r.Context(), w, agent, req.Message, sanitizedVars); err != nil {
+		// proxyToProcessStream writes headers only on success; on early error we
+		// can still return a JSON error response.
+		respondError(w, http.StatusBadGateway, err.Error())
+	}
 }
 
 // ══════════════════════════════════════════════════════════════

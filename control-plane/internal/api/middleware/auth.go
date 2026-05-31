@@ -85,6 +85,26 @@ func (am *AuthMiddleware) Handler(next http.Handler) http.Handler {
 	})
 }
 
+// RequireIdentity is a route-level middleware that unconditionally rejects any
+// request that did not produce an authenticated Identity (nil identity = 401).
+// Apply this to specific routes that must always be protected regardless of the
+// global AGENTOVEN_REQUIRE_AUTH flag — e.g. /invoke, /invoke/stream.
+func RequireIdentity(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if pkgmw.GetIdentity(r.Context()) == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("WWW-Authenticate", `Bearer realm="agentoven"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error":   "authentication_required",
+				"message": "Invoking an agent requires authentication. Provide Authorization: Bearer <key>, X-API-Key, or X-Service-Token.",
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // isAuthPublicPath returns true for paths that should skip authentication.
 func isAuthPublicPath(path string) bool {
 	publicPaths := []string{

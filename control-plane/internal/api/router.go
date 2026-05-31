@@ -87,7 +87,11 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 				r.Post("/test", h.TestAgent)
 				r.Get("/config", h.GetAgentConfig)
 				r.Get("/process", h.GetAgentProcess)
-				r.Post("/invoke", h.InvokeAgent)
+
+				// Invoke routes always require a resolved identity — regardless of the
+				// global AGENTOVEN_REQUIRE_AUTH flag. Anonymous callers are rejected with 401.
+				r.With(middleware.RequireIdentity).Post("/invoke", h.InvokeAgent)
+				r.With(middleware.RequireIdentity).Post("/invoke/stream", h.StreamInvokeAgent)
 
 				// Agent card (A2A-compatible metadata)
 				r.Get("/card", h.GetAgentCard)

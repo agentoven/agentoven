@@ -286,6 +286,11 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 	svcAcctProvider := aoauth.NewServiceAccountProvider()
 	if svcAcctProvider.Enabled() {
 		authChain.RegisterProvider(svcAcctProvider)
+		// Wire the HMAC secret into the process manager so pods receive a
+		// signed CONTROL_PLANE_TOKEN they can use for delegation callbacks.
+		if saSecret := os.Getenv("AGENTOVEN_SA_SECRET"); saSecret != "" {
+			pm.SetSASecret(saSecret)
+		}
 	}
 
 	// Register scoped key provider — enables X-Agent-Key authentication

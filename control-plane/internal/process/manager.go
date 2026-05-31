@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	aoauth "github.com/agentoven/agentoven/control-plane/internal/auth"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/rs/zerolog/log"
 )
@@ -75,6 +76,7 @@ type Manager struct {
 	k8s             *K8sExecutor
 	ports           *portAllocator
 	controlPlaneURL string // injected for AGENTOVEN_CONTROL_PLANE_URL env var
+	saSecret        string // AGENTOVEN_SA_SECRET — used to mint per-pod service-account tokens
 }
 
 // NewManager creates a new ProcessManager with all executors initialized.
@@ -93,6 +95,14 @@ func NewManager() *Manager {
 // into every agent process environment. Called during server startup.
 func (m *Manager) SetControlPlaneURL(u string) {
 	m.controlPlaneURL = u
+}
+
+// SetSASecret stores the HMAC secret used to mint per-pod service-account tokens.
+// When set, each baked pod receives a CONTROL_PLANE_TOKEN env var containing a
+// signed token scoped to its kitchen so it can call back to the control plane
+// for agent delegation.
+func (m *Manager) SetSASecret(secret string) {
+	m.saSecret = secret
 }
 
 // Start spawns an agent process using the appropriate executor.
@@ -347,6 +357,23 @@ func (m *Manager) buildEnvironment(agent *models.Agent, port int) map[string]str
 	// Control plane URL — SDK uses this for callbacks (e.g. Pro checkpointer)
 	if cpURL := m.controlPlaneURL; cpURL != "" {
 		env["AGENTOVEN_CONTROL_PLANE_URL"] = cpURL
+	}
+
+	// Service-account token — lets the pod call back to the control plane for
+	// agent delegation (agentoven_delegate tool) using X-Service-Token auth.
+	if m.saSecret != "" {
+		tok, err := aoauth.GenerateToken(
+			[]byte(m.saSecret),
+			"agent:"+agent.Name,
+			agent.Kitchen,
+			"baker",
+			365*24*time.Hour,
+		)
+		if err == nil {
+			env["CONTROL_PLANE_TOKEN"] = tok
+		} else {
+			log.Warn().Err(err).Str("agent", agent.Name).Msg("failed to mint pod service-account token")
+		}
 	}
 
 	// Skills

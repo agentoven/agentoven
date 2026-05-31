@@ -364,11 +364,15 @@ func buildDeploymentManifest(deployName, namespace, image string, envList []map[
 					"labels": map[string]string{"app": deployName, "agentoven.dev/component": "agent"},
 				},
 				"spec": map[string]interface{}{
+					"imagePullSecrets": []map[string]interface{}{
+						{"name": "ghcr-credentials"},
+					},
 					"containers": []map[string]interface{}{{
-						"name":  "agent",
-						"image": image,
-						"ports": []map[string]interface{}{{"containerPort": 9000}},
-						"env":   envList,
+						"name":            "agent",
+						"image":           image,
+						"imagePullPolicy": "Always",
+						"ports":           []map[string]interface{}{{"containerPort": 9000}},
+						"env":             envList,
 						"readinessProbe": map[string]interface{}{
 							"httpGet":             map[string]interface{}{"path": "/health", "port": 9000},
 							"initialDelaySeconds": 5,
