@@ -319,6 +319,14 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 		r.Get("/.well-known/agent-card.json", h.ServeAgentSpecificCard)
 	})
 
+	// Environment-scoped A2A endpoints — /env/{envSlug}/agents/{agentName}/a2a
+	// When environments are configured, bake sets the A2A endpoint here.
+	// Clients calling this route get the backend for that specific environment.
+	r.Route("/env/{envSlug}/agents/{agentName}/a2a", func(r chi.Router) {
+		r.Post("/", h.A2AAgentEnvEndpoint)
+		r.Get("/.well-known/agent-card.json", h.ServeAgentSpecificCard)
+	})
+
 	// ── Integration Endpoints ────────────────────────────────
 
 	// LangChain adapter — expose AgentOven agents as LangChain tools

@@ -58,9 +58,23 @@ type Handlers struct {
 	// Pro: ProRecipeRunner — adds role-based env gating before delegating to the engine.
 	RecipeExecutor RecipeExecutorService
 
+	// AgentEnvStore is an optional Pro-only store interface for environment-scoped
+	// agent deployments. OSS leaves this nil; Pro injects the PostgresStore which
+	// satisfies AgentEnvironmentStore. The A2AAgentEnvEndpoint handler uses it to
+	// look up AgentEnvironment records and apply per-env guardrail policies.
+	AgentEnvStore AgentEnvironmentStore
+
 	// ServerInfo is the response for GET /api/v1/info.
 	// OSS sets CommunityServerInfo; Pro overrides with license data.
 	ServerInfo *models.ServerInfo
+}
+
+// AgentEnvironmentStore is the subset of Pro store methods needed by the OSS
+// env-scoped A2A handler. Pro injects a concrete implementation at startup;
+// OSS leaves the field nil and falls back to the legacy EnvEndpoints map.
+type AgentEnvironmentStore interface {
+	GetAgentEnvironment(ctx context.Context, kitchenID, agentName, envSlug string) (*models.AgentEnvironment, error)
+	UpdateAgentEnvStatus(ctx context.Context, id string, status models.AgentEnvStatus, errMsg string) error
 }
 
 // RecipeExecutorService is the interface for executing recipe runs.
@@ -365,7 +379,39 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 		// Version bumps happen on UpdateAgent (patch) and RecookAgent (minor).
 		agent.VersionBump = ""
 	}
-	agent.A2AEndpoint = "/agents/" + agentName + "/a2a"
+
+	// ── Resolve target environment ──────────────────────────────────────────
+	// If the kitchen has environments configured, the agent's A2A endpoint is
+	// the env-scoped path so clients can call /env/{slug}/agents/{name}/a2a.
+	// If no environments exist, fall back to the flat /agents/{name}/a2a path.
+	targetEnvSlug := req.Environment
+	envs, _ := h.Store.ListEnvironments(r.Context(), kitchen)
+	if len(envs) > 0 {
+		if targetEnvSlug == "" {
+			// Default to lowest-order environment (first in ORDER BY env_order ASC)
+			targetEnvSlug = envs[0].Slug
+		} else {
+			// Validate the requested env slug exists
+			validEnv := false
+			for _, e := range envs {
+				if e.Slug == targetEnvSlug {
+					validEnv = true
+					break
+				}
+			}
+			if !validEnv {
+				respondError(w, http.StatusBadRequest,
+					fmt.Sprintf("Environment '%s' does not exist in this kitchen. Available: %s",
+						targetEnvSlug, joinEnvSlugs(envs)))
+				return
+			}
+		}
+		agent.A2AEndpoint = "/env/" + targetEnvSlug + "/agents/" + agentName + "/a2a"
+	} else {
+		// No environments configured — use flat endpoint (backward compat)
+		agent.A2AEndpoint = "/agents/" + agentName + "/a2a"
+		targetEnvSlug = ""
+	}
 
 	if err := h.Store.UpdateAgent(r.Context(), agent); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
@@ -472,9 +518,9 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusAccepted, map[string]string{
 		"name":        agentName,
 		"version":     agent.Version,
-		"environment": req.Environment,
+		"environment": targetEnvSlug,
 		"status":      string(models.AgentStatusBaking),
-		"agent_card":  "/agents/" + agentName + "/a2a/.well-known/agent-card.json",
+		"agent_card":  agent.A2AEndpoint + "/.well-known/agent-card.json",
 	})
 }
 
@@ -2475,6 +2521,137 @@ func (h *Handlers) ResolveBackendEndpoint(agent *models.Agent) (string, string) 
 	return "", "unsupported_agent_mode"
 }
 
+// A2AAgentEnvEndpoint handles POST /env/{envSlug}/agents/{agentName}/a2a.
+// It resolves the backend endpoint scoped to the given environment's active
+// K8s workload, falling back to the agent's global backend if no env workload exists.
+func (h *Handlers) A2AAgentEnvEndpoint(w http.ResponseWriter, r *http.Request) {
+	agentName := chi.URLParam(r, "agentName")
+	envSlug := chi.URLParam(r, "envSlug")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	a2aError := func(code int, msg, data string) {
+		w.Header().Set("Content-Type", "application/a2a+json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"error":   map[string]interface{}{"code": code, "message": msg, "data": data},
+			"id":      nil,
+		})
+	}
+
+	// ── Scoped key access check (agent + environment) ────────────────────
+	if identity := pkgmw.GetIdentity(r.Context()); identity != nil && identity.Provider == "scoped-key" {
+		keyID := identity.Claims["key_id"]
+		scopedKey, err := h.Store.GetScopedKey(r.Context(), kitchen, keyID)
+		if err != nil || !scopedKey.CanAccessAgent(agentName) {
+			a2aError(-32001, "Forbidden", fmt.Sprintf("Scoped key does not have access to agent '%s'", agentName))
+			return
+		}
+		if !scopedKey.CanAccessEnvironment(envSlug) {
+			a2aError(-32001, "Forbidden", fmt.Sprintf("Scoped key does not have access to environment '%s'", envSlug))
+			return
+		}
+	}
+
+	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
+	if err != nil {
+		a2aError(-32001, "Agent not found", "Agent '"+agentName+"' is not registered")
+		return
+	}
+
+	// ── Pro path: use AgentEnvironment record if available ───────────────
+	if h.AgentEnvStore != nil {
+		ae, err := h.AgentEnvStore.GetAgentEnvironment(r.Context(), kitchen, agentName, envSlug)
+		if err != nil {
+			a2aError(-32002, "Environment not found", fmt.Sprintf("Agent '%s' has no deployment in environment '%s'", agentName, envSlug))
+			return
+		}
+		if ae.Status != models.AgentEnvStatusReady {
+			a2aError(-32002, "Environment not ready", fmt.Sprintf("Agent '%s' in environment '%s' is %s", agentName, envSlug, ae.Status))
+			return
+		}
+
+		// Resolve effective guardrails based on ae.GuardrailPolicy
+		effectiveGuardrails := h.resolveEnvGuardrails(agent.Guardrails, ae)
+
+		// ── Input guardrails ─────────────────────────────────────────────
+		if h.Guardrails != nil && len(effectiveGuardrails) > 0 {
+			body, _ := io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			input := string(body)
+			eval, gErr := h.Guardrails.EvaluateInput(r.Context(), effectiveGuardrails, input)
+			if gErr != nil {
+				log.Warn().Err(gErr).Str("agent", agentName).Str("env", envSlug).Msg("Input guardrail eval error (env)")
+				h.emitGuardrailAuditEnv(r.Context(), kitchen, agentName, envSlug, "input", nil, gErr)
+			} else if !eval.Passed {
+				h.emitGuardrailAuditEnv(r.Context(), kitchen, agentName, envSlug, "input", eval, nil)
+				w.Header().Set("Content-Type", "application/a2a+json")
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"jsonrpc": "2.0",
+					"error": map[string]interface{}{
+						"code":    -32001,
+						"message": "Input blocked by guardrails",
+						"data":    eval.Results,
+					},
+					"id": nil,
+				})
+				return
+			}
+		}
+
+		log.Info().Str("agent", agentName).Str("env", envSlug).
+			Str("backend", sanitizeURLForLog(ae.BackendEndpoint)).
+			Msg("Proxying env-scoped A2A request (Pro)")
+
+		// Emit audit event with environment field
+		h.emitEnvA2AAudit(r.Context(), kitchen, agentName, envSlug)
+
+		h.proxyA2ARequest(w, r, ae.BackendEndpoint, agentName)
+		return
+	}
+
+	// ── OSS fallback path ─────────────────────────────────────────────────
+	if agent.Status != models.AgentStatusReady {
+		a2aError(-32002, "Agent not ready", "Agent '"+agentName+"' status is "+string(agent.Status))
+		return
+	}
+
+	// Resolve env-specific backend: look for the A2A endpoint registered
+	// for this environment slug on the agent record, then fall back to global.
+	backendURL, backendReason := h.resolveEnvBackendEndpoint(agent, envSlug)
+	if backendURL == "" {
+		a2aError(-32003, "No backend available", "Agent has no backend for environment '"+envSlug+"'")
+		return
+	}
+
+	log.Info().
+		Str("agent", agentName).
+		Str("env", envSlug).
+		Str("backend", sanitizeURLForLog(backendURL)).
+		Str("reason", backendReason).
+		Msg("Proxying env-scoped A2A request to agent backend")
+
+	h.proxyA2ARequest(w, r, backendURL, agentName)
+}
+
+// resolveEnvBackendEndpoint finds the backend URL for an agent in a specific
+// environment. Checks agent.EnvEndpoints[envSlug] first (set by the operator
+// when a K8s workload reaches Running in that env), then falls back to the
+// global ResolveBackendEndpoint.
+func (h *Handlers) resolveEnvBackendEndpoint(agent *models.Agent, envSlug string) (string, string) {
+	// Env-specific endpoint map populated by the operator per-env workload
+	if agent.EnvEndpoints != nil {
+		if ep, ok := agent.EnvEndpoints[envSlug]; ok && ep != "" {
+			return ep, "env_backend_endpoint"
+		}
+	}
+	// Fall back to global backend (handles non-env baked agents gracefully)
+	url, reason := h.ResolveBackendEndpoint(agent)
+	if url != "" {
+		return url, "global_fallback_" + reason
+	}
+	return "", "no_backend_for_env_" + envSlug
+}
+
 func sanitizeURLForLog(raw string) string {
 	if raw == "" {
 		return raw
@@ -2483,6 +2660,122 @@ func sanitizeURLForLog(raw string) string {
 		return raw[:i] + "?<redacted>"
 	}
 	return raw
+}
+
+// resolveEnvGuardrails returns the effective guardrail list for an env-scoped
+// request based on the AgentEnvironment.GuardrailPolicy field:
+//   - "inherit"  → agent-level guardrails (default)
+//   - "strict"   → agent-level + ae.RequiredGuardrails
+//   - "relaxed"  → agent-level minus ae.DisabledGuardrails
+//   - "disabled" → empty (no guardrails)
+func (h *Handlers) resolveEnvGuardrails(agentGuardrails []models.Guardrail, ae *models.AgentEnvironment) []models.Guardrail {
+	switch ae.GuardrailPolicy {
+	case "disabled":
+		return nil
+	case "strict":
+		merged := make([]models.Guardrail, len(agentGuardrails))
+		copy(merged, agentGuardrails)
+	outer:
+		for _, reqID := range ae.RequiredGuardrails {
+			for _, existing := range merged {
+				if existing.ID == reqID {
+					continue outer
+				}
+			}
+			// Append a minimal synthetic guardrail for required IDs not already present.
+			merged = append(merged, models.Guardrail{ID: reqID, Enabled: true})
+		}
+		return merged
+	case "relaxed":
+		disabled := make(map[string]bool, len(ae.DisabledGuardrails))
+		for _, g := range ae.DisabledGuardrails {
+			disabled[g] = true
+		}
+		var out []models.Guardrail
+		for _, g := range agentGuardrails {
+			if !disabled[g.ID] {
+				out = append(out, g)
+			}
+		}
+		return out
+	default: // "inherit" or empty
+		return agentGuardrails
+	}
+}
+
+// emitGuardrailAuditEnv emits a guardrail audit event with environment context.
+func (h *Handlers) emitGuardrailAuditEnv(ctx context.Context, kitchen, agentName, envSlug, stage string, eval *models.GuardrailEvaluation, guardrailErr error) {
+	if h.Store == nil {
+		return
+	}
+	identity := pkgmw.GetIdentity(ctx)
+	userID, userEmail, provider := "", "", ""
+	if identity != nil {
+		userID = identity.Subject
+		userEmail = identity.Email
+		if userEmail == "" {
+			userEmail = identity.DisplayName
+		}
+		provider = identity.Provider
+	}
+	action := "guardrail." + stage + "_blocked"
+	status := http.StatusForbidden
+	details := map[string]interface{}{"agent": agentName, "env": envSlug, "stage": stage, "provider": provider}
+	if guardrailErr != nil {
+		action = "guardrail." + stage + "_error"
+		status = http.StatusInternalServerError
+		details["error"] = guardrailErr.Error()
+	}
+	if eval != nil {
+		details["results"] = eval.Results
+		details["passed"] = eval.Passed
+	}
+	_ = h.Store.CreateAuditEvent(ctx, &models.AuditEvent{
+		ID:                 uuid.New().String(),
+		Timestamp:          time.Now().UTC(),
+		UserID:             userID,
+		UserEmail:          userEmail,
+		Action:             action,
+		Resource:           "guardrails",
+		ResourceID:         agentName,
+		Kitchen:            kitchen,
+		Environment:        envSlug,
+		Details:            details,
+		ResponseStatus:     status,
+		RegulationTags:     []string{"compliance", "guardrails"},
+		DataClassification: "restricted",
+	})
+}
+
+// emitEnvA2AAudit records an audit event for an env-scoped A2A proxy call.
+func (h *Handlers) emitEnvA2AAudit(ctx context.Context, kitchen, agentName, envSlug string) {
+	if h.Store == nil {
+		return
+	}
+	identity := pkgmw.GetIdentity(ctx)
+	userID, userEmail := "", ""
+	if identity != nil {
+		userID = identity.Subject
+		userEmail = identity.Email
+		if userEmail == "" {
+			userEmail = identity.DisplayName
+		}
+	}
+	_ = h.Store.CreateAuditEvent(ctx, &models.AuditEvent{
+		ID:                 uuid.New().String(),
+		Timestamp:          time.Now().UTC(),
+		UserID:             userID,
+		UserEmail:          userEmail,
+		Action:             "agent.a2a_env_proxy",
+		Resource:           "agent",
+		ResourceID:         agentName,
+		Kitchen:            kitchen,
+		Environment:        envSlug,
+		Details:            map[string]interface{}{"agent": agentName, "env": envSlug},
+		ResponseStatus:     http.StatusOK,
+		RegulationTags:     []string{"access"},
+		DataClassification: "internal",
+	})
 }
 
 // proxyA2ARequest relays an HTTP request to a backend agent endpoint and
@@ -4114,6 +4407,15 @@ func (h *Handlers) CountAuditEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── Helpers ──────────────────────────────────────────────────
+
+// joinEnvSlugs returns a comma-separated list of environment slugs for error messages.
+func joinEnvSlugs(envs []models.Environment) string {
+	slugs := make([]string, len(envs))
+	for i, e := range envs {
+		slugs[i] = e.Slug
+	}
+	return strings.Join(slugs, ", ")
+}
 
 func respondJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")

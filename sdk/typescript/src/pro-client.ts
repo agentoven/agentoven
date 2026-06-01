@@ -26,6 +26,7 @@
  */
 
 import type {
+  AgentEnvironment,
   AgentOvenClientOptions,
   AuditEvent,
   CreateGuardrailRequest,
@@ -39,12 +40,14 @@ import type {
   KitchenMember,
   Promotion,
   Schedule,
+  ScopedAPIKey,
   ServerInfo,
   ServiceAccount,
   Session,
   TestRun,
   TestSuite,
   TraceabilityMatrix,
+  UpsertAgentEnvironmentRequest,
   User,
   UserRole,
   Workload,
@@ -285,13 +288,42 @@ export class ProClient {
     return this.get(`/api/v1/workloads/${workloadId}`);
   }
 
+  // ── Agent environments (Pro) ───────────────────────────────────────────────
+
+  /** List all environment deployments for an agent. */
+  async listAgentEnvironments(agentName: string): Promise<AgentEnvironment[]> {
+    return this.get(`/api/v1/agents/${agentName}/environments`);
+  }
+
+  /** Get a specific environment deployment. */
+  async getAgentEnvironment(agentName: string, envSlug: string): Promise<AgentEnvironment> {
+    return this.get(`/api/v1/agents/${agentName}/environments/${envSlug}`);
+  }
+
+  /** Create or update an agent environment deployment. */
+  async upsertAgentEnvironment(agentName: string, envSlug: string, req: UpsertAgentEnvironmentRequest): Promise<AgentEnvironment> {
+    return this.put(`/api/v1/agents/${agentName}/environments/${envSlug}`, req);
+  }
+
+  /** Initiate cool-down / removal of an agent environment deployment. */
+  async deleteAgentEnvironment(agentName: string, envSlug: string): Promise<void> {
+    return this.delete(`/api/v1/agents/${agentName}/environments/${envSlug}`);
+  }
+
+  // ── Scoped API keys (Pro) ─────────────────────────────────────────────────
+
+  async listScopedKeys(): Promise<ScopedAPIKey[]> {
+    return this.get('/api/v1/keys');
+  }
+
   // ── Audit events ───────────────────────────────────────────────────────────
 
-  async listAuditEvents(opts: { limit?: number; action?: string; agent?: string } = {}): Promise<AuditEvent[]> {
+  async listAuditEvents(opts: { limit?: number; action?: string; agent?: string; environment?: string } = {}): Promise<AuditEvent[]> {
     const params = new URLSearchParams();
     if (opts.limit) params.set('limit', String(opts.limit));
     if (opts.action) params.set('action', opts.action);
     if (opts.agent) params.set('agent', opts.agent);
+    if (opts.environment) params.set('environment', opts.environment);
     const qs = params.toString() ? `?${params.toString()}` : '';
     return this.get(`/api/v1/audit${qs}`);
   }

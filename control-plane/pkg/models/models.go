@@ -231,9 +231,13 @@ type Agent struct {
 	// (always /agents/{name}/a2a). BackendEndpoint is the actual backend
 	// URL where the agent process or external service lives. The control
 	// plane proxies A2A calls from A2AEndpoint → BackendEndpoint (ADR-0007).
-	A2AEndpoint     string   `json:"a2a_endpoint,omitempty" db:"a2a_endpoint"`
-	BackendEndpoint string   `json:"backend_endpoint,omitempty" db:"backend_endpoint"`
-	Skills          []string `json:"skills,omitempty"`
+	A2AEndpoint     string            `json:"a2a_endpoint,omitempty" db:"a2a_endpoint"`
+	BackendEndpoint string            `json:"backend_endpoint,omitempty" db:"backend_endpoint"`
+	// EnvEndpoints maps environment slug → backend endpoint for env-scoped routing.
+	// Populated by the operator when a K8s workload reaches Running in that env.
+	// e.g. {"dev": "http://ao-my-agent.dev.svc.cluster.local:9000", "prod": "..."}
+	EnvEndpoints    map[string]string `json:"env_endpoints,omitempty" db:"env_endpoints"`
+	Skills          []string          `json:"skills,omitempty"`
 
 	// Model Configuration
 	ModelProvider string `json:"model_provider,omitempty" db:"model_provider"`
@@ -1387,18 +1391,20 @@ type AuditEvent struct {
 	ResponseStatus     int                    `json:"response_status" db:"response_status"`
 	RegulationTags     []string               `json:"regulation_tags,omitempty"`     // HIPAA, SOC2, GxP, GDPR
 	DataClassification string                 `json:"data_classification,omitempty"` // public, internal, confidential, restricted
+	Environment        string                 `json:"environment,omitempty" db:"environment"` // env slug — set on env-scoped A2A calls
 }
 
 // AuditFilter provides query options for listing audit events.
 type AuditFilter struct {
-	Kitchen  string
-	UserID   string
-	Action   string
-	Resource string
-	Since    *time.Time
-	Until    *time.Time
-	Limit    int
-	Offset   int
+	Kitchen     string
+	UserID      string
+	Action      string
+	Resource    string
+	Environment string
+	Since       *time.Time
+	Until       *time.Time
+	Limit       int
+	Offset      int
 }
 
 // ── Approval Records ─────────────────────────────────────────
@@ -1883,6 +1889,109 @@ type PromotionResult struct {
 	PromotedAt   time.Time `json:"promoted_at"`
 }
 
+// ── Agent Environment (Pro) ──────────────────────────────────
+
+// AgentEnvStatus tracks the lifecycle of an agent deployment within a specific environment.
+type AgentEnvStatus string
+
+const (
+	AgentEnvStatusPending AgentEnvStatus = "pending" // created, workload not yet scheduled
+	AgentEnvStatusBaking  AgentEnvStatus = "baking"  // workload deploying / provider validating
+	AgentEnvStatusReady   AgentEnvStatus = "ready"   // live and serving A2A traffic
+	AgentEnvStatusBurnt   AgentEnvStatus = "burnt"   // deployment or provider test failed
+	AgentEnvStatusCooled  AgentEnvStatus = "cooled"  // deliberately stopped
+)
+
+// AgentEnvironment represents one independent deployment of an agent within a
+// specific environment. Each env gets its own:
+//
+//   - Provider/model binding   (cost tier: dev=gpt-4o-mini, prod=gpt-4o)
+//   - Tool overrides           (mock endpoints in dev, real services in prod)
+//   - Version lock             (exact snapshot of ingredients baked into this env)
+//   - K8s workload + backend endpoint
+//
+// Baking into "dev" and baking into "prod" produce two completely independent
+// AgentEnvironment records. Promotion copies the version-locked config from one
+// env to the next without re-baking — same image, same resolved ingredients.
+//
+// UNIQUE constraint: (kitchen_id, agent_name, env_slug) — one live deployment per env.
+type AgentEnvironment struct {
+	ID        string         `json:"id" db:"id"`
+	KitchenID string         `json:"kitchen_id" db:"kitchen_id"`
+	AgentName string         `json:"agent_name" db:"agent_name"`
+	EnvSlug   string         `json:"env_slug" db:"env_slug"`
+	Status    AgentEnvStatus `json:"status" db:"status"`
+
+	// Version lock — exact snapshot of the agent at bake time.
+	AgentVersion string `json:"agent_version" db:"agent_version"` // semver e.g. "1.3.0"
+	Image        string `json:"image,omitempty" db:"image"`        // container image:tag
+	RecipeHash   string `json:"recipe_hash,omitempty" db:"recipe_hash"` // SHA-256 of resolved ingredients JSON
+
+	// Provider/model override for this env.
+	// Empty string → inherit from the parent agent's ModelProvider / ModelName.
+	// Setting these per-env enables cost tiering without forking the agent definition.
+	ProviderName string `json:"provider_name,omitempty" db:"provider_name"`
+	ModelName    string `json:"model_name,omitempty" db:"model_name"`
+
+	// ProviderOverrides: key-value config merged into the provider at bake time.
+	// Examples:
+	//   {"model": "gpt-4o-mini"}                       → cheaper model in dev
+	//   {"base_url": "http://mock-llm.dev.svc:8080"}   → local stub
+	//   {"temperature": 0}                             → deterministic in test
+	ProviderOverrides map[string]interface{} `json:"provider_overrides,omitempty"`
+
+	// ToolOverrides: per-tool config overrides applied at bake time.
+	// Key = tool name (ingredient ID), value = override map.
+	// Examples:
+	//   {"weather": {"endpoint": "http://mock-weather.dev.svc"}}
+	//   {"search":  {"api_key": "test-key", "index": "dev-index"}}
+	ToolOverrides map[string]interface{} `json:"tool_overrides,omitempty"`
+
+	// Deployment references — populated after the workload is running.
+	WorkloadID      string `json:"workload_id,omitempty" db:"workload_id"`
+	BackendEndpoint string `json:"backend_endpoint,omitempty" db:"backend_endpoint"` // in-cluster DNS
+	A2AEndpoint     string `json:"a2a_endpoint,omitempty" db:"a2a_endpoint"`         // public control-plane path
+
+	// Provenance
+	BakedBy      string     `json:"baked_by,omitempty" db:"baked_by"`
+	BakedAt      *time.Time `json:"baked_at,omitempty" db:"baked_at"`
+	PromotedFrom string     `json:"promoted_from,omitempty" db:"promoted_from"` // source env slug if promoted
+
+	// GuardrailPolicy controls which guardrails run for A2A calls on this env deployment.
+	//   "inherit"  (default) — use the agent's []Guardrails as-is.
+	//   "strict"   — agent guardrails + RequiredGuardrails; DisabledGuardrails ignored.
+	//   "relaxed"  — agent guardrails minus DisabledGuardrails.
+	//   "disabled" — no guardrails at all (logged as a warning; dev/test only).
+	GuardrailPolicy    string   `json:"guardrail_policy,omitempty" db:"guardrail_policy"`
+	RequiredGuardrails []string `json:"required_guardrails,omitempty"` // IDs that MUST run (strict only)
+	DisabledGuardrails []string `json:"disabled_guardrails,omitempty"` // IDs to skip (relaxed only)
+
+	// ErrorMessage is set when Status = "burnt".
+	ErrorMessage string `json:"error_message,omitempty" db:"error_message"`
+
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// BakeRequest carries the optional body of a bake call, including
+// env-specific provider/tool overrides.
+type BakeRequest struct {
+	Version           string                 `json:"version,omitempty"`
+	Environment       string                 `json:"environment,omitempty"`
+	ProviderName      string                 `json:"provider_name,omitempty"`
+	ModelName         string                 `json:"model_name,omitempty"`
+	ProviderOverrides map[string]interface{} `json:"provider_overrides,omitempty"`
+	ToolOverrides     map[string]interface{} `json:"tool_overrides,omitempty"`
+	// BackendURL is set for external agents — the env-specific service endpoint.
+	// When provided, no K8s workload is created; the AgentEnvironment is marked
+	// ready immediately after provider validation.
+	BackendURL string `json:"backend_url,omitempty"`
+	// Image is set for framework-native K8s agents (langchain, crewai, custom).
+	// Must be a fully-qualified container image reference (registry/name:tag).
+	// Ignored for managed agents (the platform runner image is used instead).
+	Image string `json:"image,omitempty"`
+}
+
 // ── Agent Deployment (Pro, R9) ──────────────────────────────
 
 // DeploymentStatus tracks the lifecycle of an agent deployment in an environment.
@@ -2145,8 +2254,9 @@ type ScopedAPIKey struct {
 	KeyHash    string     `json:"-"`          // bcrypt hash, never in JSON responses
 	KeyPrefix  string     `json:"key_prefix"` // first 8 chars for identification (e.g. "ao_sk_Ab")
 	Kitchen    string     `json:"kitchen"`
-	AgentNames []string   `json:"agent_names"` // which agents this key can invoke
-	Label      string     `json:"label"`       // human-readable name ("marketing-team", "demo-key")
+	AgentNames        []string   `json:"agent_names"`         // which agents this key can invoke
+	EnvironmentNames  []string   `json:"environment_names"`   // which envs this key can call; ["*"] = all
+	Label             string     `json:"label"`               // human-readable name ("marketing-team", "demo-key")
 	MaxCalls   int        `json:"max_calls"`   // 0 = unlimited
 	CallCount  int        `json:"call_count"`  // current usage
 	Role       string     `json:"role"`        // one of: admin, chef, baker, auditor, finance, viewer (default: viewer)
@@ -2177,6 +2287,21 @@ func (k *ScopedAPIKey) IsQuotaExceeded() bool {
 func (k *ScopedAPIKey) CanAccessAgent(agentName string) bool {
 	for _, name := range k.AgentNames {
 		if name == agentName || name == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+// CanAccessEnvironment returns true if the key is permitted to call the given
+// environment. A value of "*" grants access to all environments.
+// An empty EnvironmentNames slice is treated as "*" for backward compatibility.
+func (k *ScopedAPIKey) CanAccessEnvironment(envSlug string) bool {
+	if len(k.EnvironmentNames) == 0 {
+		return true
+	}
+	for _, e := range k.EnvironmentNames {
+		if e == envSlug || e == "*" {
 			return true
 		}
 	}

@@ -247,6 +247,65 @@ export interface Workload {
   namespace: string;
   image: string;
   status: string;
+  environment_slug?: string;
+  created_at: string;
+}
+
+// ── Agent Environment (Pro) ───────────────────────────────────────────────────
+
+export type AgentEnvStatus = 'baking' | 'ready' | 'error' | 'cooling';
+export type GuardrailPolicy = 'inherit' | 'strict' | 'relaxed' | 'disabled';
+
+export interface AgentEnvironment {
+  id: string;
+  kitchen_id: string;
+  agent_name: string;
+  env_slug: string;
+  version: string;
+  provider_name: string;
+  model_name: string;
+  provider_overrides?: Record<string, unknown>;
+  tool_overrides?: Record<string, unknown>;
+  guardrail_policy: GuardrailPolicy;
+  required_guardrails: string[];
+  disabled_guardrails: string[];
+  status: AgentEnvStatus;
+  backend_endpoint: string;
+  workload_id?: string;
+  error_message?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UpsertAgentEnvironmentRequest {
+  version?: string;
+  provider_name?: string;
+  model_name?: string;
+  provider_overrides?: Record<string, unknown>;
+  tool_overrides?: Record<string, unknown>;
+  guardrail_policy?: GuardrailPolicy;
+  required_guardrails?: string[];
+  disabled_guardrails?: string[];
+  backend_endpoint?: string;
+}
+
+// ── Scoped API Key (Pro) ──────────────────────────────────────────────────────
+
+export interface ScopedAPIKey {
+  id: string;
+  name: string;
+  prefix: string;
+  agent_name: string;
+  kitchen: string;
+  scopes: string[];
+  /** Glob list of allowed environment slugs. "*" means all environments. */
+  environment_names: string[];
+  quota: number;
+  call_count: number;
+  expires_at?: string;
+  last_used_at?: string;
+  revoked: boolean;
+  created_by: string;
   created_at: string;
 }
 
@@ -258,6 +317,8 @@ export interface AuditEvent {
   actor: string;
   kitchen: string;
   agent?: string;
+  /** Environment slug for env-scoped events (e.g. A2A proxy, guardrail blocks). */
+  environment?: string;
   resource_kind: string;
   resource_id: string;
   timestamp: string;

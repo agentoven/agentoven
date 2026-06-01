@@ -368,6 +368,60 @@ class AgentOvenClient:
     def get_workload(self, workload_id: str) -> dict[str, Any]:
         return self._get(f"/api/v1/workloads/{workload_id}")
 
+    # ── Agent Environments (Pro) ─────────────────────────────────────────
+    # Per-agent environment deployments: bake with provider/model overrides,
+    # guardrail policy, and optional external backend URL.
+
+    def list_agent_environments(self, agent_name: str) -> list[dict[str, Any]]:
+        """List all environment deployments for an agent."""
+        return self._get(f"/api/v1/agents/{agent_name}/environments")
+
+    def get_agent_environment(self, agent_name: str, env_slug: str) -> dict[str, Any]:
+        """Get a specific environment deployment for an agent."""
+        return self._get(f"/api/v1/agents/{agent_name}/environments/{env_slug}")
+
+    def upsert_agent_environment(
+        self,
+        agent_name: str,
+        env_slug: str,
+        version: Optional[str] = None,
+        provider_name: Optional[str] = None,
+        model_name: Optional[str] = None,
+        provider_overrides: Optional[dict[str, Any]] = None,
+        tool_overrides: Optional[dict[str, Any]] = None,
+        guardrail_policy: str = "inherit",
+        required_guardrails: Optional[list[str]] = None,
+        disabled_guardrails: Optional[list[str]] = None,
+        backend_endpoint: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Create or update an agent environment deployment.
+
+        :param guardrail_policy: One of "inherit", "strict", "relaxed", "disabled".
+        :param backend_endpoint: For external agents only — the A2A backend URL.
+        """
+        body: dict[str, Any] = {"guardrail_policy": guardrail_policy}
+        if version is not None:
+            body["version"] = version
+        if provider_name is not None:
+            body["provider_name"] = provider_name
+        if model_name is not None:
+            body["model_name"] = model_name
+        if provider_overrides is not None:
+            body["provider_overrides"] = provider_overrides
+        if tool_overrides is not None:
+            body["tool_overrides"] = tool_overrides
+        if required_guardrails is not None:
+            body["required_guardrails"] = required_guardrails
+        if disabled_guardrails is not None:
+            body["disabled_guardrails"] = disabled_guardrails
+        if backend_endpoint is not None:
+            body["backend_endpoint"] = backend_endpoint
+        return self._put(f"/api/v1/agents/{agent_name}/environments/{env_slug}", body)
+
+    def delete_agent_environment(self, agent_name: str, env_slug: str) -> dict[str, Any]:
+        """Initiate cool-down / removal of an agent environment deployment."""
+        return self._delete(f"/api/v1/agents/{agent_name}/environments/{env_slug}")
+
     # ── Audit (OSS route, exposed here for convenience) ───────────────────
 
     def list_audit_events(
@@ -375,12 +429,15 @@ class AgentOvenClient:
         limit: int = 50,
         action: Optional[str] = None,
         agent: Optional[str] = None,
+        environment: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         params: list[str] = [f"limit={limit}"]
         if action:
             params.append(f"action={action}")
         if agent:
             params.append(f"agent={agent}")
+        if environment:
+            params.append(f"environment={environment}")
         return self._get("/api/v1/audit?" + "&".join(params))
 
     # ── Traces (OSS route) ────────────────────────────────────────────────
