@@ -269,6 +269,19 @@ type Agent struct {
 	CreatedBy string            `json:"created_by,omitempty" db:"created_by"`
 }
 
+// MarshalJSON serialises Agent to JSON, injecting the computed "created_epoch"
+// field (Unix seconds of CreatedAt) alongside all regular struct fields.
+func (a Agent) MarshalJSON() ([]byte, error) {
+	type Alias Agent
+	return json.Marshal(&struct {
+		Alias
+		CreatedEpoch int64 `json:"created_epoch"`
+	}{
+		Alias:        Alias(a),
+		CreatedEpoch: a.CreatedAt.Unix(),
+	})
+}
+
 // IsFrameworkNative returns true when the agent's LLM loop runs in a user-managed
 // process rather than AgentOven's built-in Go executor. When true, InvokeAgent
 // proxies the call to the spawned process's /invoke endpoint instead of running
