@@ -318,7 +318,7 @@ class AgentOvenClient:
         """
         return self._post(
             "/api/v1/schedules",
-            {"recipe_name": recipe_name, "cron": cron, "timezone": timezone, "enabled": enabled, **kwargs},
+            {"recipe_name": recipe_name, "cron_expr": cron, "timezone": timezone, "enabled": enabled, **kwargs},
         )
 
     def update_schedule(self, schedule_id: str, **fields: Any) -> dict[str, Any]:

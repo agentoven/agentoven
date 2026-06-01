@@ -1040,6 +1040,16 @@ func (h *Handlers) CreateRecipe(w http.ResponseWriter, r *http.Request) {
 	req.CreatedAt = time.Now().UTC()
 	req.UpdatedAt = time.Now().UTC()
 
+	// Normalize client-facing "agent" field into AgentRef used by the engine.
+	for i := range req.Steps {
+		if req.Steps[i].AgentRef == "" && req.Steps[i].Agent != "" {
+			req.Steps[i].AgentRef = req.Steps[i].Agent
+		}
+		if req.Steps[i].Agent == "" && req.Steps[i].AgentRef != "" {
+			req.Steps[i].Agent = req.Steps[i].AgentRef
+		}
+	}
+
 	if err := h.Store.CreateRecipe(r.Context(), &req); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1089,6 +1099,15 @@ func (h *Handlers) UpdateRecipe(w http.ResponseWriter, r *http.Request) {
 		recipe.Description = req.Description
 	}
 	if len(req.Steps) > 0 {
+		// Normalize client-facing "agent" field into AgentRef used by the engine.
+		for i := range req.Steps {
+			if req.Steps[i].AgentRef == "" && req.Steps[i].Agent != "" {
+				req.Steps[i].AgentRef = req.Steps[i].Agent
+			}
+			if req.Steps[i].Agent == "" && req.Steps[i].AgentRef != "" {
+				req.Steps[i].Agent = req.Steps[i].AgentRef
+			}
+		}
 		recipe.Steps = req.Steps
 	}
 	recipe.UpdatedAt = time.Now().UTC()

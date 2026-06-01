@@ -231,13 +231,13 @@ type Agent struct {
 	// (always /agents/{name}/a2a). BackendEndpoint is the actual backend
 	// URL where the agent process or external service lives. The control
 	// plane proxies A2A calls from A2AEndpoint → BackendEndpoint (ADR-0007).
-	A2AEndpoint     string            `json:"a2a_endpoint,omitempty" db:"a2a_endpoint"`
-	BackendEndpoint string            `json:"backend_endpoint,omitempty" db:"backend_endpoint"`
+	A2AEndpoint     string `json:"a2a_endpoint,omitempty" db:"a2a_endpoint"`
+	BackendEndpoint string `json:"backend_endpoint,omitempty" db:"backend_endpoint"`
 	// EnvEndpoints maps environment slug → backend endpoint for env-scoped routing.
 	// Populated by the operator when a K8s workload reaches Running in that env.
 	// e.g. {"dev": "http://ao-my-agent.dev.svc.cluster.local:9000", "prod": "..."}
-	EnvEndpoints    map[string]string `json:"env_endpoints,omitempty" db:"env_endpoints"`
-	Skills          []string          `json:"skills,omitempty"`
+	EnvEndpoints map[string]string `json:"env_endpoints,omitempty" db:"env_endpoints"`
+	Skills       []string          `json:"skills,omitempty"`
 
 	// Model Configuration
 	ModelProvider string `json:"model_provider,omitempty" db:"model_provider"`
@@ -346,6 +346,7 @@ type Step struct {
 	Name        string                 `json:"name"`
 	Kind        StepKind               `json:"kind"`
 	AgentRef    string                 `json:"agent_ref,omitempty"`
+	Agent       string                 `json:"agent,omitempty"` // client-facing alias for AgentRef
 	DependsOn   []string               `json:"depends_on,omitempty"`
 	Config      map[string]interface{} `json:"config,omitempty"`
 	MaxRetries  int                    `json:"max_retries,omitempty"`
@@ -1389,8 +1390,8 @@ type AuditEvent struct {
 	IP                 string                 `json:"ip" db:"ip"`
 	UserAgent          string                 `json:"user_agent" db:"user_agent"`
 	ResponseStatus     int                    `json:"response_status" db:"response_status"`
-	RegulationTags     []string               `json:"regulation_tags,omitempty"`     // HIPAA, SOC2, GxP, GDPR
-	DataClassification string                 `json:"data_classification,omitempty"` // public, internal, confidential, restricted
+	RegulationTags     []string               `json:"regulation_tags,omitempty"`              // HIPAA, SOC2, GxP, GDPR
+	DataClassification string                 `json:"data_classification,omitempty"`          // public, internal, confidential, restricted
 	Environment        string                 `json:"environment,omitempty" db:"environment"` // env slug — set on env-scoped A2A calls
 }
 
@@ -1923,8 +1924,8 @@ type AgentEnvironment struct {
 	Status    AgentEnvStatus `json:"status" db:"status"`
 
 	// Version lock — exact snapshot of the agent at bake time.
-	AgentVersion string `json:"agent_version" db:"agent_version"` // semver e.g. "1.3.0"
-	Image        string `json:"image,omitempty" db:"image"`        // container image:tag
+	AgentVersion string `json:"agent_version" db:"agent_version"`       // semver e.g. "1.3.0"
+	Image        string `json:"image,omitempty" db:"image"`             // container image:tag
 	RecipeHash   string `json:"recipe_hash,omitempty" db:"recipe_hash"` // SHA-256 of resolved ingredients JSON
 
 	// Provider/model override for this env.
@@ -2250,21 +2251,21 @@ type APIKeyEntry struct {
 // Key format: "ao_sk_<random>" — 32 bytes, base62 encoded.
 // Stored as bcrypt hash, never in plaintext after creation.
 type ScopedAPIKey struct {
-	ID         string     `json:"id"`
-	KeyHash    string     `json:"-"`          // bcrypt hash, never in JSON responses
-	KeyPrefix  string     `json:"key_prefix"` // first 8 chars for identification (e.g. "ao_sk_Ab")
-	Kitchen    string     `json:"kitchen"`
-	AgentNames        []string   `json:"agent_names"`         // which agents this key can invoke
-	EnvironmentNames  []string   `json:"environment_names"`   // which envs this key can call; ["*"] = all
-	Label             string     `json:"label"`               // human-readable name ("marketing-team", "demo-key")
-	MaxCalls   int        `json:"max_calls"`   // 0 = unlimited
-	CallCount  int        `json:"call_count"`  // current usage
-	Role       string     `json:"role"`        // one of: admin, chef, baker, auditor, finance, viewer (default: viewer)
-	ExpiresAt  *time.Time `json:"expires_at"`  // nil = never expires
-	CreatedBy  string     `json:"created_by"`  // Identity.Subject who created this key
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
-	Revoked    bool       `json:"revoked"`
+	ID               string     `json:"id"`
+	KeyHash          string     `json:"-"`          // bcrypt hash, never in JSON responses
+	KeyPrefix        string     `json:"key_prefix"` // first 8 chars for identification (e.g. "ao_sk_Ab")
+	Kitchen          string     `json:"kitchen"`
+	AgentNames       []string   `json:"agent_names"`       // which agents this key can invoke
+	EnvironmentNames []string   `json:"environment_names"` // which envs this key can call; ["*"] = all
+	Label            string     `json:"label"`             // human-readable name ("marketing-team", "demo-key")
+	MaxCalls         int        `json:"max_calls"`         // 0 = unlimited
+	CallCount        int        `json:"call_count"`        // current usage
+	Role             string     `json:"role"`              // one of: admin, chef, baker, auditor, finance, viewer (default: viewer)
+	ExpiresAt        *time.Time `json:"expires_at"`        // nil = never expires
+	CreatedBy        string     `json:"created_by"`        // Identity.Subject who created this key
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+	Revoked          bool       `json:"revoked"`
 }
 
 // IsExpired returns true if the key has passed its expiration time.
