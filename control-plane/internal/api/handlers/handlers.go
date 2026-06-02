@@ -3361,18 +3361,16 @@ func (h *Handlers) StreamAgentLogs(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("X-Accel-Buffering", "no")
-
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			respondError(w, http.StatusInternalServerError, "streaming not supported")
-			return
-		}
+		rc := http.NewResponseController(w)
 
 		for _, entry := range entries {
 			data, _ := json.Marshal(entry)
 			fmt.Fprintf(w, "data: %s\n\n", data)
 		}
-		flusher.Flush()
+		if err := rc.Flush(); err != nil {
+			respondError(w, http.StatusInternalServerError, "streaming not supported")
+			return
+		}
 
 		ch, err := h.ProcessManager.SubscribeK8sLogs(r.Context(), kitchen, agentName, 100)
 		if err != nil {
@@ -3389,7 +3387,9 @@ func (h *Handlers) StreamAgentLogs(w http.ResponseWriter, r *http.Request) {
 				}
 				data, _ := json.Marshal(entry)
 				fmt.Fprintf(w, "data: %s\n\n", data)
-				flusher.Flush()
+				if err := rc.Flush(); err != nil {
+					return
+				}
 			}
 		}
 	}
@@ -3399,12 +3399,7 @@ func (h *Handlers) StreamAgentLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		respondError(w, http.StatusInternalServerError, "streaming not supported")
-		return
-	}
+	rc := http.NewResponseController(w)
 
 	// Send recent log history first
 	recent := logBuf.Recent(200)
@@ -3412,7 +3407,10 @@ func (h *Handlers) StreamAgentLogs(w http.ResponseWriter, r *http.Request) {
 		data, _ := json.Marshal(entry)
 		fmt.Fprintf(w, "data: %s\n\n", data)
 	}
-	flusher.Flush()
+	if err := rc.Flush(); err != nil {
+		respondError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
 
 	// Subscribe to live updates
 	ch := logBuf.Subscribe()
@@ -3429,7 +3427,9 @@ func (h *Handlers) StreamAgentLogs(w http.ResponseWriter, r *http.Request) {
 			}
 			data, _ := json.Marshal(entry)
 			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
+			if err := rc.Flush(); err != nil {
+				return
+			}
 		}
 	}
 }
