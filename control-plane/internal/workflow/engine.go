@@ -342,6 +342,7 @@ func (e *Engine) executeAsync(ctx context.Context, run *models.RecipeRun, recipe
 				completedMu.Lock()
 				completed[s.Name] = result
 				stepResults = append(stepResults, *result)
+				run.StepResults = append([]models.StepResult(nil), stepResults...)
 
 				// R8: Routing skip-set propagation.
 				// If this step has branches and BranchTaken is set, skip
@@ -1003,6 +1004,7 @@ func (e *Engine) executeHumanGate(ctx context.Context, run *models.RecipeRun, st
 	}
 
 	// Update run status to paused
+	run.StepResults = append(append([]models.StepResult(nil), run.StepResults...), *result)
 	run.Status = models.RecipeRunPaused
 	e.store.UpdateRecipeRun(ctx, run)
 
