@@ -279,6 +279,7 @@ func (e *Engine) executeAsync(ctx context.Context, run *models.RecipeRun, recipe
 
 		// Find steps that are ready to run (all deps satisfied, not yet completed, not skipped)
 		var ready []*models.Step
+		var blockedByFailedDeps []string
 		completedMu.Lock()
 		for _, step := range steps {
 			if _, done := completed[step.Name]; done {
@@ -288,20 +289,33 @@ func (e *Engine) executeAsync(ctx context.Context, run *models.RecipeRun, recipe
 				continue
 			}
 			allDepsMet := true
+			blockedByFailure := false
 			for _, dep := range step.DependsOn {
-				if _, ok := completed[dep]; !ok {
+				sr, ok := completed[dep]
+				if !ok {
 					allDepsMet = false
+					break
+				}
+				if sr.Status == "failed" || sr.Status == "canceled" {
+					allDepsMet = false
+					blockedByFailure = true
 					break
 				}
 			}
 			if allDepsMet {
 				s := step // copy
 				ready = append(ready, &s)
+			} else if blockedByFailure {
+				blockedByFailedDeps = append(blockedByFailedDeps, step.Name)
 			}
 		}
 		completedMu.Unlock()
 
 		if len(ready) == 0 {
+			if len(blockedByFailedDeps) > 0 {
+				e.failRun(run, stepResults, fmt.Sprintf("blocked by failed dependency: %s", strings.Join(blockedByFailedDeps, ", ")))
+				return
+			}
 			// Check if all steps are done (completed + skipped)
 			completedMu.Lock()
 			allDone := len(completed) == len(steps)

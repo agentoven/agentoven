@@ -502,6 +502,26 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 				Msg("Agent process spawned — control plane will proxy A2A calls")
 		}
 
+		// A managed agent must not be marked ready unless the gateway can resolve
+		// some backend for A2A traffic. Otherwise recipe steps see a false-ready
+		// agent and fail later with "No backend available".
+		if mode != models.AgentModeExternal {
+			if backendURL, backendReason := h.ResolveBackendEndpoint(fresh); backendURL == "" {
+				fresh.Status = models.AgentStatusBurnt
+				if fresh.Tags == nil {
+					fresh.Tags = map[string]string{}
+				}
+				fresh.Tags["error"] = fmt.Sprintf("Agent has no backend after bake: %s", backendReason)
+				fresh.UpdatedAt = time.Now().UTC()
+				if err := h.Store.UpdateAgent(context.Background(), fresh); err != nil {
+					log.Warn().Err(err).Str("agent", agentName).Msg("Failed to update backend-less agent to burnt")
+				} else {
+					log.Warn().Str("agent", agentName).Str("reason", backendReason).Msg("Agent burnt — no backend after bake")
+				}
+				return
+			}
+		}
+
 		fresh.Status = models.AgentStatusReady
 		fresh.UpdatedAt = time.Now().UTC()
 		if fresh.Tags == nil {
