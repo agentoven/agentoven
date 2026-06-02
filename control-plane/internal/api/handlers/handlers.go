@@ -494,6 +494,12 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 			// The control plane proxies /agents/{name}/a2a → process.endpoint
 			// so clients always use the stable URL (ADR-0007).
 			fresh.Process = procInfo
+			if procInfo.Endpoint != "" {
+				// Persist a durable backend endpoint alongside the transient process info.
+				// The Pro/Postgres store round-trips backend_endpoint, but not ProcessInfo,
+				// so later A2A lookups must not depend on the in-memory process field.
+				fresh.BackendEndpoint = procInfo.Endpoint
+			}
 			log.Info().
 				Str("agent", agentName).
 				Str("backend", procInfo.Endpoint).
@@ -2450,6 +2456,7 @@ func (h *Handlers) ServeAgentCard(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) A2AAgentEndpoint(w http.ResponseWriter, r *http.Request) {
 	agentName := chi.URLParam(r, "agentName")
 	kitchen := middleware.GetKitchen(r.Context())
+	envSlug := strings.TrimSpace(r.Header.Get("X-AO-Environment"))
 
 	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
 	if err != nil {
@@ -2477,6 +2484,107 @@ func (h *Handlers) A2AAgentEndpoint(w http.ResponseWriter, r *http.Request) {
 			},
 			"id": nil,
 		})
+		return
+	}
+
+	// If the caller provided an environment context, prefer the env-scoped
+	// backend resolution path. Recipe runs already forward X-AO-Environment,
+	// and env-backed agents may not have any usable global backend at all.
+	if envSlug != "" {
+		if h.AgentEnvStore != nil {
+			ae, err := h.AgentEnvStore.GetAgentEnvironment(r.Context(), kitchen, agentName, envSlug)
+			if err == nil {
+				if ae.Status != models.AgentEnvStatusReady {
+					w.Header().Set("Content-Type", "application/a2a+json")
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"jsonrpc": "2.0",
+						"error": map[string]interface{}{
+							"code":    -32002,
+							"message": "Environment not ready",
+							"data":    fmt.Sprintf("Agent '%s' in environment '%s' is %s", agentName, envSlug, ae.Status),
+						},
+						"id": nil,
+					})
+					return
+				}
+
+				effectiveGuardrails := h.resolveEnvGuardrails(agent.Guardrails, ae)
+				if h.Guardrails != nil && len(effectiveGuardrails) > 0 {
+					body, _ := io.ReadAll(r.Body)
+					r.Body = io.NopCloser(bytes.NewReader(body))
+					input := string(body)
+					eval, gErr := h.Guardrails.EvaluateInput(r.Context(), effectiveGuardrails, input)
+					if gErr != nil {
+						log.Warn().Err(gErr).Str("agent", agentName).Str("env", envSlug).Msg("Input guardrail eval error (gateway env)")
+						h.emitGuardrailAuditEnv(r.Context(), kitchen, agentName, envSlug, "input", nil, gErr)
+					} else if !eval.Passed {
+						h.emitGuardrailAuditEnv(r.Context(), kitchen, agentName, envSlug, "input", eval, nil)
+						w.Header().Set("Content-Type", "application/a2a+json")
+						json.NewEncoder(w).Encode(map[string]interface{}{
+							"jsonrpc": "2.0",
+							"error": map[string]interface{}{
+								"code":    -32001,
+								"message": "Input blocked by guardrails",
+								"data":    eval.Results,
+							},
+							"id": nil,
+						})
+						return
+					}
+				}
+
+				log.Info().Str("agent", agentName).Str("env", envSlug).
+					Str("backend", sanitizeURLForLog(ae.BackendEndpoint)).
+					Msg("Proxying env-scoped A2A request via stable gateway")
+
+				h.emitEnvA2AAudit(r.Context(), kitchen, agentName, envSlug)
+				h.proxyA2ARequest(w, r, ae.BackendEndpoint, agentName)
+				return
+			}
+		}
+
+		if agent.Status != models.AgentStatusReady {
+			w.Header().Set("Content-Type", "application/a2a+json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"error": map[string]interface{}{
+					"code":    -32002,
+					"message": "Agent not ready",
+					"data":    "Agent '" + agentName + "' status is " + string(agent.Status),
+				},
+				"id": nil,
+			})
+			return
+		}
+
+		backendURL, backendReason := h.resolveEnvBackendEndpoint(agent, envSlug)
+		if backendURL == "" {
+			w.Header().Set("Content-Type", "application/a2a+json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"error": map[string]interface{}{
+					"code":    -32003,
+					"message": "No backend available",
+					"data": map[string]interface{}{
+						"message":        "Agent has no backend for environment '" + envSlug + "'",
+						"backend_reason": backendReason,
+						"agent":          agentName,
+						"environment":    envSlug,
+					},
+				},
+				"id": nil,
+			})
+			return
+		}
+
+		log.Info().
+			Str("agent", agentName).
+			Str("env", envSlug).
+			Str("backend", sanitizeURLForLog(backendURL)).
+			Str("reason", backendReason).
+			Msg("Proxying env-scoped A2A request via stable gateway")
+
+		h.proxyA2ARequest(w, r, backendURL, agentName)
 		return
 	}
 
