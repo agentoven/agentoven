@@ -209,9 +209,13 @@ func (ke *K8sExecutor) Start(ctx context.Context, agent *models.Agent, info *mod
 
 	podName, err := ke.waitForPod(ctx, client, deployName, namespace, 60*time.Second)
 	if err != nil {
-		log.Warn().Err(err).Str("agent", agent.Name).Msg("K8s pod readiness check did not confirm Running state")
+		return fmt.Errorf("k8s pod did not reach running state: %w", err)
 	}
 	info.PodName = podName
+
+	if err := ke.waitForHealth(info.Endpoint, 60*time.Second); err != nil {
+		return fmt.Errorf("k8s agent health check failed: %w", err)
+	}
 
 	key := processKey(agent.Kitchen, agent.Name)
 	ke.mu.Lock()
