@@ -740,6 +740,32 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 		return fmt.Errorf("A2A error: %v", rpcErr["message"])
 	}
 
+	// Check for task-level failure in an otherwise valid JSON-RPC response.
+	if rpcResult, ok := rpcResp["result"].(map[string]interface{}); ok {
+		if statusMap, ok := rpcResult["status"].(map[string]interface{}); ok {
+			state, _ := statusMap["state"].(string)
+			if state == "failed" || state == "error" || state == "canceled" || state == "rejected" {
+				errMsg := "A2A task returned failed state"
+				if msg, ok := statusMap["message"].(map[string]interface{}); ok {
+					if parts, ok := msg["parts"].([]interface{}); ok {
+						for _, part := range parts {
+							if partMap, ok := part.(map[string]interface{}); ok {
+								if txt, ok := partMap["text"].(string); ok && strings.TrimSpace(txt) != "" {
+									errMsg = txt
+									break
+								}
+							}
+						}
+					}
+				}
+
+				result.Output = rpcResp
+				e.createStepTrace(ctx, kitchen, agentRef, run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", errMsg, parentTID)
+				return fmt.Errorf("A2A task failed (%s): %s", state, errMsg)
+			}
+		}
+	}
+
 	// Extract output text and usage data from the A2A response
 	outputText, tokens, costUSD := extractA2AMetrics(rpcResp)
 
@@ -1257,6 +1283,25 @@ func (e *Engine) finalizeParentTrace(run *models.RecipeRun, status string, total
 
 // GetPendingGates returns the list of pending human gates for a run.
 func (e *Engine) GetPendingGates(runID string) []string {
+	run, err := e.store.GetRecipeRun(context.Background(), runID)
+	if err != nil || run == nil {
+		return nil
+	}
+
+	// Primary source: durable approval records (survives control-plane restarts).
+	if approvals, err := e.store.ListApprovals(context.Background(), run.Kitchen, "pending", 1000); err == nil {
+		pending := make([]string, 0)
+		for _, approval := range approvals {
+			if approval.RunID == runID {
+				pending = append(pending, approval.StepName)
+			}
+		}
+		if len(pending) > 0 {
+			return pending
+		}
+	}
+
+	// Fallback: in-memory channels for same-process fast-path approvals.
 	e.gatesMu.RLock()
 	defer e.gatesMu.RUnlock()
 
