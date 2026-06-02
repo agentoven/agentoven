@@ -42,6 +42,11 @@ type Engine struct {
 	// so that auth, RBAC, and observability are applied uniformly (ADR-0007).
 	baseURL string
 
+	// oidcIssuer is the expected OIDC issuer URL for this deployment.
+	// Set via SetOIDCIssuer at startup (Pro-only). Used to validate same-tenant
+	// approvals on human_gate steps that have RequireSameTenant: true.
+	oidcIssuer string
+
 	// Running executions: runID → cancel func
 	runsMu sync.RWMutex
 	runs   map[string]context.CancelFunc
@@ -52,6 +57,44 @@ type Engine struct {
 
 	// Parent trace IDs: runID → parentTraceID (for linking step traces to recipe trace)
 	parentTraceIDs sync.Map
+}
+
+// SetOIDCIssuer configures the expected OIDC issuer for same-tenant approver validation.
+// Call this at server startup before processing any requests (Pro only).
+func (e *Engine) SetOIDCIssuer(issuer string) {
+	e.oidcIssuer = strings.TrimSpace(issuer)
+}
+
+type executionAPIKeyCtxKey struct{}
+
+// WithExecutionAPIKey stores the trigger API key in context so async workflow
+// execution can forward the same auth to internal gateway calls.
+func WithExecutionAPIKey(ctx context.Context, apiKey string) context.Context {
+	if strings.TrimSpace(apiKey) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, executionAPIKeyCtxKey{}, apiKey)
+}
+
+func executionAPIKeyFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(executionAPIKeyCtxKey{}).(string)
+	return strings.TrimSpace(v)
+}
+
+type triggeredByCtxKey struct{}
+
+// WithTriggeredBy stores the caller's identity subject in context so the engine
+// can record it on the RecipeRun for audit trail purposes.
+func WithTriggeredBy(ctx context.Context, subject string) context.Context {
+	if strings.TrimSpace(subject) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, triggeredByCtxKey{}, subject)
+}
+
+func triggeredByFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(triggeredByCtxKey{}).(string)
+	return strings.TrimSpace(v)
 }
 
 // NewEngine creates a new workflow execution engine.
@@ -82,6 +125,7 @@ func NewEngine(s store.Store, notifier *notify.Service, baseURL string) *Engine 
 // If envSlug is empty, recipe.DefaultEnvironment is used as a fallback.
 func (e *Engine) ExecuteRecipe(ctx context.Context, recipe *models.Recipe, kitchen string, input map[string]interface{}, envSlug string) (string, error) {
 	runID := uuid.New().String()
+	authAPIKey := executionAPIKeyFromContext(ctx)
 
 	// Resolve environment: explicit > recipe default > none
 	if envSlug == "" {
@@ -95,6 +139,7 @@ func (e *Engine) ExecuteRecipe(ctx context.Context, recipe *models.Recipe, kitch
 		Environment: envSlug,
 		Status:      models.RecipeRunRunning,
 		Input:       input,
+		TriggeredBy: triggeredByFromContext(ctx),
 		StartedAt:   time.Now().UTC(),
 	}
 
@@ -103,7 +148,11 @@ func (e *Engine) ExecuteRecipe(ctx context.Context, recipe *models.Recipe, kitch
 	}
 
 	// Create cancellable context for this execution
-	execCtx, cancel := context.WithCancel(context.Background())
+	execBase := context.Background()
+	if authAPIKey != "" {
+		execBase = WithExecutionAPIKey(execBase, authAPIKey)
+	}
+	execCtx, cancel := context.WithCancel(execBase)
 	e.runsMu.Lock()
 	e.runs[runID] = cancel
 	e.runsMu.Unlock()
@@ -174,13 +223,26 @@ func (e *Engine) ApproveGate(runID, stepName string, approved bool) bool {
 	return true
 }
 
-// ApproveGateWithMetadata approves or rejects a gate with approver identity and comments.
-func (e *Engine) ApproveGateWithMetadata(runID, stepName string, approved bool, approverID, approverEmail, channel, comments string) bool {
-	gateKey := runID + ":" + stepName
+// ErrApproverUnauthorized is returned by ApproveGateWithMetadata when the
+// caller does not satisfy the approver constraints defined on the Step.
+var ErrApproverUnauthorized = fmt.Errorf("approver is not authorised for this gate")
 
-	record, err := e.store.GetApproval(context.Background(), gateKey)
+// ApproveGateWithMetadata approves or rejects a gate with approver identity and comments.
+// approverIssuer is the OIDC issuer URL from the caller's identity token (empty if not OIDC).
+// Returns (false, ErrApproverUnauthorized) when the caller fails the step's approver
+// constraints. Returns (false, nil) when the gate doesn't exist or is no longer pending.
+func (e *Engine) ApproveGateWithMetadata(runID, stepName string, approved bool, approverID, approverEmail, approverIssuer, channel, comments string) (bool, error) {
+	gateKey := runID + ":" + stepName
+	ctx := context.Background()
+
+	record, err := e.store.GetApproval(ctx, gateKey)
 	if err != nil || record.Status != "pending" {
-		return false
+		return false, nil
+	}
+
+	// Enforce approver constraints declared in the recipe step definition.
+	if authErr := e.checkApproverConstraints(ctx, record, approverID, approverEmail, approverIssuer); authErr != nil {
+		return false, authErr
 	}
 
 	now := time.Now().UTC()
@@ -195,9 +257,9 @@ func (e *Engine) ApproveGateWithMetadata(runID, stepName string, approved bool, 
 	record.Comments = comments
 	record.ResolvedAt = &now
 
-	if updateErr := e.store.UpdateApproval(context.Background(), record); updateErr != nil {
+	if updateErr := e.store.UpdateApproval(ctx, record); updateErr != nil {
 		log.Error().Err(updateErr).Str("gate_key", gateKey).Msg("Failed to update approval record")
-		return false
+		return false, nil
 	}
 
 	// Signal the waiting goroutine
@@ -207,7 +269,100 @@ func (e *Engine) ApproveGateWithMetadata(runID, stepName string, approved bool, 
 	if ok {
 		ch <- approved
 	}
-	return true
+	return true, nil
+}
+
+// checkApproverConstraints validates approverID/approverEmail against the
+// approver constraints declared on the recipe Step.  Returns nil when no
+// constraints are defined (open gate) or when the approver satisfies them.
+// approverIssuer is the OIDC issuer from the caller's token (empty for API-key callers).
+func (e *Engine) checkApproverConstraints(ctx context.Context, record *models.ApprovalRecord, approverID, approverEmail, approverIssuer string) error {
+	// Load the recipe run to find the kitchen and recipe name.
+	run, err := e.store.GetRecipeRun(ctx, record.RunID)
+	if err != nil {
+		// Can't load run — don't block approval, just log.
+		log.Warn().Err(err).Str("run_id", record.RunID).Msg("checkApproverConstraints: could not load run, skipping constraint check")
+		return nil
+	}
+
+	// Load the recipe to find the step definition.
+	recipe, err := e.store.GetRecipe(ctx, run.Kitchen, run.RecipeID)
+	if err != nil {
+		log.Warn().Err(err).Str("recipe", run.RecipeID).Msg("checkApproverConstraints: could not load recipe, skipping constraint check")
+		return nil
+	}
+
+	// Find the matching step.
+	var step *models.Step
+	for i := range recipe.Steps {
+		if recipe.Steps[i].Name == record.StepName {
+			step = &recipe.Steps[i]
+			break
+		}
+	}
+	if step == nil {
+		// Step not found in recipe (shouldn't happen, but don't block).
+		return nil
+	}
+
+	// No constraints declared — gate is open to any authenticated caller.
+	hasConstraints := len(step.ApproverEmails) > 0 ||
+		len(step.ApproverRoles) > 0 ||
+		step.ApproverDomain != "" ||
+		step.RequireSameTenant
+
+	if !hasConstraints {
+		return nil
+	}
+
+	email := strings.ToLower(strings.TrimSpace(approverEmail))
+
+	// 1. Explicit email allow-list wins outright (even cross-tenant).
+	for _, allowed := range step.ApproverEmails {
+		if strings.ToLower(strings.TrimSpace(allowed)) == email {
+			return nil
+		}
+	}
+
+	// 2. Domain check — approver's email must end with the required domain.
+	if step.ApproverDomain != "" {
+		domain := strings.ToLower(strings.TrimSpace(step.ApproverDomain))
+		suffix := "@" + domain
+		if !strings.HasSuffix(email, suffix) {
+			return fmt.Errorf("%w: email %q does not belong to domain %q", ErrApproverUnauthorized, approverEmail, step.ApproverDomain)
+		}
+	}
+
+	// 3. RequireSameTenant — the approver's OIDC issuer must match the
+	//    configured server OIDC issuer (set via SetOIDCIssuer at startup).
+	//    If the engine has no issuer configured (OSS default), we only check
+	//    that the caller is authenticated (has a non-empty identity).
+	if step.RequireSameTenant {
+		if approverID == "" && email == "" {
+			return fmt.Errorf("%w: unauthenticated caller on a same-tenant gate", ErrApproverUnauthorized)
+		}
+		if e.oidcIssuer != "" && approverIssuer != "" {
+			if strings.TrimSpace(approverIssuer) != e.oidcIssuer {
+				// Allow if the approver is explicitly listed by email (cross-tenant exception).
+				explicitlyAllowed := false
+				for _, allowed := range step.ApproverEmails {
+					if strings.ToLower(strings.TrimSpace(allowed)) == email {
+						explicitlyAllowed = true
+						break
+					}
+				}
+				if !explicitlyAllowed {
+					return fmt.Errorf("%w: approver issuer %q does not match expected tenant issuer", ErrApproverUnauthorized, approverIssuer)
+				}
+			}
+		}
+	}
+
+	// 4. Role constraints are enforced by the Pro RBAC layer; OSS has no roles.
+	//    If only role constraints are set and we reach here, allow through
+	//    (the Pro handler will have already applied RBAC middleware).
+	_ = approverID // used by Pro layer
+	return nil
 }
 
 // ── DAG Execution ───────────────────────────────────────────
@@ -714,6 +869,25 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 		return fmt.Errorf("create A2A request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+
+	// Resolve the effective auth key for this step using a priority chain:
+	//   1. step.AuthKey      — literal Bearer token set directly on the step
+	//   2. step.AuthKeyRef   — name of a KitchenCredential looked up at runtime
+	//   3. trigger context   — the API key used to call /bake (default behaviour)
+	effectiveKey := strings.TrimSpace(step.AuthKey)
+	if effectiveKey == "" && strings.TrimSpace(step.AuthKeyRef) != "" {
+		if cred, credErr := e.store.GetKitchenCredential(ctx, kitchen, strings.TrimSpace(step.AuthKeyRef)); credErr == nil {
+			effectiveKey = cred.Value
+		} else {
+			log.Warn().Str("ref", step.AuthKeyRef).Str("step", step.Name).Msg("engine: auth_key_ref not found, falling back to trigger key")
+		}
+	}
+	if effectiveKey == "" {
+		effectiveKey = executionAPIKeyFromContext(ctx)
+	}
+	if effectiveKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+effectiveKey)
+	}
 	if run.Environment != "" {
 		// Forward the environment context so the CP gateway and target agent
 		// can observe which environment triggered this invocation.

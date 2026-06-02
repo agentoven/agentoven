@@ -30,6 +30,7 @@ type Store interface {
 	DataConnectorStore
 	SessionStore
 	ScopedKeyStore
+	KitchenCredentialStore
 	TestSuiteStore
 	EnvironmentStore
 	AgentDeploymentStore
@@ -286,6 +287,30 @@ type ScopedKeyStore interface {
 
 	// DeleteScopedKey permanently removes a scoped key.
 	DeleteScopedKey(ctx context.Context, kitchen, id string) error
+}
+
+// ── Kitchen Credential Store ─────────────────────────
+
+// KitchenCredentialStore manages named recoverable credentials scoped to a
+// kitchen. Unlike ScopedAPIKey (bcrypt, non-recoverable), credentials store
+// the raw value so the workflow engine can forward them as Bearer tokens
+// when recipe steps call agents in other kitchens.
+type KitchenCredentialStore interface {
+	// GetKitchenCredential returns a single credential by name within a kitchen.
+	GetKitchenCredential(ctx context.Context, kitchen, name string) (*models.KitchenCredential, error)
+
+	// ListKitchenCredentials returns all credentials for a kitchen.
+	// Value fields are populated; callers must not expose them over the API.
+	ListKitchenCredentials(ctx context.Context, kitchen string) ([]models.KitchenCredential, error)
+
+	// CreateKitchenCredential persists a new credential.
+	CreateKitchenCredential(ctx context.Context, cred *models.KitchenCredential) error
+
+	// UpdateKitchenCredential replaces an existing credential's value and label.
+	UpdateKitchenCredential(ctx context.Context, cred *models.KitchenCredential) error
+
+	// DeleteKitchenCredential permanently removes a credential.
+	DeleteKitchenCredential(ctx context.Context, kitchen, name string) error
 }
 
 // TestSuiteStore manages test suites, test cases, and test run results.

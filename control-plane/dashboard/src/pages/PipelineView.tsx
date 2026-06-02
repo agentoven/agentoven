@@ -601,9 +601,7 @@ function StepDetailPanel({ step }: { step: StepResult }) {
             Output
           </button>
           {expanded && (
-            <pre className="text-xs bg-[var(--ao-bg)] rounded-lg p-4 overflow-auto max-h-96 border border-[var(--ao-border)] font-mono">
-              {JSON.stringify(step.output, null, 2)}
-            </pre>
+            <SmartOutputRenderer output={step.output} stepKind={step.step_kind} />
           )}
         </div>
       )}
@@ -617,5 +615,162 @@ function InfoItem({ label, value }: { label: string; value: string }) {
       <span className="text-xs text-[var(--ao-text-muted)] block">{label}</span>
       <span className="text-sm font-medium">{value}</span>
     </div>
+  );
+}
+
+// ── Smart Output Renderer ────────────────────────────────────
+
+// Top-level keys whose string values are rendered as readable prose rather than table rows.
+const PROSE_KEYS = new Set([
+  'text', 'response', 'result', 'content', 'output', 'answer',
+  'message', 'summary', 'reply', 'description', 'explanation',
+]);
+
+function SmartOutputRenderer({
+  output,
+  stepKind,
+}: {
+  output: Record<string, unknown>;
+  stepKind?: string;
+}) {
+  // Human gate: render approval card
+  if (stepKind === 'human_gate' || 'approved' in output) {
+    return <GateOutputCard output={output} />;
+  }
+
+  // Split into prominent prose entries and everything else
+  const proseEntries: [string, string][] = [];
+  const restEntries: [string, unknown][] = [];
+
+  for (const [k, v] of Object.entries(output)) {
+    if (typeof v === 'string' && v.length > 0 && PROSE_KEYS.has(k.toLowerCase())) {
+      proseEntries.push([k, v]);
+    } else {
+      restEntries.push([k, v]);
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      {proseEntries.map(([k, v]) => (
+        <div key={k}>
+          <p className="text-xs text-[var(--ao-text-muted)] mb-1 capitalize">{k}</p>
+          <div className="rounded-lg bg-[var(--ao-bg)] border border-[var(--ao-border)] p-4">
+            <p className="text-sm text-[var(--ao-text)] whitespace-pre-wrap leading-relaxed">{v}</p>
+          </div>
+        </div>
+      ))}
+      {restEntries.length > 0 && <KeyValueTable entries={restEntries} />}
+    </div>
+  );
+}
+
+function GateOutputCard({ output }: { output: Record<string, unknown> }) {
+  const approved = output.approved as boolean | undefined;
+  return (
+    <div
+      className={`rounded-lg border p-4 ${
+        approved
+          ? 'bg-emerald-500/10 border-emerald-500/30'
+          : 'bg-red-500/10 border-red-500/30'
+      }`}
+    >
+      <div className="flex items-center gap-2 mb-3">
+        {approved ? (
+          <CheckCircle size={16} className="text-emerald-400" />
+        ) : (
+          <XCircle size={16} className="text-red-400" />
+        )}
+        <span
+          className={`text-sm font-semibold ${
+            approved ? 'text-emerald-400' : 'text-red-400'
+          }`}
+        >
+          {approved ? 'Approved' : 'Rejected'}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        {output.approver_email && (
+          <InfoItem label="Approver" value={String(output.approver_email)} />
+        )}
+        {output.channel && (
+          <InfoItem label="Channel" value={String(output.channel)} />
+        )}
+        {output.resolved_at && (
+          <InfoItem label="Resolved" value={fmtTime(String(output.resolved_at))} />
+        )}
+      </div>
+      {output.comments && (
+        <div className="mt-3">
+          <p className="text-xs text-[var(--ao-text-muted)] mb-1">Comments</p>
+          <p className="text-sm text-[var(--ao-text)] whitespace-pre-wrap">
+            {String(output.comments)}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function KeyValueTable({ entries }: { entries: [string, unknown][] }) {
+  return (
+    <div className="rounded-lg border border-[var(--ao-border)] overflow-hidden">
+      <table className="w-full text-xs">
+        <tbody>
+          {entries.map(([k, v]) => (
+            <KeyValueRow key={k} label={k} value={v} />
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function KeyValueRow({ label, value }: { label: string; value: unknown }) {
+  const [open, setOpen] = useState(false);
+  const isComplex = typeof value === 'object' && value !== null;
+  const isLongString = typeof value === 'string' && value.length > 120;
+  const collapsible = isComplex || isLongString;
+
+  let preview = '–';
+  if (value === null) preview = 'null';
+  else if (value === undefined) preview = '–';
+  else if (isComplex)
+    preview = Array.isArray(value)
+      ? `Array [${(value as unknown[]).length}]`
+      : 'Object {…}';
+  else if (isLongString) preview = `${(value as string).length} chars`;
+  else preview = String(value);
+
+  return (
+    <tr className="border-b border-[var(--ao-border)] last:border-0">
+      <td className="px-3 py-2 text-[var(--ao-text-muted)] font-medium w-1/3 align-top whitespace-nowrap">
+        {label}
+      </td>
+      <td className="px-3 py-2 text-[var(--ao-text)]">
+        {collapsible ? (
+          <div>
+            <button
+              onClick={() => setOpen(!open)}
+              className="flex items-center gap-1 text-blue-400 hover:text-blue-300"
+            >
+              {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+              {preview}
+            </button>
+            {open && (
+              isComplex ? (
+                <pre className="mt-1 text-xs text-[var(--ao-text)] bg-[var(--ao-bg)] rounded p-2 overflow-auto max-h-48">
+                  {JSON.stringify(value, null, 2)}
+                </pre>
+              ) : (
+                <p className="mt-1 text-xs whitespace-pre-wrap">{String(value)}</p>
+              )
+            )}
+          </div>
+        ) : (
+          <span>{preview}</span>
+        )}
+      </td>
+    </tr>
   );
 }

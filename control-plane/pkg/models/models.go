@@ -398,6 +398,31 @@ type Step struct {
 	// Notification — MCP tool names with "notify" capability to fire on
 	// gate_waiting, step_completed, or step_failed events.
 	NotifyTools []string `json:"notify_tools,omitempty"`
+
+	// Per-step auth override — for calling agents in a different kitchen.
+	// AuthKey is a literal Bearer token forwarded directly (takes priority).
+	// AuthKeyRef is the Name of a KitchenCredential looked up at runtime.
+	// If neither is set, the trigger API key from the bake request is used.
+	AuthKey    string `json:"auth_key,omitempty"`
+	AuthKeyRef string `json:"auth_key_ref,omitempty"`
+
+	// Approver constraints — only for human_gate steps.
+	// These are set at recipe-design time to identify who is authorised to
+	// approve this gate.  At least one field should be set; if multiple are
+	// set they are ANDed together.
+	//
+	// ApproverEmails: explicit allow-list of email addresses that may approve.
+	// ApproverRoles:  RBAC role names (Pro) that qualify an approver.
+	// ApproverDomain: e-mail domain suffix that approvers must belong to
+	//   (e.g. "acme.com").  Useful when the approver is a stakeholder on the
+	//   same OIDC tenant but not a named platform user.
+	// RequireSameTenant: when true, the approver's OIDC issuer must match the
+	//   kitchen's configured issuer.  External (cross-tenant) approvals are
+	//   rejected unless ApproverEmails explicitly lists that person.
+	ApproverEmails    []string `json:"approver_emails,omitempty"`
+	ApproverRoles     []string `json:"approver_roles,omitempty"`
+	ApproverDomain    string   `json:"approver_domain,omitempty"`
+	RequireSameTenant bool     `json:"require_same_tenant,omitempty"`
 }
 
 type Recipe struct {
@@ -765,6 +790,7 @@ type RecipeRun struct {
 	Output       map[string]interface{} `json:"output,omitempty"`
 	StepResults  []StepResult           `json:"step_results,omitempty"`
 	ParentRunID  string                 `json:"parent_run_id,omitempty" db:"parent_run_id"` // R8: set when this run is a sub-recipe invocation
+	TriggeredBy  string                 `json:"triggered_by,omitempty" db:"triggered_by"`   // Identity.Subject of the caller who started this run
 	StartedAt    time.Time              `json:"started_at" db:"started_at"`
 	CompletedAt  *time.Time             `json:"completed_at,omitempty" db:"completed_at"`
 	DurationMs   int64                  `json:"duration_ms,omitempty" db:"duration_ms"`
@@ -2320,6 +2346,28 @@ func (k *ScopedAPIKey) CanAccessEnvironment(envSlug string) bool {
 		}
 	}
 	return false
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── Kitchen Credentials ─────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// KitchenCredential is a named, recoverable secret scoped to a kitchen.
+// Unlike ScopedAPIKey (which uses bcrypt hashing and is non-recoverable),
+// KitchenCredentials store the raw value so the workflow engine can forward
+// them as Bearer tokens when steps call agents in other kitchens.
+//
+// The Value field is never included in JSON API responses (json:"-").
+// Manage credentials via POST/DELETE /api/v1/{kitchen}/credentials.
+type KitchenCredential struct {
+	ID        string    `json:"id"`
+	Kitchen   string    `json:"kitchen"`
+	Name      string    `json:"name"`      // unique within kitchen; used in step.auth_key_ref
+	Value     string    `json:"-"`         // raw key value; NEVER in JSON responses
+	Label     string    `json:"label"`     // human-readable description
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	CreatedBy string    `json:"created_by,omitempty"`
 }
 
 // ── Test Suites ──────────────────────────────────────────────

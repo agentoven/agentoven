@@ -239,6 +239,66 @@ func waitForRun(t *testing.T, eng *Engine, runID string, timeoutSec int) *models
 
 // ── Integration Tests ───────────────────────────────────────
 
+func TestExecuteRecipeForwardsTriggerAPIKeyToAgentCalls(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		seenAuth string
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seenAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"result": map[string]interface{}{
+				"status": map[string]interface{}{"state": "completed"},
+			},
+			"id": "1",
+		})
+	}))
+	defer srv.Close()
+
+	eng := setupTestEngine(t, srv)
+	ctx := context.Background()
+
+	eng.store.CreateAgent(ctx, &models.Agent{
+		Name:        "auth-agent",
+		Kitchen:     "default",
+		Status:      models.AgentStatusReady,
+		A2AEndpoint: fmt.Sprintf("%s/api/v1/agents/%s/invoke", srv.URL, "auth-agent"),
+	})
+
+	recipe := &models.Recipe{
+		ID:      "auth-forwarding",
+		Name:    "auth-forwarding",
+		Kitchen: "default",
+		Steps: []models.Step{
+			{Name: "call", Kind: models.StepAgent, AgentRef: "auth-agent"},
+		},
+	}
+	eng.store.CreateRecipe(ctx, recipe)
+
+	triggerCtx := WithExecutionAPIKey(ctx, "trigger-key-123")
+	runID, err := eng.ExecuteRecipe(triggerCtx, recipe, "default", nil, "")
+	if err != nil {
+		t.Fatalf("ExecuteRecipe: %v", err)
+	}
+
+	run := waitForRun(t, eng, runID, 10)
+	if run.Status != models.RecipeRunCompleted {
+		t.Fatalf("run status = %s, error = %s", run.Status, run.Error)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if seenAuth != "Bearer trigger-key-123" {
+		t.Fatalf("authorization header = %q, want %q", seenAuth, "Bearer trigger-key-123")
+	}
+}
+
 func TestRoutingSkipsNonTaken(t *testing.T) {
 	outputs := map[string]map[string]interface{}{
 		"triage":          {"category": "billing"},
@@ -435,5 +495,172 @@ func TestEmptyRecipe(t *testing.T) {
 	run := waitForRun(t, eng, runID, 5)
 	if run.Status != models.RecipeRunCompleted {
 		t.Errorf("empty recipe status = %s, want completed", run.Status)
+	}
+}
+
+// ── Per-step auth key tests ────────────────────────────────
+
+func TestExecuteRecipeUsesLiteralAuthKey(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		seenAuth string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seenAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"result":  map[string]interface{}{"status": map[string]interface{}{"state": "completed"}},
+			"id":      "1",
+		})
+	}))
+	defer srv.Close()
+
+	eng := setupTestEngine(t, srv)
+	ctx := context.Background()
+	eng.store.CreateAgent(ctx, &models.Agent{
+		Name:        "lit-agent",
+		Kitchen:     "default",
+		Status:      models.AgentStatusReady,
+		A2AEndpoint: fmt.Sprintf("%s/api/v1/agents/%s/invoke", srv.URL, "lit-agent"),
+	})
+	recipe := &models.Recipe{
+		ID:      "literal-auth",
+		Name:    "literal-auth",
+		Kitchen: "default",
+		Steps: []models.Step{
+			{Name: "call", Kind: models.StepAgent, AgentRef: "lit-agent", AuthKey: "step-key-abc"},
+		},
+	}
+	eng.store.CreateRecipe(ctx, recipe)
+
+	// Context has a different key — step.AuthKey must win.
+	triggerCtx := WithExecutionAPIKey(ctx, "trigger-key")
+	runID, err := eng.ExecuteRecipe(triggerCtx, recipe, "default", nil, "")
+	if err != nil {
+		t.Fatalf("ExecuteRecipe: %v", err)
+	}
+	run := waitForRun(t, eng, runID, 10)
+	if run.Status != models.RecipeRunCompleted {
+		t.Fatalf("run status = %s, error = %s", run.Status, run.Error)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if seenAuth != "Bearer step-key-abc" {
+		t.Fatalf("authorization header = %q, want %q", seenAuth, "Bearer step-key-abc")
+	}
+}
+
+func TestExecuteRecipeResolvesAuthKeyRef(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		seenAuth string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seenAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"result":  map[string]interface{}{"status": map[string]interface{}{"state": "completed"}},
+			"id":      "1",
+		})
+	}))
+	defer srv.Close()
+
+	eng := setupTestEngine(t, srv)
+	ctx := context.Background()
+	eng.store.CreateAgent(ctx, &models.Agent{
+		Name:        "ref-agent",
+		Kitchen:     "default",
+		Status:      models.AgentStatusReady,
+		A2AEndpoint: fmt.Sprintf("%s/api/v1/agents/%s/invoke", srv.URL, "ref-agent"),
+	})
+	// Seed the credential in the store.
+	eng.store.CreateKitchenCredential(ctx, &models.KitchenCredential{
+		ID:      "cred-1",
+		Kitchen: "default",
+		Name:    "my-cred",
+		Value:   "cred-key-xyz",
+	})
+	recipe := &models.Recipe{
+		ID:      "ref-auth",
+		Name:    "ref-auth",
+		Kitchen: "default",
+		Steps: []models.Step{
+			{Name: "call", Kind: models.StepAgent, AgentRef: "ref-agent", AuthKeyRef: "my-cred"},
+		},
+	}
+	eng.store.CreateRecipe(ctx, recipe)
+
+	triggerCtx := WithExecutionAPIKey(ctx, "trigger-key")
+	runID, err := eng.ExecuteRecipe(triggerCtx, recipe, "default", nil, "")
+	if err != nil {
+		t.Fatalf("ExecuteRecipe: %v", err)
+	}
+	run := waitForRun(t, eng, runID, 10)
+	if run.Status != models.RecipeRunCompleted {
+		t.Fatalf("run status = %s, error = %s", run.Status, run.Error)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if seenAuth != "Bearer cred-key-xyz" {
+		t.Fatalf("authorization header = %q, want %q", seenAuth, "Bearer cred-key-xyz")
+	}
+}
+
+func TestExecuteRecipeFallsBackToContextKey(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		seenAuth string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seenAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"result":  map[string]interface{}{"status": map[string]interface{}{"state": "completed"}},
+			"id":      "1",
+		})
+	}))
+	defer srv.Close()
+
+	eng := setupTestEngine(t, srv)
+	ctx := context.Background()
+	eng.store.CreateAgent(ctx, &models.Agent{
+		Name:        "fallback-agent",
+		Kitchen:     "default",
+		Status:      models.AgentStatusReady,
+		A2AEndpoint: fmt.Sprintf("%s/api/v1/agents/%s/invoke", srv.URL, "fallback-agent"),
+	})
+	recipe := &models.Recipe{
+		ID:      "fallback-auth",
+		Name:    "fallback-auth",
+		Kitchen: "default",
+		Steps: []models.Step{
+			// Neither AuthKey nor AuthKeyRef set → falls back to context key.
+			{Name: "call", Kind: models.StepAgent, AgentRef: "fallback-agent"},
+		},
+	}
+	eng.store.CreateRecipe(ctx, recipe)
+
+	triggerCtx := WithExecutionAPIKey(ctx, "trigger-key")
+	runID, err := eng.ExecuteRecipe(triggerCtx, recipe, "default", nil, "")
+	if err != nil {
+		t.Fatalf("ExecuteRecipe: %v", err)
+	}
+	run := waitForRun(t, eng, runID, 10)
+	if run.Status != models.RecipeRunCompleted {
+		t.Fatalf("run status = %s, error = %s", run.Status, run.Error)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if seenAuth != "Bearer trigger-key" {
+		t.Fatalf("authorization header = %q, want %q", seenAuth, "Bearer trigger-key")
 	}
 }

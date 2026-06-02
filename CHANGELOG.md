@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.5-beta-1] — 2026-06-02
+
+### 🔐 Recipe Approver Constraints
+- **Per-step approver fields** — `Step` struct gains `approver_emails`, `approver_roles`, `approver_domain`, and `require_same_tenant` fields; recipe designers specify who may approve a `human_gate`, not the API-key holder
+- **Engine enforcement** — `ApproveGateWithMetadata` validates the caller against the step's constraints; returns `ErrApproverUnauthorized` (HTTP 403) when the caller is not allowed
+- **Same-tenant OIDC check** — when `require_same_tenant: true` and an OIDC issuer is configured, the approver's token issuer must match the configured OIDC provider's issuer URL
+- **OIDC issuer propagation** — Pro server calls `engine.SetOIDCIssuer` after OIDC provider registration; issuer is extracted from `Identity.Claims["iss"]` per request
+- **Cross-tenant allow-list** — callers explicitly listed in `approver_emails` bypass the same-tenant check, enabling external approvers with explicit opt-in
+
+### 🎨 Dashboard Output Rendering
+- **Smart output renderer** — step output panel now uses `SmartOutputRenderer` instead of raw `JSON.stringify`; prose fields (`text`, `response`, `result`, `content`, `summary`, etc.) render as readable paragraphs
+- **Gate approval card** — `human_gate` completions render as a coloured approval/rejection card showing approver email, channel, resolved time, and comments
+- **Collapsible complex values** — nested objects and arrays collapse to a summary row and expand inline on click
+- **Key-value table** — scalar fields render as a clean two-column table rather than raw JSON
+
+### 🛠 Internal
+- `contracts.WorkflowService.ApproveGateWithMetadata` signature updated to include `approverIssuer` and return `(bool, error)`
+
+---
+
 ## [0.8.0] — 2026-05-31
 
 ### 📈 Release 8 Observability Hardening

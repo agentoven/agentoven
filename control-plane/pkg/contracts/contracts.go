@@ -85,7 +85,9 @@ type WorkflowService interface {
 
 	// ApproveGateWithMetadata approves or rejects a gate with full approver identity,
 	// channel, and comments. Used by Slack/Teams callback handlers and the compliance UI.
-	ApproveGateWithMetadata(runID, stepName string, approved bool, approverID, approverEmail, channel, comments string) bool
+	// approverIssuer is the OIDC issuer URL from the caller's token (empty for API-key callers).
+	// Returns (false, ErrApproverUnauthorized) when the caller fails the step's approver constraints.
+	ApproveGateWithMetadata(runID, stepName string, approved bool, approverID, approverEmail, approverIssuer, channel, comments string) (bool, error)
 }
 
 // ── Notification Service ────────────────────────────────────

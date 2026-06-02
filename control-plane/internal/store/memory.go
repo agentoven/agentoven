@@ -34,8 +34,9 @@ type snapshot struct {
 	VectorDocs    map[string]*models.VectorDoc           `json:"vector_docs"`      // key: kitchen:id
 	Connectors    map[string]*models.DataConnectorConfig `json:"connectors"`       // key: kitchen:id
 	Sessions      map[string]*models.Session             `json:"sessions"`         // key: id
-	ScopedKeys    map[string]*models.ScopedAPIKey        `json:"scoped_keys"`      // key: id
-	TestSuites    map[string]*models.TestSuite           `json:"test_suites"`      // key: id
+	ScopedKeys    map[string]*models.ScopedAPIKey        `json:"scoped_keys"`         // key: id
+	Credentials   map[string]*models.KitchenCredential   `json:"credentials"`         // key: kitchen:name
+	TestSuites    map[string]*models.TestSuite           `json:"test_suites"`         // key: id
 	TestRuns      map[string]*models.TestRun             `json:"test_runs"`        // key: id
 	Environments  map[string]*models.Environment         `json:"environments"`     // key: kitchen:slug
 	Deployments   map[string]*models.AgentDeployment     `json:"deployments"`      // key: id
@@ -63,6 +64,7 @@ type MemoryStore struct {
 	connectors   map[string]*models.DataConnectorConfig // key: kitchen:id
 	sessions     map[string]*models.Session             // key: id
 	scopedKeys   map[string]*models.ScopedAPIKey        // key: id
+	credentials  map[string]*models.KitchenCredential   // key: kitchen:name
 	testSuites   map[string]*models.TestSuite           // key: id
 	testRuns     map[string]*models.TestRun             // key: id
 	environments map[string]*models.Environment         // key: kitchen:slug
@@ -115,6 +117,7 @@ func NewMemoryStore() *MemoryStore {
 		connectors:    make(map[string]*models.DataConnectorConfig),
 		sessions:      make(map[string]*models.Session),
 		scopedKeys:    make(map[string]*models.ScopedAPIKey),
+		credentials:   make(map[string]*models.KitchenCredential),
 		testSuites:    make(map[string]*models.TestSuite),
 		testRuns:      make(map[string]*models.TestRun),
 		environments:  make(map[string]*models.Environment),
@@ -246,6 +249,7 @@ func (m *MemoryStore) saveSnapshot() {
 		VectorDocs:    m.vectorDocs,
 		Connectors:    m.connectors,
 		ScopedKeys:    m.scopedKeys,
+		Credentials:   m.credentials,
 		TestSuites:    m.testSuites,
 		TestRuns:      m.testRuns,
 		Environments:  m.environments,
@@ -346,6 +350,9 @@ func (m *MemoryStore) loadSnapshot() {
 	if snap.ScopedKeys != nil {
 		m.scopedKeys = snap.ScopedKeys
 	}
+	if snap.Credentials != nil {
+		m.credentials = snap.Credentials
+	}
 	if snap.TestSuites != nil {
 		m.testSuites = snap.TestSuites
 	}
@@ -360,6 +367,9 @@ func (m *MemoryStore) loadSnapshot() {
 	}
 	if snap.ServiceAccts != nil {
 		m.serviceAccts = snap.ServiceAccts
+	}
+	if snap.Credentials == nil {
+		m.credentials = make(map[string]*models.KitchenCredential)
 	}
 
 	total := len(m.agents) + len(m.recipes) + len(m.kitchens) + len(m.providers) + len(m.tools) + len(m.prompts)
@@ -1643,6 +1653,67 @@ func (m *MemoryStore) DeleteScopedKey(_ context.Context, kitchen, id string) err
 		return &ErrNotFound{Entity: "scoped_key", Key: id}
 	}
 	delete(m.scopedKeys, id)
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+// ── Kitchen Credential Store ────────────────────────────────
+
+func (m *MemoryStore) GetKitchenCredential(_ context.Context, kitchen, name string) (*models.KitchenCredential, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	c, ok := m.credentials[kitchen+":"+name]
+	if !ok {
+		return nil, &ErrNotFound{Entity: "kitchen_credential", Key: name}
+	}
+	copy := *c
+	return &copy, nil
+}
+
+func (m *MemoryStore) ListKitchenCredentials(_ context.Context, kitchen string) ([]models.KitchenCredential, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []models.KitchenCredential
+	for _, c := range m.credentials {
+		if c.Kitchen == kitchen {
+			out = append(out, *c)
+		}
+	}
+	return out, nil
+}
+
+func (m *MemoryStore) CreateKitchenCredential(_ context.Context, cred *models.KitchenCredential) error {
+	m.mu.Lock()
+	m.credentials[cred.Kitchen+":"+cred.Name] = cred
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) UpdateKitchenCredential(_ context.Context, cred *models.KitchenCredential) error {
+	m.mu.Lock()
+	existing, ok := m.credentials[cred.Kitchen+":"+cred.Name]
+	if !ok {
+		m.mu.Unlock()
+		return &ErrNotFound{Entity: "kitchen_credential", Key: cred.Name}
+	}
+	existing.Value = cred.Value
+	existing.Label = cred.Label
+	existing.UpdatedAt = time.Now().UTC()
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) DeleteKitchenCredential(_ context.Context, kitchen, name string) error {
+	m.mu.Lock()
+	key := kitchen + ":" + name
+	if _, ok := m.credentials[key]; !ok {
+		m.mu.Unlock()
+		return &ErrNotFound{Entity: "kitchen_credential", Key: name}
+	}
+	delete(m.credentials, key)
 	m.mu.Unlock()
 	m.requestSave()
 	return nil

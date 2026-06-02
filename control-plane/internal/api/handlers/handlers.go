@@ -1184,7 +1184,15 @@ func (h *Handlers) BakeRecipe(w http.ResponseWriter, r *http.Request) {
 		executor = h.Workflow
 	}
 
-	runID, err := executor.ExecuteRecipe(r.Context(), recipe, kitchen, req.Input, req.Environment)
+	execCtx := r.Context()
+	if triggerKey := extractAPIKeyFromRequest(r); triggerKey != "" {
+		execCtx = workflow.WithExecutionAPIKey(execCtx, triggerKey)
+	}
+	if id := pkgmw.GetIdentity(r.Context()); id != nil && id.Subject != "" {
+		execCtx = workflow.WithTriggeredBy(execCtx, id.Subject)
+	}
+
+	runID, err := executor.ExecuteRecipe(execCtx, recipe, kitchen, req.Input, req.Environment)
 	if err != nil {
 		if err.Error() == "permission_denied" || len(err.Error()) > 0 && err.Error()[:16] == "permission_denied" {
 			respondError(w, http.StatusForbidden, err.Error())
@@ -1211,6 +1219,19 @@ func (h *Handlers) BakeRecipe(w http.ResponseWriter, r *http.Request) {
 		resp["environment"] = req.Environment
 	}
 	respondJSON(w, http.StatusAccepted, resp)
+}
+
+func extractAPIKeyFromRequest(r *http.Request) string {
+	if authHeader := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(authHeader, "Bearer ") {
+		return strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+	}
+	if key := strings.TrimSpace(r.Header.Get("X-API-Key")); key != "" {
+		return key
+	}
+	if key := strings.TrimSpace(r.URL.Query().Get("api_key")); key != "" {
+		return key
+	}
+	return ""
 }
 
 func (h *Handlers) RecipeHistory(w http.ResponseWriter, r *http.Request) {
@@ -4370,7 +4391,27 @@ func (h *Handlers) ApproveGateWithMetadata(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	ok := h.Workflow.ApproveGateWithMetadata(runID, stepName, req.Approved, req.ApproverID, req.ApproverEmail, req.Channel, req.Comments)
+	// Auto-populate approver identity from the authenticated caller when not explicitly provided.
+	if id := pkgmw.GetIdentity(r.Context()); id != nil {
+		if req.ApproverID == "" {
+			req.ApproverID = id.Subject
+		}
+		if req.ApproverEmail == "" && id.Email != "" {
+			req.ApproverEmail = id.Email
+		}
+	}
+
+	// Extract OIDC issuer from the caller's token claims for same-tenant validation.
+	approverIssuer := ""
+	if id := pkgmw.GetIdentity(r.Context()); id != nil {
+		approverIssuer = id.Claims["iss"]
+	}
+
+	ok, approveErr := h.Workflow.ApproveGateWithMetadata(runID, stepName, req.Approved, req.ApproverID, req.ApproverEmail, approverIssuer, req.Channel, req.Comments)
+	if approveErr != nil {
+		respondError(w, http.StatusForbidden, approveErr.Error())
+		return
+	}
 	if !ok {
 		respondError(w, http.StatusNotFound, fmt.Sprintf("No pending gate '%s' for run '%s'", stepName, runID))
 		return
@@ -5455,3 +5496,5 @@ func (h *Handlers) HandleDeleteScopedKey(w http.ResponseWriter, r *http.Request)
 
 	w.WriteHeader(http.StatusNoContent)
 }
+
+
