@@ -303,17 +303,23 @@ func (m *Manager) GetK8sRecentLogs(ctx context.Context, kitchen, agentName strin
 	m.mu.RLock()
 	info, ok := m.processes[key]
 	m.mu.RUnlock()
-	if !ok {
-		return nil, fmt.Errorf("agent process not found")
-	}
-	if info.Mode != models.ExecModeK8s {
+	if ok && info.Mode != models.ExecModeK8s {
 		return nil, fmt.Errorf("agent is not running in k8s mode")
 	}
-	if info.PodName == "" {
-		return nil, fmt.Errorf("k8s pod name not available yet")
+
+	podName := ""
+	if ok {
+		podName = info.PodName
+	}
+	if podName == "" {
+		resolvedPod, err := m.k8s.FindPodForAgent(ctx, kitchen, agentName)
+		if err != nil {
+			return nil, fmt.Errorf("agent process not found")
+		}
+		podName = resolvedPod
 	}
 
-	return m.k8s.RecentLogs(ctx, info.PodName, tailLines)
+	return m.k8s.RecentLogs(ctx, podName, tailLines)
 }
 
 // SubscribeK8sLogs returns a channel of live pod logs for a k8s-managed agent.
@@ -323,17 +329,23 @@ func (m *Manager) SubscribeK8sLogs(ctx context.Context, kitchen, agentName strin
 	m.mu.RLock()
 	info, ok := m.processes[key]
 	m.mu.RUnlock()
-	if !ok {
-		return nil, fmt.Errorf("agent process not found")
-	}
-	if info.Mode != models.ExecModeK8s {
+	if ok && info.Mode != models.ExecModeK8s {
 		return nil, fmt.Errorf("agent is not running in k8s mode")
 	}
-	if info.PodName == "" {
-		return nil, fmt.Errorf("k8s pod name not available yet")
+
+	podName := ""
+	if ok {
+		podName = info.PodName
+	}
+	if podName == "" {
+		resolvedPod, err := m.k8s.FindPodForAgent(ctx, kitchen, agentName)
+		if err != nil {
+			return nil, fmt.Errorf("agent process not found")
+		}
+		podName = resolvedPod
 	}
 
-	return m.k8s.StreamLogs(ctx, info.PodName, tailLines)
+	return m.k8s.StreamLogs(ctx, podName, tailLines)
 }
 
 // buildEnvironment creates the env vars map for the agent process.

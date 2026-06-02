@@ -329,6 +329,71 @@ func (ke *K8sExecutor) waitForPod(ctx context.Context, client *k8sClient, deploy
 	return "", fmt.Errorf("pod for deployment %s not Running after %s", deployName, timeout)
 }
 
+// FindPodForAgent resolves the current pod name for a k8s-managed agent.
+// This is used as a fallback when the process manager has no in-memory state
+// (for example after a control-plane restart) but the agent pod is still running.
+func (ke *K8sExecutor) FindPodForAgent(ctx context.Context, kitchen, agentName string) (string, error) {
+	client, err := newK8sClient()
+	if err != nil {
+		return "", fmt.Errorf("k8s client init failed: %w", err)
+	}
+
+	deployName := fmt.Sprintf("agent-%s-%s", kitchen, agentName)
+	namespace := ke.namespace
+
+	type podItem struct {
+		Metadata struct {
+			Name              string    `json:"name"`
+			CreationTimestamp time.Time `json:"creationTimestamp"`
+		} `json:"metadata"`
+		Status struct {
+			Phase string `json:"phase"`
+		} `json:"status"`
+	}
+
+	fetchPods := func(path string) ([]podItem, error) {
+		status, body, reqErr := client.do(ctx, http.MethodGet, path, nil)
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		if status != http.StatusOK {
+			return nil, fmt.Errorf("k8s pod query returned HTTP %d", status)
+		}
+		var podList struct {
+			Items []podItem `json:"items"`
+		}
+		if err := json.Unmarshal(body, &podList); err != nil {
+			return nil, err
+		}
+		return podList.Items, nil
+	}
+
+	// Primary lookup: exact deployment label used by the executor.
+	pods, err := fetchPods(fmt.Sprintf("/api/v1/namespaces/%s/pods?labelSelector=app%%3D%s", namespace, deployName))
+	if err == nil {
+		for _, pod := range pods {
+			if pod.Status.Phase == "Running" {
+				return pod.Metadata.Name, nil
+			}
+		}
+	}
+
+	// Secondary lookup: find running agent pods by naming pattern.
+	pods, err = fetchPods(fmt.Sprintf("/api/v1/namespaces/%s/pods?labelSelector=agentoven.dev%%2Fcomponent%%3Dagent", namespace))
+	if err != nil {
+		return "", fmt.Errorf("find agent pod: %w", err)
+	}
+
+	nameNeedle := "-" + agentName + "-"
+	for _, pod := range pods {
+		if pod.Status.Phase == "Running" && strings.Contains(pod.Metadata.Name, nameNeedle) {
+			return pod.Metadata.Name, nil
+		}
+	}
+
+	return "", fmt.Errorf("no running pod found for agent '%s'", agentName)
+}
+
 // waitForHealth polls the /health endpoint until it returns 200.
 func (ke *K8sExecutor) waitForHealth(endpoint string, timeout time.Duration) error {
 	healthURL := endpoint + "/health"
