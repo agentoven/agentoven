@@ -1501,6 +1501,15 @@ func (h *Handlers) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	provider.IsDefault = req.IsDefault
 
+	// Update CA bundle if provided. Sending an empty string keeps the existing
+	// bundle. Sending a non-empty PEM string replaces it (or sets it for the
+	// first time). The cached custom HTTP client is invalidated so the new
+	// bundle is picked up immediately on the next provider call.
+	if req.CABundle != "" {
+		provider.CABundle = req.CABundle
+		h.Router.InvalidateProviderClient(provider.Name)
+	}
+
 	// Capture old model list before saving so we can detect removed models.
 	oldModels := make(map[string]bool, len(provider.Models))
 	for _, m := range provider.Models {
@@ -5496,5 +5505,3 @@ func (h *Handlers) HandleDeleteScopedKey(w http.ResponseWriter, r *http.Request)
 
 	w.WriteHeader(http.StatusNoContent)
 }
-
-

@@ -318,9 +318,17 @@ func (e *Engine) checkApproverConstraints(ctx context.Context, record *models.Ap
 	email := strings.ToLower(strings.TrimSpace(approverEmail))
 
 	// 1. Explicit email allow-list wins outright (even cross-tenant).
-	for _, allowed := range step.ApproverEmails {
-		if strings.ToLower(strings.TrimSpace(allowed)) == email {
-			return nil
+	if len(step.ApproverEmails) > 0 {
+		for _, allowed := range step.ApproverEmails {
+			if strings.ToLower(strings.TrimSpace(allowed)) == email {
+				return nil
+			}
+		}
+		// Caller is not in the explicit allow-list. If no other constraint can
+		// grant access, deny immediately (allow-list is exclusive when it is the
+		// only declared constraint).
+		if step.ApproverDomain == "" && !step.RequireSameTenant {
+			return fmt.Errorf("%w: email %q is not in the approver allow-list", ErrApproverUnauthorized, approverEmail)
 		}
 	}
 
@@ -526,6 +534,15 @@ func (e *Engine) executeAsync(ctx context.Context, run *models.RecipeRun, recipe
 			log.Warn().Err(err).Str("run_id", run.ID).Msg("Step failed")
 			// For now, continue execution of other branches
 			// In the future, we can add fail-fast policy
+		}
+	}
+
+	// Fail the run if any step ended in a failure state (e.g. rejected gate,
+	// agent error with no downstream dependent to trigger blockedByFailedDeps).
+	for _, sr := range stepResults {
+		if sr.Status == "failed" {
+			e.failRun(run, stepResults, fmt.Sprintf("step '%s' failed: %s", sr.StepName, sr.Error))
+			return
 		}
 	}
 
@@ -1142,15 +1159,16 @@ func (e *Engine) executeRAGStep(ctx context.Context, run *models.RecipeRun, step
 func (e *Engine) executeHumanGate(ctx context.Context, run *models.RecipeRun, step *models.Step, result *models.StepResult) error {
 	gateKey := run.ID + ":" + step.Name
 
-	// Parse SLA timeout from step config (default: 0 = no timeout, wait forever)
-	maxWaitMinutes := 0
+	// Parse SLA timeout from step config (default: 0 = no timeout, wait forever).
+	// Stored as float64 to support sub-minute values (useful in tests; e.g. 0.1 = 6 seconds).
+	var maxWaitMinutes float64
 	if step.Config != nil {
 		if v, ok := step.Config["max_wait_minutes"]; ok {
 			switch val := v.(type) {
 			case float64:
-				maxWaitMinutes = int(val)
-			case int:
 				maxWaitMinutes = val
+			case int:
+				maxWaitMinutes = float64(val)
 			}
 		}
 	}
@@ -1164,7 +1182,7 @@ func (e *Engine) executeHumanGate(ctx context.Context, run *models.RecipeRun, st
 		Kitchen:        run.Kitchen,
 		Status:         "pending",
 		RequestedAt:    time.Now().UTC(),
-		MaxWaitMinutes: maxWaitMinutes,
+		MaxWaitMinutes: int(maxWaitMinutes),
 	}
 	if err := e.store.CreateApproval(ctx, approval); err != nil {
 		log.Warn().Err(err).Str("gate_key", gateKey).Msg("Failed to persist approval record, falling back to in-memory only")
@@ -1187,7 +1205,7 @@ func (e *Engine) executeHumanGate(ctx context.Context, run *models.RecipeRun, st
 	log.Info().
 		Str("run_id", run.ID).
 		Str("step", step.Name).
-		Int("max_wait_minutes", maxWaitMinutes).
+		Float64("max_wait_minutes", maxWaitMinutes).
 		Msg("⏸️  Human gate — waiting for approval")
 
 	// Dispatch gate_waiting notifications
@@ -1212,7 +1230,7 @@ func (e *Engine) executeHumanGate(ctx context.Context, run *models.RecipeRun, st
 	var gateCtx context.Context
 	var gateCancel context.CancelFunc
 	if maxWaitMinutes > 0 {
-		gateCtx, gateCancel = context.WithTimeout(ctx, time.Duration(maxWaitMinutes)*time.Minute)
+		gateCtx, gateCancel = context.WithTimeout(ctx, time.Duration(float64(time.Minute)*maxWaitMinutes))
 	} else {
 		gateCtx, gateCancel = context.WithCancel(ctx)
 	}
@@ -1243,11 +1261,11 @@ func (e *Engine) executeHumanGate(ctx context.Context, run *models.RecipeRun, st
 				if record, err := e.store.GetApproval(ctx, gateKey); err == nil && record.Status == "pending" {
 					record.Status = "timed_out"
 					record.ResolvedAt = &now
-					record.Comments = fmt.Sprintf("SLA breach: gate not resolved within %d minutes", maxWaitMinutes)
+					record.Comments = fmt.Sprintf("SLA breach: gate not resolved within %.2f minutes", maxWaitMinutes)
 					e.store.UpdateApproval(ctx, record)
 				}
 				result.GateStatus = "timed_out"
-				return fmt.Errorf("human gate '%s' exceeded SLA of %d minutes", step.Name, maxWaitMinutes)
+				return fmt.Errorf("human gate '%s' exceeded SLA of %.2f minutes", step.Name, maxWaitMinutes)
 			}
 			return fmt.Errorf("human gate '%s' was canceled", step.Name)
 		}

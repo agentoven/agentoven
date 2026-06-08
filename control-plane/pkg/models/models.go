@@ -732,6 +732,12 @@ type ModelProvider struct {
 	APIKeys          []APIKeyEntry `json:"api_keys,omitempty"`
 	RotationStrategy string        `json:"rotation_strategy,omitempty" db:"rotation_strategy"` // "round-robin", "random", "weighted"
 
+	// CABundle is an optional PEM-encoded CA certificate chain to trust when
+	// calling this provider's endpoint. Useful for providers behind an internal
+	// PKI (e.g. LiteLLM with a corporate TLS cert). Leave empty to use the
+	// system default CA pool. Not sensitive — public cert only.
+	CABundle string `json:"ca_bundle,omitempty" db:"ca_bundle"`
+
 	// Health check cache — populated by TestProvider
 	LastTestedAt    *time.Time `json:"last_tested_at,omitempty" db:"last_tested_at"`
 	LastTestHealthy *bool      `json:"last_test_healthy,omitempty" db:"last_test_healthy"`
@@ -2362,9 +2368,9 @@ func (k *ScopedAPIKey) CanAccessEnvironment(envSlug string) bool {
 type KitchenCredential struct {
 	ID        string    `json:"id"`
 	Kitchen   string    `json:"kitchen"`
-	Name      string    `json:"name"`      // unique within kitchen; used in step.auth_key_ref
-	Value     string    `json:"-"`         // raw key value; NEVER in JSON responses
-	Label     string    `json:"label"`     // human-readable description
+	Name      string    `json:"name"`  // unique within kitchen; used in step.auth_key_ref
+	Value     string    `json:"-"`     // raw key value; NEVER in JSON responses
+	Label     string    `json:"label"` // human-readable description
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	CreatedBy string    `json:"created_by,omitempty"`

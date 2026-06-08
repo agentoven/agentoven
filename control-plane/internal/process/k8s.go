@@ -38,10 +38,11 @@ type k8sResource struct {
 // Uses the in-cluster service account token to call the Kubernetes API server
 // directly — no kubectl dependency.
 type K8sExecutor struct {
-	mu        sync.Mutex
-	resources map[string]*k8sResource // key: kitchen/agentName
-	namespace string
-	image     string
+	mu         sync.Mutex
+	resources  map[string]*k8sResource // key: kitchen/agentName
+	namespace  string
+	image      string
+	pullSecret string
 }
 
 // k8sClient holds HTTP client and auth info for the Kubernetes API.
@@ -63,10 +64,15 @@ func NewK8sExecutor() *K8sExecutor {
 	if env := os.Getenv("AGENTOVEN_K8S_AGENT_IMAGE"); env != "" {
 		image = env
 	}
+	pullSecret := "ghcr-credentials"
+	if env := os.Getenv("AGENTOVEN_K8S_IMAGE_PULL_SECRET"); env != "" {
+		pullSecret = env
+	}
 	return &K8sExecutor{
-		resources: make(map[string]*k8sResource),
-		namespace: ns,
-		image:     image,
+		resources:  make(map[string]*k8sResource),
+		namespace:  ns,
+		image:      image,
+		pullSecret: pullSecret,
 	}
 }
 
@@ -146,7 +152,7 @@ func (ke *K8sExecutor) Start(ctx context.Context, agent *models.Agent, info *mod
 		return fmt.Errorf("k8s client init failed: %w", err)
 	}
 
-	deployName := fmt.Sprintf("agent-%s-%s", agent.Kitchen, agent.Name)
+	deployName := toK8sName(fmt.Sprintf("agent-%s-%s", agent.Kitchen, agent.Name))
 	serviceName := deployName + "-svc"
 	namespace := ke.namespace
 
@@ -165,7 +171,7 @@ func (ke *K8sExecutor) Start(ctx context.Context, agent *models.Agent, info *mod
 		envList = append(envList, map[string]interface{}{"name": k, "value": v})
 	}
 
-	deployment := buildDeploymentManifest(deployName, namespace, image, envList)
+	deployment := buildDeploymentManifest(deployName, namespace, image, ke.pullSecret, envList)
 	service := buildServiceManifest(deployName, serviceName, namespace)
 
 	log.Info().
@@ -249,7 +255,7 @@ func (ke *K8sExecutor) Stop(_ context.Context, info *models.ProcessInfo) error {
 	}
 	ke.mu.Unlock()
 
-	deployName := fmt.Sprintf("agent-%s-%s", info.Kitchen, info.AgentName)
+	deployName := toK8sName(fmt.Sprintf("agent-%s-%s", info.Kitchen, info.AgentName))
 	serviceName := deployName + "-svc"
 
 	log.Info().
@@ -338,7 +344,7 @@ func (ke *K8sExecutor) FindPodForAgent(ctx context.Context, kitchen, agentName s
 		return "", fmt.Errorf("k8s client init failed: %w", err)
 	}
 
-	deployName := fmt.Sprintf("agent-%s-%s", kitchen, agentName)
+	deployName := toK8sName(fmt.Sprintf("agent-%s-%s", kitchen, agentName))
 	namespace := ke.namespace
 
 	type podItem struct {
@@ -510,8 +516,31 @@ func (ke *K8sExecutor) StreamLogs(ctx context.Context, podName string, tailLines
 	return out, nil
 }
 
+// toK8sName converts an arbitrary string into a valid Kubernetes DNS-label name:
+// lowercase, non-alphanumeric chars replaced with "-", trimmed to 63 characters.
+func toK8sName(s string) string {
+	s = strings.ToLower(s)
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	result := strings.Trim(b.String(), "-")
+	// collapse consecutive dashes
+	for strings.Contains(result, "--") {
+		result = strings.ReplaceAll(result, "--", "-")
+	}
+	if len(result) > 63 {
+		result = strings.TrimRight(result[:63], "-")
+	}
+	return result
+}
+
 // buildDeploymentManifest returns a Deployment map ready for JSON encoding.
-func buildDeploymentManifest(deployName, namespace, image string, envList []map[string]interface{}) map[string]interface{} {
+func buildDeploymentManifest(deployName, namespace, image, pullSecret string, envList []map[string]interface{}) map[string]interface{} {
 	return map[string]interface{}{
 		"apiVersion": "apps/v1",
 		"kind":       "Deployment",
@@ -522,6 +551,7 @@ func buildDeploymentManifest(deployName, namespace, image string, envList []map[
 		},
 		"spec": map[string]interface{}{
 			"replicas": 1,
+			"strategy": map[string]interface{}{"type": "Recreate"},
 			"selector": map[string]interface{}{
 				"matchLabels": map[string]string{"app": deployName},
 			},
@@ -531,7 +561,7 @@ func buildDeploymentManifest(deployName, namespace, image string, envList []map[
 				},
 				"spec": map[string]interface{}{
 					"imagePullSecrets": []map[string]interface{}{
-						{"name": "ghcr-credentials"},
+						{"name": pullSecret},
 					},
 					"containers": []map[string]interface{}{{
 						"name":            "agent",

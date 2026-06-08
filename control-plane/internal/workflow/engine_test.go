@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -662,5 +663,367 @@ func TestExecuteRecipeFallsBackToContextKey(t *testing.T) {
 	defer mu.Unlock()
 	if seenAuth != "Bearer trigger-key" {
 		t.Fatalf("authorization header = %q, want %q", seenAuth, "Bearer trigger-key")
+	}
+}
+
+// ── Human Gate Tests ─────────────────────────────────────────
+
+// waitForPaused polls until the run reaches paused status or times out.
+func waitForPaused(t *testing.T, eng *Engine, runID string) {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		run, _ := eng.store.GetRecipeRun(ctx, runID)
+		if run != nil && run.Status == models.RecipeRunPaused {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("timeout waiting for run to pause at human_gate")
+}
+
+// TestHumanGateApprove: recipe pauses at a human_gate step and resumes after approval.
+func TestHumanGateApprove(t *testing.T) {
+	outputs := map[string]map[string]interface{}{
+		"before": {"status": "ready"},
+		"after":  {"status": "done"},
+	}
+	srv := fakeAgentServer(outputs)
+	defer srv.Close()
+
+	eng := setupTestEngine(t, srv)
+	ctx := context.Background()
+	for n := range outputs {
+		eng.store.CreateAgent(ctx, &models.Agent{
+			Name:        n,
+			Kitchen:     "default",
+			Status:      models.AgentStatusReady,
+			A2AEndpoint: fmt.Sprintf("%s/api/v1/agents/%s/invoke", srv.URL, n),
+		})
+	}
+
+	recipe := &models.Recipe{
+		ID: "gate-approve", Name: "gate-approve", Kitchen: "default",
+		Steps: []models.Step{
+			{Name: "before", Kind: models.StepAgent, AgentRef: "before"},
+			{Name: "gate", Kind: models.StepHumanGate, DependsOn: []string{"before"}},
+			{Name: "after", Kind: models.StepAgent, AgentRef: "after", DependsOn: []string{"gate"}},
+		},
+	}
+	eng.store.CreateRecipe(ctx, recipe)
+
+	runID, err := eng.ExecuteRecipe(ctx, recipe, "default", nil, "")
+	if err != nil {
+		t.Fatalf("ExecuteRecipe: %v", err)
+	}
+
+	waitForPaused(t, eng, runID)
+
+	ok, err := eng.ApproveGateWithMetadata(runID, "gate", true, "uid-1", "approver@example.com", "", "dashboard", "LGTM")
+	if err != nil {
+		t.Fatalf("ApproveGateWithMetadata error: %v", err)
+	}
+	if !ok {
+		t.Fatal("ApproveGateWithMetadata returned false, expected true")
+	}
+
+	finished := waitForRun(t, eng, runID, 15)
+	if finished.Status != models.RecipeRunCompleted {
+		t.Fatalf("run status = %s, error = %s", finished.Status, finished.Error)
+	}
+
+	for _, sr := range finished.StepResults {
+		if sr.StepName == "gate" {
+			if sr.GateStatus != "approved" {
+				t.Errorf("gate_status = %s, want approved", sr.GateStatus)
+			}
+			if sr.Output["approver_email"] != "approver@example.com" {
+				t.Errorf("approver_email = %v", sr.Output["approver_email"])
+			}
+			return
+		}
+	}
+	t.Error("gate step not found in step_results")
+}
+
+// TestHumanGateReject: recipe fails when the gate is rejected.
+func TestHumanGateReject(t *testing.T) {
+	outputs := map[string]map[string]interface{}{
+		"before": {"status": "ready"},
+	}
+	srv := fakeAgentServer(outputs)
+	defer srv.Close()
+
+	eng := setupTestEngine(t, srv)
+	ctx := context.Background()
+	eng.store.CreateAgent(ctx, &models.Agent{
+		Name:        "before",
+		Kitchen:     "default",
+		Status:      models.AgentStatusReady,
+		A2AEndpoint: fmt.Sprintf("%s/api/v1/agents/%s/invoke", srv.URL, "before"),
+	})
+
+	recipe := &models.Recipe{
+		ID: "gate-reject", Name: "gate-reject", Kitchen: "default",
+		Steps: []models.Step{
+			{Name: "before", Kind: models.StepAgent, AgentRef: "before"},
+			{Name: "gate", Kind: models.StepHumanGate, DependsOn: []string{"before"}},
+		},
+	}
+	eng.store.CreateRecipe(ctx, recipe)
+
+	runID, err := eng.ExecuteRecipe(ctx, recipe, "default", nil, "")
+	if err != nil {
+		t.Fatalf("ExecuteRecipe: %v", err)
+	}
+
+	waitForPaused(t, eng, runID)
+
+	ok, err := eng.ApproveGateWithMetadata(runID, "gate", false, "uid-2", "rejector@example.com", "", "email", "not ready")
+	if err != nil {
+		t.Fatalf("ApproveGateWithMetadata reject error: %v", err)
+	}
+	if !ok {
+		t.Fatal("ApproveGateWithMetadata returned false")
+	}
+
+	finished := waitForRun(t, eng, runID, 15)
+	if finished.Status != models.RecipeRunFailed {
+		t.Fatalf("run should have failed on rejection, got %s", finished.Status)
+	}
+	for _, sr := range finished.StepResults {
+		if sr.StepName == "gate" && sr.GateStatus != "rejected" {
+			t.Errorf("gate_status = %s, want rejected", sr.GateStatus)
+		}
+	}
+}
+
+// TestHumanGateSLATimeout: gate times out when max_wait_minutes elapses.
+// Uses a very small SLA to keep the test fast.
+func TestHumanGateSLATimeout(t *testing.T) {
+	eng := setupTestEngine(t, nil)
+	ctx := context.Background()
+
+	// 0.001 minutes ≈ 60ms — enough for CI.
+	recipe := &models.Recipe{
+		ID: "gate-sla", Name: "gate-sla", Kitchen: "default",
+		Steps: []models.Step{
+			{
+				Name:   "gate",
+				Kind:   models.StepHumanGate,
+				Config: map[string]interface{}{"max_wait_minutes": 0.001},
+			},
+		},
+	}
+	eng.store.CreateRecipe(ctx, recipe)
+
+	runID, err := eng.ExecuteRecipe(ctx, recipe, "default", nil, "")
+	if err != nil {
+		t.Fatalf("ExecuteRecipe: %v", err)
+	}
+
+	finished := waitForRun(t, eng, runID, 15)
+	if finished.Status != models.RecipeRunFailed {
+		t.Fatalf("expected failed on SLA breach, got %s", finished.Status)
+	}
+}
+
+// ── Approver Constraint Tests ────────────────────────────────
+
+// TestApproverEmailAllowList: only callers in ApproverEmails may approve.
+func TestApproverEmailAllowList(t *testing.T) {
+	eng := setupTestEngine(t, nil)
+	ctx := context.Background()
+
+	recipe := &models.Recipe{
+		ID: "gate-email-acl", Name: "gate-email-acl", Kitchen: "default",
+		Steps: []models.Step{
+			{
+				Name:           "gate",
+				Kind:           models.StepHumanGate,
+				ApproverEmails: []string{"alice@corp.com", "bob@corp.com"},
+			},
+		},
+	}
+	eng.store.CreateRecipe(ctx, recipe)
+
+	runID, err := eng.ExecuteRecipe(ctx, recipe, "default", nil, "")
+	if err != nil {
+		t.Fatalf("ExecuteRecipe: %v", err)
+	}
+	waitForPaused(t, eng, runID)
+
+	// Unauthorized caller.
+	_, err = eng.ApproveGateWithMetadata(runID, "gate", true, "uid-x", "mallory@evil.com", "", "api", "")
+	if !errors.Is(err, ErrApproverUnauthorized) {
+		t.Errorf("expected ErrApproverUnauthorized, got %v", err)
+	}
+
+	// Authorized caller.
+	ok, err := eng.ApproveGateWithMetadata(runID, "gate", true, "uid-a", "alice@corp.com", "", "api", "")
+	if err != nil {
+		t.Fatalf("alice should be allowed: %v", err)
+	}
+	if !ok {
+		t.Fatal("ApproveGateWithMetadata returned false for alice")
+	}
+	waitForRun(t, eng, runID, 15)
+}
+
+// TestApproverDomainConstraint: caller must have an email matching ApproverDomain.
+func TestApproverDomainConstraint(t *testing.T) {
+	eng := setupTestEngine(t, nil)
+	ctx := context.Background()
+
+	recipe := &models.Recipe{
+		ID: "gate-domain", Name: "gate-domain", Kitchen: "default",
+		Steps: []models.Step{
+			{Name: "gate", Kind: models.StepHumanGate, ApproverDomain: "corp.com"},
+		},
+	}
+	eng.store.CreateRecipe(ctx, recipe)
+
+	runID, err := eng.ExecuteRecipe(ctx, recipe, "default", nil, "")
+	if err != nil {
+		t.Fatalf("ExecuteRecipe: %v", err)
+	}
+	waitForPaused(t, eng, runID)
+
+	// Wrong domain.
+	_, err = eng.ApproveGateWithMetadata(runID, "gate", true, "uid-x", "user@otherdomain.io", "", "api", "")
+	if !errors.Is(err, ErrApproverUnauthorized) {
+		t.Errorf("expected ErrApproverUnauthorized for wrong domain, got %v", err)
+	}
+
+	// Correct domain.
+	ok, err := eng.ApproveGateWithMetadata(runID, "gate", true, "uid-y", "user@corp.com", "", "api", "ok")
+	if err != nil {
+		t.Fatalf("corp.com user should be allowed: %v", err)
+	}
+	if !ok {
+		t.Fatal("ApproveGateWithMetadata returned false for domain-matched user")
+	}
+	waitForRun(t, eng, runID, 15)
+}
+
+// TestApproverSameTenant: RequireSameTenant blocks callers with a different OIDC issuer.
+func TestApproverSameTenant(t *testing.T) {
+	eng := setupTestEngine(t, nil)
+	eng.SetOIDCIssuer("https://login.microsoftonline.com/tenant-abc/v2.0")
+	ctx := context.Background()
+
+	recipe := &models.Recipe{
+		ID: "gate-tenant", Name: "gate-tenant", Kitchen: "default",
+		Steps: []models.Step{
+			{Name: "gate", Kind: models.StepHumanGate, RequireSameTenant: true},
+		},
+	}
+	eng.store.CreateRecipe(ctx, recipe)
+
+	runID, err := eng.ExecuteRecipe(ctx, recipe, "default", nil, "")
+	if err != nil {
+		t.Fatalf("ExecuteRecipe: %v", err)
+	}
+	waitForPaused(t, eng, runID)
+
+	// Different tenant issuer — rejected.
+	_, err = eng.ApproveGateWithMetadata(runID, "gate", true, "uid-x", "user@other.com",
+		"https://accounts.google.com", "api", "")
+	if !errors.Is(err, ErrApproverUnauthorized) {
+		t.Errorf("expected ErrApproverUnauthorized for cross-tenant issuer, got %v", err)
+	}
+
+	// Same tenant — allowed.
+	ok, err := eng.ApproveGateWithMetadata(runID, "gate", true, "uid-y", "user@tenant.com",
+		"https://login.microsoftonline.com/tenant-abc/v2.0", "api", "approved")
+	if err != nil {
+		t.Fatalf("same-tenant user should be allowed: %v", err)
+	}
+	if !ok {
+		t.Fatal("ApproveGateWithMetadata returned false for same-tenant user")
+	}
+	waitForRun(t, eng, runID, 15)
+}
+
+// TestApproverSameTenantEmailOverride: explicit email allow-list bypasses same-tenant check.
+func TestApproverSameTenantEmailOverride(t *testing.T) {
+	eng := setupTestEngine(t, nil)
+	eng.SetOIDCIssuer("https://login.microsoftonline.com/tenant-abc/v2.0")
+	ctx := context.Background()
+
+	recipe := &models.Recipe{
+		ID: "gate-tenant-override", Name: "gate-tenant-override", Kitchen: "default",
+		Steps: []models.Step{
+			{
+				Name:              "gate",
+				Kind:              models.StepHumanGate,
+				RequireSameTenant: true,
+				ApproverEmails:    []string{"external@partner.com"},
+			},
+		},
+	}
+	eng.store.CreateRecipe(ctx, recipe)
+
+	runID, err := eng.ExecuteRecipe(ctx, recipe, "default", nil, "")
+	if err != nil {
+		t.Fatalf("ExecuteRecipe: %v", err)
+	}
+	waitForPaused(t, eng, runID)
+
+	// External partner explicitly listed — allowed despite cross-tenant issuer.
+	ok, err := eng.ApproveGateWithMetadata(runID, "gate", true, "uid-ext", "external@partner.com",
+		"https://accounts.google.com", "api", "approved by partner")
+	if err != nil {
+		t.Fatalf("explicitly listed external user should be allowed: %v", err)
+	}
+	if !ok {
+		t.Fatal("ApproveGateWithMetadata returned false for explicitly listed external user")
+	}
+	waitForRun(t, eng, runID, 15)
+}
+
+// ── CancelRun Test ────────────────────────────────────────────
+
+// TestCancelRun: canceling a run mid-flight terminates execution.
+func TestCancelRun(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(3 * time.Second)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"result": "slow"})
+	}))
+	defer srv.Close()
+
+	eng := setupTestEngine(t, srv)
+	ctx := context.Background()
+	eng.store.CreateAgent(ctx, &models.Agent{
+		Name:        "slow",
+		Kitchen:     "default",
+		Status:      models.AgentStatusReady,
+		A2AEndpoint: fmt.Sprintf("%s/api/v1/agents/%s/invoke", srv.URL, "slow"),
+	})
+
+	recipe := &models.Recipe{
+		ID: "cancel-test", Name: "cancel-test", Kitchen: "default",
+		Steps: []models.Step{
+			{Name: "slow", Kind: models.StepAgent, AgentRef: "slow"},
+		},
+	}
+	eng.store.CreateRecipe(ctx, recipe)
+
+	runID, err := eng.ExecuteRecipe(ctx, recipe, "default", nil, "")
+	if err != nil {
+		t.Fatalf("ExecuteRecipe: %v", err)
+	}
+
+	// Give the engine a moment to reach the slow step, then cancel.
+	time.Sleep(300 * time.Millisecond)
+	if !eng.CancelRun(runID) {
+		t.Fatal("CancelRun returned false — run not found")
+	}
+
+	finished := waitForRun(t, eng, runID, 15)
+	if finished.Status != models.RecipeRunFailed && finished.Status != models.RecipeRunCanceled {
+		t.Errorf("expected failed/canceled after CancelRun, got %s", finished.Status)
 	}
 }

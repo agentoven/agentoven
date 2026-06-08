@@ -34,9 +34,9 @@ type snapshot struct {
 	VectorDocs    map[string]*models.VectorDoc           `json:"vector_docs"`      // key: kitchen:id
 	Connectors    map[string]*models.DataConnectorConfig `json:"connectors"`       // key: kitchen:id
 	Sessions      map[string]*models.Session             `json:"sessions"`         // key: id
-	ScopedKeys    map[string]*models.ScopedAPIKey        `json:"scoped_keys"`         // key: id
-	Credentials   map[string]*models.KitchenCredential   `json:"credentials"`         // key: kitchen:name
-	TestSuites    map[string]*models.TestSuite           `json:"test_suites"`         // key: id
+	ScopedKeys    map[string]*models.ScopedAPIKey        `json:"scoped_keys"`      // key: id
+	Credentials   map[string]*models.KitchenCredential   `json:"credentials"`      // key: kitchen:name
+	TestSuites    map[string]*models.TestSuite           `json:"test_suites"`      // key: id
 	TestRuns      map[string]*models.TestRun             `json:"test_runs"`        // key: id
 	Environments  map[string]*models.Environment         `json:"environments"`     // key: kitchen:slug
 	Deployments   map[string]*models.AgentDeployment     `json:"deployments"`      // key: id

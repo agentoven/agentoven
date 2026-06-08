@@ -44,12 +44,12 @@
     "vitest": "^2.0.0"
   },
   "optionalDependencies": {
-    "@agentoven/sdk-win32-x64-msvc": "0.8.2",
-    "@agentoven/sdk-darwin-x64": "0.8.2",
-    "@agentoven/sdk-linux-x64-gnu": "0.8.2",
-    "@agentoven/sdk-darwin-arm64": "0.8.2",
-    "@agentoven/sdk-linux-arm64-gnu": "0.8.2",
-    "@agentoven/sdk-linux-x64-musl": "0.8.2"
+    "@agentoven/sdk-win32-x64-msvc": "0.8.5-beta-3",
+    "@agentoven/sdk-darwin-x64": "0.8.5-beta-3",
+    "@agentoven/sdk-linux-x64-gnu": "0.8.5-beta-3",
+    "@agentoven/sdk-darwin-arm64": "0.8.5-beta-3",
+    "@agentoven/sdk-linux-arm64-gnu": "0.8.5-beta-3",
+    "@agentoven/sdk-linux-x64-musl": "0.8.5-beta-3"
   },
   "engines": {
     "node": ">= 18"

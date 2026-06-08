@@ -8,6 +8,8 @@ package router
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -67,6 +69,11 @@ type ModelRouter struct {
 	// Pro calls RegisterDriver("bedrock", ...) etc. to add enterprise drivers.
 	driversMu sync.RWMutex
 	drivers   map[string]ProviderDriver
+
+	// providerClients caches per-provider *http.Client instances for providers
+	// that have a custom CA bundle. Keyed by provider name. The shared client
+	// field is used for providers without a custom CA.
+	providerClients sync.Map
 
 	// catalog provides model-level pricing and capability lookups.
 	// Optional — when nil, falls back to defaultCosts map.
@@ -195,6 +202,43 @@ func (mr *ModelRouter) ListDrivers() []string {
 		kinds = append(kinds, k)
 	}
 	return kinds
+}
+
+// clientFor returns the *http.Client to use when calling the given provider.
+// If the provider has a non-empty CABundle, a custom client that trusts that
+// CA chain (in addition to the system pool) is returned and cached by provider
+// name. Otherwise the shared router client is returned.
+func (mr *ModelRouter) clientFor(p *models.ModelProvider) *http.Client {
+	if p == nil || p.CABundle == "" {
+		return mr.client
+	}
+	if v, ok := mr.providerClients.Load(p.Name); ok {
+		return v.(*http.Client)
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil {
+		pool = x509.NewCertPool()
+	}
+	pool.AppendCertsFromPEM([]byte(p.CABundle))
+	c := &http.Client{
+		Timeout: mr.client.Timeout,
+		Transport: &http.Transport{
+			TLSClientConfig:       &tls.Config{RootCAs: pool},
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   10,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}
+	mr.providerClients.Store(p.Name, c)
+	return c
+}
+
+// InvalidateProviderClient removes the cached custom HTTP client for a provider.
+// Call this after updating a provider's CA bundle so the new bundle is picked up.
+func (mr *ModelRouter) InvalidateProviderClient(name string) {
+	mr.providerClients.Delete(name)
 }
 
 // ListEmbeddingCapableDrivers returns all registered drivers that implement
@@ -697,7 +741,7 @@ func (mr *ModelRouter) callOpenAI(ctx context.Context, provider *models.ModelPro
 		httpReq.Header.Set("X-Title", title)
 	}
 
-	httpResp, err := mr.client.Do(httpReq)
+	httpResp, err := mr.clientFor(provider).Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("openai: request failed: %w", err)
 	}
@@ -851,7 +895,7 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 	httpReq.Header.Set("x-api-key", apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
-	httpResp, err := mr.client.Do(httpReq)
+	httpResp, err := mr.clientFor(provider).Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: request failed: %w", err)
 	}
@@ -960,7 +1004,7 @@ func (mr *ModelRouter) callOllama(ctx context.Context, provider *models.ModelPro
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	httpResp, err := mr.client.Do(httpReq)
+	httpResp, err := mr.clientFor(provider).Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("ollama: request failed: %w", err)
 	}
@@ -1086,7 +1130,7 @@ func (mr *ModelRouter) TestProvider(ctx context.Context, provider *models.ModelP
 		}
 		url := endpoint + "/api/tags"
 		req, _ := http.NewRequestWithContext(testCtx, "GET", url, nil)
-		resp, err := mr.client.Do(req)
+		resp, err := mr.clientFor(provider).Do(req)
 		if err != nil {
 			result.Error = fmt.Sprintf("ollama unreachable: %v", err)
 			result.LatencyMs = time.Since(start).Milliseconds()
@@ -1271,7 +1315,7 @@ func (mr *ModelRouter) callOpenAITest(ctx context.Context, provider *models.Mode
 		MaxCompletionTokens *int                 `json:"max_completion_tokens,omitempty"`
 	}
 
-	limit := 5
+	limit := 200
 	req := testReq{
 		Model:    model,
 		Messages: []models.ChatMessage{{Role: "user", Content: "Say OK"}},
@@ -1297,7 +1341,7 @@ func (mr *ModelRouter) callOpenAITest(ctx context.Context, provider *models.Mode
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	httpResp, err := mr.client.Do(httpReq)
+	httpResp, err := mr.clientFor(provider).Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -1307,7 +1351,7 @@ func (mr *ModelRouter) callOpenAITest(ctx context.Context, provider *models.Mode
 		respBody, _ := io.ReadAll(httpResp.Body)
 		errStr := string(respBody)
 		// A max_tokens truncation error means the model IS reachable — treat as healthy
-		if httpResp.StatusCode == 400 && (strings.Contains(errStr, "max_tokens") || strings.Contains(errStr, "max_completion_tokens")) {
+		if httpResp.StatusCode == 400 && (strings.Contains(errStr, "max_tokens") || strings.Contains(errStr, "max_completion_tokens") || strings.Contains(errStr, "max_output_tokens")) {
 			return &models.RouteResponse{Provider: provider.Name, Model: model}, nil
 		}
 		// Extract human-readable message from OpenAI-compatible JSON error bodies
@@ -1366,7 +1410,7 @@ func (mr *ModelRouter) callAnthropicTest(ctx context.Context, provider *models.M
 	httpReq.Header.Set("x-api-key", apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
-	httpResp, err := mr.client.Do(httpReq)
+	httpResp, err := mr.clientFor(provider).Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -1541,7 +1585,7 @@ func (d *OpenAIDriver) DiscoverModels(ctx context.Context, provider *models.Mode
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 
-	httpResp, err := d.router.client.Do(httpReq)
+	httpResp, err := d.router.clientFor(provider).Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("openai discover: %w", err)
 	}
@@ -1623,7 +1667,7 @@ func (d *OpenAIDriver) Embed(ctx context.Context, provider *models.ModelProvider
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 
-	httpResp, err := d.router.client.Do(httpReq)
+	httpResp, err := d.router.clientFor(provider).Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("openai embed: request failed: %w", err)
 	}
@@ -1728,7 +1772,7 @@ func (d *AzureOpenAIDriver) Embed(ctx context.Context, provider *models.ModelPro
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("api-key", apiKey)
 
-	httpResp, err := d.router.client.Do(httpReq)
+	httpResp, err := d.router.clientFor(provider).Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("azure-openai embed: request failed: %w", err)
 	}
@@ -1804,7 +1848,7 @@ func (d *AnthropicDriver) DiscoverModels(ctx context.Context, provider *models.M
 	httpReq.Header.Set("x-api-key", apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
-	httpResp, err := d.router.client.Do(httpReq)
+	httpResp, err := d.router.clientFor(provider).Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic discover: %w", err)
 	}
@@ -1862,7 +1906,7 @@ func (d *OllamaDriver) HealthCheck(ctx context.Context, provider *models.ModelPr
 	}
 	url := endpoint + "/api/tags"
 	httpReq, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-	resp, err := d.router.client.Do(httpReq)
+	resp, err := d.router.clientFor(provider).Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("ollama unreachable: %w", err)
 	}
@@ -1886,7 +1930,7 @@ func (d *OllamaDriver) DiscoverModels(ctx context.Context, provider *models.Mode
 		return nil, err
 	}
 
-	httpResp, err := d.router.client.Do(httpReq)
+	httpResp, err := d.router.clientFor(provider).Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("ollama discover: %w", err)
 	}
@@ -1955,7 +1999,7 @@ func (d *OllamaDriver) Embed(ctx context.Context, provider *models.ModelProvider
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	httpResp, err := d.router.client.Do(httpReq)
+	httpResp, err := d.router.clientFor(provider).Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("ollama embed: request failed: %w", err)
 	}
@@ -2021,7 +2065,7 @@ func (d *LiteLLMDriver) HealthCheck(ctx context.Context, provider *models.ModelP
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	resp, err := d.router.client.Do(httpReq)
+	resp, err := d.router.clientFor(provider).Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("litellm unreachable: %w", err)
 	}
@@ -2052,7 +2096,7 @@ func (d *LiteLLMDriver) DiscoverModels(ctx context.Context, provider *models.Mod
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	httpResp, err := d.router.client.Do(httpReq)
+	httpResp, err := d.router.clientFor(provider).Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("litellm discover: %w", err)
 	}
@@ -2157,7 +2201,7 @@ func (d *OpenRouterDriver) HealthCheck(ctx context.Context, provider *models.Mod
 		return err
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	resp, err := d.router.client.Do(httpReq)
+	resp, err := d.router.clientFor(provider).Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("openrouter unreachable: %w", err)
 	}
@@ -2187,7 +2231,7 @@ func (d *OpenRouterDriver) DiscoverModels(ctx context.Context, provider *models.
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	httpResp, err := d.router.client.Do(httpReq)
+	httpResp, err := d.router.clientFor(provider).Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("openrouter discover: %w", err)
 	}

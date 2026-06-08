@@ -111,16 +111,6 @@ func (m *Manager) SetSASecret(secret string) {
 func (m *Manager) Start(ctx context.Context, agent *models.Agent) (*models.ProcessInfo, error) {
 	key := processKey(agent.Kitchen, agent.Name)
 
-	// Check if already running
-	m.mu.RLock()
-	if existing, ok := m.processes[key]; ok {
-		if existing.Status == models.ProcessRunning {
-			m.mu.RUnlock()
-			return existing, nil // already running
-		}
-	}
-	m.mu.RUnlock()
-
 	// Determine execution mode; AGENTOVEN_DEFAULT_EXEC_MODE lets deployments
 	// override the default without changing agent records (e.g. "k8s" in AKS).
 	mode := agent.ExecutionMode
@@ -130,6 +120,22 @@ func (m *Manager) Start(ctx context.Context, agent *models.Agent) (*models.Proce
 		} else {
 			mode = models.ExecModeLocal
 		}
+	}
+
+	// Check if already running.
+	// For K8s mode we always re-apply the deployment so that env var changes
+	// (e.g. a new model API key after a re-bake) take effect immediately via a
+	// rolling update. For local/docker, re-starting a live process would be
+	// destructive, so we keep the early-return guard.
+	if mode != models.ExecModeK8s {
+		m.mu.RLock()
+		if existing, ok := m.processes[key]; ok {
+			if existing.Status == models.ProcessRunning {
+				m.mu.RUnlock()
+				return existing, nil // already running
+			}
+		}
+		m.mu.RUnlock()
 	}
 
 	// Allocate a port

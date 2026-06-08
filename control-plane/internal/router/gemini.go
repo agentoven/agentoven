@@ -113,7 +113,7 @@ func (d *GeminiDriver) HealthCheck(ctx context.Context, provider *models.ModelPr
 		return err
 	}
 
-	resp, err := d.router.client.Do(httpReq)
+	resp, err := d.router.clientFor(provider).Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("gemini unreachable: %w", err)
 	}
@@ -140,7 +140,7 @@ func (d *GeminiDriver) DiscoverModels(ctx context.Context, provider *models.Mode
 		return nil, err
 	}
 
-	resp, err := d.router.client.Do(httpReq)
+	resp, err := d.router.clientFor(provider).Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("gemini discover: %w", err)
 	}
@@ -248,7 +248,7 @@ func (d *GeminiDriver) Embed(ctx context.Context, provider *models.ModelProvider
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	httpResp, err := d.router.client.Do(httpReq)
+	httpResp, err := d.router.clientFor(provider).Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("gemini embed: request failed: %w", err)
 	}
@@ -372,7 +372,7 @@ func (mr *ModelRouter) callGemini(ctx context.Context, provider *models.ModelPro
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	start := time.Now()
-	httpResp, err := mr.client.Do(httpReq)
+	httpResp, err := mr.clientFor(provider).Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("gemini: request failed: %w", err)
 	}
