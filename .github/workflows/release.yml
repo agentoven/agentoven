@@ -1,4 +1,4 @@
-name: Release
+alsname: Release
 
 on:
   push:
@@ -118,26 +118,108 @@ jobs:
 
   # ── Python wheels ────────────────────────────────────────────
   python-wheels:
-    name: Python (${{ matrix.os }})
+    name: Python wheel (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          # Linux x86_64 — manylinux (glibc)
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            manylinux: auto
+          # Linux aarch64 — manylinux (glibc)
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            manylinux: auto
+          # Linux x86_64 — musl (Alpine)
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            manylinux: musllinux_1_2
+          # macOS Intel
+          - target: x86_64-apple-darwin
+            os: macos-13
+            manylinux: ''
+          # macOS Apple Silicon
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            manylinux: ''
+          # Windows x86_64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            manylinux: ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sdk/python
+      - uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.9
+            3.10
+            3.11
+            3.12
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: sdk/python
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --out dist --find-interpreter
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-wheels-${{ matrix.target }}
+          path: sdk/python/dist/*.whl
+          if-no-files-found: error
+
+  # ── Python sdist ──────────────────────────────────────────────
+  python-sdist:
+    name: Python sdist
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Build wheels
+      - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
           working-directory: sdk/python
-          args: --release --out dist
+          command: sdist
+          args: --out dist
       - uses: actions/upload-artifact@v4
         with:
-          name: python-wheels-${{ matrix.os }}
-          path: sdk/python/dist/
+          name: python-sdist
+          path: sdk/python/dist/*.tar.gz
+          if-no-files-found: error
+
+  # ── Publish Python SDK to PyPI ────────────────────────────────
+  python-publish:
+    name: Publish Python SDK
+    needs: [python-wheels, python-sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: python-*
+          merge-multiple: true
+      - name: Upload to PyPI
+        run: |
+          pip install twine
+          twine upload dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
 
   # ── Build & push Docker image to GHCR ─────────────────────────
   docker:
@@ -271,7 +353,7 @@ jobs:
   # ── Create GitHub Release ────────────────────────────────────
   release:
     name: Create Release
-    needs: [cli, server, python-wheels, docker, npm-publish]
+    needs: [cli, server, python-publish, docker, npm-publish]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
