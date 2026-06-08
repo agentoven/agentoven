@@ -293,20 +293,18 @@ export interface UpsertAgentEnvironmentRequest {
 
 export interface ScopedAPIKey {
   id: string;
-  name: string;
-  prefix: string;
-  agent_name: string;
+  key_prefix: string;
   kitchen: string;
-  scopes: string[];
-  /** Glob list of allowed environment slugs. "*" means all environments. */
+  agent_names: string[];
   environment_names: string[];
-  quota: number;
+  max_calls: number;
   call_count: number;
+  role?: string;
   expires_at?: string;
-  last_used_at?: string;
   revoked: boolean;
   created_by: string;
   created_at: string;
+  updated_at?: string;
 }
 
 // ── Audit Event ───────────────────────────────────────────────────────────────
@@ -328,12 +326,38 @@ export interface AuditEvent {
 // ── Server Info ───────────────────────────────────────────────────────────────
 
 export interface ServerInfo {
+  service?: string;
   version: string;
   edition: 'community' | 'pro' | 'enterprise';
   plan: string;
-  features: string[];
-  license_id?: string;
-  expires_at?: string;
+  org?: string;
+  features: {
+    environments: boolean;
+    test_suites: boolean;
+    service_accounts: boolean;
+    scoped_keys: boolean;
+    sso: boolean;
+    federation: boolean;
+    cloud_providers: boolean;
+    audit: boolean;
+    rag: boolean;
+    guardrails: boolean;
+    promotions: boolean;
+    phone_home: boolean;
+  };
+  limits?: Record<string, unknown>;
+  auth?: {
+    providers: string[];
+    sso_enabled: boolean;
+    require_auth: boolean;
+  };
+  license?: {
+    valid: boolean;
+    expires_at?: string;
+    org?: string;
+    plan: string;
+    license_id?: string;
+  };
 }
 
 // ── API Error ─────────────────────────────────────────────────────────────────

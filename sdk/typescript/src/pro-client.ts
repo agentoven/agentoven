@@ -316,6 +316,55 @@ export class ProClient {
     return this.get('/api/v1/keys');
   }
 
+  async createScopedKey(req: {
+    label: string;
+    agent_names: string[];
+    max_calls?: number;
+    expires_in?: string;
+  }): Promise<Record<string, unknown>> {
+    return this.post('/api/v1/keys', req);
+  }
+
+  async getScopedKey(keyId: string): Promise<ScopedAPIKey> {
+    return this.get(`/api/v1/keys/${keyId}`);
+  }
+
+  async revokeScopedKey(keyId: string): Promise<Record<string, unknown>> {
+    return this.post(`/api/v1/keys/${keyId}/revoke`, {});
+  }
+
+  async getScopedKeyUsage(keyId: string): Promise<Record<string, unknown>> {
+    return this.get(`/api/v1/keys/${keyId}/usage`);
+  }
+
+  async deleteScopedKey(keyId: string): Promise<void> {
+    await this.delete(`/api/v1/keys/${keyId}`);
+  }
+
+  // ── Credentials (Pro) ────────────────────────────────────────────────────
+
+  async listCredentials(): Promise<Record<string, unknown>[]> {
+    return this.get('/api/v1/credentials');
+  }
+
+  async createCredential(name: string, value: string, label = ''): Promise<Record<string, unknown>> {
+    return this.post('/api/v1/credentials', { name, value, label });
+  }
+
+  async deleteCredential(credentialName: string): Promise<void> {
+    await this.delete(`/api/v1/credentials/${credentialName}`);
+  }
+
+  // ── License (Pro) ────────────────────────────────────────────────────────
+
+  async licenseStatus(): Promise<Record<string, unknown>> {
+    return this.get('/api/v1/license/status');
+  }
+
+  async licensePhoneHome(): Promise<Record<string, unknown>> {
+    return this.get('/api/v1/license/phone-home');
+  }
+
   // ── Audit events ───────────────────────────────────────────────────────────
 
   async listAuditEvents(opts: { limit?: number; action?: string; agent?: string; environment?: string } = {}): Promise<AuditEvent[]> {
@@ -334,6 +383,7 @@ export class ProClient {
     const h: Record<string, string> = {
       'Content-Type': 'application/json',
       'X-Kitchen': this.kitchen,
+      'X-Kitchen-Id': this.kitchen,
     };
     if (this.apiKey) {
       h['Authorization'] = `Bearer ${this.apiKey}`;

@@ -7,6 +7,8 @@ use super::pro_gate;
 
 const FEATURE_NAME: &str = "Environments";
 const FEATURE_KEY: &str = "environments";
+const PROMOTIONS_FEATURE_NAME: &str = "Promotions";
+const PROMOTIONS_FEATURE_KEY: &str = "promotions";
 
 #[derive(Subcommand)]
 pub enum EnvironmentCommands {
@@ -59,16 +61,37 @@ pub struct PromoteArgs {
 }
 
 pub async fn execute(cmd: EnvironmentCommands) -> anyhow::Result<()> {
-    if !pro_gate::check_pro_feature(FEATURE_NAME, FEATURE_KEY).await? {
-        return Ok(());
-    }
-
     match cmd {
-        EnvironmentCommands::List => list().await,
-        EnvironmentCommands::Get(args) => get(args).await,
-        EnvironmentCommands::Create(args) => create(args).await,
-        EnvironmentCommands::Delete(args) => delete(args).await,
-        EnvironmentCommands::Promote(args) => promote(args).await,
+        EnvironmentCommands::List => {
+            if !pro_gate::check_pro_feature(FEATURE_NAME, FEATURE_KEY).await? {
+                return Ok(());
+            }
+            list().await
+        }
+        EnvironmentCommands::Get(args) => {
+            if !pro_gate::check_pro_feature(FEATURE_NAME, FEATURE_KEY).await? {
+                return Ok(());
+            }
+            get(args).await
+        }
+        EnvironmentCommands::Create(args) => {
+            if !pro_gate::check_pro_feature(FEATURE_NAME, FEATURE_KEY).await? {
+                return Ok(());
+            }
+            create(args).await
+        }
+        EnvironmentCommands::Delete(args) => {
+            if !pro_gate::check_pro_feature(FEATURE_NAME, FEATURE_KEY).await? {
+                return Ok(());
+            }
+            delete(args).await
+        }
+        EnvironmentCommands::Promote(args) => {
+            if !pro_gate::check_pro_feature(PROMOTIONS_FEATURE_NAME, PROMOTIONS_FEATURE_KEY).await? {
+                return Ok(());
+            }
+            promote(args).await
+        }
     }
 }
 
@@ -201,9 +224,9 @@ async fn promote(args: PromoteArgs) -> anyhow::Result<()> {
     );
 
     let body = serde_json::json!({
-        "agent": args.agent,
-        "to_environment": args.to,
-        "from_environment": args.from,
+        "agent_name": args.agent,
+        "to_env": args.to,
+        "from_env": args.from,
     });
 
     let client = pro_gate::build_client()?;

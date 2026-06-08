@@ -205,9 +205,10 @@ impl AgentOvenClient {
         input: serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/recipes/{recipe_name}/bake"));
+        let body = serde_json::json!({"input": input});
         let resp = self
             .authed_request(self.http.post(url))
-            .json(&input)
+            .json(&body)
             .send()
             .await?
             .error_for_status()?;
@@ -1018,6 +1019,7 @@ impl AgentOvenClient {
             b = b.bearer_auth(key);
         }
         if let Some(ref kitchen) = self.kitchen_id {
+            b = b.header("X-Kitchen", kitchen.as_str());
             b = b.header("X-Kitchen-Id", kitchen.as_str());
         }
         b

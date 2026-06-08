@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "a2a-ao"
-version = "0.8.2"
+version = "0.8.5-beta-3"
 dependencies = [
  "async-trait",
  "base64",
@@ -26,7 +26,7 @@ dependencies = [
 
 [[package]]
 name = "agentoven-core"
-version = "0.8.2"
+version = "0.8.5-beta-3"
 dependencies = [
  "a2a-ao",
  "anyhow",
@@ -52,7 +52,7 @@ dependencies = [
 
 [[package]]
 name = "agentoven-napi"
-version = "0.8.0"
+version = "0.8.5-beta-3"
 dependencies = [
  "a2a-ao",
  "agentoven-core",

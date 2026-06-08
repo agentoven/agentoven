@@ -861,10 +861,11 @@ impl AgentOvenClient {
     ) -> PyResult<String> {
         let http = reqwest::blocking::Client::new();
         let url = self.api_url(&format!("/recipes/{name}/bake"));
-        let body = match input {
+        let input_body = match input {
             Some(obj) => pyany_to_json(obj)?,
             None => serde_json::json!({}),
         };
+        let body = serde_json::json!({"input": input_body});
         let req = self.authed_request(&http, reqwest::Method::POST, &url).json(&body);
         let (status, text) = self.send(req)?;
         if (200..300).contains(&status) {

@@ -97,7 +97,26 @@ class AgentOvenClient:
         return self._native.get_agent(name)
 
     def list_agents(self) -> list[Agent]:
-        return self._native.list_agents()
+        try:
+            return self._native.list_agents()
+        except Exception:
+            items = self._get("/api/v1/agents")
+            agents: list[Agent] = []
+            for item in items:
+                agents.append(
+                    Agent(
+                        name=item.get("name", ""),
+                        description=item.get("description", ""),
+                        framework=item.get("framework", "custom"),
+                        version=item.get("version", "0.1.0"),
+                        model_provider=item.get("model_provider", ""),
+                        model_name=item.get("model_name", ""),
+                        mode=item.get("mode", "managed"),
+                        system_prompt=item.get("system_prompt"),
+                        ingredients=[],
+                    )
+                )
+            return agents
 
     def delete(self, target: Any) -> str:
         return self._native.delete(target)
@@ -422,6 +441,51 @@ class AgentOvenClient:
         """Initiate cool-down / removal of an agent environment deployment."""
         return self._delete(f"/api/v1/agents/{agent_name}/environments/{env_slug}")
 
+    # ── Scoped API keys (Pro) ───────────────────────────────────────────
+
+    def list_scoped_keys(self) -> list[dict[str, Any]]:
+        return self._get("/api/v1/keys")
+
+    def create_scoped_key(
+        self,
+        label: str,
+        agent_names: list[str],
+        max_calls: int = 0,
+        expires_in: str = "",
+    ) -> dict[str, Any]:
+        return self._post(
+            "/api/v1/keys",
+            {
+                "label": label,
+                "agent_names": agent_names,
+                "max_calls": max_calls,
+                "expires_in": expires_in,
+            },
+        )
+
+    def get_scoped_key(self, key_id: str) -> dict[str, Any]:
+        return self._get(f"/api/v1/keys/{key_id}")
+
+    def revoke_scoped_key(self, key_id: str) -> dict[str, Any]:
+        return self._post(f"/api/v1/keys/{key_id}/revoke", {})
+
+    def get_scoped_key_usage(self, key_id: str) -> dict[str, Any]:
+        return self._get(f"/api/v1/keys/{key_id}/usage")
+
+    def delete_scoped_key(self, key_id: str) -> dict[str, Any]:
+        return self._delete(f"/api/v1/keys/{key_id}")
+
+    # ── Credentials (Pro) ───────────────────────────────────────────────
+
+    def list_credentials(self) -> list[dict[str, Any]]:
+        return self._get("/api/v1/credentials")
+
+    def create_credential(self, name: str, value: str, label: str = "") -> dict[str, Any]:
+        return self._post("/api/v1/credentials", {"name": name, "value": value, "label": label})
+
+    def delete_credential(self, credential_name: str) -> dict[str, Any]:
+        return self._delete(f"/api/v1/credentials/{credential_name}")
+
     # ── Audit (OSS route, exposed here for convenience) ───────────────────
 
     def list_audit_events(
@@ -457,10 +521,22 @@ class AgentOvenClient:
         """Return edition, plan, features, and license metadata."""
         return self._get("/api/v1/info")
 
+    def license_status(self) -> dict[str, Any]:
+        """Return detailed license status from the Pro endpoint."""
+        return self._get("/api/v1/license/status")
+
+    def license_phone_home(self) -> dict[str, Any]:
+        """Trigger and return license phone-home status (Pro)."""
+        return self._get("/api/v1/license/phone-home")
+
     # ── Internal HTTP helpers ─────────────────────────────────────────────
 
     def _headers(self) -> dict[str, str]:
-        h = {"Content-Type": "application/json", "X-Kitchen": self._kitchen}
+        h = {
+            "Content-Type": "application/json",
+            "X-Kitchen": self._kitchen,
+            "X-Kitchen-Id": self._kitchen,
+        }
         if self._api_key:
             h["Authorization"] = f"Bearer {self._api_key}"
         return h

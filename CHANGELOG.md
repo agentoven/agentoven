@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.5-beta-3] — 2026-06-08
+
+### 🔧 SDK Contract Hardening
+- **Recipe bake payload alignment** — Rust core and Python native SDKs now send the server-expected envelope `{ "input": ... }` to `/api/v1/recipes/{recipeName}/bake`
+- **Kitchen header compatibility** — Rust core, Python, and TypeScript clients now send both `X-Kitchen` and `X-Kitchen-Id` to avoid tenant-resolution drift across mixed middleware paths
+- **Promotion payload fix in CLI** — `agentoven environment promote` now sends `agent_name`, `from_env`, and `to_env` to match the backend request contract
+
+### 🧰 SDK Surface Parity
+- **Python SDK parity expansion** — added scoped key lifecycle methods (list/create/get/revoke/usage/delete), credentials methods (list/create/delete), and license endpoints (`/license/status`, `/license/phone-home`)
+- **Python robustness** — `list_agents()` now includes a REST fallback path when native typed decoding fails due API shape drift
+- **TypeScript Pro client parity expansion** — added scoped key lifecycle methods, credentials methods, and license methods
+- **TypeScript type alignment** — `ServerInfo` and `ScopedAPIKey` typings updated to match backend response shapes
+
+### 📦 Versioning
+- Release line advanced to **0.8.5-beta-3** for Rust and TypeScript artifacts
+- Python package uses the PEP 440-equivalent prerelease version **0.8.5b3**
+
 ## [0.8.5-beta-1] — 2026-06-02
 
 ### 🔐 Recipe Approver Constraints
