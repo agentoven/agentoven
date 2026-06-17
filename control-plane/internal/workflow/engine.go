@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/agentoven/agentoven/control-plane/internal/executor"
 	"github.com/agentoven/agentoven/control-plane/internal/notify"
 	"github.com/agentoven/agentoven/control-plane/internal/store"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
@@ -57,6 +58,9 @@ type Engine struct {
 
 	// Parent trace IDs: runID → parentTraceID (for linking step traces to recipe trace)
 	parentTraceIDs sync.Map
+
+	// Recipe names: runID → recipeName (for readable step trace labels)
+	runRecipeNames sync.Map
 }
 
 // SetOIDCIssuer configures the expected OIDC issuer for same-tenant approver validation.
@@ -404,6 +408,7 @@ func (e *Engine) executeAsync(ctx context.Context, run *models.RecipeRun, recipe
 
 	// Store parentTraceID for linking step traces to the recipe trace
 	e.parentTraceIDs.Store(run.ID, parentTraceID)
+	e.runRecipeNames.Store(run.ID, recipe.Name)
 
 	steps := recipe.Steps
 	if len(steps) == 0 {
@@ -808,6 +813,7 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 	if v, ok := e.parentTraceIDs.Load(run.ID); ok {
 		parentTID, _ = v.(string)
 	}
+	recipeName := e.recipeNameForRun(run)
 
 	agentRef := step.AgentRef
 	if agentRef == "" {
@@ -838,38 +844,100 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 		}
 	}
 
-	if agent.Status != models.AgentStatusReady {
-		return fmt.Errorf("agent '%s' is not ready (status: %s)", agentRef, agent.Status)
+	switch agent.Status {
+	case models.AgentStatusReady:
+		// ok
+	case models.AgentStatusDraft:
+		return fmt.Errorf("agent '%s' has never been baked — bake it before using it in a recipe", agentRef)
+	case models.AgentStatusBaking:
+		return fmt.Errorf("agent '%s' is currently baking — wait for it to reach ready status", agentRef)
+	case models.AgentStatusBurnt:
+		return fmt.Errorf("agent '%s' is burnt (last bake failed) — check provider config and re-bake", agentRef)
+	default:
+		return fmt.Errorf("agent '%s' is not ready (status: %s) — bake it before using it in a recipe", agentRef, agent.Status)
 	}
 
-	// Build input from previous step outputs
-	input := make(map[string]interface{})
-	if run.Input != nil {
-		input["recipe_input"] = run.Input
-	}
-
+	// Build input from previous step outputs.
+	// Extract artifact text from each dependency's A2A result so the LLM
+	// receives clean natural-language output, not a raw JSON-RPC envelope.
+	depOutputs := make(map[string]string) // dep name → extracted text
 	mu.Lock()
 	for _, dep := range step.DependsOn {
 		if sr, ok := completed[dep]; ok && sr.Output != nil {
-			input[dep] = sr.Output
+			depOutputs[dep] = extractTextFromA2AOutput(sr.Output)
 		}
 	}
 	mu.Unlock()
+
+	// Compose the message sent to the agent.
+	var msgParts []string
+	if run.Input != nil {
+		inputBytes, _ := json.Marshal(run.Input)
+		msgParts = append(msgParts, "Recipe input: "+string(inputBytes))
+	}
+	for _, dep := range step.DependsOn {
+		if txt, ok := depOutputs[dep]; ok && txt != "" {
+			msgParts = append(msgParts, fmt.Sprintf("Output from '%s': %s", dep, txt))
+		}
+	}
+	userMsg := strings.Join(msgParts, "\n\n")
+	if userMsg == "" {
+		userMsg = "Execute step: " + step.Name
+	}
+
+	// Build A2A params, including provider config if the agent has a model provider
+	a2aParams := map[string]interface{}{
+		"id": uuid.New().String(),
+		"message": map[string]interface{}{
+			"role": "user",
+			"parts": []map[string]interface{}{
+				{"type": "text", "text": userMsg},
+			},
+		},
+	}
+
+	// If agent has a ModelProvider, fetch it and include TLS config for the agent to use
+	if agent.ModelProvider != "" {
+		provider, err := e.store.GetProvider(ctx, agent.ModelProvider)
+		if err != nil {
+			log.Warn().
+				Err(err).
+				Str("run_id", run.ID).
+				Str("step", step.Name).
+				Str("agent", agentRef).
+				Str("provider", agent.ModelProvider).
+				Msg("Failed to load model provider for A2A TLS forwarding")
+		}
+		if err == nil && provider != nil {
+			providerConfig := map[string]interface{}{
+				"name": provider.Name,
+				"kind": provider.Kind,
+			}
+			if provider.CABundle != "" {
+				providerConfig["ca_bundle"] = provider.CABundle
+			}
+			if provider.TLSSkipVerify {
+				providerConfig["tls_skip_verify"] = true
+			}
+			a2aParams["provider_config"] = providerConfig
+			log.Info().
+				Str("run_id", run.ID).
+				Str("step", step.Name).
+				Str("agent", agentRef).
+				Str("provider", provider.Name).
+				Bool("has_ca_bundle", provider.CABundle != "").
+				Int("ca_bundle_len", len(provider.CABundle)).
+				Bool("tls_skip_verify", provider.TLSSkipVerify).
+				Msg("Forwarding provider TLS config in A2A request")
+		}
+	}
 
 	// Send A2A task via JSON-RPC
 	a2aReq := map[string]interface{}{
 		"jsonrpc": "2.0",
 		"method":  "tasks/send",
-		"params": map[string]interface{}{
-			"id": uuid.New().String(),
-			"message": map[string]interface{}{
-				"role": "user",
-				"parts": []map[string]interface{}{
-					{"type": "text", "text": fmt.Sprintf("Execute step: %s\nInput: %v", step.Name, input)},
-				},
-			},
-		},
-		"id": uuid.New().String(),
+		"params":  a2aParams,
+		"id":      uuid.New().String(),
 	}
 
 	body, _ := json.Marshal(a2aReq)
@@ -913,21 +981,33 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 
 	resp, err := e.client.Do(httpReq)
 	if err != nil {
-		e.createStepTrace(ctx, kitchen, agentRef, run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", err.Error(), parentTID)
+		e.createStepTrace(ctx, kitchen, agentRef, recipeName, run.ID, step.Name, "error", stepStart, 0, 0, "", err.Error(), parentTID)
 		return fmt.Errorf("A2A request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var rpcResp map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
-		e.createStepTrace(ctx, kitchen, agentRef, run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", err.Error(), parentTID)
-		return fmt.Errorf("decode A2A response: %w", err)
+		// Provide actionable context: HTTP status + body snippet instead of raw EOF.
+		var hint string
+		switch {
+		case resp.StatusCode == http.StatusNotFound:
+			hint = fmt.Sprintf("agent '%s' A2A endpoint not found (HTTP 404) — the agent pod may not be running; try re-baking", agentRef)
+		case resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusBadGateway:
+			hint = fmt.Sprintf("agent '%s' is unreachable (HTTP %d) — pod may be starting or crash-looping", agentRef, resp.StatusCode)
+		case resp.StatusCode >= 500:
+			hint = fmt.Sprintf("agent '%s' returned HTTP %d — check agent pod logs", agentRef, resp.StatusCode)
+		default:
+			hint = fmt.Sprintf("agent '%s' returned an empty or invalid response (HTTP %d)", agentRef, resp.StatusCode)
+		}
+		e.createStepTrace(ctx, kitchen, agentRef, recipeName, run.ID, step.Name, "error", stepStart, 0, 0, "", hint, parentTID)
+		return fmt.Errorf("%s", hint)
 	}
 
 	// Check for RPC error
 	if rpcErr, ok := rpcResp["error"].(map[string]interface{}); ok {
 		errMsg := fmt.Sprintf("%v", rpcErr["message"])
-		e.createStepTrace(ctx, kitchen, agentRef, run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", errMsg, parentTID)
+		e.createStepTrace(ctx, kitchen, agentRef, recipeName, run.ID, step.Name, "error", stepStart, 0, 0, "", errMsg, parentTID)
 		return fmt.Errorf("A2A error: %v", rpcErr["message"])
 	}
 
@@ -951,13 +1031,17 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 				}
 
 				result.Output = rpcResp
-				e.createStepTrace(ctx, kitchen, agentRef, run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", errMsg, parentTID)
+				e.createStepTrace(ctx, kitchen, agentRef, recipeName, run.ID, step.Name, "error", stepStart, 0, 0, "", errMsg, parentTID)
 				return fmt.Errorf("A2A task failed (%s): %s", state, errMsg)
 			}
 		}
 	}
 
-	// Extract output text and usage data from the A2A response
+	// Extract output text and usage data from the A2A response.
+	// If the task was accepted asynchronously (state == "submitted" or "working"),
+	// poll tasks/get until it reaches a terminal state (completed/failed/canceled).
+	rpcResp = e.pollA2ATaskToCompletion(ctx, endpoint, rpcResp, httpReq, effectiveKey)
+
 	outputText, tokens, costUSD := extractA2AMetrics(rpcResp)
 
 	// Populate cost/token data on the step result
@@ -965,7 +1049,13 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 	result.CostUSD = costUSD
 
 	// Create a trace record for this step
-	e.createStepTrace(ctx, kitchen, agentRef, run.RecipeID, run.ID, step.Name, "completed", stepStart, tokens, costUSD, outputText, "", parentTID)
+	stepTraceID := e.createStepTrace(ctx, kitchen, agentRef, recipeName, run.ID, step.Name, "completed", stepStart, tokens, costUSD, outputText, "", parentTID)
+
+	// Persist executor spans from the pod's exec_trace so the waterfall
+	// visualisation is populated in the pro Postgres store.
+	if stepTraceID != "" {
+		e.persistA2ASpans(ctx, rpcResp, stepTraceID)
+	}
 
 	result.Output = rpcResp
 	return nil
@@ -973,10 +1063,12 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 
 // createStepTrace persists a Trace record for a single agent/RAG step execution.
 // If parentTraceID is set, it links this step trace to a parent recipe trace.
-func (e *Engine) createStepTrace(ctx context.Context, kitchen, agentName, recipeName, runID, stepName, status string, start time.Time, tokens int64, costUSD float64, outputText, errMsg string, parentTraceID ...string) {
+// Returns the new trace ID so callers can attach spans to it.
+func (e *Engine) createStepTrace(ctx context.Context, kitchen, agentName, recipeName, runID, stepName, status string, start time.Time, tokens int64, costUSD float64, outputText, errMsg string, parentTraceID ...string) string {
 	durationMs := time.Since(start).Milliseconds()
+	traceID := uuid.New().String()
 	trace := &models.Trace{
-		ID:          uuid.New().String(),
+		ID:          traceID,
 		AgentName:   agentName,
 		RecipeName:  recipeName,
 		Kitchen:     kitchen,
@@ -999,7 +1091,148 @@ func (e *Engine) createStepTrace(ctx context.Context, kitchen, agentName, recipe
 	}
 	if err := e.store.CreateTrace(ctx, trace); err != nil {
 		log.Error().Err(err).Str("agent", agentName).Str("step", stepName).Msg("Failed to persist trace")
+		return ""
 	}
+	return traceID
+}
+
+// persistA2ASpans extracts the exec_trace embedded in an A2A JSON-RPC response
+// by the pod's handleA2ATaskSend and persists the span waterfall to the store.
+// The exec_trace is nested at result.metadata.exec_trace.
+func (e *Engine) persistA2ASpans(ctx context.Context, rpcResp map[string]interface{}, traceID string) {
+	result, ok := rpcResp["result"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	meta, ok := result["metadata"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	rawTrace, ok := meta["exec_trace"]
+	if !ok {
+		return
+	}
+	traceBytes, err := json.Marshal(rawTrace)
+	if err != nil {
+		return
+	}
+	var execTrace executor.ExecutionTrace
+	if err := json.Unmarshal(traceBytes, &execTrace); err != nil || len(execTrace.Turns) == 0 {
+		return
+	}
+
+	// Override the trace ID so spans link to the step trace in Postgres
+	// (the pod's exec_trace carries the pod-local task ID, not the pro trace ID).
+	execTrace.TraceID = traceID
+
+	now := time.Now().UTC()
+	execStart := now.Add(-time.Duration(execTrace.TotalMs) * time.Millisecond)
+	rootSpanID := uuid.New().String()
+	agentUsage := execTrace.Usage
+
+	inputJSON, _ := json.Marshal(map[string]interface{}{
+		"agent":   execTrace.AgentName,
+		"kitchen": execTrace.Kitchen,
+	})
+	outputJSON, _ := json.Marshal(map[string]interface{}{
+		"turns":        len(execTrace.Turns),
+		"total_ms":     execTrace.TotalMs,
+		"total_tokens": execTrace.Usage.TotalTokens,
+	})
+
+	spans := []models.Span{
+		{
+			ID:         rootSpanID,
+			TraceID:    traceID,
+			Name:       execTrace.AgentName,
+			Kind:       models.SpanKindAgent,
+			Status:     "completed",
+			StartTime:  execStart,
+			EndTime:    now,
+			DurationMs: execTrace.TotalMs,
+			Input:      inputJSON,
+			Output:     outputJSON,
+			Usage:      &agentUsage,
+		},
+	}
+
+	turnOffset := execStart
+	for _, turn := range execTrace.Turns {
+		turnStart := turnOffset
+		turnEnd := turnStart.Add(time.Duration(turn.LatencyMs) * time.Millisecond)
+		turnOffset = turnEnd
+
+		llmSpanID := uuid.New().String()
+		turnUsage := turn.Usage
+		reqJSON, _ := json.Marshal(turn.Request)
+		respJSON, _ := json.Marshal(map[string]interface{}{
+			"content":    turn.Response,
+			"tool_calls": turn.ToolCalls,
+		})
+		spans = append(spans, models.Span{
+			ID:           llmSpanID,
+			TraceID:      traceID,
+			ParentSpanID: rootSpanID,
+			Name:         fmt.Sprintf("llm.turn_%d", turn.Number),
+			Kind:         models.SpanKindLLM,
+			Status:       "completed",
+			StartTime:    turnStart,
+			EndTime:      turnEnd,
+			DurationMs:   turn.LatencyMs,
+			Input:        reqJSON,
+			Output:       respJSON,
+			Usage:        &turnUsage,
+			Metadata:     map[string]interface{}{"turn_number": turn.Number},
+		})
+
+		if len(turn.ToolCalls) > 0 {
+			toolDuration := turn.LatencyMs / int64(len(turn.ToolCalls)+1)
+			toolStart := turnStart.Add(time.Duration(toolDuration) * time.Millisecond)
+			for i, tc := range turn.ToolCalls {
+				toolEnd := toolStart.Add(time.Duration(toolDuration) * time.Millisecond)
+				tcInputJSON, _ := json.Marshal(tc.Arguments)
+				var tcOutputJSON json.RawMessage
+				toolStatus := "completed"
+				toolError := ""
+				if i < len(turn.ToolResults) {
+					tr := turn.ToolResults[i]
+					tcOutputJSON, _ = json.Marshal(map[string]interface{}{"content": tr.Content, "is_error": tr.IsError})
+					if tr.IsError {
+						toolStatus = "failed"
+						toolError = tr.Content
+					}
+				}
+				spans = append(spans, models.Span{
+					ID:           uuid.New().String(),
+					TraceID:      traceID,
+					ParentSpanID: llmSpanID,
+					Name:         tc.Name,
+					Kind:         models.SpanKindTool,
+					Status:       toolStatus,
+					StartTime:    toolStart,
+					EndTime:      toolEnd,
+					DurationMs:   toolDuration,
+					Input:        tcInputJSON,
+					Output:       tcOutputJSON,
+					Error:        toolError,
+					Metadata:     map[string]interface{}{"tool_call_id": tc.ID},
+				})
+				toolStart = toolEnd
+			}
+		}
+	}
+
+	if err := e.store.CreateSpans(ctx, spans); err != nil {
+		log.Warn().Err(err).Str("trace_id", traceID).Int("span_count", len(spans)).Msg("engine: failed to persist A2A spans")
+	}
+}
+
+// extractTextFromA2AOutput extracts the plain text from a step's stored Output map,
+// which is an A2A JSON-RPC response envelope. Used to pipe one step's output as
+// the next step's input in a clean, LLM-readable form.
+func extractTextFromA2AOutput(output map[string]interface{}) string {
+	txt, _, _ := extractA2AMetrics(output)
+	return txt
 }
 
 // extractA2AMetrics extracts output text, token count, and cost from an A2A JSON-RPC response.
@@ -1056,6 +1289,97 @@ func extractA2AMetrics(rpcResp map[string]interface{}) (outputText string, token
 	return outputText, tokens, costUSD
 }
 
+// pollA2ATaskToCompletion polls a tasks/get A2A endpoint until the task reaches a
+// terminal state (completed, failed, canceled, rejected). If the initial response
+// already contains a terminal state it is returned immediately.
+// Returns the final RPC response (which may have artifacts + usage populated).
+func (e *Engine) pollA2ATaskToCompletion(ctx context.Context, endpoint string, initial map[string]interface{}, _ *http.Request, authKey string) map[string]interface{} {
+	taskID := extractA2ATaskID(initial)
+	if taskID == "" {
+		return initial
+	}
+
+	// Check if already in a terminal state.
+	if state := extractA2AState(initial); state == "completed" || state == "failed" || state == "canceled" || state == "rejected" {
+		return initial
+	}
+
+	// Poll with exponential backoff capped at 5s, total timeout 90s.
+	const maxPollDuration = 90 * time.Second
+	deadline := time.Now().Add(maxPollDuration)
+	delay := 500 * time.Millisecond
+
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return initial
+		case <-time.After(delay):
+		}
+		if delay < 5*time.Second {
+			delay = delay * 2
+		}
+
+		getReq := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"method":  "tasks/get",
+			"params":  map[string]interface{}{"id": taskID},
+			"id":      uuid.New().String(),
+		}
+		body, _ := json.Marshal(getReq)
+		req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
+		if err != nil {
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if authKey != "" {
+			req.Header.Set("Authorization", "Bearer "+authKey)
+		}
+
+		resp, err := e.client.Do(req)
+		if err != nil {
+			continue
+		}
+		var pollResp map[string]interface{}
+		if decErr := json.NewDecoder(resp.Body).Decode(&pollResp); decErr != nil {
+			resp.Body.Close()
+			continue
+		}
+		resp.Body.Close()
+
+		state := extractA2AState(pollResp)
+		if state == "completed" || state == "failed" || state == "canceled" || state == "rejected" {
+			return pollResp
+		}
+	}
+
+	// Timed out — return best effort (likely still working).
+	return initial
+}
+
+// extractA2ATaskID extracts the task ID from an A2A JSON-RPC response.
+func extractA2ATaskID(rpcResp map[string]interface{}) string {
+	result, ok := rpcResp["result"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	id, _ := result["id"].(string)
+	return id
+}
+
+// extractA2AState extracts the task state string from an A2A JSON-RPC response.
+func extractA2AState(rpcResp map[string]interface{}) string {
+	result, ok := rpcResp["result"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	statusMap, ok := result["status"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	state, _ := statusMap["state"].(string)
+	return state
+}
+
 // executeRAGStep calls the control plane's RAG query endpoint.
 // The step config should contain "strategy", "top_k", "namespace", and
 // optionally "question_from" (the name of a previous step whose output
@@ -1067,6 +1391,7 @@ func (e *Engine) executeRAGStep(ctx context.Context, run *models.RecipeRun, step
 	if v, ok := e.parentTraceIDs.Load(run.ID); ok {
 		parentTID, _ = v.(string)
 	}
+	recipeName := e.recipeNameForRun(run)
 
 	// Determine the question text
 	question := ""
@@ -1126,26 +1451,26 @@ func (e *Engine) executeRAGStep(ctx context.Context, run *models.RecipeRun, step
 
 	resp, err := e.client.Do(httpReq)
 	if err != nil {
-		e.createStepTrace(ctx, run.Kitchen, "rag-pipeline", run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", err.Error(), parentTID)
+		e.createStepTrace(ctx, run.Kitchen, "rag-pipeline", recipeName, run.ID, step.Name, "error", stepStart, 0, 0, "", err.Error(), parentTID)
 		return fmt.Errorf("RAG request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var ragResp map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&ragResp); err != nil {
-		e.createStepTrace(ctx, run.Kitchen, "rag-pipeline", run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", err.Error(), parentTID)
+		e.createStepTrace(ctx, run.Kitchen, "rag-pipeline", recipeName, run.ID, step.Name, "error", stepStart, 0, 0, "", err.Error(), parentTID)
 		return fmt.Errorf("decode RAG response: %w", err)
 	}
 
 	if resp.StatusCode >= 400 {
 		errMsg, _ := ragResp["error"].(string)
-		e.createStepTrace(ctx, run.Kitchen, "rag-pipeline", run.RecipeID, run.ID, step.Name, "error", stepStart, 0, 0, "", errMsg, parentTID)
+		e.createStepTrace(ctx, run.Kitchen, "rag-pipeline", recipeName, run.ID, step.Name, "error", stepStart, 0, 0, "", errMsg, parentTID)
 		return fmt.Errorf("RAG query failed (status %d): %s", resp.StatusCode, errMsg)
 	}
 
 	// Extract answer text from RAG response
 	answerText, _ := ragResp["answer"].(string)
-	e.createStepTrace(ctx, run.Kitchen, "rag-pipeline", run.RecipeID, run.ID, step.Name, "completed", stepStart, 0, 0, answerText, "", parentTID)
+	e.createStepTrace(ctx, run.Kitchen, "rag-pipeline", recipeName, run.ID, step.Name, "completed", stepStart, 0, 0, answerText, "", parentTID)
 
 	result.Output = ragResp
 	return nil
@@ -1441,6 +1766,8 @@ func (e *Engine) failRun(run *models.RecipeRun, stepResults []models.StepResult,
 
 // finalizeParentTrace updates the parent recipe trace with final status, duration, and totals.
 func (e *Engine) finalizeParentTrace(run *models.RecipeRun, status string, totalTokens int64, totalCostUSD float64, errMsg string) {
+	e.runRecipeNames.Delete(run.ID)
+
 	v, ok := e.parentTraceIDs.LoadAndDelete(run.ID)
 	if !ok {
 		return
@@ -1471,6 +1798,15 @@ func (e *Engine) finalizeParentTrace(run *models.RecipeRun, status string, total
 	if err := e.store.UpdateTrace(ctx, trace); err != nil {
 		log.Error().Err(err).Str("trace_id", parentTID).Msg("Failed to finalize parent recipe trace")
 	}
+}
+
+func (e *Engine) recipeNameForRun(run *models.RecipeRun) string {
+	if v, ok := e.runRecipeNames.Load(run.ID); ok {
+		if name, ok := v.(string); ok && strings.TrimSpace(name) != "" {
+			return name
+		}
+	}
+	return run.RecipeID
 }
 
 // GetPendingGates returns the list of pending human gates for a run.

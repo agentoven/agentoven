@@ -68,8 +68,9 @@ type MemoryStore struct {
 	testSuites   map[string]*models.TestSuite           // key: id
 	testRuns     map[string]*models.TestRun             // key: id
 	environments map[string]*models.Environment         // key: kitchen:slug
-	deployments  map[string]*models.AgentDeployment     // key: id
-	serviceAccts map[string]*models.ServiceAccount      // key: id
+	deployments         map[string]*models.AgentDeployment     // key: id
+	serviceAccts        map[string]*models.ServiceAccount      // key: id
+	crossKitchenGrants  map[string]*models.CrossKitchenGrant   // key: id
 
 	// Agent version history — append-only, keyed by kitchen:name
 	agentVersions map[string][]*models.Agent // key: kitchen:name → version history
@@ -121,8 +122,9 @@ func NewMemoryStore() *MemoryStore {
 		testSuites:    make(map[string]*models.TestSuite),
 		testRuns:      make(map[string]*models.TestRun),
 		environments:  make(map[string]*models.Environment),
-		deployments:   make(map[string]*models.AgentDeployment),
-		serviceAccts:  make(map[string]*models.ServiceAccount),
+		deployments:        make(map[string]*models.AgentDeployment),
+		serviceAccts:       make(map[string]*models.ServiceAccount),
+		crossKitchenGrants: make(map[string]*models.CrossKitchenGrant),
 		spans:         make(map[string]*models.Span),
 		spansByTrace:  make(map[string][]string),
 		saveCh:        make(chan struct{}, 1),
@@ -1195,6 +1197,18 @@ func (m *MemoryStore) CountAuditEvents(_ context.Context, filter models.AuditFil
 		if filter.Kitchen != "" && e.Kitchen != filter.Kitchen {
 			continue
 		}
+		if filter.UserID != "" && e.UserID != filter.UserID {
+			continue
+		}
+		if filter.Action != "" && e.Action != filter.Action {
+			continue
+		}
+		if filter.Resource != "" && e.Resource != filter.Resource {
+			continue
+		}
+		if filter.Environment != "" && e.Environment != filter.Environment {
+			continue
+		}
 		if filter.Since != nil && e.Timestamp.Before(*filter.Since) {
 			continue
 		}
@@ -2165,6 +2179,73 @@ func (m *MemoryStore) DeleteServiceAccount(_ context.Context, kitchen, id string
 	m.mu.Unlock()
 	m.requestSave()
 	return nil
+}
+
+// ── Cross-Kitchen Grant Store ───────────────────────────────
+
+func (m *MemoryStore) CreateCrossKitchenGrant(_ context.Context, grant *models.CrossKitchenGrant) error {
+	m.mu.Lock()
+	copy := *grant
+	m.crossKitchenGrants[grant.ID] = &copy
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *MemoryStore) GetCrossKitchenGrant(_ context.Context, id string) (*models.CrossKitchenGrant, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	g, ok := m.crossKitchenGrants[id]
+	if !ok {
+		return nil, &ErrNotFound{Entity: "cross_kitchen_grant", Key: id}
+	}
+	copy := *g
+	return &copy, nil
+}
+
+func (m *MemoryStore) ListCrossKitchenGrants(_ context.Context, targetKitchen string) ([]models.CrossKitchenGrant, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []models.CrossKitchenGrant
+	for _, g := range m.crossKitchenGrants {
+		if g.TargetKitchen == targetKitchen && !g.Revoked {
+			out = append(out, *g)
+		}
+	}
+	return out, nil
+}
+
+func (m *MemoryStore) RevokeCrossKitchenGrant(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	g, ok := m.crossKitchenGrants[id]
+	if !ok {
+		return &ErrNotFound{Entity: "cross_kitchen_grant", Key: id}
+	}
+	g.Revoked = true
+	return nil
+}
+
+func (m *MemoryStore) CheckCrossKitchenAccess(_ context.Context, sourceKitchen, targetKitchen, agentName string) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	now := time.Now().UTC()
+	for _, g := range m.crossKitchenGrants {
+		if g.Revoked {
+			continue
+		}
+		if g.SourceKitchen != sourceKitchen || g.TargetKitchen != targetKitchen {
+			continue
+		}
+		if g.ExpiresAt != nil && now.After(*g.ExpiresAt) {
+			continue
+		}
+		for _, a := range g.AllowedAgents {
+			if a == "*" || a == agentName {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // Compile-time check that MemoryStore implements Store.

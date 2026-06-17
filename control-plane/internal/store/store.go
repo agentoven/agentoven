@@ -35,6 +35,7 @@ type Store interface {
 	EnvironmentStore
 	AgentDeploymentStore
 	ServiceAccountStore
+	CrossKitchenGrantStore
 
 	// Ping checks if the database is reachable.
 	Ping(ctx context.Context) error
@@ -417,6 +418,29 @@ type ServiceAccountStore interface {
 
 	// DeleteServiceAccount permanently removes a service account.
 	DeleteServiceAccount(ctx context.Context, kitchen, id string) error
+}
+
+// ── Cross-Kitchen Grant Store ────────────────────────────────
+
+// CrossKitchenGrantStore manages authorisation grants that allow one kitchen
+// to invoke agents in another kitchen via the cross-kitchen A2A proxy.
+type CrossKitchenGrantStore interface {
+	// CreateCrossKitchenGrant persists a new grant.
+	CreateCrossKitchenGrant(ctx context.Context, grant *models.CrossKitchenGrant) error
+
+	// GetCrossKitchenGrant returns a grant by ID.
+	GetCrossKitchenGrant(ctx context.Context, id string) (*models.CrossKitchenGrant, error)
+
+	// ListCrossKitchenGrants returns all non-revoked grants for a target kitchen.
+	ListCrossKitchenGrants(ctx context.Context, targetKitchen string) ([]models.CrossKitchenGrant, error)
+
+	// RevokeCrossKitchenGrant marks a grant as revoked (soft delete).
+	RevokeCrossKitchenGrant(ctx context.Context, id string) error
+
+	// CheckCrossKitchenAccess returns true if there is an active, non-expired grant
+	// allowing sourceKitchen to call agentName in targetKitchen.
+	// agentName may be "*" to test any-agent access.
+	CheckCrossKitchenAccess(ctx context.Context, sourceKitchen, targetKitchen, agentName string) (bool, error)
 }
 
 // ErrNotFound is returned when a requested entity does not exist.

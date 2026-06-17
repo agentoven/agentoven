@@ -70,4 +70,4 @@ ADR/0014-microsoft-mcp-gateway-upstream.md
 ADR/0015-operational-hardening-plan.md
 pitch/*
 
-*.workspace
+*.workspacesdk/typescript/*.tgz

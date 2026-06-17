@@ -228,6 +228,16 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 			r.Post("/{runId}/{stepName}", h.ApproveGateWithMetadata)
 		})
 
+		// Admin operations — kitchen-scoped bulk actions (admin role required)
+		r.Route("/admin", func(r chi.Router) {
+			r.Delete("/deployments", h.AdminRetireAllDeployments)
+			r.Route("/cross-kitchen-grants", func(r chi.Router) {
+				r.Get("/", h.HandleListCrossKitchenGrants)
+				r.Post("/", h.HandleCreateCrossKitchenGrant)
+				r.Delete("/{grantId}", h.HandleRevokeCrossKitchenGrant)
+			})
+		})
+
 		// Notification Channels — per-kitchen notification configuration
 		r.Route("/channels", func(r chi.Router) {
 			r.Get("/", h.ListChannels)

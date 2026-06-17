@@ -39,6 +39,8 @@ import type {
   Kitchen,
   KitchenMember,
   Promotion,
+  Recipe,
+  RecipeRun,
   Schedule,
   ScopedAPIKey,
   ServerInfo,
@@ -72,6 +74,34 @@ export class ProClient {
     this.baseUrl = (options.url ?? 'http://localhost:8080').replace(/\/$/, '');
     this.apiKey = options.apiKey;
     this.kitchen = options.kitchen ?? 'default';
+  }
+
+  /** Returns a cloned client bound to a specific kitchen. */
+  withKitchen(kitchen: string): ProClient {
+    return new ProClient({
+      url: this.baseUrl,
+      apiKey: this.apiKey,
+      kitchen,
+    });
+  }
+
+  /**
+   * Resolve which kitchen contains the recipe by probing candidate kitchens.
+   * Returns the first kitchen where GET /recipes/{name} succeeds, else null.
+   */
+  async resolveRecipeKitchen(recipeName: string, candidateKitchens: string[]): Promise<string | null> {
+    for (const kitchen of candidateKitchens) {
+      try {
+        await this.getRecipe(recipeName, { kitchen });
+        return kitchen;
+      } catch (err) {
+        if (err instanceof AgentOvenAPIError && err.statusCode === 404) {
+          continue;
+        }
+        throw err;
+      }
+    }
+    return null;
   }
 
   // ── Server info ────────────────────────────────────────────────────────────
@@ -197,6 +227,48 @@ export class ProClient {
 
   async getTraceabilityMatrix(): Promise<TraceabilityMatrix> {
     return this.get(`/api/v1/traces/matrix?kitchen=${encodeURIComponent(this.kitchen)}`);
+  }
+
+  // ── Recipes ───────────────────────────────────────────────────────────────
+
+  async listRecipes(opts?: { kitchen?: string }): Promise<Recipe[]> {
+    return this.get('/api/v1/recipes', opts?.kitchen);
+  }
+
+  async getRecipe(name: string, opts?: { kitchen?: string }): Promise<Recipe> {
+    return this.get(`/api/v1/recipes/${encodeURIComponent(name)}`, opts?.kitchen);
+  }
+
+  async createRecipe(recipe: Partial<Recipe>, opts?: { kitchen?: string }): Promise<Recipe> {
+    return this.post('/api/v1/recipes', recipe, opts?.kitchen);
+  }
+
+  async deleteRecipe(name: string, opts?: { kitchen?: string }): Promise<void> {
+    await this.delete(`/api/v1/recipes/${encodeURIComponent(name)}`, opts?.kitchen);
+  }
+
+  async bakeRecipe(
+    name: string,
+    input: Record<string, unknown> = {},
+    environment?: string,
+    opts?: { kitchen?: string },
+  ): Promise<Record<string, unknown>> {
+    return this.post(
+      `/api/v1/recipes/${encodeURIComponent(name)}/bake`,
+      { input, ...(environment ? { environment } : {}) },
+      opts?.kitchen,
+    );
+  }
+
+  async listRecipeRuns(recipeName: string, opts?: { kitchen?: string }): Promise<RecipeRun[]> {
+    return this.get(`/api/v1/recipes/${encodeURIComponent(recipeName)}/runs`, opts?.kitchen);
+  }
+
+  async getRecipeRun(recipeName: string, runId: string, opts?: { kitchen?: string }): Promise<RecipeRun> {
+    return this.get(
+      `/api/v1/recipes/${encodeURIComponent(recipeName)}/runs/${encodeURIComponent(runId)}`,
+      opts?.kitchen,
+    );
   }
 
   // ── Sessions ───────────────────────────────────────────────────────────────
@@ -379,11 +451,12 @@ export class ProClient {
 
   // ── Internal helpers ───────────────────────────────────────────────────────
 
-  private headers(): Record<string, string> {
+  private headers(kitchenOverride?: string): Record<string, string> {
+    const kitchen = kitchenOverride ?? this.kitchen;
     const h: Record<string, string> = {
       'Content-Type': 'application/json',
-      'X-Kitchen': this.kitchen,
-      'X-Kitchen-Id': this.kitchen,
+      'X-Kitchen': kitchen,
+      'X-Kitchen-Id': kitchen,
     };
     if (this.apiKey) {
       h['Authorization'] = `Bearer ${this.apiKey}`;
@@ -391,11 +464,11 @@ export class ProClient {
     return h;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown, kitchenOverride?: string): Promise<T> {
     const url = `${this.baseUrl}${path}`;
     const res = await fetch(url, {
       method,
-      headers: this.headers(),
+      headers: this.headers(kitchenOverride),
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
 
@@ -413,19 +486,19 @@ export class ProClient {
     return text ? (JSON.parse(text) as T) : ({} as T);
   }
 
-  private get<T>(path: string): Promise<T> {
-    return this.request<T>('GET', path);
+  private get<T>(path: string, kitchenOverride?: string): Promise<T> {
+    return this.request<T>('GET', path, undefined, kitchenOverride);
   }
 
-  private post<T>(path: string, body: unknown): Promise<T> {
-    return this.request<T>('POST', path, body);
+  private post<T>(path: string, body: unknown, kitchenOverride?: string): Promise<T> {
+    return this.request<T>('POST', path, body, kitchenOverride);
   }
 
-  private put<T>(path: string, body: unknown): Promise<T> {
-    return this.request<T>('PUT', path, body);
+  private put<T>(path: string, body: unknown, kitchenOverride?: string): Promise<T> {
+    return this.request<T>('PUT', path, body, kitchenOverride);
   }
 
-  private async delete(path: string): Promise<void> {
-    await this.request<void>('DELETE', path);
+  private async delete(path: string, kitchenOverride?: string): Promise<void> {
+    await this.request<void>('DELETE', path, undefined, kitchenOverride);
   }
 }

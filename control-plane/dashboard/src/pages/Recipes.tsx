@@ -8,6 +8,17 @@ import {
   Spinner, ErrorBanner, Button,
 } from '../components/UI';
 
+const RECIPE_NAME_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/;
+
+function recipeNameError(name: string): string | null {
+  const trimmed = name.trim();
+  if (!trimmed) return 'Recipe name is required.';
+  if (!RECIPE_NAME_RE.test(trimmed)) {
+    return "Use 2-63 chars: lowercase letters, numbers, '_' or '-'.";
+  }
+  return null;
+}
+
 export function RecipesPage() {
   const { data, loading, error, refetch } = useAPI(recipes.list);
   const [showForm, setShowForm] = useState(false);
@@ -101,13 +112,15 @@ function RecipeCard({ recipe, onAction }: { recipe: Recipe; onAction: () => void
 function RecipeForm({ onCreated }: { onCreated: () => void }) {
   const [form, setForm] = useState({ name: '', description: '' });
   const [submitting, setSubmitting] = useState(false);
+  const nameValidationError = recipeNameError(form.name);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.name) return;
+    const trimmedName = form.name.trim();
+    if (recipeNameError(trimmedName)) return;
     setSubmitting(true);
     try {
-      await recipes.create({ ...form, steps: [] });
+      await recipes.create({ ...form, name: trimmedName, description: form.description.trim(), steps: [] });
       onCreated();
     } catch { /* toast */ }
     setSubmitting(false);
@@ -124,6 +137,9 @@ function RecipeForm({ onCreated }: { onCreated: () => void }) {
             className="w-full px-3 py-2 rounded-lg bg-[var(--ao-bg)] border border-[var(--ao-border)] text-sm outline-none focus:border-[var(--ao-brand)]"
             placeholder="my-workflow"
           />
+          {nameValidationError && (
+            <p className="mt-1 text-xs text-red-400">{nameValidationError}</p>
+          )}
         </div>
         <div className="flex-1 min-w-[200px]">
           <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Description</label>
@@ -134,7 +150,7 @@ function RecipeForm({ onCreated }: { onCreated: () => void }) {
             placeholder="A workflow that..."
           />
         </div>
-        <Button disabled={submitting || !form.name}>
+        <Button disabled={submitting || !!nameValidationError}>
           {submitting ? 'Creating...' : 'Create'}
         </Button>
       </form>

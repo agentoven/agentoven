@@ -8,11 +8,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -39,6 +42,8 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+var recipeNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,62}$`)
+
 // Handlers holds all handler dependencies.
 type Handlers struct {
 	Store           store.Store
@@ -57,6 +62,18 @@ type Handlers struct {
 	// OSS: nil — BakeRecipe falls through to h.Workflow.ExecuteRecipe directly.
 	// Pro: ProRecipeRunner — adds role-based env gating before delegating to the engine.
 	RecipeExecutor RecipeExecutorService
+
+	// WorkloadRestarter is an optional Pro-only hook called after RecookAgent
+	// completes. It bumps the updated_at timestamp on the k8s_workload record for the
+	// agent, causing the operator's next reconcile to emit a changed pod-template
+	// annotation and trigger a Kubernetes rolling restart.
+	// OSS: nil (no-op). Pro injects a concrete implementation at startup.
+	WorkloadRestarter WorkloadRestarter
+
+	// K8sAgentImage is the current configured agent container image
+	// (AGENTOVEN_K8S_AGENT_IMAGE). When set, recook will update the stored workload
+	// image so the operator deploys the latest image rather than the frozen DB value.
+	K8sAgentImage string
 
 	// AgentEnvStore is an optional Pro-only store interface for environment-scoped
 	// agent deployments. OSS leaves this nil; Pro injects the PostgresStore which
@@ -82,6 +99,15 @@ type AgentEnvironmentStore interface {
 // Pro wraps it with role-based environment gating.
 type RecipeExecutorService interface {
 	ExecuteRecipe(ctx context.Context, recipe *models.Recipe, kitchen string, input map[string]interface{}, envSlug string) (string, error)
+}
+
+// WorkloadRestarter is an optional Pro-only hook for triggering a Kubernetes
+// rolling restart of the agent pod after a recook. Pro injects a concrete
+// implementation; OSS leaves the field nil.
+// newImage: if non-empty, the workload's image column is also updated so the
+// operator reconciles with the current configured image instead of the frozen DB value.
+type WorkloadRestarter interface {
+	TouchWorkloadForAgent(ctx context.Context, kitchenID, agentName, newImage string) error
 }
 
 // New creates a new Handlers instance with all dependencies.
@@ -431,7 +457,19 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 	// Re-fetch the agent from the store inside the goroutine to avoid racing
 	// on the same pointer that was used in the HTTP response. Capture only the
 	// immutable identifiers (kitchen, agentName) — not the *Agent pointer.
-	go func(kitchen, agentName, modelProvider string, mode models.AgentMode) {
+	// Resolve the kitchen's K8sNamespace override (if configured) to inject into
+	// the agent's process environment so the K8sExecutor uses the right namespace.
+	var kitchenK8sNS string
+	if kitchens, kErr := h.Store.ListKitchens(r.Context()); kErr == nil {
+		for _, k := range kitchens {
+			if k.Name == kitchen || k.ID == kitchen {
+				kitchenK8sNS = k.K8sNamespace
+				break
+			}
+		}
+	}
+
+	go func(kitchen, agentName, modelProvider string, mode models.AgentMode, k8sNamespace string) {
 		time.Sleep(1 * time.Second)
 
 		// Re-fetch the agent from the store to get the current state.
@@ -477,6 +515,16 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 		// After provider validation passes, spawn the agent as a running
 		// process (local Python / Docker / K8s) so it can serve A2A tasks.
 		if h.ProcessManager != nil && mode != models.AgentModeExternal {
+			// Propagate kitchen-level K8s namespace into agent tags so the
+			// K8sExecutor can place the workload in the right namespace.
+			if k8sNamespace != "" {
+				if fresh.Tags == nil {
+					fresh.Tags = map[string]string{}
+				}
+				if _, alreadySet := fresh.Tags["k8s_namespace"]; !alreadySet {
+					fresh.Tags["k8s_namespace"] = k8sNamespace
+				}
+			}
 			procInfo, err := h.ProcessManager.Start(context.Background(), fresh)
 			if err != nil {
 				fresh.Status = models.AgentStatusBurnt
@@ -539,7 +587,7 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 		} else {
 			log.Info().Str("agent", agentName).Msg("Agent is ready")
 		}
-	}(kitchen, agentName, agent.ModelProvider, agent.Mode)
+	}(kitchen, agentName, agent.ModelProvider, agent.Mode, kitchenK8sNS)
 
 	respondJSON(w, http.StatusAccepted, map[string]string{
 		"name":        agentName,
@@ -584,6 +632,7 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Message         string `json:"message"`
 		ThinkingEnabled bool   `json:"thinking_enabled,omitempty"`
+		Tools           bool   `json:"tools,omitempty"` // when true, run full executor loop with tool calls
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Message == "" {
 		respondError(w, http.StatusBadRequest, "Request must include a non-empty 'message' field")
@@ -602,6 +651,92 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+	}
+
+	// ── Tools mode: run full executor loop ──────────────────
+	if req.Tools {
+		if agent.Status != models.AgentStatusReady {
+			respondError(w, http.StatusBadRequest,
+				fmt.Sprintf("Agent '%s' is not ready (status: %s) — bake it first", agentName, agent.Status))
+			return
+		}
+
+		// When thinking is enabled, extend request timeout
+		if req.ThinkingEnabled {
+			var cancel context.CancelFunc
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			r = r.WithContext(ctx)
+			_ = ctx
+		}
+
+		var resolved *models.ResolvedIngredients
+		if agent.ResolvedConfig != nil {
+			resolved = agent.ResolvedConfig
+		} else {
+			resolved, err = h.Resolver.Resolve(r.Context(), agent)
+			if err != nil {
+				respondError(w, http.StatusBadRequest, "Ingredient resolution failed: "+err.Error())
+				return
+			}
+		}
+
+		response, trace, err := h.Executor.Execute(r.Context(), agent, req.Message, resolved, nil, req.ThinkingEnabled)
+		if err != nil {
+			respondError(w, http.StatusBadGateway, "Execution failed: "+err.Error())
+			return
+		}
+
+		// ── Output Guardrails ─────────────────────────────────
+		if h.Guardrails != nil && len(agent.Guardrails) > 0 {
+			eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), agent.Guardrails, response)
+			if gErr != nil {
+				log.Warn().Err(gErr).Str("agent", agentName).Msg("Output guardrail evaluation error (test+tools)")
+			} else if !eval.Passed {
+				respondJSON(w, http.StatusForbidden, map[string]interface{}{
+					"error":      "Output blocked by guardrails",
+					"guardrails": eval.Results,
+				})
+				return
+			}
+		}
+
+		// Record trace
+		traceUsage := trace.Usage
+		traceRecord := &models.Trace{
+			ID:          trace.TraceID,
+			AgentName:   agentName,
+			Kitchen:     kitchen,
+			Status:      "completed",
+			DurationMs:  trace.TotalMs,
+			TotalTokens: trace.Usage.TotalTokens,
+			CostUSD:     trace.Usage.EstimatedCost,
+			InputText:   req.Message,
+			OutputText:  response,
+			Usage:       &traceUsage,
+			Metadata: map[string]interface{}{
+				"mode":  "managed",
+				"turns": len(trace.Turns),
+				"type":  "test",
+				"tools": true,
+			},
+			CreatedAt: time.Now().UTC(),
+		}
+		h.Store.CreateTrace(r.Context(), traceRecord)
+
+		// Persist executor turns as hierarchical spans (includes tool spans)
+		h.persistExecutorSpans(r.Context(), trace)
+
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"agent":           agentName,
+			"response":        response,
+			"trace_id":        trace.TraceID,
+			"turns":           len(trace.Turns),
+			"usage":           trace.Usage,
+			"latency_ms":      trace.TotalMs,
+			"execution_trace": trace,
+		})
+		return
 	}
 
 	// Framework-native agents: proxy the test call to the running process
@@ -924,6 +1059,56 @@ func (h *Handlers) RecookAgent(w http.ResponseWriter, r *http.Request) {
 		} else {
 			log.Info().Str("agent", agentName).Msg("Agent re-cooked and ready")
 		}
+
+		// For managed agents (K8s / Docker / local process): stop the old process
+		// and start a fresh one so the pod is replaced with the current image.
+		pmNil := h.ProcessManager == nil
+		isExternal := agent.Mode == models.AgentModeExternal
+		log.Info().
+			Bool("pm_nil", pmNil).
+			Str("mode", string(agent.Mode)).
+			Bool("is_external", isExternal).
+			Str("agent", agentName).
+			Msg("RecookAgent: ProcessManager gate")
+		if !pmNil && !isExternal {
+			if stopErr := h.ProcessManager.Stop(context.Background(), kitchen, agentName); stopErr != nil {
+				log.Warn().Err(stopErr).Str("agent", agentName).Msg("RecookAgent: stop old process (non-fatal)")
+			}
+			// Re-fetch latest agent state before starting so process inherits updated config.
+			latest, fetchErr := h.Store.GetAgent(context.Background(), kitchen, agentName)
+			if fetchErr != nil {
+				latest = agent
+			}
+			procInfo, startErr := h.ProcessManager.Start(context.Background(), latest)
+			if startErr != nil {
+				latest.Status = models.AgentStatusBurnt
+				if latest.Tags == nil {
+					latest.Tags = map[string]string{}
+				}
+				latest.Tags["error"] = fmt.Sprintf("Process restart after recook failed: %s", startErr.Error())
+				latest.UpdatedAt = time.Now().UTC()
+				h.Store.UpdateAgent(context.Background(), latest)
+				log.Warn().Err(startErr).Str("agent", agentName).Msg("Agent burnt — process restart after recook failed")
+				return
+			}
+			latest.Process = procInfo
+			if procInfo.Endpoint != "" {
+				latest.BackendEndpoint = procInfo.Endpoint
+			}
+			h.Store.UpdateAgent(context.Background(), latest)
+			log.Info().Str("agent", agentName).Str("backend", procInfo.Endpoint).Msg("Agent process restarted after recook")
+		}
+
+		// Pro hook: bump k8s_workload.updated_at (and image if configured) so the
+		// operator emits a new pod-template annotation → Kubernetes rolling restart
+		// → pods pull the current image (imagePullPolicy: Always).
+		if h.WorkloadRestarter != nil {
+			if touchErr := h.WorkloadRestarter.TouchWorkloadForAgent(context.Background(), kitchen, agentName, h.K8sAgentImage); touchErr != nil {
+				log.Warn().Err(touchErr).Str("agent", agentName).Msg("Failed to touch workload for recook restart")
+			} else {
+				log.Info().Str("agent", agentName).Str("image", h.K8sAgentImage).Msg("Workload touched for recook restart")
+			}
+		}
 	}()
 
 	respondJSON(w, http.StatusAccepted, map[string]interface{}{
@@ -1057,6 +1242,16 @@ func (h *Handlers) CreateRecipe(w http.ResponseWriter, r *http.Request) {
 	var req models.Recipe
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		respondError(w, http.StatusBadRequest, "Recipe 'name' is required")
+		return
+	}
+	if !recipeNameRe.MatchString(req.Name) {
+		respondError(w, http.StatusBadRequest, "Recipe 'name' must be 2-63 chars and use lowercase letters, numbers, '_' or '-'")
 		return
 	}
 
@@ -2166,6 +2361,12 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 				Text string `json:"text"`
 			} `json:"parts"`
 		} `json:"message"`
+		ProviderConfig struct {
+			Name          string `json:"name"`
+			Kind          string `json:"kind"`
+			CABundle      string `json:"ca_bundle"`
+			TLSSkipVerify bool   `json:"tls_skip_verify"`
+		} `json:"provider_config"`
 		// Optional: specify which agent to invoke
 		Metadata struct {
 			AgentName string `json:"agent_name"`
@@ -2196,13 +2397,51 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 		taskID = uuid.New().String()
 	}
 
+	if strings.TrimSpace(taskReq.ProviderConfig.Name) != "" {
+		log.Info().
+			Str("task_id", taskID).
+			Str("provider", taskReq.ProviderConfig.Name).
+			Str("kind", taskReq.ProviderConfig.Kind).
+			Bool("has_ca_bundle", taskReq.ProviderConfig.CABundle != "").
+			Int("ca_bundle_len", len(taskReq.ProviderConfig.CABundle)).
+			Bool("tls_skip_verify", taskReq.ProviderConfig.TLSSkipVerify).
+			Msg("A2A tasks/send received provider TLS configuration")
+	}
+
 	// If an agent is specified, try to invoke it
 	agentName := taskReq.Metadata.AgentName
+	// Fall back to the X-AgentOven-Agent header (set by proxyA2ARequest) so
+	// agent pods running the control plane binary can identify themselves.
+	if agentName == "" {
+		agentName = strings.TrimSpace(r.Header.Get("X-AgentOven-Agent"))
+	}
+	// Final fallback: if this binary is running as an agent pod, use its own name.
+	if agentName == "" {
+		agentName = strings.TrimSpace(os.Getenv("AGENT_NAME"))
+	}
 	targetKitchen := kitchen
 	// Cross-kitchen A2A: "otherkitchen/agentname" format (ADR-0014 / ADR-0007)
 	if idx := strings.Index(agentName, "/"); idx > 0 {
 		targetKitchen = agentName[:idx]
 		agentName = agentName[idx+1:]
+	}
+	// Cross-kitchen authorization check (ADR-0016): when the target kitchen differs
+	// from the caller's kitchen, verify an active CrossKitchenGrant exists.
+	if targetKitchen != kitchen {
+		allowed, checkErr := h.Store.CheckCrossKitchenAccess(r.Context(), kitchen, targetKitchen, agentName)
+		if checkErr != nil || !allowed {
+			w.Header().Set("Content-Type", "application/a2a+json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"error": map[string]interface{}{
+					"code":    -32004,
+					"message": "Cross-kitchen access denied — no active grant",
+					"data":    targetKitchen + "/" + agentName,
+				},
+				"id": rpcID,
+			})
+			return
+		}
 	}
 	if agentName != "" && h.Executor != nil {
 		agent, err := h.Store.GetAgent(r.Context(), targetKitchen, agentName)
@@ -2265,97 +2504,135 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 		}
 		h.Store.CreateTrace(r.Context(), initialTrace)
 
-		// Execute agent asynchronously — updates trace on completion
-		go func() {
-			execCtx := context.Background()
+		// Execute agent synchronously — return full completed result in one response.
+		// This avoids a separate tasks/get poll cycle and ensures tokens/output are
+		// always propagated back to the caller (engine, dashboard, SDK, etc.).
+		execCtx := r.Context()
+		if strings.TrimSpace(taskReq.ProviderConfig.Name) != "" {
+			execCtx = router.WithProviderTLSOverride(execCtx, router.ProviderTLSOverride{
+				ProviderName:  taskReq.ProviderConfig.Name,
+				CABundle:      taskReq.ProviderConfig.CABundle,
+				TLSSkipVerify: taskReq.ProviderConfig.TLSSkipVerify,
+			})
+			log.Info().
+				Str("task_id", taskID).
+				Str("provider", taskReq.ProviderConfig.Name).
+				Msg("A2A execution context set with provider TLS override")
+		}
 
-			var response string
-			var status string
-			var totalTokens int64
-			var costUSD float64
-			var usage *models.TokenUsage
-			var execTrace *executor.ExecutionTrace
+		var response string
+		var status string
+		var totalTokens int64
+		var costUSD float64
+		var usage *models.TokenUsage
+		var execTrace *executor.ExecutionTrace
 
-			if agent.IsFrameworkNative() {
-				// Framework-native: proxy to the running process
-				resp, traceRecord, proxyErr := h.proxyToProcess(execCtx, agent, userMessage, nil, kitchen)
-				if proxyErr != nil {
-					status = "failed"
-					log.Warn().Err(proxyErr).Str("agent", agentName).Str("task_id", taskID).Msg("A2A framework-native execution failed")
-				} else {
-					response = resp
-					status = "completed"
-					if traceRecord.Usage != nil {
-						totalTokens = traceRecord.Usage.TotalTokens
-						costUSD = traceRecord.CostUSD
-						u := *traceRecord.Usage
-						usage = &u
-					}
-				}
+		if agent.IsFrameworkNative() {
+			// Framework-native: proxy to the running process
+			resp, traceRecord, proxyErr := h.proxyToProcess(execCtx, agent, userMessage, nil, kitchen)
+			if proxyErr != nil {
+				status = "failed"
+				log.Warn().Err(proxyErr).Str("agent", agentName).Str("task_id", taskID).Msg("A2A framework-native execution failed")
 			} else {
-				resp, et, execErr := h.Executor.Execute(execCtx, agent, userMessage, resolved, nil, false)
 				response = resp
-				execTrace = et
-				if execErr != nil {
-					status = "failed"
-					log.Warn().Err(execErr).Str("agent", agentName).Str("task_id", taskID).Msg("A2A agent execution failed")
-				} else {
-					status = "completed"
-					if execTrace != nil {
-						costUSD = execTrace.Usage.EstimatedCost
-						totalTokens = execTrace.Usage.TotalTokens
-						traceUsage := execTrace.Usage
-						usage = &traceUsage
-					}
+				status = "completed"
+				if traceRecord.Usage != nil {
+					totalTokens = traceRecord.Usage.TotalTokens
+					costUSD = traceRecord.CostUSD
+					u := *traceRecord.Usage
+					usage = &u
 				}
 			}
+		} else {
+			resp, et, execErr := h.Executor.Execute(execCtx, agent, userMessage, resolved, nil, false)
+			response = resp
+			execTrace = et
+			if execErr != nil {
+				status = "failed"
+				log.Warn().Err(execErr).Str("agent", agentName).Str("task_id", taskID).Msg("A2A agent execution failed")
+			} else {
+				status = "completed"
+				if execTrace != nil {
+					costUSD = execTrace.Usage.EstimatedCost
+					totalTokens = execTrace.Usage.TotalTokens
+					traceUsage := execTrace.Usage
+					usage = &traceUsage
+				}
+			}
+		}
 
-			trace := &models.Trace{
-				ID:          taskID,
-				AgentName:   agentName,
-				Kitchen:     kitchen,
-				Status:      status,
-				TotalTokens: totalTokens,
-				CostUSD:     costUSD,
-				InputText:   userMessage,
-				OutputText:  response,
-				Usage:       usage,
-				Metadata: map[string]interface{}{
-					"source":  "a2a",
-					"task_id": taskID,
+		trace := &models.Trace{
+			ID:          taskID,
+			AgentName:   agentName,
+			Kitchen:     kitchen,
+			Status:      status,
+			TotalTokens: totalTokens,
+			CostUSD:     costUSD,
+			InputText:   userMessage,
+			OutputText:  response,
+			Usage:       usage,
+			Metadata: map[string]interface{}{
+				"source":  "a2a",
+				"task_id": taskID,
+			},
+			CreatedAt: initialTrace.CreatedAt,
+		}
+		if execTrace != nil {
+			thinkingBlocks, thinkingTokens := summarizeThinking(execTrace)
+			if len(thinkingBlocks) > 0 {
+				trace.Metadata["thinking_blocks"] = thinkingBlocks
+			}
+			if thinkingTokens > 0 {
+				trace.Metadata["thinking_tokens"] = thinkingTokens
+			}
+		}
+		h.Store.CreateTrace(execCtx, trace)
+
+		// Persist executor spans for waterfall visualization
+		if execTrace != nil {
+			h.persistExecutorSpans(execCtx, execTrace)
+		}
+
+		// Build result with artifacts and usage so callers get the full response
+		// in one round-trip — no poll cycle needed.
+		taskMeta := map[string]interface{}{
+			"agent_name": agentName,
+			"kitchen":    kitchen,
+		}
+		// Embed the executor trace so the caller (engine / pro control plane) can
+		// persist spans directly into Postgres rather than relying on the pod's
+		// in-memory store (which is not visible to the caller).
+		if execTrace != nil {
+			if traceJSON, err := json.Marshal(execTrace); err == nil {
+				taskMeta["exec_trace"] = json.RawMessage(traceJSON)
+			}
+		}
+		taskResult := map[string]interface{}{
+			"id":       taskID,
+			"status":   map[string]string{"state": status},
+			"metadata": taskMeta,
+		}
+		if status == "completed" && response != "" {
+			taskResult["artifacts"] = []map[string]interface{}{
+				{
+					"parts": []map[string]interface{}{
+						{"type": "text", "text": response},
+					},
 				},
-				CreatedAt: initialTrace.CreatedAt,
 			}
-			if execTrace != nil {
-				thinkingBlocks, thinkingTokens := summarizeThinking(execTrace)
-				if len(thinkingBlocks) > 0 {
-					trace.Metadata["thinking_blocks"] = thinkingBlocks
-				}
-				if thinkingTokens > 0 {
-					trace.Metadata["thinking_tokens"] = thinkingTokens
-				}
+		}
+		if totalTokens > 0 || costUSD > 0 {
+			taskResult["usage"] = map[string]interface{}{
+				"total_tokens": totalTokens,
+				"cost_usd":     costUSD,
 			}
-			h.Store.CreateTrace(execCtx, trace)
+		}
 
-			// Persist executor spans for waterfall visualization
-			if execTrace != nil {
-				h.persistExecutorSpans(execCtx, execTrace)
-			}
-		}()
-
-		// Return immediately with submitted status (async execution)
 		w.Header().Set("Content-Type", "application/a2a+json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"jsonrpc": "2.0",
-			"result": map[string]interface{}{
-				"id":     taskID,
-				"status": map[string]string{"state": "working"},
-				"metadata": map[string]string{
-					"agent_name": agentName,
-					"kitchen":    kitchen,
-				},
-			},
-			"id": rpcID,
+			"result":  taskResult,
+			"id":      rpcID,
 		})
 		return
 	}
@@ -2447,6 +2724,12 @@ func (h *Handlers) handleA2ATaskGet(w http.ResponseWriter, r *http.Request, para
 					{"type": "text", "text": trace.OutputText},
 				},
 			},
+		}
+	}
+	if trace.TotalTokens > 0 || trace.CostUSD > 0 {
+		result["usage"] = map[string]interface{}{
+			"total_tokens": trace.TotalTokens,
+			"cost_usd":     trace.CostUSD,
 		}
 	}
 
@@ -2955,6 +3238,22 @@ func (h *Handlers) emitEnvA2AAudit(ctx context.Context, kitchen, agentName, envS
 	})
 }
 
+// backendHTTPClient is a shared HTTP client used for all agent-to-agent
+// proxy calls. TLS verification is skipped by default because backend agents
+// run as internal cluster workloads and typically use self-signed certificates.
+// Set AGENTOVEN_BACKEND_TLS_VERIFY=true to opt back in to strict verification.
+var backendHTTPClient = func() *http.Client {
+	skipVerify := os.Getenv("AGENTOVEN_BACKEND_TLS_VERIFY") != "true"
+	return &http.Client{
+		Timeout: 5 * time.Minute,
+		Transport: &http.Transport{
+			TLSClientConfig:       &tls.Config{InsecureSkipVerify: skipVerify}, // #nosec G402 — internal cluster traffic; opt-in strict via env var
+			DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			ResponseHeaderTimeout: 60 * time.Second,
+		},
+	}
+}()
+
 // proxyA2ARequest relays an HTTP request to a backend agent endpoint and
 // streams the response back to the caller. This is the core of the
 // control-plane-as-gateway pattern (ADR-0007).
@@ -2971,8 +3270,8 @@ func (h *Handlers) proxyA2ARequest(w http.ResponseWriter, r *http.Request, backe
 		return
 	}
 
-	// Ensure the backend URL has no trailing slash for the root POST
-	targetURL := strings.TrimRight(backendURL, "/") + "/"
+	// Use the backend URL as-is — it already contains the full path (e.g. /a2a).
+	targetURL := strings.TrimRight(backendURL, "/")
 
 	// Create the proxied request
 	proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, targetURL, bytes.NewReader(body))
@@ -2989,8 +3288,7 @@ func (h *Handlers) proxyA2ARequest(w http.ResponseWriter, r *http.Request, backe
 	proxyReq.Header.Set("X-AgentOven-Agent", agentName)
 
 	// Forward the request to the backend
-	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Do(proxyReq)
+	resp, err := backendHTTPClient.Do(proxyReq)
 	if err != nil {
 		log.Warn().Err(err).Str("agent", agentName).Str("backend", backendURL).Msg("Backend request failed")
 		w.Header().Set("Content-Type", "application/a2a+json")
@@ -4545,18 +4843,35 @@ func (h *Handlers) DeleteChannel(w http.ResponseWriter, r *http.Request) {
 // ListAuditEvents returns audit events for the current kitchen.
 func (h *Handlers) ListAuditEvents(w http.ResponseWriter, r *http.Request) {
 	kitchen := middleware.GetKitchen(r.Context())
+	q := r.URL.Query()
 	filter := models.AuditFilter{
 		Kitchen: kitchen,
 		Limit:   100,
 	}
-	if q := r.URL.Query().Get("action"); q != "" {
-		filter.Action = q
+	if v := q.Get("action"); v != "" {
+		filter.Action = v
 	}
-	if q := r.URL.Query().Get("user_id"); q != "" {
-		filter.UserID = q
+	if v := q.Get("user_id"); v != "" {
+		filter.UserID = v
 	}
-	if q := r.URL.Query().Get("resource"); q != "" {
-		filter.Resource = q
+	// Accept both "resource" (canonical) and "agent" (legacy UI alias)
+	if v := q.Get("resource"); v != "" {
+		filter.Resource = v
+	} else if v := q.Get("agent"); v != "" {
+		filter.Resource = v
+	}
+	if v := q.Get("environment"); v != "" {
+		filter.Environment = v
+	}
+	if v := q.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
+			filter.Limit = n
+		}
+	}
+	if v := q.Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			filter.Offset = n
+		}
 	}
 
 	events, err := h.Store.ListAuditEvents(r.Context(), filter)
@@ -4584,15 +4899,21 @@ func (h *Handlers) ListAuditEvents(w http.ResponseWriter, r *http.Request) {
 // CountAuditEvents returns the count of audit events matching the filter.
 func (h *Handlers) CountAuditEvents(w http.ResponseWriter, r *http.Request) {
 	kitchen := middleware.GetKitchen(r.Context())
+	q := r.URL.Query()
 	filter := models.AuditFilter{Kitchen: kitchen}
-	if q := r.URL.Query().Get("action"); q != "" {
-		filter.Action = q
+	if v := q.Get("action"); v != "" {
+		filter.Action = v
 	}
-	if q := r.URL.Query().Get("user_id"); q != "" {
-		filter.UserID = q
+	if v := q.Get("user_id"); v != "" {
+		filter.UserID = v
 	}
-	if q := r.URL.Query().Get("resource"); q != "" {
-		filter.Resource = q
+	if v := q.Get("resource"); v != "" {
+		filter.Resource = v
+	} else if v := q.Get("agent"); v != "" {
+		filter.Resource = v
+	}
+	if v := q.Get("environment"); v != "" {
+		filter.Environment = v
 	}
 
 	count, err := h.Store.CountAuditEvents(r.Context(), filter)
@@ -5504,4 +5825,124 @@ func (h *Handlers) HandleDeleteScopedKey(w http.ResponseWriter, r *http.Request)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// AdminRetireAllDeployments stops every active agent process in the current kitchen
+// and marks them cooled. Requires admin identity.
+// DELETE /api/v1/admin/deployments
+func (h *Handlers) AdminRetireAllDeployments(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+
+	// Admin-only: reject non-admin callers
+	if id := pkgmw.GetIdentity(r.Context()); id == nil || id.Role != "admin" {
+		respondError(w, http.StatusForbidden, "admin role required")
+		return
+	}
+
+	agents, err := h.Store.ListAgents(r.Context(), kitchen)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	retired := 0
+	for i := range agents {
+		ag := &agents[i]
+		switch ag.Status {
+		case models.AgentStatusReady, models.AgentStatusBaking, models.AgentStatusBurnt:
+			if h.ProcessManager != nil {
+				if stopErr := h.ProcessManager.Stop(r.Context(), kitchen, ag.Name); stopErr != nil {
+					log.Warn().Err(stopErr).Str("agent", ag.Name).Msg("Failed to stop agent process during retire-all")
+				}
+			}
+			ag.Status = models.AgentStatusCooled
+			ag.Process = nil
+			ag.UpdatedAt = time.Now().UTC()
+			if updateErr := h.Store.UpdateAgent(r.Context(), ag); updateErr != nil {
+				log.Warn().Err(updateErr).Str("agent", ag.Name).Msg("Failed to update agent status during retire-all")
+				continue
+			}
+			retired++
+			log.Info().Str("agent", ag.Name).Str("kitchen", kitchen).Msg("Agent retired (bulk)")
+		}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{"retired": retired, "kitchen": kitchen})
+}
+
+// ── Cross-Kitchen Grant Handlers ─────────────────────────────────────────────
+
+// HandleListCrossKitchenGrants lists all active grants for the current kitchen.
+// GET /api/v1/admin/cross-kitchen-grants
+func (h *Handlers) HandleListCrossKitchenGrants(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+	if id := pkgmw.GetIdentity(r.Context()); id == nil || id.Role != "admin" {
+		respondError(w, http.StatusForbidden, "admin role required")
+		return
+	}
+	grants, err := h.Store.ListCrossKitchenGrants(r.Context(), kitchen)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if grants == nil {
+		grants = []models.CrossKitchenGrant{}
+	}
+	respondJSON(w, http.StatusOK, grants)
+}
+
+// HandleCreateCrossKitchenGrant creates a new grant.
+// POST /api/v1/admin/cross-kitchen-grants
+func (h *Handlers) HandleCreateCrossKitchenGrant(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+	if id := pkgmw.GetIdentity(r.Context()); id == nil || id.Role != "admin" {
+		respondError(w, http.StatusForbidden, "admin role required")
+		return
+	}
+
+	var req models.CrossKitchenGrant
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// The target kitchen of the grant is always the current kitchen; the source
+	// is specified by the caller (which kitchen is being granted access).
+	req.ID = uuid.New().String()
+	req.TargetKitchen = kitchen
+	req.CreatedAt = time.Now().UTC()
+	if id := pkgmw.GetIdentity(r.Context()); id != nil {
+		req.CreatedBy = id.Subject
+	}
+	if req.AllowedAgents == nil {
+		req.AllowedAgents = []string{}
+	}
+
+	if err := h.Store.CreateCrossKitchenGrant(r.Context(), &req); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	log.Info().Str("id", req.ID).Str("source", req.SourceKitchen).Str("target", kitchen).Msg("Cross-kitchen grant created")
+	respondJSON(w, http.StatusCreated, req)
+}
+
+// HandleRevokeCrossKitchenGrant revokes (soft-deletes) a grant.
+// DELETE /api/v1/admin/cross-kitchen-grants/{grantId}
+func (h *Handlers) HandleRevokeCrossKitchenGrant(w http.ResponseWriter, r *http.Request) {
+	if id := pkgmw.GetIdentity(r.Context()); id == nil || id.Role != "admin" {
+		respondError(w, http.StatusForbidden, "admin role required")
+		return
+	}
+	grantID := chi.URLParam(r, "grantId")
+	if err := h.Store.RevokeCrossKitchenGrant(r.Context(), grantID); err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	log.Info().Str("id", grantID).Msg("Cross-kitchen grant revoked")
+	respondJSON(w, http.StatusOK, map[string]string{"status": "revoked", "id": grantID})
 }

@@ -690,17 +690,17 @@ function GateOutputCard({ output }: { output: Record<string, unknown> }) {
         </span>
       </div>
       <div className="grid grid-cols-2 gap-2">
-        {output.approver_email && (
+        {!!output.approver_email && (
           <InfoItem label="Approver" value={String(output.approver_email)} />
         )}
-        {output.channel && (
+        {!!output.channel && (
           <InfoItem label="Channel" value={String(output.channel)} />
         )}
-        {output.resolved_at && (
+        {!!output.resolved_at && (
           <InfoItem label="Resolved" value={fmtTime(String(output.resolved_at))} />
         )}
       </div>
-      {output.comments && (
+      {!!output.comments && (
         <div className="mt-3">
           <p className="text-xs text-[var(--ao-text-muted)] mb-1">Comments</p>
           <p className="text-sm text-[var(--ao-text)] whitespace-pre-wrap">

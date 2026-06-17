@@ -151,20 +151,48 @@ class AgentOvenClient:
             name, kind, api_key=api_key, endpoint=endpoint, models=models
         )
 
-    def create_recipe(self, recipe: Recipe) -> str:
-        return self._native.create_recipe(recipe)
+    def with_kitchen(self, kitchen: str) -> "AgentOvenClient":
+        """Return a cloned client bound to a different kitchen."""
+        return AgentOvenClient(url=self._url, api_key=self._api_key, kitchen=kitchen)
 
-    def bake_recipe(self, name: str, input: Optional[Any] = None) -> str:
-        return self._native.bake_recipe(name, input=input)
+    def resolve_recipe_kitchen(
+        self, recipe_name: str, candidate_kitchens: list[str]
+    ) -> Optional[str]:
+        """Return the first kitchen that contains the recipe, else None."""
+        for kitchen in candidate_kitchens:
+            try:
+                self.get_recipe(recipe_name, kitchen=kitchen)
+                return kitchen
+            except AgentOvenAPIError as exc:
+                if exc.status_code == 404:
+                    continue
+                raise
+        return None
 
-    def list_recipes(self) -> str:
-        return self._native.list_recipes()
+    def create_recipe(self, recipe: Recipe, kitchen: Optional[str] = None) -> str:
+        native = self._native if kitchen is None else self.with_kitchen(kitchen)._native
+        return native.create_recipe(recipe)
 
-    def get_recipe_runs(self, name: str) -> str:
-        return self._native.get_recipe_runs(name)
+    def bake_recipe(self, name: str, input: Optional[Any] = None, kitchen: Optional[str] = None) -> str:
+        native = self._native if kitchen is None else self.with_kitchen(kitchen)._native
+        return native.bake_recipe(name, input=input)
 
-    def get_recipe_run(self, recipe_name: str, run_id: str) -> str:
-        return self._native.get_recipe_run(recipe_name, run_id)
+    def list_recipes(self, kitchen: Optional[str] = None) -> str:
+        native = self._native if kitchen is None else self.with_kitchen(kitchen)._native
+        return native.list_recipes()
+
+    def get_recipe(self, name: str, kitchen: Optional[str] = None) -> dict[str, Any]:
+        if kitchen is None:
+            return self._get(f"/api/v1/recipes/{name}")
+        return self.with_kitchen(kitchen)._get(f"/api/v1/recipes/{name}")
+
+    def get_recipe_runs(self, name: str, kitchen: Optional[str] = None) -> str:
+        native = self._native if kitchen is None else self.with_kitchen(kitchen)._native
+        return native.get_recipe_runs(name)
+
+    def get_recipe_run(self, recipe_name: str, run_id: str, kitchen: Optional[str] = None) -> str:
+        native = self._native if kitchen is None else self.with_kitchen(kitchen)._native
+        return native.get_recipe_run(recipe_name, run_id)
 
     # ── Kitchen management (Pro) ──────────────────────────────────────────
 

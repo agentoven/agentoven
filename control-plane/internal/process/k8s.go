@@ -156,6 +156,14 @@ func (ke *K8sExecutor) Start(ctx context.Context, agent *models.Agent, info *mod
 	serviceName := deployName + "-svc"
 	namespace := ke.namespace
 
+	// Allow per-kitchen namespace override via agent tag (set by BakeAgent handler
+	// from Kitchen.K8sNamespace). Falls back to the executor-level default namespace.
+	if agent.Tags != nil {
+		if ns, ok := agent.Tags["k8s_namespace"]; ok && ns != "" {
+			namespace = ns
+		}
+	}
+
 	// Use custom image if specified
 	image := ke.image
 	if agent.Tags != nil {
@@ -165,6 +173,7 @@ func (ke *K8sExecutor) Start(ctx context.Context, agent *models.Agent, info *mod
 	}
 
 	env["AGENT_PORT"] = "9000"
+	env["AGENTOVEN_PORT"] = "9000" // agentoven binary reads AGENTOVEN_PORT, not AGENT_PORT
 
 	envList := make([]map[string]interface{}, 0, len(env))
 	for k, v := range env {
@@ -211,7 +220,9 @@ func (ke *K8sExecutor) Start(ctx context.Context, agent *models.Agent, info *mod
 	}
 
 	// Set endpoint before waiting so it is populated even if pod check times out.
-	info.Endpoint = fmt.Sprintf("http://%s.%s.svc.cluster.local:9000", serviceName, namespace)
+	// Store the full A2A path so proxyA2ARequest can POST directly to it.
+	baseURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:9000", serviceName, namespace)
+	info.Endpoint = baseURL + "/a2a"
 
 	podName, err := ke.waitForPod(ctx, client, deployName, namespace, 60*time.Second)
 	if err != nil {
@@ -219,7 +230,7 @@ func (ke *K8sExecutor) Start(ctx context.Context, agent *models.Agent, info *mod
 	}
 	info.PodName = podName
 
-	if err := ke.waitForHealth(info.Endpoint, 60*time.Second); err != nil {
+	if err := ke.waitForHealth(baseURL, 60*time.Second); err != nil {
 		return fmt.Errorf("k8s agent health check failed: %w", err)
 	}
 

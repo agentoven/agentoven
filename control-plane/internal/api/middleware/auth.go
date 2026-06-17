@@ -75,8 +75,26 @@ func (am *AuthMiddleware) Handler(next http.Handler) http.Handler {
 		if identity != nil {
 			ctx = pkgmw.SetIdentity(ctx, identity)
 
-			// If the identity carries a kitchen scope, override the tenant
+			// If the identity carries a kitchen scope, override the tenant.
+			// But if the request explicitly set X-Kitchen to a different value,
+			// reject with 403 — prevents silent 404 when token kitchen mismatches.
 			if identity.Kitchen != "" {
+				requestedKitchen := pkgmw.GetKitchen(ctx)
+				if requestedKitchen != "" && requestedKitchen != "default" && requestedKitchen != identity.Kitchen {
+					log.Warn().
+						Str("provider", identity.Provider).
+						Str("subject", identity.Subject).
+						Str("token_kitchen", identity.Kitchen).
+						Str("requested_kitchen", requestedKitchen).
+						Msg("Kitchen mismatch: identity kitchen differs from requested kitchen")
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusForbidden)
+					json.NewEncoder(w).Encode(map[string]string{
+						"error":   "kitchen_mismatch",
+						"message": "Identity is scoped to kitchen '" + identity.Kitchen + "' but request targets kitchen '" + requestedKitchen + "'. Generate a token for the correct kitchen.",
+					})
+					return
+				}
 				ctx = pkgmw.SetKitchen(ctx, identity.Kitchen)
 			}
 		}
