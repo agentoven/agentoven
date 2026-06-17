@@ -451,13 +451,33 @@ const (
 )
 
 type Kitchen struct {
-	ID          string            `json:"id" db:"id"`
-	Name        string            `json:"name" db:"name"`
-	Description string            `json:"description,omitempty" db:"description"`
-	Owner       string            `json:"owner" db:"owner"`
-	Plan        Plan              `json:"plan" db:"plan"`
-	Tags        map[string]string `json:"tags,omitempty"`
-	CreatedAt   time.Time         `json:"created_at" db:"created_at"`
+	ID           string            `json:"id" db:"id"`
+	Name         string            `json:"name" db:"name"`
+	Description  string            `json:"description,omitempty" db:"description"`
+	Owner        string            `json:"owner" db:"owner"`
+	Plan         Plan              `json:"plan" db:"plan"`
+	Tags         map[string]string `json:"tags,omitempty"`
+	K8sNamespace string            `json:"k8s_namespace,omitempty" db:"k8s_namespace"`
+	CreatedAt    time.Time         `json:"created_at" db:"created_at"`
+}
+
+// CrossKitchenGrant authorizes a source kitchen to invoke specific agents in a
+// target kitchen via the cross-kitchen A2A proxy. Grants are checked at request
+// time in the A2AEndpoint handler.
+//
+// AllowedAgents: ["*"] grants access to all agents in the target kitchen.
+// An empty slice grants no agents — the grant is effectively a no-op until
+// specific agents are added.
+type CrossKitchenGrant struct {
+	ID            string     `json:"id" db:"id"`
+	SourceKitchen string     `json:"source_kitchen" db:"source_kitchen"`
+	TargetKitchen string     `json:"target_kitchen" db:"target_kitchen"`
+	AllowedAgents []string   `json:"allowed_agents" db:"allowed_agents"` // ["*"] = all
+	Label         string     `json:"label,omitempty" db:"label"`
+	CreatedBy     string     `json:"created_by,omitempty" db:"created_by"`
+	CreatedAt     time.Time  `json:"created_at" db:"created_at"`
+	ExpiresAt     *time.Time `json:"expires_at,omitempty" db:"expires_at"`
+	Revoked       bool       `json:"revoked" db:"revoked"`
 }
 
 // PlanLimits defines the quotas and feature gates for a given plan tier.
@@ -732,11 +752,26 @@ type ModelProvider struct {
 	APIKeys          []APIKeyEntry `json:"api_keys,omitempty"`
 	RotationStrategy string        `json:"rotation_strategy,omitempty" db:"rotation_strategy"` // "round-robin", "random", "weighted"
 
+	// SecretRef references an external secret (K8s Secret, env var) for the API key.
+	// When set, the key is resolved at runtime instead of being stored in the database.
+	// Supported formats:
+	//   "k8s://namespace/secret-name/key"  → reads from K8s Secret
+	//   "env://ENV_VAR_NAME"               → reads from environment variable
+	// If SecretRef is set, Config["api_key"] is ignored.
+	SecretRef string `json:"secret_ref,omitempty" db:"secret_ref"`
+
 	// CABundle is an optional PEM-encoded CA certificate chain to trust when
 	// calling this provider's endpoint. Useful for providers behind an internal
 	// PKI (e.g. LiteLLM with a corporate TLS cert). Leave empty to use the
 	// system default CA pool. Not sensitive — public cert only.
 	CABundle string `json:"ca_bundle,omitempty" db:"ca_bundle"`
+
+	// TLSSkipVerify disables TLS certificate verification for this provider.
+	// Use when the provider endpoint uses a self-signed or private-CA cert that
+	// cannot be added to the trust chain via CABundle (e.g. on-premise LiteLLM).
+	// WARNING: only enable in trusted internal networks — disabling TLS verification
+	// exposes the connection to MITM attacks.
+	TLSSkipVerify bool `json:"tls_skip_verify,omitempty" db:"tls_skip_verify"`
 
 	// Health check cache — populated by TestProvider
 	LastTestedAt    *time.Time `json:"last_tested_at,omitempty" db:"last_tested_at"`
@@ -2279,10 +2314,11 @@ type GuardrailEvaluation struct {
 
 // APIKeyEntry represents a single API key in a rotation pool.
 type APIKeyEntry struct {
-	Key     string `json:"key"`
-	Label   string `json:"label,omitempty"`  // human-readable label (e.g. "prod-key-1")
-	Weight  int    `json:"weight,omitempty"` // for weighted rotation (higher = more traffic)
-	Enabled bool   `json:"enabled"`
+	Key       string `json:"key"`
+	Label     string `json:"label,omitempty"`      // human-readable label (e.g. "prod-key-1")
+	Weight    int    `json:"weight,omitempty"`     // for weighted rotation (higher = more traffic)
+	Enabled   bool   `json:"enabled"`
+	SecretRef string `json:"secret_ref,omitempty"` // external reference (k8s://ns/secret/key or env://VAR)
 }
 
 // ══════════════════════════════════════════════════════════════

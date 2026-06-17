@@ -38,6 +38,7 @@ import (
 	ragpkg "github.com/agentoven/agentoven/control-plane/internal/rag"
 	"github.com/agentoven/agentoven/control-plane/internal/retention"
 	modelrouter "github.com/agentoven/agentoven/control-plane/internal/router"
+	"github.com/agentoven/agentoven/control-plane/internal/secretref"
 	"github.com/agentoven/agentoven/control-plane/internal/sessions"
 	"github.com/agentoven/agentoven/control-plane/internal/store"
 	"github.com/agentoven/agentoven/control-plane/internal/telemetry"
@@ -127,6 +128,10 @@ type Server struct {
 	// Catalog is the live model capability database.
 	// Exposed so Pro can trigger refreshes or register custom models.
 	Catalog *catalog.Catalog
+
+	// SecretResolver resolves k8s:// and env:// secret references.
+	// Exposed so Pro can call SetK8sReader() to enable k8s:// refs.
+	SecretResolver *secretref.Resolver
 
 	// SessionStore manages multi-turn conversation sessions.
 	// Exposed so Pro can replace with Redis/PostgreSQL-backed store.
@@ -229,8 +234,17 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 	// Seed default kitchen
 	seedDefaultKitchen(ctx, dataStore)
 
+	// If AGENT_NAME is set, this binary is running as an agent pod.
+	// Register itself so the A2A endpoint can resolve and execute it.
+	seedAgentFromEnv(ctx, dataStore)
+
 	// Initialize services
 	mr := modelrouter.NewModelRouter(dataStore)
+
+	// Wire secret resolver for provider key references (k8s://, env://)
+	secretRes := secretref.New()
+	mr.SetSecretResolver(secretRes)
+
 	gw := mcpgw.NewGateway(dataStore)
 	ns := notify.NewService(dataStore)
 	baseURL := fmt.Sprintf("http://localhost:%d", cfg.Port)
@@ -463,6 +477,7 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 		TierEnforcer:        tierEnforcer,
 		AuthChain:           authChain,
 		Catalog:             cat,
+		SecretResolver:      secretRes,
 		SessionStore:        sessStore,
 		SessionJanitor:      sessJanitor,
 		ProcessManager:      pm,
@@ -492,6 +507,107 @@ func seedDefaultKitchen(ctx context.Context, s store.Store) {
 			log.Info().Msg("✅ Default kitchen seeded")
 		}
 	}
+}
+
+// seedAgentFromEnv auto-registers this server as an agent when the AGENT_NAME
+// environment variable is set (i.e., when the binary is used as an agent pod).
+// The agent is seeded into the local in-memory store so that handleA2ATaskSend
+// can find it and execute the LLM inline.
+func seedAgentFromEnv(ctx context.Context, s store.Store) {
+	agentName := os.Getenv("AGENT_NAME")
+	if agentName == "" {
+		return
+	}
+	kitchen := os.Getenv("AGENT_KITCHEN")
+	if kitchen == "" {
+		kitchen = "default"
+	}
+
+	modelProvider := os.Getenv("AGENT_MODEL_PROVIDER")
+	modelName := os.Getenv("AGENT_MODEL_NAME")
+	apiKey := os.Getenv("AGENT_API_KEY")
+	apiEndpoint := os.Getenv("AGENT_API_ENDPOINT")
+
+	// Seed the model provider so the resolver can look up credentials at runtime.
+	// The resolver reads provider.Config["api_key"], so we must store the key there.
+	if modelProvider != "" && apiKey != "" {
+		existingProvider, _ := s.GetProvider(ctx, modelProvider)
+		if existingProvider == nil {
+			p := &models.ModelProvider{
+				Name:   modelProvider,
+				Kind:   "openai",
+				Models: []string{modelName},
+				Config: map[string]interface{}{
+					"api_key": apiKey,
+				},
+				APIKeys: []models.APIKeyEntry{
+					{Key: apiKey, Label: "agent-env", Enabled: true},
+				},
+			}
+			if apiEndpoint != "" {
+				p.Endpoint = apiEndpoint
+			}
+			if err := s.CreateProvider(ctx, p); err != nil {
+				log.Warn().Err(err).Str("provider", modelProvider).Msg("Failed to seed provider from env")
+			} else {
+				log.Info().Str("provider", modelProvider).Msg("✅ Provider seeded from environment")
+			}
+		}
+	}
+
+	// Idempotent — skip if already registered
+	if _, err := s.GetAgent(ctx, kitchen, agentName); err == nil {
+		return
+	}
+
+	// Build ingredients so the resolver produces a valid ResolvedIngredients.
+	// The resolver only iterates agent.Ingredients — bare ModelProvider/ModelName
+	// fields on the Agent struct are not enough on their own.
+	var ingredients []models.Ingredient
+	if modelProvider != "" && modelName != "" {
+		ingredients = append(ingredients, models.Ingredient{
+			ID:   "model",
+			Name: "model",
+			Kind: models.IngredientModel,
+			Config: map[string]interface{}{
+				"provider": modelProvider,
+				"model":    modelName,
+			},
+			Required: true,
+		})
+	}
+	promptTemplate := os.Getenv("AGENT_PROMPT_TEMPLATE")
+	if promptTemplate != "" {
+		ingredients = append(ingredients, models.Ingredient{
+			ID:   "system-prompt",
+			Name: "system-prompt",
+			Kind: models.IngredientPrompt,
+			Config: map[string]interface{}{
+				"template": promptTemplate,
+			},
+		})
+	}
+
+	agent := &models.Agent{
+		Name:          agentName,
+		Kitchen:       kitchen,
+		Description:   os.Getenv("AGENT_DESCRIPTION"),
+		ModelProvider: modelProvider,
+		ModelName:     modelName,
+		Ingredients:   ingredients,
+		Mode:          models.AgentModeManaged,
+		Status:        models.AgentStatusReady,
+		CreatedAt:     time.Now().UTC(),
+		UpdatedAt:     time.Now().UTC(),
+	}
+
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		log.Warn().Err(err).Str("agent", agentName).Msg("Failed to seed agent from env")
+		return
+	}
+	log.Info().Str("agent", agentName).Str("kitchen", kitchen).
+		Str("provider", agent.ModelProvider).Str("model", agent.ModelName).
+		Msg("✅ Agent seeded from environment (agent-pod mode)")
 }
 
 // Shutdown stops all background goroutines (retention janitor, etc.)

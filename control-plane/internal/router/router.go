@@ -32,11 +32,40 @@ import (
 // orphaned flat traces — the executor persists spans with full hierarchy instead.
 type ctxKeySkipTrace struct{}
 
+// ctxKeyProviderTLSOverride carries per-request TLS settings for a specific
+// provider. This allows A2A invocations to override provider TLS trust
+// settings without mutating persisted provider records.
+type ctxKeyProviderTLSOverride struct{}
+
+// ProviderTLSOverride carries optional TLS settings to apply to one provider.
+// CABundle should be PEM text; TLSSkipVerify disables cert verification.
+type ProviderTLSOverride struct {
+	ProviderName  string
+	CABundle      string
+	TLSSkipVerify bool
+}
+
 // ContextSkipTrace returns a context that tells the router to skip trace creation.
 // Used by the executor to prevent orphaned router traces when the executor
 // already persists rich hierarchical spans.
 func ContextSkipTrace(ctx context.Context) context.Context {
 	return context.WithValue(ctx, ctxKeySkipTrace{}, true)
+}
+
+// WithProviderTLSOverride adds a per-request provider TLS override.
+func WithProviderTLSOverride(ctx context.Context, ov ProviderTLSOverride) context.Context {
+	if strings.TrimSpace(ov.ProviderName) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, ctxKeyProviderTLSOverride{}, ov)
+}
+
+func providerTLSOverrideFromContext(ctx context.Context) (ProviderTLSOverride, bool) {
+	v, ok := ctx.Value(ctxKeyProviderTLSOverride{}).(ProviderTLSOverride)
+	if !ok || strings.TrimSpace(v.ProviderName) == "" {
+		return ProviderTLSOverride{}, false
+	}
+	return v, true
 }
 
 // shouldSkipTrace checks if trace creation should be skipped for this context.
@@ -45,10 +74,18 @@ func shouldSkipTrace(ctx context.Context) bool {
 	return v
 }
 
+// SecretResolver resolves external secret references (k8s://, env://) to values.
+type SecretResolver interface {
+	Resolve(ctx context.Context, ref string) (string, error)
+}
+
 // ModelRouter routes LLM requests to configured providers.
 type ModelRouter struct {
 	store  store.Store
 	client *http.Client
+
+	// SecretResolver resolves provider API key references at runtime.
+	secretResolver SecretResolver
 
 	// Round-robin counter (atomic)
 	rrCounter uint64
@@ -168,6 +205,12 @@ func NewModelRouter(s store.Store) *ModelRouter {
 	return mr
 }
 
+// SetSecretResolver sets the resolver for external secret references.
+// Call this after NewModelRouter to enable k8s:// and env:// provider key refs.
+func (mr *ModelRouter) SetSecretResolver(r SecretResolver) {
+	mr.secretResolver = r
+}
+
 // RegisterDriver adds a provider driver to the registry.
 // If a driver with the same kind already exists, it is replaced.
 // This is the primary extension point for Pro to add enterprise drivers
@@ -207,23 +250,47 @@ func (mr *ModelRouter) ListDrivers() []string {
 // clientFor returns the *http.Client to use when calling the given provider.
 // If the provider has a non-empty CABundle, a custom client that trusts that
 // CA chain (in addition to the system pool) is returned and cached by provider
-// name. Otherwise the shared router client is returned.
+// name. If TLSSkipVerify is set, certificate verification is disabled entirely.
+// Otherwise the shared router client is returned.
 func (mr *ModelRouter) clientFor(p *models.ModelProvider) *http.Client {
-	if p == nil || p.CABundle == "" {
+	if p == nil || (p.CABundle == "" && !p.TLSSkipVerify) {
 		return mr.client
 	}
 	if v, ok := mr.providerClients.Load(p.Name); ok {
+		log.Debug().
+			Str("provider", p.Name).
+			Bool("has_ca_bundle", p.CABundle != "").
+			Int("ca_bundle_len", len(p.CABundle)).
+			Bool("tls_skip_verify", p.TLSSkipVerify).
+			Msg("Reusing cached provider HTTP client with custom TLS settings")
 		return v.(*http.Client)
 	}
-	pool, err := x509.SystemCertPool()
-	if err != nil {
-		pool = x509.NewCertPool()
+	tlsCfg := &tls.Config{}
+	if p.TLSSkipVerify {
+		tlsCfg.InsecureSkipVerify = true // #nosec G402 — user-opted-in for private endpoints
+		log.Warn().Str("provider", p.Name).Msg("Provider TLS verification disabled by configuration")
+	} else {
+		pool, err := x509.SystemCertPool()
+		if err != nil {
+			pool = x509.NewCertPool()
+		}
+		if ok := pool.AppendCertsFromPEM([]byte(p.CABundle)); !ok {
+			log.Warn().
+				Str("provider", p.Name).
+				Int("ca_bundle_len", len(p.CABundle)).
+				Msg("Provider CA bundle could not be parsed as PEM; proceeding with system trust store")
+		} else {
+			log.Info().
+				Str("provider", p.Name).
+				Int("ca_bundle_len", len(p.CABundle)).
+				Msg("Provider CA bundle loaded into TLS client")
+		}
+		tlsCfg.RootCAs = pool
 	}
-	pool.AppendCertsFromPEM([]byte(p.CABundle))
 	c := &http.Client{
 		Timeout: mr.client.Timeout,
 		Transport: &http.Transport{
-			TLSClientConfig:       &tls.Config{RootCAs: pool},
+			TLSClientConfig:       tlsCfg,
 			MaxIdleConns:          100,
 			MaxIdleConnsPerHost:   10,
 			IdleConnTimeout:       90 * time.Second,
@@ -324,15 +391,45 @@ func (mr *ModelRouter) HealthCheck(ctx context.Context) map[string]string {
 // rotation strategy. If no API keys are configured in the pool, falls back to
 // the provider's Config["api_key"] field.
 //
+// Resolution priority:
+//  1. Provider-level SecretRef (k8s:// or env://) → single dynamic key
+//  2. APIKeys pool with per-key SecretRef support → rotation with dynamic keys
+//  3. APIKeys pool with inline keys → rotation with static keys
+//  4. Legacy Config["api_key"] → single static key
+//
 // Strategies:
 //   - "round-robin" (default): rotates through enabled keys sequentially
 //   - "random": picks a random enabled key
 //   - "weighted": weighted random selection based on key weights
 func (mr *ModelRouter) SelectAPIKey(provider *models.ModelProvider) string {
-	// Filter to enabled keys only
+	// Priority 1: Provider-level SecretRef (dynamic key from external store)
+	if provider.SecretRef != "" && mr.secretResolver != nil {
+		resolved, err := mr.secretResolver.Resolve(context.Background(), provider.SecretRef)
+		if err != nil {
+			log.Warn().Err(err).Str("provider", provider.Name).Str("ref", provider.SecretRef).Msg("Failed to resolve provider secret ref, falling back")
+		} else if resolved != "" {
+			return resolved
+		}
+	}
+
+	// Filter to enabled keys only, resolving SecretRefs for each
 	var enabled []models.APIKeyEntry
 	for _, k := range provider.APIKeys {
-		if k.Enabled && k.Key != "" {
+		if !k.Enabled {
+			continue
+		}
+		// Resolve SecretRef for this key entry if set
+		if k.SecretRef != "" && mr.secretResolver != nil {
+			resolved, err := mr.secretResolver.Resolve(context.Background(), k.SecretRef)
+			if err != nil {
+				log.Warn().Err(err).Str("provider", provider.Name).Str("label", k.Label).Str("ref", k.SecretRef).Msg("Failed to resolve key secret ref, skipping")
+				continue
+			}
+			if resolved != "" {
+				k.Key = resolved
+			}
+		}
+		if k.Key != "" {
 			enabled = append(enabled, k)
 		}
 	}
@@ -387,6 +484,27 @@ func (mr *ModelRouter) Route(ctx context.Context, req *models.RouteRequest) (*mo
 	providers, err := mr.store.ListProviders(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list providers: %w", err)
+	}
+	if ov, ok := providerTLSOverrideFromContext(ctx); ok {
+		matched := false
+		for i := range providers {
+			if providers[i].Name != ov.ProviderName {
+				continue
+			}
+			matched = true
+			providers[i].CABundle = ov.CABundle
+			providers[i].TLSSkipVerify = ov.TLSSkipVerify
+			log.Info().
+				Str("provider", providers[i].Name).
+				Bool("has_ca_bundle", ov.CABundle != "").
+				Int("ca_bundle_len", len(ov.CABundle)).
+				Bool("tls_skip_verify", ov.TLSSkipVerify).
+				Msg("Applied per-request provider TLS override")
+			break
+		}
+		if !matched {
+			log.Warn().Str("provider", ov.ProviderName).Msg("Provider TLS override provided but provider not found")
+		}
 	}
 	if len(providers) == 0 {
 		return nil, fmt.Errorf("no model providers configured")
@@ -450,6 +568,16 @@ func (mr *ModelRouter) RouteWithBackup(ctx context.Context, req *models.RouteReq
 	backup, bErr := mr.store.GetProvider(ctx, backupProvider)
 	if bErr != nil {
 		return nil, fmt.Errorf("primary providers failed (%w) and backup provider %q not found: %v", err, backupProvider, bErr)
+	}
+	if ov, ok := providerTLSOverrideFromContext(ctx); ok && backup != nil && backup.Name == ov.ProviderName {
+		backup.CABundle = ov.CABundle
+		backup.TLSSkipVerify = ov.TLSSkipVerify
+		log.Info().
+			Str("provider", backup.Name).
+			Bool("has_ca_bundle", ov.CABundle != "").
+			Int("ca_bundle_len", len(ov.CABundle)).
+			Bool("tls_skip_verify", ov.TLSSkipVerify).
+			Msg("Applied per-request provider TLS override (backup)")
 	}
 
 	// Build a request targeting the backup model
