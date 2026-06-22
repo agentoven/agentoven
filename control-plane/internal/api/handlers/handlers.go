@@ -286,6 +286,13 @@ func (h *Handlers) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 			agent.Tags[k] = v
 		}
 	}
+	// Behavior and runtime
+	if req.Behavior != "" {
+		agent.Behavior = req.Behavior
+	}
+	if req.Runtime != "" {
+		agent.Runtime = req.Runtime
+	}
 	// R9 fields: backup provider and guardrails
 	if req.BackupProvider != "" {
 		agent.BackupProvider = req.BackupProvider
@@ -2126,11 +2133,17 @@ func (h *Handlers) ListTraces(w http.ResponseWriter, r *http.Request) {
 	kitchen := middleware.GetKitchen(r.Context())
 
 	// Parse optional filter query params
+	limit := 500
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 5000 {
+			limit = n
+		}
+	}
 	filter := store.TraceFilter{
 		AgentName:  r.URL.Query().Get("agent"),
 		RecipeName: r.URL.Query().Get("recipe"),
 		Status:     r.URL.Query().Get("status"),
-		Limit:      100,
+		Limit:      limit,
 	}
 
 	traces, err := h.Store.ListTracesFiltered(r.Context(), kitchen, filter)

@@ -2315,8 +2315,8 @@ type GuardrailEvaluation struct {
 // APIKeyEntry represents a single API key in a rotation pool.
 type APIKeyEntry struct {
 	Key       string `json:"key"`
-	Label     string `json:"label,omitempty"`      // human-readable label (e.g. "prod-key-1")
-	Weight    int    `json:"weight,omitempty"`     // for weighted rotation (higher = more traffic)
+	Label     string `json:"label,omitempty"`  // human-readable label (e.g. "prod-key-1")
+	Weight    int    `json:"weight,omitempty"` // for weighted rotation (higher = more traffic)
 	Enabled   bool   `json:"enabled"`
 	SecretRef string `json:"secret_ref,omitempty"` // external reference (k8s://ns/secret/key or env://VAR)
 }

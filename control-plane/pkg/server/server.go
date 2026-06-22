@@ -18,6 +18,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"time"
@@ -588,6 +589,49 @@ func seedAgentFromEnv(ctx context.Context, s store.Store) {
 		})
 	}
 
+	// Seed tools from AGENT_TOOLS_JSON so the resolver can find them during A2A execution.
+	// Without this, handleA2ATaskSend resolves an empty tool set and the LLM has no tools.
+	toolsJSON := os.Getenv("AGENT_TOOLS_JSON")
+	var seededToolCount int
+	if toolsJSON != "" {
+		var resolvedTools []struct {
+			Name      string                 `json:"name"`
+			Endpoint  string                 `json:"endpoint"`
+			Transport string                 `json:"transport"`
+			Schema    map[string]interface{} `json:"schema"`
+		}
+		if err := json.Unmarshal([]byte(toolsJSON), &resolvedTools); err != nil {
+			log.Warn().Err(err).Msg("Failed to parse AGENT_TOOLS_JSON for seeding")
+		} else {
+			for _, t := range resolvedTools {
+				// Register each tool in the store so the resolver's GetTool finds it
+				tool := &models.MCPTool{
+					Name:         t.Name,
+					Kitchen:      kitchen,
+					Endpoint:     t.Endpoint,
+					Transport:    t.Transport,
+					Schema:       t.Schema,
+					Capabilities: []string{"tool"},
+					Enabled:      true,
+					CreatedAt:    time.Now().UTC(),
+					UpdatedAt:    time.Now().UTC(),
+				}
+				if err := s.CreateTool(ctx, tool); err != nil {
+					log.Warn().Err(err).Str("tool", t.Name).Msg("Failed to seed tool from env")
+				}
+				// Add as ingredient on the agent
+				ingredients = append(ingredients, models.Ingredient{
+					ID:       "tool-" + t.Name,
+					Name:     t.Name,
+					Kind:     models.IngredientTool,
+					Required: true,
+				})
+			}
+			seededToolCount = len(resolvedTools)
+			log.Info().Int("count", seededToolCount).Msg("✅ Tools seeded from AGENT_TOOLS_JSON")
+		}
+	}
+
 	agent := &models.Agent{
 		Name:          agentName,
 		Kitchen:       kitchen,
@@ -597,6 +641,7 @@ func seedAgentFromEnv(ctx context.Context, s store.Store) {
 		Ingredients:   ingredients,
 		Mode:          models.AgentModeManaged,
 		Status:        models.AgentStatusReady,
+		Behavior:      models.BehaviorAgentic,
 		CreatedAt:     time.Now().UTC(),
 		UpdatedAt:     time.Now().UTC(),
 	}
@@ -607,6 +652,7 @@ func seedAgentFromEnv(ctx context.Context, s store.Store) {
 	}
 	log.Info().Str("agent", agentName).Str("kitchen", kitchen).
 		Str("provider", agent.ModelProvider).Str("model", agent.ModelName).
+		Int("tools", seededToolCount).
 		Msg("✅ Agent seeded from environment (agent-pod mode)")
 }
 

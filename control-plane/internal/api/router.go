@@ -116,6 +116,12 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 				// Live agent logs — streaming and recent
 				r.Get("/logs", h.StreamAgentLogs)
 				r.Get("/logs/recent", h.GetAgentLogs)
+
+				// Per-agent A2A (also reachable at root /agents/{agentName}/a2a)
+				r.Route("/a2a", func(r chi.Router) {
+					r.Post("/", h.A2AAgentEndpoint)
+					r.Get("/.well-known/agent-card.json", h.ServeAgentSpecificCard)
+				})
 			})
 		})
 

@@ -778,28 +778,32 @@ func (e *Executor) buildToolDefinitions(tools []models.ResolvedTool) []models.To
 		defs = append(defs, def)
 	}
 
-	// Add agentoven_delegate virtual tool for agent-to-agent delegation
-	defs = append(defs, models.ToolDefinition{
-		Type: "function",
-		Function: models.ToolFunction{
-			Name:        "agentoven_delegate",
-			Description: "Delegate a subtask to another agent in the same kitchen. Use this when a task is better handled by a specialized agent.",
-			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"agent": map[string]interface{}{
-						"type":        "string",
-						"description": "Name of the agent to delegate to",
+	// Only add agentoven_delegate for orchestrator agents (those without their own
+	// tools). Agents with real MCP tools should use them directly — adding delegate
+	// alongside real tools causes the LLM to prefer delegation over direct execution.
+	if len(tools) == 0 {
+		defs = append(defs, models.ToolDefinition{
+			Type: "function",
+			Function: models.ToolFunction{
+				Name:        "agentoven_delegate",
+				Description: "Delegate a subtask to another agent in the same kitchen. Use this when a task is better handled by a specialized agent.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"agent": map[string]interface{}{
+							"type":        "string",
+							"description": "Name of the agent to delegate to",
+						},
+						"message": map[string]interface{}{
+							"type":        "string",
+							"description": "The task or question to send to the delegate agent",
+						},
 					},
-					"message": map[string]interface{}{
-						"type":        "string",
-						"description": "The task or question to send to the delegate agent",
-					},
+					"required": []interface{}{"agent", "message"},
 				},
-				"required": []interface{}{"agent", "message"},
 			},
-		},
-	})
+		})
+	}
 
 	return defs
 }

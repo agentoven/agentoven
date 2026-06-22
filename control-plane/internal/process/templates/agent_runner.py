@@ -87,31 +87,33 @@ def _build_tool_defs():
             },
         })
 
-    # Always include the virtual delegation tool
-    defs.append({
-        "type": "function",
-        "function": {
-            "name": "agentoven_delegate",
-            "description": (
-                "Delegate a task to another specialist agent in this kitchen. "
-                "Use when the request requires a capability owned by a different agent."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "agent": {
-                        "type": "string",
-                        "description": "Name of the target agent to delegate to",
+    # Only add agentoven_delegate for orchestrator agents (those without their own
+    # tools). Agents with real MCP tools should use them directly.
+    if not defs:
+        defs.append({
+            "type": "function",
+            "function": {
+                "name": "agentoven_delegate",
+                "description": (
+                    "Delegate a task to another specialist agent in this kitchen. "
+                    "Use when the request requires a capability owned by a different agent."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "agent": {
+                            "type": "string",
+                            "description": "Name of the target agent to delegate to",
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": "The task or message to send to the target agent",
+                        },
                     },
-                    "message": {
-                        "type": "string",
-                        "description": "The task or message to send to the target agent",
-                    },
+                    "required": ["agent", "message"],
                 },
-                "required": ["agent", "message"],
             },
-        },
-    })
+        })
     return defs
 
 

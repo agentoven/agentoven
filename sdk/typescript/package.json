@@ -1,6 +1,6 @@
 {
   "name": "@agentoven/sdk",
-  "version": "0.8.5-beta-3",
+  "version": "0.8.6",
   "description": "AgentOven TypeScript SDK — enterprise agent orchestration",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

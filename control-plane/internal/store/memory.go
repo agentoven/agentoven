@@ -697,7 +697,7 @@ func (m *MemoryStore) ListTracesFiltered(_ context.Context, kitchen string, filt
 
 	limit := filter.Limit
 	if limit <= 0 {
-		limit = 100
+		limit = 500
 	}
 
 	var result []models.Trace
