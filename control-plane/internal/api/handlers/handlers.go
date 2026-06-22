@@ -70,6 +70,12 @@ type Handlers struct {
 	// OSS: nil (no-op). Pro injects a concrete implementation at startup.
 	WorkloadRestarter WorkloadRestarter
 
+	// WorkloadScaler is an optional Pro-only hook called by CoolAgent (scale to 0)
+	// and RewarmAgent (scale back to desired replicas). The operator reconciles the
+	// replica change on the next tick, draining or recreating the pod.
+	// OSS: nil (no k8s deployment). Pro injects a concrete implementation at startup.
+	WorkloadScaler WorkloadScaler
+
 	// K8sAgentImage is the current configured agent container image
 	// (AGENTOVEN_K8S_AGENT_IMAGE). When set, recook will update the stored workload
 	// image so the operator deploys the latest image rather than the frozen DB value.
@@ -108,6 +114,17 @@ type RecipeExecutorService interface {
 // operator reconciles with the current configured image instead of the frozen DB value.
 type WorkloadRestarter interface {
 	TouchWorkloadForAgent(ctx context.Context, kitchenID, agentName, newImage string) error
+}
+
+// WorkloadScaler is an optional Pro-only hook for scaling an agent's k8s
+// deployment to zero (cool) or back to its desired replica count (rewarm).
+// OSS leaves the field nil (no k8s deployment to scale).
+// Pro injects a concrete implementation backed by the PostgresStore.
+type WorkloadScaler interface {
+	// ScaleWorkloadForAgent sets replicas to 0 (cool) or the desired count
+	// (rewarm) on the k8s_workloads record for the named agent.
+	// The operator will reconcile the change on the next tick.
+	ScaleWorkloadForAgent(ctx context.Context, kitchenID, agentName string, replicas int32) error
 }
 
 // New creates a new Handlers instance with all dependencies.
@@ -1153,6 +1170,15 @@ func (h *Handlers) CoolAgent(w http.ResponseWriter, r *http.Request) {
 	agent.UpdatedAt = time.Now().UTC()
 	h.Store.UpdateAgent(r.Context(), agent)
 
+	// Pro: scale the k8s deployment to 0 so the pod is drained.
+	if h.WorkloadScaler != nil {
+		if scaleErr := h.WorkloadScaler.ScaleWorkloadForAgent(r.Context(), kitchen, agentName, 0); scaleErr != nil {
+			log.Warn().Err(scaleErr).Str("agent", agentName).Msg("Failed to scale workload to 0 during cool")
+		} else {
+			log.Info().Str("agent", agentName).Msg("Workload scaled to 0 (cooled)")
+		}
+	}
+
 	log.Info().Str("agent", agentName).Msg("Agent cooled")
 	respondJSON(w, http.StatusOK, map[string]string{
 		"name":   agentName,
@@ -1190,6 +1216,15 @@ func (h *Handlers) RewarmAgent(w http.ResponseWriter, r *http.Request) {
 	if err := h.Store.UpdateAgent(r.Context(), agent); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	// Pro: restore the k8s deployment replica count so the operator brings the pod back.
+	if h.WorkloadScaler != nil {
+		if scaleErr := h.WorkloadScaler.ScaleWorkloadForAgent(r.Context(), kitchen, agentName, 1); scaleErr != nil {
+			log.Warn().Err(scaleErr).Str("agent", agentName).Msg("Failed to scale workload back up during rewarm")
+		} else {
+			log.Info().Str("agent", agentName).Msg("Workload scaled to 1 (rewarmed)")
+		}
 	}
 
 	log.Info().Str("agent", agentName).Msg("Agent rewarmed")
