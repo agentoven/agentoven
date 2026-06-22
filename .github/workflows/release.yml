@@ -221,6 +221,38 @@ jobs:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
 
+  # ── Publish Rust crates to crates.io ────────────────────────
+  crates-publish:
+    name: Publish Rust crates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Publish a2a-ao
+        run: cargo publish -p a2a-ao --no-verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for a2a-ao to index
+        run: sleep 30
+
+      - name: Publish agentoven-core
+        run: cargo publish -p agentoven-core --no-verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for agentoven-core to index
+        run: sleep 30
+
+      - name: Publish agentoven-cli
+        run: cargo publish -p agentoven-cli --no-verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
   # ── Build & push Docker image to GHCR ─────────────────────────
   docker:
     name: Docker Image
@@ -353,7 +385,7 @@ jobs:
   # ── Create GitHub Release ────────────────────────────────────
   release:
     name: Create Release
-    needs: [cli, server, python-publish, docker, npm-publish]
+    needs: [cli, server, python-publish, docker, npm-publish, crates-publish]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
