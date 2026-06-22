@@ -45,32 +45,32 @@ type snapshot struct {
 
 // MemoryStore implements Store with in-memory maps.
 type MemoryStore struct {
-	mu           sync.RWMutex
-	agents       map[string]*models.Agent               // key: kitchen:name
-	recipes      map[string]*models.Recipe              // key: kitchen:name
-	kitchens     map[string]*models.Kitchen             // key: id
-	traces       map[string]*models.Trace               // key: id
-	spans        map[string]*models.Span                // key: span_id
-	spansByTrace map[string][]string                    // key: trace_id → []span_id (ordered)
-	providers    map[string]*models.ModelProvider       // key: name
-	recipeRuns   map[string]*models.RecipeRun           // key: id
-	tools        map[string]*models.MCPTool             // key: kitchen:name
-	prompts      map[string][]*models.Prompt            // key: kitchen:name → version history (newest last)
-	settings     map[string]*models.KitchenSettings     // key: kitchen_id
-	auditEvents  []*models.AuditEvent                   // append-only log
-	approvals    map[string]*models.ApprovalRecord      // key: gate_key
-	channels     map[string]*models.NotificationChannel // key: kitchen:name
-	vectorDocs   map[string]*models.VectorDoc           // key: kitchen:id
-	connectors   map[string]*models.DataConnectorConfig // key: kitchen:id
-	sessions     map[string]*models.Session             // key: id
-	scopedKeys   map[string]*models.ScopedAPIKey        // key: id
-	credentials  map[string]*models.KitchenCredential   // key: kitchen:name
-	testSuites   map[string]*models.TestSuite           // key: id
-	testRuns     map[string]*models.TestRun             // key: id
-	environments map[string]*models.Environment         // key: kitchen:slug
-	deployments         map[string]*models.AgentDeployment     // key: id
-	serviceAccts        map[string]*models.ServiceAccount      // key: id
-	crossKitchenGrants  map[string]*models.CrossKitchenGrant   // key: id
+	mu                 sync.RWMutex
+	agents             map[string]*models.Agent               // key: kitchen:name
+	recipes            map[string]*models.Recipe              // key: kitchen:name
+	kitchens           map[string]*models.Kitchen             // key: id
+	traces             map[string]*models.Trace               // key: id
+	spans              map[string]*models.Span                // key: span_id
+	spansByTrace       map[string][]string                    // key: trace_id → []span_id (ordered)
+	providers          map[string]*models.ModelProvider       // key: name
+	recipeRuns         map[string]*models.RecipeRun           // key: id
+	tools              map[string]*models.MCPTool             // key: kitchen:name
+	prompts            map[string][]*models.Prompt            // key: kitchen:name → version history (newest last)
+	settings           map[string]*models.KitchenSettings     // key: kitchen_id
+	auditEvents        []*models.AuditEvent                   // append-only log
+	approvals          map[string]*models.ApprovalRecord      // key: gate_key
+	channels           map[string]*models.NotificationChannel // key: kitchen:name
+	vectorDocs         map[string]*models.VectorDoc           // key: kitchen:id
+	connectors         map[string]*models.DataConnectorConfig // key: kitchen:id
+	sessions           map[string]*models.Session             // key: id
+	scopedKeys         map[string]*models.ScopedAPIKey        // key: id
+	credentials        map[string]*models.KitchenCredential   // key: kitchen:name
+	testSuites         map[string]*models.TestSuite           // key: id
+	testRuns           map[string]*models.TestRun             // key: id
+	environments       map[string]*models.Environment         // key: kitchen:slug
+	deployments        map[string]*models.AgentDeployment     // key: id
+	serviceAccts       map[string]*models.ServiceAccount      // key: id
+	crossKitchenGrants map[string]*models.CrossKitchenGrant   // key: id
 
 	// Agent version history — append-only, keyed by kitchen:name
 	agentVersions map[string][]*models.Agent // key: kitchen:name → version history
@@ -101,35 +101,35 @@ func NewMemoryStore() *MemoryStore {
 	}
 
 	m := &MemoryStore{
-		agents:        make(map[string]*models.Agent),
-		recipes:       make(map[string]*models.Recipe),
-		kitchens:      make(map[string]*models.Kitchen),
-		traces:        make(map[string]*models.Trace),
-		providers:     make(map[string]*models.ModelProvider),
-		recipeRuns:    make(map[string]*models.RecipeRun),
-		tools:         make(map[string]*models.MCPTool),
-		prompts:       make(map[string][]*models.Prompt),
-		settings:      make(map[string]*models.KitchenSettings),
-		agentVersions: make(map[string][]*models.Agent),
-		auditEvents:   make([]*models.AuditEvent, 0),
-		approvals:     make(map[string]*models.ApprovalRecord),
-		channels:      make(map[string]*models.NotificationChannel),
-		vectorDocs:    make(map[string]*models.VectorDoc),
-		connectors:    make(map[string]*models.DataConnectorConfig),
-		sessions:      make(map[string]*models.Session),
-		scopedKeys:    make(map[string]*models.ScopedAPIKey),
-		credentials:   make(map[string]*models.KitchenCredential),
-		testSuites:    make(map[string]*models.TestSuite),
-		testRuns:      make(map[string]*models.TestRun),
-		environments:  make(map[string]*models.Environment),
+		agents:             make(map[string]*models.Agent),
+		recipes:            make(map[string]*models.Recipe),
+		kitchens:           make(map[string]*models.Kitchen),
+		traces:             make(map[string]*models.Trace),
+		providers:          make(map[string]*models.ModelProvider),
+		recipeRuns:         make(map[string]*models.RecipeRun),
+		tools:              make(map[string]*models.MCPTool),
+		prompts:            make(map[string][]*models.Prompt),
+		settings:           make(map[string]*models.KitchenSettings),
+		agentVersions:      make(map[string][]*models.Agent),
+		auditEvents:        make([]*models.AuditEvent, 0),
+		approvals:          make(map[string]*models.ApprovalRecord),
+		channels:           make(map[string]*models.NotificationChannel),
+		vectorDocs:         make(map[string]*models.VectorDoc),
+		connectors:         make(map[string]*models.DataConnectorConfig),
+		sessions:           make(map[string]*models.Session),
+		scopedKeys:         make(map[string]*models.ScopedAPIKey),
+		credentials:        make(map[string]*models.KitchenCredential),
+		testSuites:         make(map[string]*models.TestSuite),
+		testRuns:           make(map[string]*models.TestRun),
+		environments:       make(map[string]*models.Environment),
 		deployments:        make(map[string]*models.AgentDeployment),
 		serviceAccts:       make(map[string]*models.ServiceAccount),
 		crossKitchenGrants: make(map[string]*models.CrossKitchenGrant),
-		spans:         make(map[string]*models.Span),
-		spansByTrace:  make(map[string][]string),
-		saveCh:        make(chan struct{}, 1),
-		doneCh:        make(chan struct{}),
-		traceTTL:      traceTTL,
+		spans:              make(map[string]*models.Span),
+		spansByTrace:       make(map[string][]string),
+		saveCh:             make(chan struct{}, 1),
+		doneCh:             make(chan struct{}),
+		traceTTL:           traceTTL,
 	}
 
 	// Determine snapshot path
