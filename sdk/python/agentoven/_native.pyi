@@ -80,6 +80,8 @@ class Agent:
     model_provider: str
     model_name: str
     mode: str
+    runtime: str
+    behavior: str
     system_prompt: Optional[str]
     ingredients: list[Ingredient]
     status: AgentStatus
@@ -93,6 +95,8 @@ class Agent:
         model_provider: str = "",
         model_name: str = "",
         mode: str = "managed",
+        runtime: str = "agentoven",
+        behavior: str = "agentic",
         system_prompt: Optional[str] = None,
         ingredients: list[Ingredient] = [],
     ) -> None: ...

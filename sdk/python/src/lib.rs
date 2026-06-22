@@ -422,6 +422,10 @@ pub struct Agent {
     #[pyo3(get, set)]
     pub mode: String,
     #[pyo3(get, set)]
+    pub runtime: String,
+    #[pyo3(get, set)]
+    pub behavior: String,
+    #[pyo3(get, set)]
     pub system_prompt: Option<String>,
     #[pyo3(get, set)]
     pub ingredients: Vec<Ingredient>,
@@ -440,6 +444,8 @@ impl Agent {
         model_provider="".to_string(),
         model_name="".to_string(),
         mode="managed".to_string(),
+        runtime="agentoven".to_string(),
+        behavior="agentic".to_string(),
         system_prompt=None,
         ingredients=vec![],
     ))]
@@ -452,10 +458,12 @@ impl Agent {
         model_provider: String,
         model_name: String,
         mode: String,
+        runtime: String,
+        behavior: String,
         system_prompt: Option<String>,
         ingredients: Vec<Ingredient>,
     ) -> Self {
-        Agent { name, description, framework, version, model_provider, model_name, mode, system_prompt, ingredients, status: AgentStatus::Draft }
+        Agent { name, description, framework, version, model_provider, model_name, mode, runtime, behavior, system_prompt, ingredients, status: AgentStatus::Draft }
     }
 
     /// Add an ingredient to this agent.
@@ -628,6 +636,13 @@ impl AgentOvenClient {
         if !agent.mode.is_empty() {
             body["mode"] = serde_json::json!(agent.mode);
         }
+        // Runtime and behavior
+        if !agent.runtime.is_empty() {
+            body["runtime"] = serde_json::json!(agent.runtime);
+        }
+        if !agent.behavior.is_empty() {
+            body["behavior"] = serde_json::json!(agent.behavior);
+        }
         // Top-level model fields for backward compat
         if !agent.model_provider.is_empty() {
             body["model_provider"] = serde_json::json!(agent.model_provider);
@@ -741,11 +756,11 @@ impl AgentOvenClient {
     ///     client.register(agent)
     fn register(&self, agent: &Agent) -> PyResult<String> {
         let http = reqwest::blocking::Client::new();
-        let url = self.api_url("/agents");
+        let url = self.api_url(&format!("/agents/{}", agent.name));
         let body = self.agent_to_json(agent);
-        let req = self.authed_request(&http, reqwest::Method::POST, &url).json(&body);
+        let req = self.authed_request(&http, reqwest::Method::PUT, &url).json(&body);
         let (status, text) = self.send(req)?;
-        if (200..300).contains(&status) {
+        if (200..300).contains(&status) || status == 409 {
             Ok(format!("✅ Agent '{}' registered — {text}", agent.name))
         } else {
             Err(PyRuntimeError::new_err(format!("Register failed ({status}): {text}")))
@@ -819,6 +834,8 @@ impl AgentOvenClient {
             model_provider: v["model_provider"].as_str().unwrap_or("").to_string(),
             model_name: v["model_name"].as_str().unwrap_or("").to_string(),
             mode: v["mode"].as_str().unwrap_or("managed").to_string(),
+            runtime: v["runtime"].as_str().unwrap_or("agentoven").to_string(),
+            behavior: v["behavior"].as_str().unwrap_or("agentic").to_string(),
             system_prompt: v.get("system_prompt").and_then(|s| s.as_str()).map(|s| s.to_string()),
             ingredients: vec![],
             status: match v["status"].as_str().unwrap_or("draft") {
@@ -943,6 +960,8 @@ impl AgentOvenClient {
                     model_provider: a.model_provider,
                     model_name: a.model_name,
                     mode: format!("{}", a.mode),
+                    runtime: "agentoven".to_string(),
+                    behavior: "agentic".to_string(),
                     system_prompt: a.system_prompt,
                     ingredients: vec![],
                     status: match a.status {
