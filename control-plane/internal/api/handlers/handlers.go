@@ -770,7 +770,7 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 				fmt.Sprintf("Agent '%s' is not ready (status: %s) — bake it first to test framework-native agents", agentName, agent.Status))
 			return
 		}
-		response, traceRecord, err := h.proxyToProcess(r.Context(), agent, req.Message, nil, kitchen)
+		response, traceRecord, err := h.proxyToProcess(r.Context(), agent, req.Message, nil, nil, kitchen)
 		if err != nil {
 			respondError(w, http.StatusBadGateway, "Framework agent test failed: "+err.Error())
 			return
@@ -2556,12 +2556,15 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 		// This avoids a separate tasks/get poll cycle and ensures tokens/output are
 		// always propagated back to the caller (engine, dashboard, SDK, etc.).
 		execCtx := r.Context()
+		var providerTLS *router.ProviderTLSOverride
 		if strings.TrimSpace(taskReq.ProviderConfig.Name) != "" {
-			execCtx = router.WithProviderTLSOverride(execCtx, router.ProviderTLSOverride{
+			override := router.ProviderTLSOverride{
 				ProviderName:  taskReq.ProviderConfig.Name,
 				CABundle:      taskReq.ProviderConfig.CABundle,
 				TLSSkipVerify: taskReq.ProviderConfig.TLSSkipVerify,
-			})
+			}
+			providerTLS = &override
+			execCtx = router.WithProviderTLSOverride(execCtx, override)
 			log.Info().
 				Str("task_id", taskID).
 				Str("provider", taskReq.ProviderConfig.Name).
@@ -2577,7 +2580,7 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 
 		if agent.IsFrameworkNative() {
 			// Framework-native: proxy to the running process
-			resp, traceRecord, proxyErr := h.proxyToProcess(execCtx, agent, userMessage, nil, kitchen)
+			resp, traceRecord, proxyErr := h.proxyToProcess(execCtx, agent, userMessage, nil, providerTLS, kitchen)
 			if proxyErr != nil {
 				status = "failed"
 				log.Warn().Err(proxyErr).Str("agent", agentName).Str("task_id", taskID).Msg("A2A framework-native execution failed")
@@ -3863,6 +3866,7 @@ func (h *Handlers) proxyToProcess(
 	agent *models.Agent,
 	message string,
 	variables map[string]string,
+	providerTLS *router.ProviderTLSOverride,
 	kitchen string,
 ) (string, *models.Trace, error) {
 	if agent.Process == nil || agent.Process.Status != models.ProcessRunning {
@@ -3879,6 +3883,13 @@ func (h *Handlers) proxyToProcess(
 	}
 	if len(variables) > 0 {
 		body["variables"] = variables
+	}
+	if providerTLS != nil && strings.TrimSpace(providerTLS.ProviderName) != "" {
+		body["provider_config"] = map[string]interface{}{
+			"name":            providerTLS.ProviderName,
+			"ca_bundle":       providerTLS.CABundle,
+			"tls_skip_verify": providerTLS.TLSSkipVerify,
+		}
 	}
 	reqBody, err := json.Marshal(body)
 	if err != nil {
@@ -4134,7 +4145,7 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	// Framework-native agents without a running process are an error; agentoven-
 	// native agents without a process fall back to the in-process Go executor.
 	if agent.Process != nil && agent.Process.Status == models.ProcessRunning {
-		response, traceRecord, err := h.proxyToProcess(r.Context(), agent, req.Message, sanitizedVars, kitchen)
+		response, traceRecord, err := h.proxyToProcess(r.Context(), agent, req.Message, sanitizedVars, nil, kitchen)
 		if err != nil {
 			respondError(w, http.StatusBadGateway, "Agent pod execution failed: "+err.Error())
 			return

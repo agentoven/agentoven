@@ -37,6 +37,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 import urllib.request
 import urllib.error
+import ssl
+import threading
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
@@ -53,6 +55,58 @@ MAX_TURNS         = int(os.environ.get("AGENT_MAX_TURNS", "10"))
 
 CONTROL_PLANE_URL   = os.environ.get("AGENTOVEN_CONTROL_PLANE_URL", "")
 CONTROL_PLANE_TOKEN = os.environ.get("CONTROL_PLANE_TOKEN", "")
+
+_REQUEST_CONTEXT = threading.local()
+
+
+def _build_ssl_context(provider_config):
+    """Build an SSL context from provider_config, or return None for defaults."""
+    if not isinstance(provider_config, dict):
+        return None
+
+    ca_bundle = provider_config.get("ca_bundle", "") or ""
+    tls_skip_verify = bool(provider_config.get("tls_skip_verify", False))
+
+    if not ca_bundle and not tls_skip_verify:
+        return None
+
+    if tls_skip_verify:
+        ctx = ssl._create_unverified_context()
+        if ca_bundle:
+            try:
+                ctx.load_verify_locations(cadata=ca_bundle)
+            except Exception as e:
+                print(f"[{AGENT_NAME}] WARNING: failed to load provider CA bundle with skip-verify: {e}", file=sys.stderr)
+        return ctx
+
+    ctx = ssl.create_default_context()
+    if ca_bundle:
+        ctx.load_verify_locations(cadata=ca_bundle)
+    return ctx
+
+
+def _set_request_ssl_context(provider_config):
+    """Set request-scoped SSL context and return the previous one."""
+    previous = getattr(_REQUEST_CONTEXT, "ssl_context", None)
+    _REQUEST_CONTEXT.ssl_context = _build_ssl_context(provider_config)
+    return previous
+
+
+def _restore_request_ssl_context(previous):
+    """Restore previous request-scoped SSL context."""
+    if previous is None:
+        if hasattr(_REQUEST_CONTEXT, "ssl_context"):
+            delattr(_REQUEST_CONTEXT, "ssl_context")
+    else:
+        _REQUEST_CONTEXT.ssl_context = previous
+
+
+def _urlopen(req, timeout):
+    """Open a URL using the current request SSL context when configured."""
+    ctx = getattr(_REQUEST_CONTEXT, "ssl_context", None)
+    if ctx is not None:
+        return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+    return urllib.request.urlopen(req, timeout=timeout)
 
 # ── Tool Loading ───────────────────────────────────────────────────────────────
 
@@ -221,7 +275,7 @@ def call_llm(messages):
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with _urlopen(req, timeout=120) as resp:
             result = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8", errors="replace")
@@ -244,7 +298,7 @@ def _call_llm_with_tools(messages, tools):
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with _urlopen(req, timeout=120) as resp:
             result = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8", errors="replace")
@@ -313,7 +367,7 @@ def _call_llm_stream(messages, tools, on_token, on_tool_call_start, on_usage):
     tool_call_started = False
 
     try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
+        with _urlopen(req, timeout=180) as resp:
             for raw_line in resp:
                 line = raw_line.decode("utf-8").strip()
                 if not line or not line.startswith("data: "):
@@ -424,7 +478,7 @@ def _call_mcp_tool(endpoint, name, args):
         url, data=body, headers={"Content-Type": "application/json"}, method="POST"
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with _urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read().decode("utf-8"))
         if "error" in result:
             return f"Tool error: {result['error'].get('message', str(result['error']))}"
@@ -445,7 +499,7 @@ def _call_mcp_tool(endpoint, name, args):
             call_url, data=rest_body,
             headers={"Content-Type": "application/json"}, method="POST",
         )
-        with urllib.request.urlopen(rest_req, timeout=30) as resp2:
+        with _urlopen(rest_req, timeout=30) as resp2:
             r2 = json.loads(resp2.read().decode("utf-8"))
         content = r2.get("content", [])
         if content:
@@ -473,7 +527,7 @@ def _delegate_to_agent(agent_name, message, trace_id=""):
 
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with _urlopen(req, timeout=60) as resp:
             result = json.loads(resp.read().decode("utf-8"))
         return result.get("response", json.dumps(result))
     except urllib.error.HTTPError as e:
@@ -642,7 +696,7 @@ def run_invoke_stream(message, variables=None, trace_id="", max_turns=None, writ
 tasks = {}  # task_id → task dict
 
 
-def _a2a_create_task(task_id, user_message):
+def _a2a_create_task(task_id, user_message, provider_config=None):
     """Create a new A2A task and run the full agentic loop."""
     task = {
         "id": task_id,
@@ -651,6 +705,7 @@ def _a2a_create_task(task_id, user_message):
         "history": [],
     }
     tasks[task_id] = task
+    previous_ssl_context = _set_request_ssl_context(provider_config or {})
     try:
         response_text, _ = run_invoke(user_message, trace_id=task_id)
         task["artifacts"].append({"parts": [{"type": "text", "text": response_text}]})
@@ -666,6 +721,8 @@ def _a2a_create_task(task_id, user_message):
         }
         print(f"[{AGENT_NAME}] task {task_id} failed: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
+    finally:
+        _restore_request_ssl_context(previous_ssl_context)
     return task
 
 
@@ -699,6 +756,7 @@ def _handle_jsonrpc(request):
     if method == "tasks/send":
         task_id  = params.get("id", str(uuid.uuid4()))
         message  = params.get("message", {})
+        provider_config = params.get("provider_config") or {}
         user_text = "".join(
             part.get("text", "")
             for part in message.get("parts", [])
@@ -706,7 +764,7 @@ def _handle_jsonrpc(request):
         )
         if not user_text:
             return _jsonrpc_error(req_id, -32602, "No text content in message")
-        return _jsonrpc_result(req_id, _a2a_create_task(task_id, user_text))
+        return _jsonrpc_result(req_id, _a2a_create_task(task_id, user_text, provider_config=provider_config))
 
     if method == "tasks/get":
         task_id = params.get("id", "")
@@ -788,9 +846,11 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
 
         variables = req.get("variables") or {}
+        provider_config = req.get("provider_config") or {}
         trace_id  = req.get("trace_id", str(uuid.uuid4()))
         max_turns = req.get("max_turns") or MAX_TURNS
 
+        previous_ssl_context = _set_request_ssl_context(provider_config)
         try:
             response, usage = run_invoke(
                 message, variables=variables, trace_id=trace_id, max_turns=max_turns
@@ -806,6 +866,8 @@ class AgentHandler(BaseHTTPRequestHandler):
         except Exception as e:
             traceback.print_exc(file=sys.stderr)
             self._respond_json(500, {"error": str(e)})
+        finally:
+            _restore_request_ssl_context(previous_ssl_context)
 
     # ── Stream (SSE) ───────────────────────────────────────────────────────────
 
@@ -816,6 +878,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
 
         variables = req.get("variables") or {}
+        provider_config = req.get("provider_config") or {}
         trace_id  = req.get("trace_id", str(uuid.uuid4()))
         max_turns = req.get("max_turns") or MAX_TURNS
 
@@ -834,6 +897,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass  # client disconnected
 
+        previous_ssl_context = _set_request_ssl_context(provider_config)
         try:
             run_invoke_stream(
                 message, variables=variables, trace_id=trace_id,
@@ -841,6 +905,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             )
         except Exception as e:
             write_event({"type": "error", "message": str(e)})
+        finally:
+            _restore_request_ssl_context(previous_ssl_context)
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 
