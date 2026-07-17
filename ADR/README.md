@@ -58,3 +58,4 @@ What other options were evaluated and why were they rejected?
 | [0011](0011-oss-local-test-runner.md) | OSS local test runner for agentic agents | Accepted | 2026-03-03 |
 | [0012](0012-agent-packaging-distribution.md) | Agent packaging and distribution (.aopack) | Accepted | 2026-03-03 |
 | [0013](0013-agent-to-ui-protocol.md) | Agent-to-UI protocol (A2UI) | Accepted | 2026-03-03 |
+| [0022](0022-dashboard-nav-grouping-and-gate-ux.md) | Dashboard sidebar navigation grouping & human-gate approval UX | Proposed | 2026-07-04 |
