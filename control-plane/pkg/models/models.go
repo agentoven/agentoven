@@ -741,6 +741,7 @@ type SpanEvent struct {
 type ModelProvider struct {
 	ID        string                 `json:"id" db:"id"`
 	Name      string                 `json:"name" db:"name"`
+	Kitchen   string                 `json:"kitchen" db:"kitchen"`
 	Kind      string                 `json:"kind" db:"kind"`
 	Endpoint  string                 `json:"endpoint,omitempty" db:"endpoint"`
 	Models    []string               `json:"models"`
@@ -1462,6 +1463,8 @@ type AuditEvent struct {
 	Timestamp          time.Time              `json:"timestamp" db:"timestamp"`
 	UserID             string                 `json:"user_id" db:"user_id"`
 	UserEmail          string                 `json:"user_email" db:"user_email"`
+	ActorType          string                 `json:"actor_type,omitempty" db:"actor_type"`                 // "user", "service_account", "api_key"
+	ActorDisplayName   string                 `json:"actor_display_name,omitempty" db:"actor_display_name"` // human-friendly name, e.g. SA name — never split/parsed as an email
 	Action             string                 `json:"action" db:"action"`
 	Resource           string                 `json:"resource" db:"resource"`
 	ResourceID         string                 `json:"resource_id,omitempty" db:"resource_id"`

@@ -270,6 +270,7 @@ func TestProviderCRUD(t *testing.T) {
 
 	p := &models.ModelProvider{
 		Name:     "openai-1",
+		Kitchen:  "default",
 		Kind:     "openai",
 		Endpoint: "https://api.openai.com/v1",
 		Models:   []string{"gpt-4o"},
@@ -278,7 +279,7 @@ func TestProviderCRUD(t *testing.T) {
 		t.Fatalf("CreateProvider() error = %v", err)
 	}
 
-	providers, err := s.ListProviders(ctx)
+	providers, err := s.ListProviders(ctx, "default")
 	if err != nil {
 		t.Fatalf("ListProviders() error = %v", err)
 	}
@@ -286,7 +287,7 @@ func TestProviderCRUD(t *testing.T) {
 		t.Errorf("ListProviders() returned %d, want 1", len(providers))
 	}
 
-	got, err := s.GetProvider(ctx, "openai-1")
+	got, err := s.GetProvider(ctx, "default", "openai-1")
 	if err != nil {
 		t.Fatalf("GetProvider() error = %v", err)
 	}
@@ -294,10 +295,10 @@ func TestProviderCRUD(t *testing.T) {
 		t.Errorf("GetProvider().Kind = %q, want %q", got.Kind, "openai")
 	}
 
-	if err := s.DeleteProvider(ctx, "openai-1"); err != nil {
+	if err := s.DeleteProvider(ctx, "default", "openai-1"); err != nil {
 		t.Fatalf("DeleteProvider() error = %v", err)
 	}
-	providers, _ = s.ListProviders(ctx)
+	providers, _ = s.ListProviders(ctx, "default")
 	if len(providers) != 0 {
 		t.Errorf("ListProviders() after delete returned %d, want 0", len(providers))
 	}

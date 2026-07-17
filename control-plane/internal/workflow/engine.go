@@ -898,7 +898,7 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 
 	// If agent has a ModelProvider, fetch it and include TLS config for the agent to use
 	if agent.ModelProvider != "" {
-		provider, err := e.store.GetProvider(ctx, agent.ModelProvider)
+		provider, err := e.store.GetProvider(ctx, agent.Kitchen, agent.ModelProvider)
 		if err != nil {
 			log.Warn().
 				Err(err).

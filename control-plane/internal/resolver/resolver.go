@@ -47,7 +47,7 @@ func (r *Resolver) Resolve(ctx context.Context, agent *models.Agent) (*models.Re
 	for _, ing := range agent.Ingredients {
 		switch ing.Kind {
 		case models.IngredientModel:
-			rm, err := r.resolveModel(ctx, ing)
+			rm, err := r.resolveModel(ctx, agent.Kitchen, ing)
 			if err != nil {
 				errors = append(errors, fmt.Sprintf("model %q: %s", ing.Name, err))
 				continue
@@ -89,7 +89,7 @@ func (r *Resolver) Resolve(ctx context.Context, agent *models.Agent) (*models.Re
 			resolved.Data = append(resolved.Data, *rd)
 
 		case models.IngredientEmbedding:
-			re, err := r.resolveEmbedding(ctx, ing)
+			re, err := r.resolveEmbedding(ctx, agent.Kitchen, ing)
 			if err != nil {
 				if ing.Required {
 					errors = append(errors, fmt.Sprintf("embedding %q: %s", ing.Name, err))
@@ -186,7 +186,7 @@ func (r *Resolver) Resolve(ctx context.Context, agent *models.Agent) (*models.Re
 }
 
 // resolveModel looks up the model provider and validates the requested model exists.
-func (r *Resolver) resolveModel(ctx context.Context, ing models.Ingredient) (*models.ResolvedModel, error) {
+func (r *Resolver) resolveModel(ctx context.Context, kitchen string, ing models.Ingredient) (*models.ResolvedModel, error) {
 	providerName, _ := ing.Config["provider"].(string)
 	modelName, _ := ing.Config["model"].(string)
 
@@ -197,7 +197,7 @@ func (r *Resolver) resolveModel(ctx context.Context, ing models.Ingredient) (*mo
 		return nil, fmt.Errorf("missing 'model' in config")
 	}
 
-	provider, err := r.store.GetProvider(ctx, providerName)
+	provider, err := r.store.GetProvider(ctx, kitchen, providerName)
 	if err != nil {
 		return nil, fmt.Errorf("provider %q not found", providerName)
 	}
@@ -344,7 +344,7 @@ func (r *Resolver) resolveData(ing models.Ingredient) (*models.ResolvedData, err
 
 // resolveEmbedding validates and resolves an embedding ingredient.
 // Config fields: provider (required), model (optional — defaults to provider's default).
-func (r *Resolver) resolveEmbedding(ctx context.Context, ing models.Ingredient) (*models.ResolvedEmbedding, error) {
+func (r *Resolver) resolveEmbedding(ctx context.Context, kitchen string, ing models.Ingredient) (*models.ResolvedEmbedding, error) {
 	providerName, _ := ing.Config["provider"].(string)
 	modelName, _ := ing.Config["model"].(string)
 
@@ -353,7 +353,7 @@ func (r *Resolver) resolveEmbedding(ctx context.Context, ing models.Ingredient) 
 	}
 
 	// Look up the model provider to validate it exists and get credentials.
-	provider, err := r.store.GetProvider(ctx, providerName)
+	provider, err := r.store.GetProvider(ctx, kitchen, providerName)
 	if err != nil {
 		return nil, fmt.Errorf("provider %q not found — register it first", providerName)
 	}

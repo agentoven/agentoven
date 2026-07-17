@@ -52,7 +52,7 @@ type MemoryStore struct {
 	traces             map[string]*models.Trace               // key: id
 	spans              map[string]*models.Span                // key: span_id
 	spansByTrace       map[string][]string                    // key: trace_id → []span_id (ordered)
-	providers          map[string]*models.ModelProvider       // key: name
+	providers          map[string]*models.ModelProvider       // key: kitchen:name
 	recipeRuns         map[string]*models.RecipeRun           // key: id
 	tools              map[string]*models.MCPTool             // key: kitchen:name
 	prompts            map[string][]*models.Prompt            // key: kitchen:name → version history (newest last)
@@ -401,6 +401,26 @@ func (m *MemoryStore) loadSnapshot() {
 	}
 	if migrated > 0 {
 		log.Info().Int("agents", migrated).Msg("Migrated legacy integer versions to semver")
+	}
+
+	// Migrate legacy providers (no Kitchen field, previously keyed by bare name
+	// and implicitly visible to every kitchen) → the "default" kitchen, re-keyed
+	// as "kitchen:name" like every other kitchen-scoped resource. This closes a
+	// cross-kitchen visibility gap: providers are now scoped like Agents/Recipes/
+	// Tools. Kitchens that need to share a provider should use cross-kitchen
+	// grants rather than relying on implicit global visibility.
+	migratedProviders := 0
+	rekeyedProviders := make(map[string]*models.ModelProvider, len(m.providers))
+	for _, p := range m.providers {
+		if p.Kitchen == "" {
+			p.Kitchen = "default"
+			migratedProviders++
+		}
+		rekeyedProviders[key(p.Kitchen, p.Name)] = p
+	}
+	m.providers = rekeyedProviders
+	if migratedProviders > 0 {
+		log.Info().Int("providers", migratedProviders).Msg("Migrated legacy global providers to 'default' kitchen")
 	}
 }
 
@@ -878,20 +898,22 @@ func (m *MemoryStore) DeleteSpansByTrace(_ context.Context, traceID string) erro
 
 // ── Model Provider Store ────────────────────────────────────
 
-func (m *MemoryStore) ListProviders(_ context.Context) ([]models.ModelProvider, error) {
+func (m *MemoryStore) ListProviders(_ context.Context, kitchen string) ([]models.ModelProvider, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var result []models.ModelProvider
 	for _, p := range m.providers {
-		result = append(result, *p)
+		if kitchen == "" || p.Kitchen == kitchen {
+			result = append(result, *p)
+		}
 	}
 	return result, nil
 }
 
-func (m *MemoryStore) GetProvider(_ context.Context, name string) (*models.ModelProvider, error) {
+func (m *MemoryStore) GetProvider(_ context.Context, kitchen, name string) (*models.ModelProvider, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	p, ok := m.providers[name]
+	p, ok := m.providers[key(kitchen, name)]
 	if !ok {
 		return nil, &ErrNotFound{Entity: "provider", Key: name}
 	}
@@ -902,7 +924,7 @@ func (m *MemoryStore) GetProvider(_ context.Context, name string) (*models.Model
 func (m *MemoryStore) CreateProvider(_ context.Context, provider *models.ModelProvider) error {
 	m.mu.Lock()
 	copy := *provider
-	m.providers[provider.Name] = &copy
+	m.providers[key(provider.Kitchen, provider.Name)] = &copy
 	m.mu.Unlock()
 	m.requestSave()
 	return nil
@@ -911,15 +933,15 @@ func (m *MemoryStore) CreateProvider(_ context.Context, provider *models.ModelPr
 func (m *MemoryStore) UpdateProvider(_ context.Context, provider *models.ModelProvider) error {
 	m.mu.Lock()
 	copy := *provider
-	m.providers[provider.Name] = &copy
+	m.providers[key(provider.Kitchen, provider.Name)] = &copy
 	m.mu.Unlock()
 	m.requestSave()
 	return nil
 }
 
-func (m *MemoryStore) DeleteProvider(_ context.Context, name string) error {
+func (m *MemoryStore) DeleteProvider(_ context.Context, kitchen, name string) error {
 	m.mu.Lock()
-	delete(m.providers, name)
+	delete(m.providers, key(kitchen, name))
 	m.mu.Unlock()
 	m.requestSave()
 	return nil
@@ -1991,11 +2013,11 @@ func (m *MemoryStore) CreateDeployment(_ context.Context, deployment *models.Age
 	return nil
 }
 
-func (m *MemoryStore) GetDeployment(_ context.Context, id string) (*models.AgentDeployment, error) {
+func (m *MemoryStore) GetDeployment(_ context.Context, kitchen, id string) (*models.AgentDeployment, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	d, ok := m.deployments[id]
-	if !ok {
+	if !ok || d.Kitchen != kitchen {
 		return nil, &ErrNotFound{Entity: "deployment", Key: id}
 	}
 	copy := *d

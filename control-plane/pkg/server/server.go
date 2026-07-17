@@ -325,7 +325,7 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 	// Auto-discover embeddings from providers in the default kitchen.
 	// When a provider (e.g. OpenAI) is configured with an API key,
 	// its embedding capabilities are automatically registered.
-	providers, _ := dataStore.ListProviders(ctx)
+	providers, _ := dataStore.ListProviders(ctx, "default")
 	for i := range providers {
 		p := &providers[i]
 		ecd, embModels := mr.DiscoverEmbeddingsForProvider(p)
@@ -532,12 +532,13 @@ func seedAgentFromEnv(ctx context.Context, s store.Store) {
 	// Seed the model provider so the resolver can look up credentials at runtime.
 	// The resolver reads provider.Config["api_key"], so we must store the key there.
 	if modelProvider != "" && apiKey != "" {
-		existingProvider, _ := s.GetProvider(ctx, modelProvider)
+		existingProvider, _ := s.GetProvider(ctx, kitchen, modelProvider)
 		if existingProvider == nil {
 			p := &models.ModelProvider{
-				Name:   modelProvider,
-				Kind:   "openai",
-				Models: []string{modelName},
+				Name:    modelProvider,
+				Kitchen: kitchen,
+				Kind:    "openai",
+				Models:  []string{modelName},
 				Config: map[string]interface{}{
 					"api_key": apiKey,
 				},

@@ -518,7 +518,7 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 
 		// Test the provider with a real credential-validating call
 		if modelProvider != "" {
-			provider, err := h.Store.GetProvider(context.Background(), modelProvider)
+			provider, err := h.Store.GetProvider(context.Background(), kitchen, modelProvider)
 			if err == nil {
 				result := h.Router.TestProvider(context.Background(), provider)
 				if !result.Healthy {
@@ -1056,7 +1056,7 @@ func (h *Handlers) RecookAgent(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(1 * time.Second)
 
 		if agent.ModelProvider != "" {
-			provider, err := h.Store.GetProvider(context.Background(), agent.ModelProvider)
+			provider, err := h.Store.GetProvider(context.Background(), agent.Kitchen, agent.ModelProvider)
 			if err == nil {
 				result := h.Router.TestProvider(context.Background(), provider)
 				if !result.Healthy {
@@ -1640,7 +1640,8 @@ func (h *Handlers) ListProviderTemplates(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *Handlers) ListProviders(w http.ResponseWriter, r *http.Request) {
-	providers, err := h.Store.ListProviders(r.Context())
+	kitchen := middleware.GetKitchen(r.Context())
+	providers, err := h.Store.ListProviders(r.Context(), kitchen)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1665,6 +1666,7 @@ func (h *Handlers) CreateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req.ID = uuid.New().String()
+	req.Kitchen = middleware.GetKitchen(r.Context())
 	req.CreatedAt = time.Now().UTC()
 
 	if err := h.Store.CreateProvider(r.Context(), &req); err != nil {
@@ -1678,7 +1680,8 @@ func (h *Handlers) CreateProvider(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) GetProvider(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "providerName")
-	provider, err := h.Store.GetProvider(r.Context(), name)
+	kitchen := middleware.GetKitchen(r.Context())
+	provider, err := h.Store.GetProvider(r.Context(), kitchen, name)
 	if err != nil {
 		if _, ok := err.(*store.ErrNotFound); ok {
 			respondError(w, http.StatusNotFound, err.Error())
@@ -1692,7 +1695,8 @@ func (h *Handlers) GetProvider(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) DeleteProvider(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "providerName")
-	if err := h.Store.DeleteProvider(r.Context(), name); err != nil {
+	kitchen := middleware.GetKitchen(r.Context())
+	if err := h.Store.DeleteProvider(r.Context(), kitchen, name); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1701,8 +1705,9 @@ func (h *Handlers) DeleteProvider(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "providerName")
+	kitchen := middleware.GetKitchen(r.Context())
 
-	provider, err := h.Store.GetProvider(r.Context(), name)
+	provider, err := h.Store.GetProvider(r.Context(), kitchen, name)
 	if err != nil {
 		if _, ok := err.(*store.ErrNotFound); ok {
 			respondError(w, http.StatusNotFound, err.Error())
@@ -1765,7 +1770,6 @@ func (h *Handlers) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 		for _, m := range req.Models {
 			newModels[m] = true
 		}
-		kitchen := middleware.GetKitchen(r.Context())
 		if allAgents, listErr := h.Store.ListAgents(r.Context(), kitchen); listErr == nil {
 			for i := range allAgents {
 				ag := &allAgents[i]
@@ -1874,7 +1878,7 @@ func (h *Handlers) TestProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	provider, err := h.Store.GetProvider(r.Context(), providerName)
+	provider, err := h.Store.GetProvider(r.Context(), middleware.GetKitchen(r.Context()), providerName)
 	if err != nil {
 		if _, ok := err.(*store.ErrNotFound); ok {
 			respondError(w, http.StatusNotFound, fmt.Sprintf("provider %q not found", providerName))
@@ -3214,21 +3218,40 @@ func (h *Handlers) resolveEnvGuardrails(agentGuardrails []models.Guardrail, ae *
 	}
 }
 
+// auditActorFromIdentity resolves the acting identity for an audit event, returning the
+// subject id, an email (only ever a real email address), a display name suitable for UI
+// rendering, the identity provider, and a coarse actor type ("user", "service_account",
+// "api_key"). Centralizing this avoids each call site re-deriving userEmail by falling back
+// to DisplayName (which broke rendering for service-account names containing "@").
+func auditActorFromIdentity(ctx context.Context) (userID, userEmail, displayName, provider, actorType string) {
+	identity := pkgmw.GetIdentity(ctx)
+	if identity == nil {
+		return "", "", "", "", ""
+	}
+	userID = identity.Subject
+	userEmail = identity.Email
+	displayName = identity.DisplayName
+	if displayName == "" {
+		displayName = userEmail
+	}
+	provider = identity.Provider
+	switch provider {
+	case "service_account":
+		actorType = "service_account"
+	case "scoped-key", "apikey":
+		actorType = "api_key"
+	default:
+		actorType = "user"
+	}
+	return userID, userEmail, displayName, provider, actorType
+}
+
 // emitGuardrailAuditEnv emits a guardrail audit event with environment context.
 func (h *Handlers) emitGuardrailAuditEnv(ctx context.Context, kitchen, agentName, envSlug, stage string, eval *models.GuardrailEvaluation, guardrailErr error) {
 	if h.Store == nil {
 		return
 	}
-	identity := pkgmw.GetIdentity(ctx)
-	userID, userEmail, provider := "", "", ""
-	if identity != nil {
-		userID = identity.Subject
-		userEmail = identity.Email
-		if userEmail == "" {
-			userEmail = identity.DisplayName
-		}
-		provider = identity.Provider
-	}
+	userID, userEmail, displayName, provider, actorType := auditActorFromIdentity(ctx)
 	action := "guardrail." + stage + "_blocked"
 	status := http.StatusForbidden
 	details := map[string]interface{}{"agent": agentName, "env": envSlug, "stage": stage, "provider": provider}
@@ -3246,6 +3269,8 @@ func (h *Handlers) emitGuardrailAuditEnv(ctx context.Context, kitchen, agentName
 		Timestamp:          time.Now().UTC(),
 		UserID:             userID,
 		UserEmail:          userEmail,
+		ActorType:          actorType,
+		ActorDisplayName:   displayName,
 		Action:             action,
 		Resource:           "guardrails",
 		ResourceID:         agentName,
@@ -3263,20 +3288,14 @@ func (h *Handlers) emitEnvA2AAudit(ctx context.Context, kitchen, agentName, envS
 	if h.Store == nil {
 		return
 	}
-	identity := pkgmw.GetIdentity(ctx)
-	userID, userEmail := "", ""
-	if identity != nil {
-		userID = identity.Subject
-		userEmail = identity.Email
-		if userEmail == "" {
-			userEmail = identity.DisplayName
-		}
-	}
+	userID, userEmail, displayName, _, actorType := auditActorFromIdentity(ctx)
 	_ = h.Store.CreateAuditEvent(ctx, &models.AuditEvent{
 		ID:                 uuid.New().String(),
 		Timestamp:          time.Now().UTC(),
 		UserID:             userID,
 		UserEmail:          userEmail,
+		ActorType:          actorType,
+		ActorDisplayName:   displayName,
 		Action:             "agent.a2a_env_proxy",
 		Resource:           "agent",
 		ResourceID:         agentName,
@@ -4475,16 +4494,7 @@ func (h *Handlers) emitThinkingAudit(ctx context.Context, kitchen, agentName, so
 		return
 	}
 
-	identity := pkgmw.GetIdentity(ctx)
-	userID := ""
-	userEmail := ""
-	if identity != nil {
-		userID = identity.Subject
-		userEmail = identity.Email
-		if userEmail == "" {
-			userEmail = identity.DisplayName
-		}
-	}
+	userID, userEmail, displayName, _, actorType := auditActorFromIdentity(ctx)
 
 	status := http.StatusOK
 	action := "thinking.captured"
@@ -4514,6 +4524,8 @@ func (h *Handlers) emitThinkingAudit(ctx context.Context, kitchen, agentName, so
 		Timestamp:          time.Now().UTC(),
 		UserID:             userID,
 		UserEmail:          userEmail,
+		ActorType:          actorType,
+		ActorDisplayName:   displayName,
 		Action:             action,
 		Resource:           "thinking",
 		ResourceID:         agentName,
@@ -5119,7 +5131,7 @@ func (h *Handlers) DiscoverModels(w http.ResponseWriter, r *http.Request) {
 	providerName := chi.URLParam(r, "providerName")
 
 	// Look up the provider
-	provider, err := h.Store.GetProvider(r.Context(), providerName)
+	provider, err := h.Store.GetProvider(r.Context(), middleware.GetKitchen(r.Context()), providerName)
 	if err != nil {
 		respondError(w, http.StatusNotFound, "provider not found: "+providerName)
 		return
@@ -5532,18 +5544,7 @@ func (h *Handlers) emitGuardrailAudit(ctx context.Context, kitchen, agentName, s
 		return
 	}
 
-	identity := pkgmw.GetIdentity(ctx)
-	userID := ""
-	userEmail := ""
-	provider := ""
-	if identity != nil {
-		userID = identity.Subject
-		userEmail = identity.Email
-		if userEmail == "" {
-			userEmail = identity.DisplayName
-		}
-		provider = identity.Provider
-	}
+	userID, userEmail, displayName, provider, actorType := auditActorFromIdentity(ctx)
 
 	action := "guardrail." + stage + "_blocked"
 	status := http.StatusForbidden
@@ -5568,6 +5569,8 @@ func (h *Handlers) emitGuardrailAudit(ctx context.Context, kitchen, agentName, s
 		Timestamp:          time.Now().UTC(),
 		UserID:             userID,
 		UserEmail:          userEmail,
+		ActorType:          actorType,
+		ActorDisplayName:   displayName,
 		Action:             action,
 		Resource:           "guardrails",
 		ResourceID:         agentName,
@@ -5639,7 +5642,7 @@ func (h *Handlers) GetAgentCard(w http.ResponseWriter, r *http.Request) {
 	if h.Catalog != nil && agent.ModelName != "" {
 		providerKind := ""
 		if agent.ModelProvider != "" {
-			if prov, err := h.Store.GetProvider(r.Context(), agent.ModelProvider); err == nil {
+			if prov, err := h.Store.GetProvider(r.Context(), agent.Kitchen, agent.ModelProvider); err == nil {
 				providerKind = prov.Kind
 			}
 		}

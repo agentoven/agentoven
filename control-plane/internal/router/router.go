@@ -367,7 +367,8 @@ func (mr *ModelRouter) ListDiscoveryCapableDrivers() map[string]ModelDiscoveryDr
 
 // HealthCheck pings all configured providers and returns their status.
 func (mr *ModelRouter) HealthCheck(ctx context.Context) map[string]string {
-	providers, err := mr.store.ListProviders(ctx)
+	// Cross-kitchen admin view — empty kitchen means "no filter" in the store layer.
+	providers, err := mr.store.ListProviders(ctx, "")
 	if err != nil {
 		return map[string]string{"error": err.Error()}
 	}
@@ -481,7 +482,7 @@ func (mr *ModelRouter) SelectAPIKey(provider *models.ModelProvider) string {
 // Route sends a request through the router using the specified strategy.
 func (mr *ModelRouter) Route(ctx context.Context, req *models.RouteRequest) (*models.RouteResponse, error) {
 	// Get configured providers
-	providers, err := mr.store.ListProviders(ctx)
+	providers, err := mr.store.ListProviders(ctx, req.Kitchen)
 	if err != nil {
 		return nil, fmt.Errorf("list providers: %w", err)
 	}
@@ -565,7 +566,7 @@ func (mr *ModelRouter) RouteWithBackup(ctx context.Context, req *models.RouteReq
 		Err(err).
 		Msg("Primary providers failed, attempting backup provider")
 
-	backup, bErr := mr.store.GetProvider(ctx, backupProvider)
+	backup, bErr := mr.store.GetProvider(ctx, req.Kitchen, backupProvider)
 	if bErr != nil {
 		return nil, fmt.Errorf("primary providers failed (%w) and backup provider %q not found: %v", err, backupProvider, bErr)
 	}
@@ -605,7 +606,7 @@ func (mr *ModelRouter) RouteWithBackup(ctx context.Context, req *models.RouteReq
 // Falls back to non-streaming Route() if the selected driver doesn't implement
 // StreamingProviderDriver, buffering the full response and sending it as one chunk.
 func (mr *ModelRouter) RouteStream(ctx context.Context, req *models.RouteRequest, callback func(chunk *models.StreamChunk) error) error {
-	providers, err := mr.store.ListProviders(ctx)
+	providers, err := mr.store.ListProviders(ctx, req.Kitchen)
 	if err != nil {
 		return fmt.Errorf("list providers: %w", err)
 	}

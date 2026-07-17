@@ -143,11 +143,11 @@ type SpanStore interface {
 // ── Model Provider Store ────────────────────────────────────
 
 type ModelProviderStore interface {
-	ListProviders(ctx context.Context) ([]models.ModelProvider, error)
-	GetProvider(ctx context.Context, name string) (*models.ModelProvider, error)
+	ListProviders(ctx context.Context, kitchen string) ([]models.ModelProvider, error)
+	GetProvider(ctx context.Context, kitchen, name string) (*models.ModelProvider, error)
 	CreateProvider(ctx context.Context, provider *models.ModelProvider) error
 	UpdateProvider(ctx context.Context, provider *models.ModelProvider) error
-	DeleteProvider(ctx context.Context, name string) error
+	DeleteProvider(ctx context.Context, kitchen, name string) error
 }
 
 // ── Recipe Run Store ────────────────────────────────────────
@@ -375,8 +375,8 @@ type AgentDeploymentStore interface {
 	// CreateDeployment records a new agent deployment.
 	CreateDeployment(ctx context.Context, deployment *models.AgentDeployment) error
 
-	// GetDeployment returns a deployment by ID.
-	GetDeployment(ctx context.Context, id string) (*models.AgentDeployment, error)
+	// GetDeployment returns a deployment by ID, scoped to the owning kitchen.
+	GetDeployment(ctx context.Context, kitchen, id string) (*models.AgentDeployment, error)
 
 	// GetActiveDeployment returns the currently active deployment for an agent in an environment.
 	GetActiveDeployment(ctx context.Context, kitchen, agentName, envSlug string) (*models.AgentDeployment, error)

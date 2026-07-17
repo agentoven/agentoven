@@ -369,12 +369,38 @@ func (e *Executor) Execute(ctx context.Context, agent *models.Agent, userMessage
 		turnRecord.LatencyMs = time.Since(turnStart).Milliseconds()
 		trace.Turns = append(trace.Turns, turnRecord)
 
+		// Build the assistant tool_calls for the next turn.
+		// Prefer native tool calls from the response; fall back to synthesising
+		// ToolCallResult entries from the already-extracted toolCalls slice.
+		// This is critical when litellm / some proxies strip tool_calls from the
+		// response body (e.g. codex-class models) — without matching tool_calls on
+		// the assistant message the API rejects subsequent tool results with
+		// "No tool call found for function call output with call_id <id>".
+		assistantToolCalls := routeResp.ToolCalls
+		if len(assistantToolCalls) == 0 && len(toolCalls) > 0 {
+			assistantToolCalls = make([]models.ToolCallResult, 0, len(toolCalls))
+			for _, tc := range toolCalls {
+				argsJSON, _ := json.Marshal(tc.Arguments)
+				assistantToolCalls = append(assistantToolCalls, models.ToolCallResult{
+					ID:   tc.ID,
+					Type: "function",
+					Function: struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					}{
+						Name:      tc.Name,
+						Arguments: string(argsJSON),
+					},
+				})
+			}
+		}
+
 		// Add assistant message with tool call info to conversation
 		// OpenAI requires assistant messages to include tool_calls when finish_reason is "tool_calls"
 		assistantMsg := models.ChatMessage{
 			Role:      "assistant",
 			Content:   routeResp.Content,
-			ToolCalls: routeResp.ToolCalls, // include native tool calls for multi-turn
+			ToolCalls: assistantToolCalls,
 		}
 		messages = append(messages, assistantMsg)
 

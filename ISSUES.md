@@ -1,6 +1,6 @@
 # AgentOven — Known Issues & Technical Debt
 
-> Last audited: 21 February 2026 (Post Release 6.5)
+> Last audited: 03 July 2026 (Post 0.8.6 hotfixes)
 >
 > This file tracks real bugs, logic errors, and technical debt found via
 > code review, `go vet`, and manual inspection. It is referenced from
@@ -73,6 +73,19 @@
   request could modify the same agent between the two updates, causing stale overwrites.
   The version is also spuriously bumped twice.
 - **Status:** ✅ Fixed (R9, 1 Mar 2026) — goroutine re-fetches agent from store, checks status is still `baking` before mutating, captures immutable identifiers instead of `*Agent` pointer.
+
+### ISS-024: A2A provider TLS override lost on framework-native path
+
+- **Files:**
+  - `control-plane/internal/api/handlers/handlers.go`
+  - `control-plane/internal/process/templates/agent_runner.py`
+- **Category:** `BUG`
+- **Description:** `tasks/send` accepted `provider_config` and set `WithProviderTLSOverride` in Go context, but framework-native calls proxied via `/invoke` did not serialize TLS override into payload. Python runner then used default trust chain and failed on self-signed certs (`CERTIFICATE_VERIFY_FAILED`).
+- **Fix:**
+  - Extended `proxyToProcess` payload to include `provider_config`.
+  - Updated framework-native call sites to pass TLS override.
+  - Added request-scoped SSL context handling in runner and applied it across all outbound `urlopen` calls.
+- **Status:** ✅ Fixed (0.8.6 hotfix, 2 Jul 2026)
 
 ---
 
@@ -302,9 +315,9 @@
 | Severity | Count | Fixed |
 |----------|-------|-------|
 | 🔴 Critical | 1 | 1 |
-| 🟠 High | 6 | 4 |
+| 🟠 High | 7 | 5 |
 | 🟡 Medium | 5 | 4 |
 | 🟢 Low | 4 | 2 |
 | ⚪ Infra | 5 | 0 |
 | 🔒 Auth | 2 | 2 (partial) |
-| **Total** | **23** | **13** |
+| **Total** | **24** | **14** |

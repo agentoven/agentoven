@@ -1,6 +1,6 @@
 # AgentOven Roadmap
 
-> Last updated: 21 February 2026
+> Last updated: 03 July 2026
 >
 > This document tracks the complete feature roadmap for AgentOven — the open-source,
 > framework-agnostic enterprise agent control plane built on A2A and MCP protocols.
@@ -8,6 +8,36 @@
 > Architecture rules:
 > - **OSS** = lean, stable, in-memory store only, 4 community providers (OpenAI, Azure OpenAI, Anthropic, Ollama)
 > - **Pro** = PostgreSQL, cloud provider drivers (Bedrock, Foundry, Vertex), RBAC, SSO, audit, federation
+
+---
+
+## Current Delivery Projection (July 2026)
+
+This section reflects what is actively delivered and what is next, so execution is clear across OSS and Pro tracks.
+
+### Completed in current cycle
+
+| Stream | Delivered | Evidence |
+|--------|-----------|----------|
+| Runtime reliability | Framework-native A2A TLS propagation fixed (provider CA bundle + tls_skip_verify now forwarded and honored in runner) | `control-plane/internal/api/handlers/handlers.go`, `control-plane/internal/process/templates/agent_runner.py` |
+| Pro data compatibility | `agents.behavior` migration added to self-heal older Postgres deployments | `agentoven-pro/internal/store/postgres.go` |
+| Release consistency | 0.8.6 image tags aligned across Pro server, operator, scheduler, dashboard, and runtime values | `agentoven-pro/charts/*/values.yaml` |
+| Image publishing | Multi-arch images pushed to GHCR and client ACR for 0.8.6 and latest | Release/publish runbook execution |
+
+### In progress now
+
+| Stream | Current focus | Target outcome |
+|--------|---------------|----------------|
+| Security audit readiness | Auth-free cyber audit workflow (Trivy/Syft/Grype/Gitleaks) and report packaging | Repeatable release evidence package per version |
+| AKS rollout verification | Validate runtime pull path and A2A execution with new image set | No pull backoff and green recipe runs |
+
+### Next up (near-term)
+
+| Priority | Item | Success criteria |
+|----------|------|------------------|
+| P1 | CI security gate for image and IaC scanning | Pipeline fails on unapproved high/critical findings |
+| P1 | Complete Pro release checklist automation | One command to build/push/scan/verify all Pro artifacts |
+| P2 | R8 scale and federation closeout | Helm and cross-org federation milestones moved to done |
 
 ---
 
