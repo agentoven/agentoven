@@ -11,3 +11,12 @@ Each entry should include:
 
 ---
 
+
+## 2026-09-05T01:45:15.885Z - #5
+
+Implemented: separate harness into a sub app. so that can be published individually
+
+### Files Changed
+- .openhands_task_prompt
+
+---
