@@ -1,0 +1,66 @@
+# REVISION REQUESTED — READ BEFORE THE PLAN
+This task was already implemented on branch `agent/5-95ad1e82` and that work is
+checked out in your workspace. The plan below describes the ORIGINAL task; treat it as
+background. Your job is to address this review feedback:
+
+The chage is not implemented Please try again
+
+- Run `git log --oneline -20` first to see what the previous attempt did.
+- Make an incremental change on top of that work. Do NOT reimplement the task
+  from scratch, revert existing commits, or reset the branch.
+- Keep the change scoped to the feedback above; leave unrelated code alone.
+
+# Task
+separate harness into a sub app. so that can be published individually
+
+# Implementation Plan
+I'll help you separate the harness component into a standalone publishable crate. Let me analyze the task and create a comprehensive plan.
+
+Looking at the architecture, I need to extract harness functionality from the existing codebase into an independent `agentoven-harness` crate that can be published to crates.io. The harness is currently embedded in the core or CLI crates based on the ADR references to test runners and agent orchestration.
+
+Before breaking this into tasks, let me consider wha
+
+## Files to Create
+- crates/agentoven-harness/Cargo.toml
+- crates/agentoven-harness/src/lib.rs
+- crates/agentoven-harness/src/runner.rs
+- crates/agentoven-harness/src/config.rs
+- crates/agentoven-harness/src/result.rs
+- crates/agentoven-harness/src/error.rs
+- crates/agentoven-harness/README.md
+- crates/agentoven-harness/LICENSE
+- crates/agentoven-harness/CHANGELOG.md
+
+## Files to Modify
+- Cargo.toml
+- crates/agentoven-core/Cargo.toml
+- crates/agentoven-core/src/lib.rs
+- crates/agentoven-cli/Cargo.toml
+- .github/workflows/ci.yml
+- .github/workflows/release.yml
+- README.md
+- ADR/0009-pluggable-test-runner-architecture.md
+- ADR/0011-oss-local-test-runner.md
+- CONTRIBUTING.md
+
+## Testing Strategy
+Write appropriate unit tests
+
+# Project Context
+Read the project context from these files already in your workspace:
+- /workspace/.adlc-context/PROJECT.md
+- /workspace/.adlc-context/CODEBASE.md
+- /workspace/.adlc-context/HISTORY.md (previous agent runs — do not repeat completed work)
+
+# Instructions
+You are running in a non-interactive headless Kubernetes container.
+
+1. Read the context files above before coding — they describe the project and prior agent work.
+2. Implement the changes according to the plan above.
+3. Do not ask for clarification. Make sensible decisions from the existing code.
+4. Work only inside /workspace.
+5. Follow existing code style and conventions.
+6. Write tests for new functionality.
+7. Run install, build, and test commands when practical.
+8. Commit your changes with a clear message summarising the work.
+9. Do NOT create standalone summary/report Markdown files (IMPLEMENTATION_SUMMARY.md etc.).
