@@ -1,0 +1,39 @@
+{
+  "suite": "example-agent-tests",
+  "agent": "example-agent",
+  "cases": [
+    {
+      "id": "tc-001",
+      "name": "basic greeting",
+      "input": "Hello!",
+      "expected": "hello",
+      "match_mode": "contains",
+      "tags": ["greeting", "basic"]
+    },
+    {
+      "id": "tc-002",
+      "name": "math question",
+      "input": "What is 2+2?",
+      "expected": "4",
+      "match_mode": "contains",
+      "tags": ["math"]
+    },
+    {
+      "id": "tc-003",
+      "name": "exact match test",
+      "input": "Say exactly: OK",
+      "expected": "OK",
+      "match_mode": "exact",
+      "tags": ["exact"]
+    },
+    {
+      "id": "tc-004",
+      "name": "regex test - phone number",
+      "input": "Give me a phone number in format XXX-XXXX",
+      "expected": "\\d{3}-\\d{4}",
+      "match_mode": "regex",
+      "tags": ["regex"],
+      "timeout_seconds": 30
+    }
+  ]
+}

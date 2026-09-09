@@ -17,6 +17,7 @@ pub mod recipe;
 pub mod server;
 pub mod service_account;
 pub mod session;
+pub mod test;
 pub mod test_suite;
 pub mod tool;
 pub mod trace;
@@ -127,6 +128,9 @@ pub enum Commands {
     #[command(subcommand)]
     Environment(environment::EnvironmentCommands),
 
+    /// 🧪 Run agent test cases locally (community).
+    Test(test::TestArgs),
+
     /// 🧪 Manage test suites (Pro).
     #[command(subcommand)]
     TestSuite(test_suite::TestSuiteCommands),
@@ -167,6 +171,7 @@ pub async fn execute(cli: Cli) -> anyhow::Result<()> {
         Commands::Config(cmd) => config_cmd::execute(cmd).await,
         Commands::Use(args) => use_cmd::execute(args).await,
         Commands::Environment(cmd) => environment::execute(cmd).await,
+        Commands::Test(args) => test::execute(args).await,
         Commands::TestSuite(cmd) => test_suite::execute(cmd).await,
         Commands::ServiceAccount(cmd) => service_account::execute(cmd).await,
         Commands::Status => status().await,

@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 agentoven-core = { workspace = true }
+agentoven-harness = { workspace = true }
 a2a-ao = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
