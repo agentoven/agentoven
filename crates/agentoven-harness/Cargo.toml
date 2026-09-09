@@ -1,0 +1,47 @@
+[package]
+name = "agentoven-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Test harness for AgentOven agents - run test suites locally or against remote agents"
+keywords = ["ai", "agents", "testing", "harness", "llm"]
+categories = ["development-tools::testing"]
+
+[dependencies]
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Async runtime
+tokio.workspace = true
+
+# HTTP client
+reqwest.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# UUID
+uuid.workspace = true
+
+# Time
+chrono.workspace = true
+
+# CLI output
+colored = "2"
+
+# Regex for match mode
+regex = "1"
+
+# Internal crates
+agentoven-core.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[features]
+default = []

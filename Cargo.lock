@@ -32,6 +32,7 @@ version = "0.8.6"
 dependencies = [
  "a2a-ao",
  "agentoven-core",
+ "agentoven-harness",
  "anyhow",
  "chrono",
  "clap",
@@ -73,6 +74,23 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "agentoven-harness"
+version = "0.8.6"
+dependencies = [
+ "agentoven-core",
+ "anyhow",
+ "chrono",
+ "colored",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
  "uuid",
 ]
 

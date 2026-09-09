@@ -4,6 +4,7 @@ members = [
     "crates/a2a-ao",
     "crates/agentoven-core",
     "crates/agentoven-cli",
+    "crates/agentoven-harness",
     "sdk/python",
 ]
 # Built separately — requires Rust 1.88+ for napi-build
@@ -44,6 +45,7 @@ opentelemetry_sdk = "0.27"
 
 # CLI
 clap = { version = "4", features = ["derive", "env", "color"] }
+colored = "2"
 
 # UUID
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -56,6 +58,9 @@ url = { version = "2", features = ["serde"] }
 
 # Schema
 schemars = { version = "0.8", features = ["url", "chrono"] }
+
+# Regex
+regex = "1"
 
 # Encoding
 base64 = "0.22"
@@ -73,6 +78,7 @@ napi-derive = "2"
 # Internal crates
 a2a-ao = { version = "0.8.6", path = "crates/a2a-ao" }
 agentoven-core = { version = "0.8.6", path = "crates/agentoven-core" }
+agentoven-harness = { version = "0.8.6", path = "crates/agentoven-harness" }
 
 [profile.release]
 lto = true
