@@ -58,4 +58,17 @@ What other options were evaluated and why were they rejected?
 | [0011](0011-oss-local-test-runner.md) | OSS local test runner for agentic agents | Accepted | 2026-03-03 |
 | [0012](0012-agent-packaging-distribution.md) | Agent packaging and distribution (.aopack) | Accepted | 2026-03-03 |
 | [0013](0013-agent-to-ui-protocol.md) | Agent-to-UI protocol (A2UI) | Accepted | 2026-03-03 |
+| [0014](0014-pluggable-scheduler-dispatcher.md) | Pluggable scheduler dispatcher abstraction | Accepted | 2026-05-05 |
+| [0015](0015-agent-orchestrator-k8s-crd.md) | Agent orchestrator — CRD-based lifecycle on Kubernetes | Accepted | 2026-05-05 |
+| [0016](0016-external-agent-traceability.md) | External agent registration and traceability | Accepted | 2026-05-05 |
+| [0017](0017-framework-native-managed-agents.md) | Framework-native managed agents | Accepted | 2026-05-14 |
+| [0018](0018-remote-provider-plugin-protocol.md) | Remote provider plugin protocol (gRPC) | Accepted | 2026-05-18 |
+| [0019](0019-otel-metrics-pipeline-multi-sink.md) | OTel metrics pipeline and multi-sink collector | Accepted | 2026-05-18 |
+| [0020](0020-pageindex-vectorless-rag-strategy.md) | PageIndex vectorless RAG strategy | Proposed | 2026-06-07 |
+| [0021](0021-release-090-oss-architecture.md) | Release 0.9.0 OSS architecture — SSE, skills plugin system, multimodal, RAG multi-pipeline | Accepted | 2026-06-23 |
 | [0022](0022-dashboard-nav-grouping-and-gate-ux.md) | Dashboard sidebar navigation grouping & human-gate approval UX | Proposed | 2026-07-04 |
+| [0023](0023-pluggable-cloud-agent-deployment-backend.md) | Pluggable cloud agent deployment backend (AgenticCore selection) | Proposed | 2026-07-07 |
+| [0024](0024-advanced-recipe-flow-and-hpa.md) | Advanced recipe flow control — gate branching, loop controls, multi-scope rate limiting, K8s HPA | Proposed | 2026-07-07 |
+| [0025](0025-agent-as-identity-principal.md) | Agent as a first-class identity principal | Proposed | 2026-07-07 |
+| [0026](0026-rag-runtime-separate-process.md) | RAG/KAG runtime as a separate process | Proposed | 2026-07-10 |
+| [0027](0027-pooled-agent-runtime.md) | Pooled agent runtime — request-time config injection into a per-kitchen warm process pool | Proposed | 2026-08-18 |
