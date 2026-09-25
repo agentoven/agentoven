@@ -501,6 +501,7 @@ type PlanLimits struct {
 	MaxOutputRetentionDays  int               `json:"max_output_retention_days"` // Agent I/O retention
 	MaxAuditRetentionDays   int               `json:"max_audit_retention_days"`  // Audit event retention
 	RequireThinkingAudit    bool              `json:"require_thinking_audit"`    // Force thinking mode
+	ImmutableAudit          bool              `json:"immutable_audit"`           // ADR-0031: hash chain, WORM, legal hold
 	MaxGateWaitMinutes      int               `json:"max_gate_wait_minutes"`     // SLA for human gates
 	MaxNotificationChannels int               `json:"max_notification_channels"` // Notification channel quota
 

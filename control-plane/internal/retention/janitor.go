@@ -435,6 +435,9 @@ func (j *Janitor) purgeTraces(ctx context.Context, traces []models.Trace, stats 
 }
 
 // purgeAuditEvents deletes audit events from the hot store.
+//
+// Under Enterprise this is only reached after archival succeeded (ADR-0031 §7):
+// the hot table is an index, and the archived copy remains the system of record.
 func (j *Janitor) purgeAuditEvents(ctx context.Context, events []models.AuditEvent, stats *CycleStats) {
 	for _, e := range events {
 		if err := j.store.DeleteAuditEvent(ctx, e.ID); err != nil {
