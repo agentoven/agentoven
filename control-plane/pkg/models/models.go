@@ -1458,7 +1458,28 @@ type ThinkingBlock struct {
 
 // ── Audit Events ─────────────────────────────────────────────
 
+// ActorRef is one link in a delegation chain, matching the `act` claim in ADR-0030.
+type ActorRef struct {
+	Sub  string `json:"sub"`
+	Kind string `json:"kind"`
+	Role string `json:"role,omitempty"`
+}
+
+// AuditPhase distinguishes the two records a mutating request writes (ADR-0031 §3):
+// the intent written before the handler runs, and the completion written after.
+// An intent with no matching completion is itself evidence.
+type AuditPhase string
+
+const (
+	AuditPhaseIntent   AuditPhase = "intent"
+	AuditPhaseComplete AuditPhase = "complete"
+)
+
 // AuditEvent represents an auditable action for compliance tracking.
+//
+// Seq, PrevHash and EntryHash are chain columns. OSS never populates them —
+// hashing is Enterprise-only (ADR-0031) — but they are declared here because
+// the audit_events row this struct maps to is owned by OSS.
 type AuditEvent struct {
 	ID                 string                 `json:"id" db:"id"`
 	Timestamp          time.Time              `json:"timestamp" db:"timestamp"`
@@ -1477,6 +1498,20 @@ type AuditEvent struct {
 	RegulationTags     []string               `json:"regulation_tags,omitempty"`              // HIPAA, SOC2, GxP, GDPR
 	DataClassification string                 `json:"data_classification,omitempty"`          // public, internal, confidential, restricted
 	Environment        string                 `json:"environment,omitempty" db:"environment"` // env slug — set on env-scoped A2A calls
+
+	// Principal attribution (ADR-0031 §4)
+	Phase         AuditPhase `json:"phase,omitempty" db:"phase"`
+	PrincipalKind string     `json:"principal_kind,omitempty" db:"principal_kind"`
+	PrincipalID   string     `json:"principal_id,omitempty" db:"principal_id"`
+	SubjectRef    string     `json:"subject_ref,omitempty" db:"subject_ref"` // pseudonymous — raw identity never enters the chain
+	OwnerUserID   string     `json:"owner_user_id,omitempty" db:"owner_user_id"`
+	OwnerRef      string     `json:"owner_ref,omitempty" db:"owner_ref"`
+	ActorChain    []ActorRef `json:"actor_chain,omitempty" db:"actor_chain"`
+
+	// Chain position (ADR-0031 §2) — populated by Enterprise only
+	Seq       int64  `json:"seq,omitempty" db:"seq"`
+	PrevHash  string `json:"prev_hash,omitempty" db:"prev_hash"`
+	EntryHash string `json:"entry_hash,omitempty" db:"entry_hash"`
 }
 
 // AuditFilter provides query options for listing audit events.
@@ -1490,6 +1525,11 @@ type AuditFilter struct {
 	Until       *time.Time
 	Limit       int
 	Offset      int
+
+	// Chain walking (ADR-0031 §2) — verification pages through events in
+	// sequence order, which offset-based paging cannot guarantee.
+	SinceSeq  int64
+	Ascending bool
 }
 
 // ── Approval Records ─────────────────────────────────────────
