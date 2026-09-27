@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -4944,6 +4945,7 @@ func (h *Handlers) ListAuditEvents(w http.ResponseWriter, r *http.Request) {
 			filter.Offset = n
 		}
 	}
+	applyAuditTimeRange(q, &filter)
 
 	events, err := h.Store.ListAuditEvents(r.Context(), filter)
 	if err != nil {
@@ -4986,6 +4988,7 @@ func (h *Handlers) CountAuditEvents(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("environment"); v != "" {
 		filter.Environment = v
 	}
+	applyAuditTimeRange(q, &filter)
 
 	count, err := h.Store.CountAuditEvents(r.Context(), filter)
 	if err != nil {
@@ -4993,6 +4996,31 @@ func (h *Handlers) CountAuditEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]int64{"count": count})
+}
+
+// applyAuditTimeRange reads the since/until window shared by list and count.
+//
+// Accepts RFC3339 or a bare YYYY-MM-DD date; a bare until date covers the whole
+// day, since an operator asking for events "until the 5th" does not mean
+// midnight at the start of it.
+func applyAuditTimeRange(q url.Values, filter *models.AuditFilter) {
+	parse := func(v string, endOfDay bool) *time.Time {
+		if v == "" {
+			return nil
+		}
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			return &t
+		}
+		if t, err := time.Parse("2006-01-02", v); err == nil {
+			if endOfDay {
+				t = t.Add(24*time.Hour - time.Nanosecond)
+			}
+			return &t
+		}
+		return nil
+	}
+	filter.Since = parse(q.Get("since"), false)
+	filter.Until = parse(q.Get("until"), true)
 }
 
 // ── Helpers ──────────────────────────────────────────────────
