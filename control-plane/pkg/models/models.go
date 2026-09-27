@@ -1512,6 +1512,9 @@ type AuditEvent struct {
 	Seq       int64  `json:"seq,omitempty" db:"seq"`
 	PrevHash  string `json:"prev_hash,omitempty" db:"prev_hash"`
 	EntryHash string `json:"entry_hash,omitempty" db:"entry_hash"`
+
+	// LegalHold blocks retention purge and GDPR erasure for this record.
+	LegalHold bool `json:"legal_hold,omitempty" db:"legal_hold"`
 }
 
 // AuditFilter provides query options for listing audit events.
