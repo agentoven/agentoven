@@ -323,6 +323,10 @@ const (
 	IngredientEmbedding     IngredientKind = "embedding"
 	IngredientVectorStore   IngredientKind = "vectorstore"
 	IngredientRetriever     IngredientKind = "retriever"
+	// IngredientScenario attaches an evaluation scenario to an agent, so the
+	// agent carries its own eval suite. The community edition records the
+	// reference; running it needs the scenario environment (Pro).
+	IngredientScenario IngredientKind = "scenario"
 )
 
 type Ingredient struct {
@@ -1229,6 +1233,18 @@ type ResolvedIngredients struct {
 	Embeddings   []ResolvedEmbedding   `json:"embeddings,omitempty"`
 	VectorStores []ResolvedVectorStore `json:"vector_stores,omitempty"`
 	Retrievers   []ResolvedRetriever   `json:"retrievers,omitempty"`
+	Scenarios    []ResolvedScenario    `json:"scenarios,omitempty"`
+}
+
+// ResolvedScenario is a scenario an agent is evaluated against.
+//
+// MinPassRate, when set, is the bar a run of this scenario must clear — the
+// gate a promotion or CI check reads.
+type ResolvedScenario struct {
+	Name        string  `json:"name"`
+	Scenario    string  `json:"scenario"`
+	Rollouts    int     `json:"rollouts,omitempty"`
+	MinPassRate float64 `json:"min_pass_rate,omitempty"`
 }
 
 type ResolvedModel struct {
@@ -1512,9 +1528,6 @@ type AuditEvent struct {
 	Seq       int64  `json:"seq,omitempty" db:"seq"`
 	PrevHash  string `json:"prev_hash,omitempty" db:"prev_hash"`
 	EntryHash string `json:"entry_hash,omitempty" db:"entry_hash"`
-
-	// LegalHold blocks retention purge and GDPR erasure for this record.
-	LegalHold bool `json:"legal_hold,omitempty" db:"legal_hold"`
 }
 
 // AuditFilter provides query options for listing audit events.

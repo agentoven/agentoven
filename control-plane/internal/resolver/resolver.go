@@ -124,6 +124,14 @@ func (r *Resolver) Resolve(ctx context.Context, agent *models.Agent) (*models.Re
 			}
 			resolved.Retrievers = append(resolved.Retrievers, *rr)
 
+		case models.IngredientScenario:
+			rs, err := resolveScenario(ing)
+			if err != nil {
+				errors = append(errors, fmt.Sprintf("scenario %q: %s", ing.Name, err))
+				continue
+			}
+			resolved.Scenarios = append(resolved.Scenarios, *rs)
+
 		case models.IngredientObservability:
 			// Observability ingredients reference MCP tools (e.g., LangFuse MCP)
 			_, err := r.resolveTool(ctx, agent.Kitchen, ing)
@@ -326,6 +334,37 @@ func (r *Resolver) resolvePrompt(ctx context.Context, kitchen string, ing models
 		Version:  prompt.Version,
 		Template: prompt.Template,
 	}, nil
+}
+
+// resolveScenario validates a scenario ingredient's shape. Whether the
+// scenario exists is the scenario environment's to check, not the resolver's:
+// the community edition has no scenario store.
+//
+// Config: scenario (the scenario id; defaults to the ingredient name),
+// rollouts (optional), min_pass_rate (optional, in [0, 1]).
+func resolveScenario(ing models.Ingredient) (*models.ResolvedScenario, error) {
+	rs := &models.ResolvedScenario{Name: ing.Name, Scenario: ing.Name}
+	if v, ok := ing.Config["scenario"].(string); ok && v != "" {
+		rs.Scenario = v
+	}
+	if rs.Scenario == "" {
+		return nil, fmt.Errorf("missing 'scenario' in scenario ingredient config")
+	}
+	if v, ok := ing.Config["rollouts"]; ok {
+		n, ok := v.(float64)
+		if !ok || n < 1 || n != float64(int(n)) {
+			return nil, fmt.Errorf("'rollouts' must be a positive integer")
+		}
+		rs.Rollouts = int(n)
+	}
+	if v, ok := ing.Config["min_pass_rate"]; ok {
+		f, ok := v.(float64)
+		if !ok || f < 0 || f > 1 {
+			return nil, fmt.Errorf("'min_pass_rate' must be a number in [0, 1]")
+		}
+		rs.MinPassRate = f
+	}
+	return rs, nil
 }
 
 // resolveData validates data ingredient configuration.

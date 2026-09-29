@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/agentoven/agentoven/control-plane/internal/ctxwindow"
-	"github.com/agentoven/agentoven/control-plane/internal/mcpgw"
 	"github.com/agentoven/agentoven/control-plane/internal/resolver"
 	"github.com/agentoven/agentoven/control-plane/internal/router"
 	"github.com/agentoven/agentoven/control-plane/internal/store"
@@ -89,11 +88,22 @@ type Turn struct {
 	Usage          models.TokenUsage      `json:"usage"`
 }
 
+// ToolGateway is the executor's view of the MCP gateway: it dispatches a tool
+// call and returns the result.
+//
+// Narrow on purpose. Anything that can answer a tools/call can stand in, which
+// is what lets a scenario episode route the agent's tool calls into its own
+// isolated world instead of the real gateway — without the executor knowing a
+// scenario exists. *mcpgw.Gateway satisfies it, so ordinary wiring is unchanged.
+type ToolGateway interface {
+	HandleJSONRPC(ctx context.Context, kitchen string, req *models.MCPRequest) *models.MCPResponse
+}
+
 // Executor runs managed-mode agents through an agentic tool-use loop.
 type Executor struct {
 	store       store.Store
 	router      *router.ModelRouter
-	gateway     *mcpgw.Gateway
+	gateway     ToolGateway
 	sessions    contracts.SessionStore
 	ragRegistry RAGRegistry // optional: enables retriever ingredient consumption
 }
@@ -106,7 +116,7 @@ type RAGRegistry interface {
 }
 
 // NewExecutor creates a new managed-agent executor.
-func NewExecutor(s store.Store, r *router.ModelRouter, gw *mcpgw.Gateway, sess contracts.SessionStore) *Executor {
+func NewExecutor(s store.Store, r *router.ModelRouter, gw ToolGateway, sess contracts.SessionStore) *Executor {
 	return &Executor{
 		store:    s,
 		router:   r,

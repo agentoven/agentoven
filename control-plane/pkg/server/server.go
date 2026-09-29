@@ -45,6 +45,7 @@ import (
 	"github.com/agentoven/agentoven/control-plane/internal/telemetry"
 	"github.com/agentoven/agentoven/control-plane/internal/vectorstore"
 	"github.com/agentoven/agentoven/control-plane/internal/workflow"
+	"github.com/agentoven/agentoven/control-plane/pkg/agentexec"
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 
@@ -78,6 +79,11 @@ type Server struct {
 	// Router is the model router instance.
 	// Exposed so Pro can call RegisterDriver() to add enterprise drivers.
 	Router *modelrouter.ModelRouter
+
+	// MCPGateway dispatches tool calls to the kitchen's registered MCP tools.
+	// Exposed so Pro can forward a scenario episode's live tool calls through
+	// the same path production uses.
+	MCPGateway agentexec.ToolGateway
 
 	// Notifier is the notification service.
 	// Exposed so Pro can call RegisterDriver() to add Slack, Teams, etc.
@@ -465,6 +471,7 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 		Mux:                 router,
 		Store:               dataStore,
 		Router:              mr,
+		MCPGateway:          gw,
 		Notifier:            ns,
 		Handlers:            h,
 		RAGHandlers:         rh,

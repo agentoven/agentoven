@@ -550,7 +550,12 @@ export interface DataConnector {
 }
 
 export const connectorsAPI = {
-  list: () => request<DataConnector[]>('/connectors'),
+  // The control plane wraps the list as { kitchen, connectors, note }.
+  list: async (): Promise<DataConnector[]> => {
+    const res = await request<DataConnector[] | { connectors?: DataConnector[] | null }>('/connectors');
+    if (Array.isArray(res)) return res;
+    return res?.connectors ?? [];
+  },
 };
 
 // ── Model Catalog ─────────────────────────────────────────────
