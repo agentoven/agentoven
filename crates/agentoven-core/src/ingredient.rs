@@ -166,6 +166,17 @@ impl Ingredient {
             config: None,
         }
     }
+
+    /// Attach an evaluation scenario to the agent (run by the scenario environment, Pro).
+    pub fn scenario(name: impl Into<String>) -> IngredientBuilder {
+        IngredientBuilder {
+            kind: IngredientKind::Scenario,
+            name: name.into(),
+            provider: None,
+            role: None,
+            config: None,
+        }
+    }
 }
 
 /// The kind of ingredient.
@@ -189,4 +200,6 @@ pub enum IngredientKind {
     VectorStore,
     /// Retriever pipeline configuration.
     Retriever,
+    /// Evaluation scenario the agent is run against.
+    Scenario,
 }

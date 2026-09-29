@@ -997,6 +997,36 @@ impl AgentOvenClient {
         Ok(resp.json().await?)
     }
 
+    /// Generic PUT that sends JSON and returns deserialized JSON.
+    pub async fn raw_put<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<T> {
+        let url = self.url(path);
+        let resp = self
+            .authed_request(self.http.put(url))
+            .json(body)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
+    /// Generic GET returning the response body verbatim.
+    ///
+    /// Used for endpoints that serve a stored file rather than JSON, so the
+    /// bytes a caller writes to disk are the bytes the server holds.
+    pub async fn raw_get_text(&self, path: &str) -> anyhow::Result<String> {
+        let url = self.url(path);
+        let resp = self
+            .authed_request(self.http.get(url))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.text().await?)
+    }
+
     /// Generic DELETE.
     pub async fn raw_delete(&self, path: &str) -> anyhow::Result<()> {
         let url = self.url(path);

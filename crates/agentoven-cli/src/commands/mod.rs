@@ -17,7 +17,12 @@ pub mod recipe;
 pub mod server;
 pub mod service_account;
 pub mod session;
+pub mod connector;
+pub mod eval;
+pub mod judge;
+pub mod scenario;
 pub mod test_suite;
+pub mod world_schema;
 pub mod tool;
 pub mod trace;
 pub mod use_cmd;
@@ -131,6 +136,26 @@ pub enum Commands {
     #[command(subcommand)]
     TestSuite(test_suite::TestSuiteCommands),
 
+    /// 🌍 Manage scenario environments (Pro).
+    #[command(subcommand)]
+    Scenario(scenario::ScenarioCommands),
+
+    /// 📐 Manage world schemas (Pro).
+    #[command(subcommand)]
+    Schema(world_schema::SchemaCommands),
+
+    /// 🔌 Manage data connectors (Pro).
+    #[command(subcommand)]
+    Connector(connector::ConnectorCommands),
+
+    /// ⚖️  Manage LLM-as-judge verifiers and their statistics (Pro).
+    #[command(subcommand)]
+    Judge(judge::JudgeCommands),
+
+    /// 🧪 Set a kitchen up to evaluate over tools and A2A (Pro).
+    #[command(subcommand)]
+    Eval(eval::EvalCommands),
+
     /// 🤖 Manage service accounts (Pro).
     #[command(subcommand)]
     ServiceAccount(service_account::ServiceAccountCommands),
@@ -168,6 +193,11 @@ pub async fn execute(cli: Cli) -> anyhow::Result<()> {
         Commands::Use(args) => use_cmd::execute(args).await,
         Commands::Environment(cmd) => environment::execute(cmd).await,
         Commands::TestSuite(cmd) => test_suite::execute(cmd).await,
+        Commands::Scenario(cmd) => scenario::execute(cmd).await,
+        Commands::Schema(cmd) => world_schema::execute(cmd).await,
+        Commands::Connector(cmd) => connector::execute(cmd).await,
+        Commands::Judge(cmd) => judge::execute(cmd).await,
+        Commands::Eval(cmd) => eval::execute(cmd).await,
         Commands::ServiceAccount(cmd) => service_account::execute(cmd).await,
         Commands::Status => status().await,
     }
