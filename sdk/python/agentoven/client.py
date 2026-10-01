@@ -375,15 +375,23 @@ class AgentOvenClient:
         return self._delete(f"/api/v1/schedules/{schedule_id}")
 
     # ── Test suites (Pro) ────────────────────────────────────────────────
+    # The server routes every one of these by id, never by name.
 
     def list_test_suites(self) -> list[dict[str, Any]]:
         return self._get("/api/v1/test-suites")
 
-    def get_test_suite(self, name: str) -> dict[str, Any]:
-        return self._get(f"/api/v1/test-suites/{name}")
+    def get_test_suite(self, suite_id: str) -> dict[str, Any]:
+        return self._get(f"/api/v1/test-suites/{suite_id}")
 
     def create_test_suite(self, suite: dict[str, Any]) -> dict[str, Any]:
         """Create a test suite.
+
+        A case is exactly one of two modes (the server rejects a case that
+        mixes or omits both — see internal/testsuite/handlers.go
+        validateCases): a plain response check (``input`` +
+        ``expected_output``), or — with ``expected_scenario_id`` set — a
+        scenario auto-pick check, which asks the agent to run with no
+        scenario named and verifies it resolves to this one and passes.
 
         Example::
 
@@ -391,21 +399,95 @@ class AgentOvenClient:
                 "name": "smoke",
                 "agent_name": "classifier",
                 "cases": [
-                    {"input": "Refund $50", "expected_contains": "refund", "timeout_secs": 30}
+                    {"name": "refund case", "input": "Refund $50", "expected_output": "refund"},
+                    {"name": "picks its own scenario", "expected_scenario_id": "refund-flow", "min_pass_rate": 1},
                 ],
             })
         """
         return self._post("/api/v1/test-suites", suite)
 
-    def run_test_suite(self, name: str) -> dict[str, Any]:
-        """Trigger an immediate (ad-hoc) run of a test suite."""
-        return self._post(f"/api/v1/test-suites/{name}/run", {})
+    def update_test_suite(self, suite_id: str, suite: dict[str, Any]) -> dict[str, Any]:
+        return self._put(f"/api/v1/test-suites/{suite_id}", suite)
 
-    def list_test_runs(self, suite_name: Optional[str] = None) -> list[dict[str, Any]]:
-        path = "/api/v1/test-runs"
-        if suite_name:
-            path += f"?suite={suite_name}"
-        return self._get(path)
+    def delete_test_suite(self, suite_id: str) -> dict[str, Any]:
+        return self._delete(f"/api/v1/test-suites/{suite_id}")
+
+    def run_test_suite(self, suite_id: str, trigger: str = "manual") -> dict[str, Any]:
+        """Trigger an immediate (ad-hoc) run of a test suite."""
+        return self._post(f"/api/v1/test-suites/{suite_id}/run", {"trigger": trigger})
+
+    def list_test_runs(self, suite_id: str) -> list[dict[str, Any]]:
+        """Lists runs for one suite. The server has no top-level
+        ``GET /api/v1/test-runs`` — only this route, nested under the suite —
+        so unlike an earlier version of this method, ``suite_id`` is
+        required, not optional."""
+        return self._get(f"/api/v1/test-suites/{suite_id}/runs")
+
+    def get_test_run(self, suite_id: str, run_id: str) -> dict[str, Any]:
+        return self._get(f"/api/v1/test-suites/{suite_id}/runs/{run_id}")
+
+    def cancel_test_run(self, run_id: str) -> dict[str, Any]:
+        return self._post(f"/api/v1/test-runs/{run_id}/cancel", {})
+
+    # ── World schemas (Pro, ADR-0032) ─────────────────────────────────────
+
+    def list_world_schemas(self) -> list[dict[str, Any]]:
+        return self._get("/api/v1/world-schemas")
+
+    def get_world_schema(self, schema_id: str) -> dict[str, Any]:
+        return self._get(f"/api/v1/world-schemas/{schema_id}")
+
+    def create_world_schema(self, schema: dict[str, Any]) -> dict[str, Any]:
+        return self._post("/api/v1/world-schemas", schema)
+
+    def save_world_schema(self, schema_id: str, schema: dict[str, Any]) -> dict[str, Any]:
+        return self._put(f"/api/v1/world-schemas/{schema_id}", schema)
+
+    def delete_world_schema(self, schema_id: str) -> dict[str, Any]:
+        return self._delete(f"/api/v1/world-schemas/{schema_id}")
+
+    # ── Scenarios (Pro, ADR-0032) ──────────────────────────────────────────
+
+    def list_scenarios(self) -> list[dict[str, Any]]:
+        return self._get("/api/v1/scenarios")
+
+    def get_scenario(self, scenario_id: str) -> dict[str, Any]:
+        return self._get(f"/api/v1/scenarios/{scenario_id}")
+
+    def create_scenario(self, scenario: dict[str, Any]) -> dict[str, Any]:
+        return self._post("/api/v1/scenarios", scenario)
+
+    def save_scenario(self, scenario_id: str, scenario: dict[str, Any]) -> dict[str, Any]:
+        return self._put(f"/api/v1/scenarios/{scenario_id}", scenario)
+
+    def delete_scenario(self, scenario_id: str) -> dict[str, Any]:
+        return self._delete(f"/api/v1/scenarios/{scenario_id}")
+
+    def run_scenarios(self, req: dict[str, Any]) -> dict[str, Any]:
+        """Submits a scenario run. Leave ``scenario_ids`` out of ``req`` to
+        auto-pick: the agent's own scenario ingredients decide what runs and
+        how many episodes (each ingredient's own ``rollouts``) — the same
+        path a scenario auto-pick test case uses.
+
+        Example::
+
+            client.run_scenarios({"agent_name": "refund-agent"})
+        """
+        return self._post("/api/v1/scenario-runs", req)
+
+    def get_scenario_run(self, run_id: str) -> dict[str, Any]:
+        return self._get(f"/api/v1/scenario-runs/{run_id}")
+
+    def list_scenario_runs(self) -> list[dict[str, Any]]:
+        return self._get("/api/v1/scenario-runs")
+
+    def get_scenario_run_episodes(self, run_id: str) -> list[dict[str, Any]]:
+        """The per-episode detail behind a scenario run's aggregate
+        pass_rate — one entry per rollout, each with its own graded verdict."""
+        return self._get(f"/api/v1/scenario-runs/{run_id}/episodes")
+
+    def cancel_scenario_run(self, run_id: str) -> dict[str, Any]:
+        return self._post(f"/api/v1/scenario-runs/{run_id}/cancel", {})
 
     # ── Workloads / K8s (Pro) ────────────────────────────────────────────
 

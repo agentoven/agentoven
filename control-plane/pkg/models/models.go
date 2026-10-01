@@ -611,6 +611,7 @@ type ServerFeatures struct {
 	TestSuites      bool `json:"test_suites"`
 	ServiceAccounts bool `json:"service_accounts"`
 	ScopedKeys      bool `json:"scoped_keys"`
+	Scenarios       bool `json:"scenarios"` // ADR-0032 world/scenario environment (Pro)
 	SSO             bool `json:"sso"`
 	Federation      bool `json:"federation"`
 	CloudProviders  bool `json:"cloud_providers"`
@@ -2493,7 +2494,12 @@ type TestSuite struct {
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
-// TestCase is a single input → expected-output pair within a test suite.
+// TestCase is a single input → expected-output pair within a test suite, OR
+// (when ExpectedScenarioID is set, Pro only) a scenario auto-pick check: the
+// agent is asked to run with no scenario named explicitly, and the case
+// verifies both that this exact scenario was the one the agent's own
+// ResolvedConfig.Scenarios ingredients resolved to, and that it passed —
+// rather than the single input/expected-output substring match below.
 type TestCase struct {
 	ID             string            `json:"id"`
 	Name           string            `json:"name"`
@@ -2502,6 +2508,15 @@ type TestCase struct {
 	Tags           []string          `json:"tags,omitempty"`            // e.g. ["edge-case", "safety"]
 	Variables      map[string]string `json:"variables,omitempty"`       // prompt template variables
 	MaxLatencyMs   int64             `json:"max_latency_ms,omitempty"`  // SLA threshold
+
+	// ExpectedScenarioID switches this case to scenario auto-pick mode
+	// (Pro only — OSS has no scenario store, so this is simply ignored by
+	// the OSS test-suite executor). Empty means the ordinary input/
+	// expected-output case above.
+	ExpectedScenarioID string `json:"expected_scenario_id,omitempty"`
+	// MinPassRate gates the scenario's own pass rate; 0 defaults to
+	// requiring every episode to pass (pass_rate == 1).
+	MinPassRate float64 `json:"min_pass_rate,omitempty"`
 }
 
 // TestRunStatus tracks the lifecycle of a test suite execution.
@@ -2548,6 +2563,12 @@ type TestResult struct {
 	CostUSD        float64 `json:"cost_usd"`
 	Error          string  `json:"error,omitempty"`
 	TraceID        string  `json:"trace_id,omitempty"` // link to the trace record
+
+	// ActualScenarioID is set for a scenario auto-pick case (Pro): the
+	// scenario_id the agent's own ingredients actually resolved to, which
+	// this same value (and the run it came from) is independently visible
+	// in the audit log via TraceID — not just trusted from this response.
+	ActualScenarioID string `json:"actual_scenario_id,omitempty"`
 }
 
 // TestRunSummary aggregates metrics across all test case results.

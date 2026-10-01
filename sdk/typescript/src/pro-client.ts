@@ -34,6 +34,7 @@ import type {
   CreateServiceAccountResponse,
   Deployment,
   Environment,
+  EpisodeRecord,
   Guardrail,
   GuardrailException,
   Kitchen,
@@ -42,6 +43,9 @@ import type {
   Recipe,
   RecipeRun,
   Schedule,
+  Scenario,
+  ScenarioRun,
+  ScenarioRunRequest,
   ScopedAPIKey,
   ServerInfo,
   ServiceAccount,
@@ -53,7 +57,8 @@ import type {
   User,
   UserRole,
   Workload,
-} from './types';
+  WorldSchema,
+} from './types.js';
 
 export class AgentOvenAPIError extends Error {
   constructor(
@@ -328,26 +333,122 @@ export class ProClient {
   }
 
   // ── Test suites ────────────────────────────────────────────────────────────
+  // The server routes every one of these by id, never by name — despite the
+  // early `name`-labelled params below (kept only so `getTestSuite(x)` /
+  // `runTestSuite(x)` don't break existing callers passing an id under that
+  // name; pass the suite's `id` field, not its display name).
 
   async listTestSuites(): Promise<TestSuite[]> {
     return this.get('/api/v1/test-suites');
   }
 
-  async getTestSuite(name: string): Promise<TestSuite> {
-    return this.get(`/api/v1/test-suites/${name}`);
+  async getTestSuite(id: string): Promise<TestSuite> {
+    return this.get(`/api/v1/test-suites/${id}`);
   }
 
   async createTestSuite(suite: Omit<TestSuite, 'id' | 'created_at'>): Promise<TestSuite> {
     return this.post('/api/v1/test-suites', suite);
   }
 
-  async runTestSuite(name: string): Promise<TestRun> {
-    return this.post(`/api/v1/test-suites/${name}/run`, {});
+  async updateTestSuite(id: string, suite: Partial<TestSuite>): Promise<TestSuite> {
+    return this.put(`/api/v1/test-suites/${id}`, suite);
   }
 
-  async listTestRuns(suiteName?: string): Promise<TestRun[]> {
-    const qs = suiteName ? `?suite=${encodeURIComponent(suiteName)}` : '';
-    return this.get(`/api/v1/test-runs${qs}`);
+  async deleteTestSuite(id: string): Promise<void> {
+    return this.delete(`/api/v1/test-suites/${id}`);
+  }
+
+  async runTestSuite(id: string, trigger = 'manual'): Promise<{ run_id: string; status: string }> {
+    return this.post(`/api/v1/test-suites/${id}/run`, { trigger });
+  }
+
+  /**
+   * Lists runs for one suite. The server has no top-level `GET
+   * /api/v1/test-runs` — only this nested route — so, unlike the earlier
+   * version of this method, `suiteId` is required, not optional.
+   */
+  async listTestRuns(suiteId: string): Promise<TestRun[]> {
+    return this.get(`/api/v1/test-suites/${suiteId}/runs`);
+  }
+
+  async getTestRun(suiteId: string, runId: string): Promise<TestRun> {
+    return this.get(`/api/v1/test-suites/${suiteId}/runs/${runId}`);
+  }
+
+  async cancelTestRun(runId: string): Promise<void> {
+    return this.post(`/api/v1/test-runs/${runId}/cancel`, {});
+  }
+
+  // ── World schemas (Pro, ADR-0032) ────────────────────────────────────────────
+
+  async listWorldSchemas(): Promise<WorldSchema[]> {
+    return this.get('/api/v1/world-schemas');
+  }
+
+  async getWorldSchema(id: string): Promise<WorldSchema> {
+    return this.get(`/api/v1/world-schemas/${id}`);
+  }
+
+  async createWorldSchema(schema: WorldSchema): Promise<{ schema: WorldSchema; issues: unknown[] }> {
+    return this.post('/api/v1/world-schemas', schema);
+  }
+
+  async saveWorldSchema(id: string, schema: WorldSchema): Promise<{ schema: WorldSchema; issues: unknown[] }> {
+    return this.put(`/api/v1/world-schemas/${id}`, schema);
+  }
+
+  async deleteWorldSchema(id: string): Promise<void> {
+    return this.delete(`/api/v1/world-schemas/${id}`);
+  }
+
+  // ── Scenarios (Pro, ADR-0032) ─────────────────────────────────────────────────
+
+  async listScenarios(): Promise<Scenario[]> {
+    return this.get('/api/v1/scenarios');
+  }
+
+  async getScenario(id: string): Promise<Scenario> {
+    return this.get(`/api/v1/scenarios/${id}`);
+  }
+
+  async createScenario(scenario: Scenario): Promise<Scenario> {
+    return this.post('/api/v1/scenarios', scenario);
+  }
+
+  async saveScenario(id: string, scenario: Scenario): Promise<Scenario> {
+    return this.put(`/api/v1/scenarios/${id}`, scenario);
+  }
+
+  async deleteScenario(id: string): Promise<void> {
+    return this.delete(`/api/v1/scenarios/${id}`);
+  }
+
+  /**
+   * Submits a scenario run. Leave `scenario_ids` unset to auto-pick: the
+   * agent's own scenario ingredients decide what runs and how many episodes
+   * (each ingredient's own `rollouts`), the same path a scenario auto-pick
+   * test case uses.
+   */
+  async runScenarios(req: ScenarioRunRequest): Promise<ScenarioRun> {
+    return this.post('/api/v1/scenario-runs', req);
+  }
+
+  async getScenarioRun(runId: string): Promise<ScenarioRun> {
+    return this.get(`/api/v1/scenario-runs/${runId}`);
+  }
+
+  async listScenarioRuns(): Promise<ScenarioRun[]> {
+    return this.get('/api/v1/scenario-runs');
+  }
+
+  /** The per-episode detail behind a scenario run's aggregate pass_rate —
+   *  one entry per rollout, each with its own graded verdict. */
+  async getScenarioRunEpisodes(runId: string): Promise<EpisodeRecord[]> {
+    return this.get(`/api/v1/scenario-runs/${runId}/episodes`);
+  }
+
+  async cancelScenarioRun(runId: string): Promise<void> {
+    return this.post(`/api/v1/scenario-runs/${runId}/cancel`, {});
   }
 
   // ── Workloads (K8s) ────────────────────────────────────────────────────────

@@ -2,6 +2,7 @@
 
 use clap::{Args, Subcommand};
 use colored::Colorize;
+use std::time::Duration;
 
 use super::pro_gate;
 
@@ -18,6 +19,8 @@ pub enum TestSuiteCommands {
     Create(CreateArgs),
     /// Run a test suite.
     Run(RunArgs),
+    /// Show a run's per-case results (and episodes, for a scenario auto-pick case).
+    RunStatus(RunStatusArgs),
     /// Delete a test suite.
     Delete(DeleteArgs),
 }
@@ -35,7 +38,13 @@ pub struct CreateArgs {
     /// Agent to test.
     #[arg(long)]
     pub agent: String,
-    /// Test cases file (JSON).
+    /// Suite description.
+    #[arg(long)]
+    pub description: Option<String>,
+    /// Test cases file (JSON array). Each case is either a plain response
+    /// check ({"name","input","expected_output"}) or a scenario auto-pick
+    /// check ({"name","expected_scenario_id","min_pass_rate"}) — see
+    /// `agentoven scenario --help` for what a scenario ingredient resolves to.
     #[arg(long)]
     pub cases: Option<String>,
 }
@@ -44,9 +53,17 @@ pub struct CreateArgs {
 pub struct RunArgs {
     /// Test suite ID.
     pub id: String,
-    /// Wait for completion.
+    /// Wait for completion and print results.
     #[arg(long)]
     pub wait: bool,
+}
+
+#[derive(Args)]
+pub struct RunStatusArgs {
+    /// Test suite ID.
+    pub suite_id: String,
+    /// Run ID.
+    pub run_id: String,
 }
 
 #[derive(Args)]
@@ -68,6 +85,7 @@ pub async fn execute(cmd: TestSuiteCommands) -> anyhow::Result<()> {
         TestSuiteCommands::Get(args) => get(args).await,
         TestSuiteCommands::Create(args) => create(args).await,
         TestSuiteCommands::Run(args) => run(args).await,
+        TestSuiteCommands::RunStatus(args) => run_status(args).await,
         TestSuiteCommands::Delete(args) => delete(args).await,
     }
 }
@@ -82,19 +100,22 @@ async fn list() -> anyhow::Result<()> {
         println!("  (no test suites)");
     } else {
         println!(
-            "  {:<24} {:<16} {:<12} {:<20}",
+            "  {:<24} {:<24} {:<8} {:<12}",
             "NAME".bold(),
             "AGENT".bold(),
             "CASES".bold(),
-            "LAST RUN".bold()
+            "ID".bold()
         );
         println!("  {}", "─".repeat(76).dimmed());
         for s in &suites {
             let name = s["name"].as_str().unwrap_or("-");
-            let agent = s["agent"].as_str().unwrap_or("-");
-            let cases = s["case_count"].as_u64().unwrap_or(0);
-            let last_run = s["last_run_at"].as_str().unwrap_or("never");
-            println!("  {:<24} {:<16} {:<12} {:<20}", name, agent, cases, last_run);
+            // The wire field is agent_name, not agent — a suite created
+            // before this fix, or via the raw API, always has it under that
+            // key; there is no top-level "agent" field on the server model.
+            let agent = s["agent_name"].as_str().unwrap_or("-");
+            let cases = s["cases"].as_array().map(|c| c.len()).unwrap_or(0);
+            let id = s["id"].as_str().unwrap_or("-");
+            println!("  {:<24} {:<24} {:<8} {:<12}", name, agent, cases, id.dimmed());
         }
         println!("\n  {} {} suite(s)", "→".dimmed(), suites.len());
     }
@@ -131,13 +152,19 @@ async fn create(args: CreateArgs) -> anyhow::Result<()> {
 
     let mut body = serde_json::json!({
         "name": args.name,
-        "agent": args.agent,
+        // The server field is agent_name — the earlier "agent" key here
+        // meant every suite created through the CLI failed server-side
+        // validation ("agent_name is required") before this fix.
+        "agent_name": args.agent,
+        "description": args.description.unwrap_or_default(),
     });
 
     if let Some(ref cases_file) = args.cases {
         let content = tokio::fs::read_to_string(cases_file).await?;
         let cases: serde_json::Value = serde_json::from_str(&content)?;
         body["cases"] = cases;
+    } else {
+        body["cases"] = serde_json::json!([]);
     }
 
     let client = pro_gate::build_client()?;
@@ -145,11 +172,13 @@ async fn create(args: CreateArgs) -> anyhow::Result<()> {
         .raw_post::<serde_json::Value>("/api/v1/test-suites", &body)
         .await
     {
-        Ok(_) => {
+        Ok(s) => {
+            let id = s["id"].as_str().unwrap_or("-");
             println!(
-                "  {} Test suite {} created.",
+                "  {} Test suite {} created (id: {}).",
                 "✓".green().bold(),
-                args.name.cyan()
+                args.name.cyan(),
+                id.dimmed()
             );
         }
         Err(e) => {
@@ -168,35 +197,149 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
 
     let body = serde_json::json!({});
     let client = pro_gate::build_client()?;
-    match client
-        .raw_post::<serde_json::Value>(
-            &format!("/api/v1/test-suites/{}/runs", args.id),
-            &body,
-        )
+    // The route is singular /run, not /runs — the plural form 404s.
+    let r: serde_json::Value = match client
+        .raw_post(&format!("/api/v1/test-suites/{}/run", args.id), &body)
         .await
     {
-        Ok(r) => {
-            let run_id = r["id"].as_str().unwrap_or("-");
-            println!(
-                "  {} Test run started (run: {})",
-                "✓".green().bold(),
-                run_id.cyan()
-            );
-
-            if args.wait {
-                println!("  {} Waiting for completion...", "→".dimmed());
-                // Future: poll for completion
-            }
-        }
+        Ok(r) => r,
         Err(e) => {
             println!(
                 "  {} Failed: {}",
                 "✗".red().bold(),
                 e.to_string().dimmed()
             );
+            return Ok(());
+        }
+    };
+
+    let run_id = r["run_id"].as_str().unwrap_or("-").to_string();
+    println!(
+        "  {} Test run started (run: {})",
+        "✓".green().bold(),
+        run_id.cyan()
+    );
+
+    if !args.wait {
+        println!(
+            "  {} follow with {}\n",
+            "→".dimmed(),
+            format!("agentoven test-suite run-status {} {}", args.id, run_id).cyan()
+        );
+        return Ok(());
+    }
+
+    println!("  {} Waiting for completion...", "→".dimmed());
+    let mut result = serde_json::Value::Null;
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        result = client
+            .raw_get(&format!(
+                "/api/v1/test-suites/{}/runs/{}",
+                args.id, run_id
+            ))
+            .await?;
+        let status = result["status"].as_str().unwrap_or("");
+        if status != "pending" && status != "running" {
+            break;
+        }
+    }
+    print_run_result(&result);
+    Ok(())
+}
+
+async fn run_status(args: RunStatusArgs) -> anyhow::Result<()> {
+    let client = pro_gate::build_client()?;
+    let result: serde_json::Value = client
+        .raw_get(&format!(
+            "/api/v1/test-suites/{}/runs/{}",
+            args.suite_id, args.run_id
+        ))
+        .await?;
+    print_run_result(&result);
+
+    // For a scenario auto-pick case, join through to the scenario run's own
+    // episodes — the multi-episode breakdown a single pass/fail line can't
+    // show, and the same detail `agentoven scenario run-status --episodes`
+    // gives for a scenario run triggered directly.
+    if let Some(results) = result["results"].as_array() {
+        for r in results {
+            let Some(scenario_id) = r["actual_scenario_id"].as_str() else { continue };
+            let Some(trace_id) = r["trace_id"].as_str() else { continue };
+            println!(
+                "\n  {} episodes for {} (scenario {}):\n",
+                "→".dimmed(),
+                r["case_name"].as_str().unwrap_or("-").bold(),
+                scenario_id.cyan()
+            );
+            let eps: Vec<serde_json::Value> = client
+                .raw_get(&format!("/api/v1/scenario-runs/{}/episodes", trace_id))
+                .await?;
+            for e in &eps {
+                let v = &e["verdict"];
+                let status = v["status"].as_str().unwrap_or("?");
+                let marker = match status {
+                    "passed" => "✓".green().bold(),
+                    "failed" => "✗".red().bold(),
+                    _ => "∅".yellow().bold(),
+                };
+                println!(
+                    "    {} seed {:<4} reward {:<7}",
+                    marker,
+                    e["seed"],
+                    format!("{:.3}", v["reward"].as_f64().unwrap_or(0.0))
+                );
+            }
+            println!("    {} {} episode(s)", "→".dimmed(), eps.len());
         }
     }
     Ok(())
+}
+
+fn print_run_result(result: &serde_json::Value) {
+    let status = result["status"].as_str().unwrap_or("-");
+    let marker = match status {
+        "completed" => "✓".green().bold(),
+        "failed" => "✗".red().bold(),
+        _ => "∅".yellow().bold(),
+    };
+    println!("\n  {} status: {}", marker, status.bold());
+
+    if let Some(summary) = result.get("summary") {
+        println!(
+            "  pass_rate {} · passed {}/{} · avg_latency {}ms · cost ${:.4}\n",
+            format!(
+                "{:.0}%",
+                summary["pass_rate"].as_f64().unwrap_or(0.0) * 100.0
+            )
+            .bold(),
+            summary["passed"],
+            summary["total_cases"],
+            summary["avg_latency_ms"],
+            summary["total_cost_usd"].as_f64().unwrap_or(0.0)
+        );
+    }
+
+    if let Some(results) = result["results"].as_array() {
+        for r in results {
+            let passed = r["passed"].as_bool().unwrap_or(false);
+            let marker = if passed { "✓".green().bold() } else { "✗".red().bold() };
+            let case_name = r["case_name"].as_str().unwrap_or("-");
+            let extra = if let Some(scenario_id) = r["actual_scenario_id"].as_str() {
+                format!(" (picked: {})", scenario_id).dimmed().to_string()
+            } else if let Some(err) = r["error"].as_str() {
+                if !err.is_empty() {
+                    format!(" — {}", err).red().to_string()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+            println!("  {} {}{}", marker, case_name, extra);
+        }
+        println!();
+    }
 }
 
 async fn delete(args: DeleteArgs) -> anyhow::Result<()> {

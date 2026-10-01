@@ -940,11 +940,96 @@ type anthropicTool struct {
 }
 
 type anthropicRequest struct {
-	Model     string               `json:"model"`
-	System    string               `json:"system,omitempty"`
-	Messages  []models.ChatMessage `json:"messages"`
-	MaxTokens int                  `json:"max_tokens"`
-	Tools     []anthropicTool      `json:"tools,omitempty"`
+	Model     string             `json:"model"`
+	System    string             `json:"system,omitempty"`
+	Messages  []anthropicMessage `json:"messages"`
+	MaxTokens int                `json:"max_tokens"`
+	Tools     []anthropicTool    `json:"tools,omitempty"`
+}
+
+// anthropicMessage is one turn in Anthropic's wire format. Content is a plain
+// string for an ordinary text turn, or a list of anthropicContentBlock for a
+// turn that carries tool_use/tool_result blocks — Anthropic accepts either
+// shape per message, so anthropicMessagesFrom only builds the block form when
+// a message actually needs one.
+type anthropicMessage struct {
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"`
+}
+
+// anthropicContentBlock is a "text", "tool_use" or "tool_result" block.
+// Exactly the fields for one of those three are set; json:",omitempty"
+// leaves the other kinds out of the wire payload.
+type anthropicContentBlock struct {
+	Type string `json:"type"`
+
+	// text
+	Text string `json:"text,omitempty"`
+
+	// tool_use (an assistant message asking to call a tool)
+	ID    string                 `json:"id,omitempty"`
+	Name  string                 `json:"name,omitempty"`
+	Input map[string]interface{} `json:"input,omitempty"`
+
+	// tool_result (a user message answering a tool_use)
+	ToolUseID string `json:"tool_use_id,omitempty"`
+	Content   string `json:"content,omitempty"`
+	IsError   bool   `json:"is_error,omitempty"`
+}
+
+// anthropicMessagesFrom translates the router's provider-agnostic message
+// history — OpenAI-shaped: an assistant message's tool calls in ToolCalls,
+// each answered by a follow-up message with Role "tool" and a ToolCallID —
+// into Anthropic's Messages API shape, which has no "tool" role at all.
+//
+// An assistant message with ToolCalls becomes an assistant turn whose content
+// is a text block (if it also said something) followed by one tool_use block
+// per call. Anthropic requires every tool_use in one assistant turn to be
+// answered together, in one following user turn, so consecutive "tool"
+// messages are merged into a single user message with one tool_result block
+// each — passing them through as separate consecutive messages the way the
+// generic history stores them is exactly what produced "Unexpected role
+// \"tool\"" once, and would still violate Anthropic's turn-pairing even after
+// the role were merely renamed.
+func anthropicMessagesFrom(msgs []models.ChatMessage) []anthropicMessage {
+	var out []anthropicMessage
+	for i := 0; i < len(msgs); i++ {
+		m := msgs[i]
+
+		if m.Role == "tool" {
+			var blocks []anthropicContentBlock
+			for i < len(msgs) && msgs[i].Role == "tool" {
+				blocks = append(blocks, anthropicContentBlock{
+					Type:      "tool_result",
+					ToolUseID: msgs[i].ToolCallID,
+					Content:   msgs[i].Content,
+				})
+				i++
+			}
+			i--
+			out = append(out, anthropicMessage{Role: "user", Content: blocks})
+			continue
+		}
+
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			var blocks []anthropicContentBlock
+			if m.Content != "" {
+				blocks = append(blocks, anthropicContentBlock{Type: "text", Text: m.Content})
+			}
+			for _, tc := range m.ToolCalls {
+				var input map[string]interface{}
+				_ = json.Unmarshal([]byte(tc.Function.Arguments), &input)
+				blocks = append(blocks, anthropicContentBlock{
+					Type: "tool_use", ID: tc.ID, Name: tc.Function.Name, Input: input,
+				})
+			}
+			out = append(out, anthropicMessage{Role: "assistant", Content: blocks})
+			continue
+		}
+
+		out = append(out, anthropicMessage{Role: m.Role, Content: m.Content})
+	}
+	return out
 }
 
 type anthropicResponse struct {
@@ -1001,7 +1086,7 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 		}
 	}
 
-	anthReq := anthropicRequest{Model: model, System: systemText, Messages: filteredMessages, MaxTokens: maxTokens}
+	anthReq := anthropicRequest{Model: model, System: systemText, Messages: anthropicMessagesFrom(filteredMessages), MaxTokens: maxTokens}
 	// Convert tool definitions to Anthropic format
 	if len(req.Tools) > 0 {
 		for _, td := range req.Tools {

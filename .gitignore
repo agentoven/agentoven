@@ -71,3 +71,4 @@ ADR/0015-operational-hardening-plan.md
 pitch/*
 
 *.workspacesdk/typescript/*.tgz
+*.tgz

@@ -20,7 +20,15 @@
  * ```
  */
 
-// Re-export native bindings (napi-rs generated)
+// Re-export native bindings (napi-rs generated). This package's compiled
+// output lives at dist/, two levels below the actual generated binding —
+// which is the package root's index.js (+ platform .node binary), not a
+// dist/native.js that never gets built. Importing from './native' (what
+// this used to say) meant the package's own documented entrypoint
+// (`import { AgentOvenClient } from '@agentoven/sdk'`) crashed immediately
+// with "Cannot find module '.../dist/native'" for every consumer — the
+// pro-client-only exports below still worked, which is why that was easy to
+// miss. src/native.d.ts supplies the types for this same root file.
 export {
   Agent,
   AgentStatus,
@@ -29,14 +37,15 @@ export {
   Recipe,
   AgentOvenClient,
   createAgent,
-} from './native';
+} from '../index.js';
 
 // Pro REST client
-export { ProClient, AgentOvenAPIError } from './pro-client';
+export { ProClient, AgentOvenAPIError } from './pro-client.js';
 
 // Re-export all types
 export type {
   AgentOvenClientOptions,
+  AssertionResult,
   AuditEvent,
   Branch,
   CreateGuardrailRequest,
@@ -44,6 +53,8 @@ export type {
   CreateServiceAccountResponse,
   Deployment,
   Environment,
+  EpisodeRecord,
+  EpisodeVerdict,
   Guardrail,
   GuardrailException,
   GuardrailKind,
@@ -55,19 +66,26 @@ export type {
   Recipe as RecipeType,
   RegisterAgentOptions,
   Schedule,
+  Scenario,
+  ScenarioResult,
+  ScenarioRun,
+  ScenarioRunRequest,
   ServerInfo,
   ServiceAccount,
   Session,
   Step,
   TestCase,
+  TestResult,
   TestRun,
+  TestRunSummary,
   TestSuite,
   TraceabilityMatrix,
   User,
   UserRole,
   Workload,
+  WorldSchema,
   AgentStatus as AgentStatusType,
   EnvironmentKind,
   IngredientKind as IngredientKindType,
-} from './types';
+} from './types.js';
 
