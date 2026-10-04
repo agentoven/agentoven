@@ -48,6 +48,18 @@ type Identity struct {
 	// Claims holds raw claims from the token (for custom policies in Enterprise).
 	Claims map[string]string `json:"claims,omitempty"`
 
+	// Kind classifies the principal: "user", "service_account", "scoped_key",
+	// "api_key", "agent". Audit uses it to distinguish human from machine actors.
+	Kind string `json:"kind,omitempty"`
+
+	// OwnerSubject / OwnerEmail identify the human *accountable* for a machine
+	// principal (ADR-0031 §5). They are seeded from the credential's CreatedBy so
+	// that every audit event maps to a person, but they never replace Subject:
+	// the actor is the credential that acted, and rewriting it to its creator
+	// would attribute an action to someone who may have left months ago.
+	OwnerSubject string `json:"owner_subject,omitempty"`
+	OwnerEmail   string `json:"owner_email,omitempty"`
+
 	// ExpiresAt is when this identity's session expires.
 	ExpiresAt time.Time `json:"expires_at,omitempty"`
 }

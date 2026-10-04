@@ -80,10 +80,14 @@ func (p *ScopedKeyProvider) Authenticate(ctx context.Context, r *http.Request) (
 	identity := &contracts.Identity{
 		Subject:     "scopedkey:" + scopedKey.ID,
 		Provider:    "scoped-key",
+		Kind:        "scoped_key",
 		Kitchen:     scopedKey.Kitchen,
 		Role:        role,
 		DisplayName: scopedKey.Label,
-		ExpiresAt:   time.Now().Add(1 * time.Hour), // session-level expiry
+		// The key's creator is the accountable owner until reassigned. Without
+		// this, scoped-key activity audits as "scopedkey:<id>" and no human.
+		OwnerSubject: scopedKey.CreatedBy,
+		ExpiresAt:    time.Now().Add(1 * time.Hour), // session-level expiry
 		Claims: map[string]string{
 			"key_id":  scopedKey.ID,
 			"label":   scopedKey.Label,

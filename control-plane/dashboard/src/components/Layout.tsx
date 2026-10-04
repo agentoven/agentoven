@@ -123,7 +123,10 @@ export function Layout() {
   }
 
   function navLinkClass({ isActive }: { isActive: boolean }) {
-    return `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+    const shape = collapsed
+      ? 'w-10 h-10 mx-auto justify-center'
+      : 'gap-3 px-3 py-2.5 w-full';
+    return `flex items-center rounded-lg text-sm font-medium transition-colors ${shape} ${
       isActive
         ? 'bg-[var(--ao-brand)] text-white'
         : 'text-[var(--ao-text-muted)] hover:bg-[var(--ao-surface-hover)] hover:text-[var(--ao-text)]'
@@ -139,7 +142,7 @@ export function Layout() {
         }`}
       >
         {/* Logo */}
-        <div className="flex items-center gap-2 px-5 py-5">
+        <div className={`flex items-center gap-2 py-5 ${collapsed ? 'justify-center px-0' : 'px-5'}`}>
           <img src="/logo.png" alt="AgentOven" className="w-8 h-8 rounded-full object-cover shrink-0" />
           {!collapsed && (
             <span className="text-lg font-bold text-[var(--ao-brand-light)] truncate">
@@ -171,10 +174,13 @@ export function Layout() {
             </NavLink>
           )}
 
-          {filteredGroups.map((group) => {
+          {filteredGroups.map((group, groupIndex) => {
             const isExpanded = isSearching || expandedGroups.includes(group.id);
             return (
-              <div key={group.id} className="pt-2">
+              <div key={group.id} className={collapsed ? '' : 'pt-2'}>
+                {collapsed && groupIndex > 0 && (
+                  <div aria-hidden className="h-px bg-[var(--ao-border)] mx-3 my-2" />
+                )}
                 {!collapsed && (
                   <button
                     type="button"
@@ -211,7 +217,9 @@ export function Layout() {
           type="button"
           onClick={() => setCollapsed((v) => !v)}
           aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          className="flex items-center justify-center gap-2 px-5 py-3 text-[var(--ao-text-muted)] hover:text-[var(--ao-text)] border-t border-[var(--ao-border)] transition-colors"
+          className={`flex items-center gap-2 py-3 text-[var(--ao-text-muted)] hover:text-[var(--ao-text)] border-t border-[var(--ao-border)] transition-colors ${
+            collapsed ? 'justify-center px-0' : 'justify-end px-5'
+          }`}
         >
           {collapsed ? <ChevronsRight size={16} /> : <ChevronsLeft size={16} />}
         </button>
