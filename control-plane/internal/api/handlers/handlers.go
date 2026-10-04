@@ -14,7 +14,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -38,6 +37,7 @@ import (
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	pkgmw "github.com/agentoven/agentoven/control-plane/pkg/middleware"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
+	"github.com/agentoven/agentoven/control-plane/pkg/skills"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -58,6 +58,7 @@ type Handlers struct {
 	Catalog         *catalog.Catalog
 	Sessions        contracts.SessionStore
 	Guardrails      contracts.GuardrailService
+	SkillUploads    *skills.UploadStore
 
 	// RecipeExecutor is the pluggable execution backend for POST /{name}/bake.
 	// OSS: nil — BakeRecipe falls through to h.Workflow.ExecuteRecipe directly.
@@ -132,6 +133,27 @@ type WorkloadScaler interface {
 func New(s store.Store, mr *router.ModelRouter, gw *mcpgw.Gateway, wf *workflow.Engine, cat *catalog.Catalog, sess contracts.SessionStore, pm *process.Manager) *Handlers {
 	res := resolver.NewResolver(s)
 	exec := executor.NewExecutor(s, mr, gw, sess)
+
+	// Journaling is on by default — it is pure additive, append-only local
+	// files (see executor.FileJournal), not the store this repo's "OSS is
+	// in-memory only" rule is about — and it is what makes an interrupted
+	// agentic loop resumable instead of lost. AGENTOVEN_JOURNAL_DIR overrides
+	// the default ~/.agentoven/journal path; set AGENTOVEN_JOURNAL_DISABLE=true
+	// to turn it off entirely.
+	//
+	// Nothing here prunes old journals yet — unlike traces/audit events, which
+	// have a retention janitor (internal/retention), a finished run's journal
+	// file is left on disk until something calls Journal.Discard. That is a
+	// known gap, not an oversight: worth a janitor of its own once this sees
+	// real use, not before.
+	if os.Getenv("AGENTOVEN_JOURNAL_DISABLE") != "true" {
+		if j, err := executor.NewFileJournal(os.Getenv("AGENTOVEN_JOURNAL_DIR")); err != nil {
+			log.Warn().Err(err).Msg("Failed to initialize execution journal, runs will not be resumable")
+		} else {
+			exec.SetJournal(j)
+		}
+	}
+
 	return &Handlers{
 		Store:           s,
 		Router:          mr,
@@ -143,6 +165,7 @@ func New(s store.Store, mr *router.ModelRouter, gw *mcpgw.Gateway, wf *workflow.
 		PromptValidator: &contracts.CommunityPromptValidator{},
 		Catalog:         cat,
 		Sessions:        sess,
+		SkillUploads:    skills.NewUploadStore(),
 	}
 }
 
@@ -4087,6 +4110,7 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		Message         string            `json:"message"`
 		Variables       map[string]string `json:"variables,omitempty"`        // prompt template variables
 		ThinkingEnabled bool              `json:"thinking_enabled,omitempty"` // enable extended thinking
+		SessionID       string            `json:"session_id,omitempty"`       // continue a prior conversation — any agent, not just agentic
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Message == "" {
 		respondError(w, http.StatusBadRequest, "Request must include a non-empty 'message' field")
@@ -4197,7 +4221,7 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Execute the agentic loop
-	response, trace, err := h.Executor.Execute(r.Context(), agent, req.Message, resolved, sanitizedVars, req.ThinkingEnabled)
+	response, trace, err := h.Executor.Execute(r.Context(), agent, req.Message, resolved, sanitizedVars, req.ThinkingEnabled, req.SessionID)
 	if err != nil {
 		respondError(w, http.StatusBadGateway, "Execution failed: "+err.Error())
 		return
@@ -4257,6 +4281,7 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		"agent":           agentName,
 		"response":        response,
 		"trace_id":        trace.TraceID,
+		"session_id":      trace.SessionID, // pass back to continue this conversation on a later /invoke
 		"turns":           len(trace.Turns),
 		"usage":           trace.Usage,
 		"latency_ms":      trace.TotalMs,
@@ -4264,47 +4289,305 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// StreamInvokeAgent proxies a streaming agentic-loop call (SSE) to the agent pod.
+// StreamInvokeAgent executes a managed agent's agentic loop over SSE: proxies
+// to a running agent pod when one exists (identical to before), or — new —
+// streams the in-process Go executor directly when it doesn't, the same
+// fallback InvokeAgent already uses for its synchronous counterpart. Before
+// this, an agent with no running process could never be streamed at all.
 // POST /api/v1/agents/{agentName}/invoke/stream
 func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 	agentName := chi.URLParam(r, "agentName")
 	kitchen := middleware.GetKitchen(r.Context())
 
+	if identity := pkgmw.GetIdentity(r.Context()); identity != nil && identity.Provider == "scoped-key" {
+		keyID := identity.Claims["key_id"]
+		scopedKey, err := h.Store.GetScopedKey(r.Context(), kitchen, keyID)
+		if err != nil || !scopedKey.CanAccessAgent(agentName) {
+			respondError(w, http.StatusForbidden,
+				fmt.Sprintf("Scoped key does not have access to agent '%s'", agentName))
+			return
+		}
+	}
+
 	var req struct {
-		Message   string            `json:"message"`
-		Variables map[string]string `json:"variables"`
+		Message         string            `json:"message"`
+		Variables       map[string]string `json:"variables,omitempty"`
+		ThinkingEnabled bool              `json:"thinking_enabled,omitempty"`
+		SessionID       string            `json:"session_id,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	if req.Message == "" {
-		respondError(w, http.StatusBadRequest, "message is required")
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Message == "" {
+		respondError(w, http.StatusBadRequest, "Request must include a non-empty 'message' field")
 		return
 	}
 
-	agent, err := h.Store.GetAgent(r.Context(), agentName, kitchen)
-	if err != nil || agent == nil {
-		respondError(w, http.StatusNotFound, fmt.Sprintf("agent '%s' not found", agentName))
+	// NOTE: this previously called GetAgent(ctx, agentName, kitchen) — the
+	// store's signature is (ctx, kitchen, name), so the arguments were
+	// swapped and this endpoint could not reliably resolve an agent outside
+	// a single-kitchen deployment. Fixed here.
+	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
-	if agent.Process == nil || agent.Process.Status != models.ProcessRunning {
+
+	if agent.Mode != models.AgentModeManaged {
 		respondError(w, http.StatusBadRequest,
-			fmt.Sprintf("agent '%s' process is not running — bake it first", agentName))
+			fmt.Sprintf("Agent '%s' is in '%s' mode — use the A2A endpoint for external agents", agentName, agent.Mode))
 		return
 	}
 
-	// Sanitize variables (pass-through for streaming; validation handled per-agent at bake time)
-	sanitizedVars := req.Variables
-	if sanitizedVars == nil {
-		sanitizedVars = map[string]string{}
+	if h.Guardrails != nil && len(agent.Guardrails) > 0 {
+		eval, gErr := h.Guardrails.EvaluateInput(r.Context(), agent.Guardrails, req.Message)
+		if gErr != nil {
+			log.Warn().Err(gErr).Str("agent", agentName).Msg("Input guardrail evaluation error")
+			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "input", nil, gErr)
+		} else if !eval.Passed {
+			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "input", eval, nil)
+			respondJSON(w, http.StatusForbidden, map[string]interface{}{
+				"error":      "Input blocked by guardrails",
+				"guardrails": eval.Results,
+			})
+			return
+		}
 	}
 
-	if err := h.proxyToProcessStream(r.Context(), w, agent, req.Message, sanitizedVars); err != nil {
-		// proxyToProcessStream writes headers only on success; on early error we
-		// can still return a JSON error response.
-		respondError(w, http.StatusBadGateway, err.Error())
+	if agent.Status != models.AgentStatusReady {
+		respondError(w, http.StatusBadRequest,
+			fmt.Sprintf("Agent '%s' is not ready (status: %s) — bake it first", agentName, agent.Status))
+		return
 	}
+
+	if agent.Process != nil && agent.Process.Status == models.ProcessRunning {
+		sanitizedVars := req.Variables
+		if sanitizedVars == nil {
+			sanitizedVars = map[string]string{}
+		}
+		if err := h.proxyToProcessStream(r.Context(), w, agent, req.Message, sanitizedVars); err != nil {
+			// proxyToProcessStream writes headers only on success; on early
+			// error we can still return a JSON error response.
+			respondError(w, http.StatusBadGateway, err.Error())
+		}
+		return
+	}
+
+	// No running pod — stream the in-process Go executor directly.
+	var resolved *models.ResolvedIngredients
+	if agent.ResolvedConfig != nil {
+		resolved = agent.ResolvedConfig
+	} else {
+		resolved, err = h.Resolver.Resolve(r.Context(), agent)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, "Ingredient resolution failed: "+err.Error())
+			return
+		}
+	}
+
+	sanitizedVars := req.Variables
+	if len(req.Variables) > 0 {
+		settings, _ := h.Store.GetKitchenSettings(r.Context(), kitchen)
+		var issues []models.ValidationIssue
+		sanitizedVars, issues, err = h.PromptValidator.SanitizeVariables(r.Context(), req.Variables, settings)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, "Variable sanitization failed: "+err.Error())
+			return
+		}
+		for _, issue := range issues {
+			if issue.Severity == models.ValidationError {
+				respondJSON(w, http.StatusBadRequest, map[string]interface{}{
+					"error":  "Variable injection detected",
+					"issues": issues,
+				})
+				return
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher, canFlush := w.(http.Flusher)
+
+	writeEvent := func(ev executor.Event) error {
+		payload, merr := json.Marshal(ev)
+		if merr != nil {
+			return merr
+		}
+		if _, werr := fmt.Fprintf(w, "data: %s\n\n", payload); werr != nil {
+			return werr
+		}
+		if canFlush {
+			flusher.Flush()
+		}
+		return nil
+	}
+
+	response, trace, err := h.Executor.ExecuteStream(r.Context(), agent, req.Message, resolved, sanitizedVars, req.ThinkingEnabled, writeEvent, req.SessionID)
+	if err == executor.ErrPausedForApproval {
+		// The EventPaused frame already told the client what's pending —
+		// there is no final response to persist until Resume runs the turn.
+		return
+	}
+	if err != nil {
+		log.Warn().Err(err).Str("agent", agentName).Msg("Streaming execution failed")
+		return // the failure already went out over the stream as an EventError frame
+	}
+
+	// Output guardrails run after the fact here, unlike the synchronous path:
+	// tokens are already on the wire by the time the full response is known,
+	// so this can only flag/audit a violation, not retract what was sent.
+	if h.Guardrails != nil && len(agent.Guardrails) > 0 {
+		if eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), agent.Guardrails, response); gErr != nil {
+			log.Warn().Err(gErr).Str("agent", agentName).Msg("Output guardrail evaluation error")
+		} else if !eval.Passed {
+			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "output", eval, nil)
+		}
+	}
+
+	traceUsage := trace.Usage
+	traceRecord := &models.Trace{
+		ID:          trace.TraceID,
+		AgentName:   agentName,
+		Kitchen:     kitchen,
+		Status:      "completed",
+		DurationMs:  trace.TotalMs,
+		TotalTokens: trace.Usage.TotalTokens,
+		CostUSD:     trace.Usage.EstimatedCost,
+		InputText:   req.Message,
+		OutputText:  response,
+		SessionID:   trace.SessionID,
+		Usage:       &traceUsage,
+		Metadata: map[string]interface{}{
+			"mode":  "managed",
+			"turns": len(trace.Turns),
+			"type":  "invoke_stream",
+		},
+		CreatedAt: time.Now().UTC(),
+	}
+	thinkingBlocks, thinkingTokens := summarizeThinking(trace)
+	if len(thinkingBlocks) > 0 {
+		traceRecord.Metadata["thinking_blocks"] = thinkingBlocks
+	}
+	if thinkingTokens > 0 {
+		traceRecord.Metadata["thinking_tokens"] = thinkingTokens
+	}
+	h.Store.CreateTrace(r.Context(), traceRecord)
+	h.emitThinkingAudit(r.Context(), kitchen, agentName, "invoke_stream", req.ThinkingEnabled, thinkingBlocks, thinkingTokens)
+	h.persistExecutorSpans(r.Context(), trace)
+}
+
+// ResumeRun applies a human decision to a run paused on an approval-gated
+// tool call (see Agent.ApprovalTools), or retries a run that was interrupted
+// without ever pausing (a crashed process, a lost model call) from its last
+// journaled turn. decision is required only for a genuinely paused run —
+// resuming a plain interruption passes a nil decision since there is nothing
+// to approve or deny.
+// POST /api/v1/agents/{agentName}/runs/{traceID}/resume
+func (h *Handlers) ResumeRun(w http.ResponseWriter, r *http.Request) {
+	agentName := chi.URLParam(r, "agentName")
+	traceID := chi.URLParam(r, "traceID")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	if identity := pkgmw.GetIdentity(r.Context()); identity != nil && identity.Provider == "scoped-key" {
+		keyID := identity.Claims["key_id"]
+		scopedKey, err := h.Store.GetScopedKey(r.Context(), kitchen, keyID)
+		if err != nil || !scopedKey.CanAccessAgent(agentName) {
+			respondError(w, http.StatusForbidden,
+				fmt.Sprintf("Scoped key does not have access to agent '%s'", agentName))
+			return
+		}
+	}
+
+	var body struct {
+		Approved bool   `json:"approved"`
+		Note     string `json:"note,omitempty"`
+	}
+	var decision *executor.ResumeDecision
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		decision = &executor.ResumeDecision{Approved: body.Approved, Note: body.Note}
+	}
+
+	response, trace, err := h.Executor.Resume(r.Context(), kitchen, traceID, decision)
+	if err != nil {
+		switch {
+		case err == executor.ErrPausedForApproval:
+			// Paused again on a later approval-gated call — not a failure.
+			respondJSON(w, http.StatusOK, map[string]interface{}{
+				"agent":    agentName,
+				"trace_id": traceID,
+				"status":   "paused",
+				"pending":  trace.Pending,
+			})
+		case strings.Contains(err.Error(), "no journal configured"):
+			respondError(w, http.StatusServiceUnavailable, err.Error())
+		case strings.Contains(err.Error(), "not found"):
+			respondError(w, http.StatusNotFound, err.Error())
+		case strings.Contains(err.Error(), "already finished"), strings.Contains(err.Error(), "ResumeDecision is required"):
+			respondError(w, http.StatusBadRequest, err.Error())
+		default:
+			respondError(w, http.StatusBadGateway, "Resume failed: "+err.Error())
+		}
+		return
+	}
+
+	traceUsage := trace.Usage
+	traceRecord := &models.Trace{
+		ID:          trace.TraceID,
+		AgentName:   agentName,
+		Kitchen:     kitchen,
+		Status:      "completed",
+		DurationMs:  trace.TotalMs,
+		TotalTokens: trace.Usage.TotalTokens,
+		CostUSD:     trace.Usage.EstimatedCost,
+		OutputText:  response,
+		SessionID:   trace.SessionID,
+		Usage:       &traceUsage,
+		Metadata: map[string]interface{}{
+			"mode":  "managed",
+			"turns": len(trace.Turns),
+			"type":  "resume",
+		},
+		CreatedAt: time.Now().UTC(),
+	}
+	h.Store.CreateTrace(r.Context(), traceRecord)
+	h.persistExecutorSpans(r.Context(), trace)
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"agent":           agentName,
+		"response":        response,
+		"trace_id":        trace.TraceID,
+		"session_id":      trace.SessionID,
+		"status":          "completed",
+		"turns":           len(trace.Turns),
+		"usage":           trace.Usage,
+		"latency_ms":      trace.TotalMs,
+		"execution_trace": trace,
+	})
+}
+
+// ListUnfinishedRuns reports runs that stopped without finishing — crashed,
+// restarted, or paused for approval — in this kitchen, so a caller can decide
+// which (if any) to resume with ResumeRun. Requires the executor to have a
+// journal configured (the OSS default; see handlers.New), otherwise durable
+// execution has nothing to report.
+// GET /api/v1/agents/runs/unfinished
+func (h *Handlers) ListUnfinishedRuns(w http.ResponseWriter, r *http.Request) {
+	kitchen := middleware.GetKitchen(r.Context())
+	runs, err := h.Executor.ListUnfinished(r.Context(), kitchen)
+	if err != nil {
+		respondError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]interface{}{"runs": runs})
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -4945,7 +5228,6 @@ func (h *Handlers) ListAuditEvents(w http.ResponseWriter, r *http.Request) {
 			filter.Offset = n
 		}
 	}
-	applyAuditTimeRange(q, &filter)
 
 	events, err := h.Store.ListAuditEvents(r.Context(), filter)
 	if err != nil {
@@ -4988,7 +5270,6 @@ func (h *Handlers) CountAuditEvents(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("environment"); v != "" {
 		filter.Environment = v
 	}
-	applyAuditTimeRange(q, &filter)
 
 	count, err := h.Store.CountAuditEvents(r.Context(), filter)
 	if err != nil {
@@ -4996,31 +5277,6 @@ func (h *Handlers) CountAuditEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]int64{"count": count})
-}
-
-// applyAuditTimeRange reads the since/until window shared by list and count.
-//
-// Accepts RFC3339 or a bare YYYY-MM-DD date; a bare until date covers the whole
-// day, since an operator asking for events "until the 5th" does not mean
-// midnight at the start of it.
-func applyAuditTimeRange(q url.Values, filter *models.AuditFilter) {
-	parse := func(v string, endOfDay bool) *time.Time {
-		if v == "" {
-			return nil
-		}
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
-			return &t
-		}
-		if t, err := time.Parse("2006-01-02", v); err == nil {
-			if endOfDay {
-				t = t.Add(24*time.Hour - time.Nanosecond)
-			}
-			return &t
-		}
-		return nil
-	}
-	filter.Since = parse(q.Get("since"), false)
-	filter.Until = parse(q.Get("until"), true)
 }
 
 // ── Helpers ──────────────────────────────────────────────────

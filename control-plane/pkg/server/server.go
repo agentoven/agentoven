@@ -289,8 +289,12 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 
 	// ── Guardrails (R9) ────────────────────────────────────
 	// Community guardrail service provides built-in heuristic evaluation.
-	// Pro can override h.Guardrails with LLM-judge or external policy engines.
+	// Pro can override h.Guardrails with LLM-judge or external policy engines
+	// — if it does, it must also call h.Executor.SetGuardrails(h.Guardrails)
+	// again afterward, since the Executor holds its own reference (set below)
+	// rather than reading h.Guardrails live on every tool call.
 	h.Guardrails = &grails.CommunityGuardrailService{}
+	h.Executor.SetGuardrails(h.Guardrails)
 	log.Info().Msg("✅ Guardrail service initialized (community)")
 
 	// ── Pluggable Auth (Release 7) ─────────────────────────

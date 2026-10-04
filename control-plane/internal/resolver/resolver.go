@@ -132,6 +132,18 @@ func (r *Resolver) Resolve(ctx context.Context, agent *models.Agent) (*models.Re
 			}
 			resolved.Scenarios = append(resolved.Scenarios, *rs)
 
+		case models.IngredientSkill:
+			rsk, err := r.resolveSkill(ctx, agent.Kitchen, ing)
+			if err != nil {
+				if ing.Required {
+					errors = append(errors, fmt.Sprintf("skill %q: %s", ing.Name, err))
+				} else {
+					log.Warn().Str("skill", ing.Name).Err(err).Msg("Optional skill not resolved")
+				}
+				continue
+			}
+			resolved.Skills = append(resolved.Skills, *rsk)
+
 		case models.IngredientObservability:
 			// Observability ingredients reference MCP tools (e.g., LangFuse MCP)
 			_, err := r.resolveTool(ctx, agent.Kitchen, ing)
@@ -284,6 +296,44 @@ func (r *Resolver) resolveTool(ctx context.Context, kitchen string, ing models.I
 		Version:    tool.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 		SchemaHash: schemaHash,
 		BakedAt:    time.Now().UTC(),
+	}, nil
+}
+
+// resolveSkill resolves a skill ingredient. A skill must already be
+// SkillStatusAccepted — pending, rejected, and needs_review skills all fail
+// to resolve, which is what keeps an unverified or rejected skill from ever
+// reaching a running agent no matter what an agent's own config says. Its
+// bundled MCP servers were registered as ordinary MCPTool rows when the
+// skill was accepted (see handlers.RegisterSkill), so resolving each one is
+// just resolveTool again — there is no separate "skill tool" resolution path.
+func (r *Resolver) resolveSkill(ctx context.Context, kitchen string, ing models.Ingredient) (*models.ResolvedSkill, error) {
+	skill, err := r.store.GetSkill(ctx, kitchen, ing.Name)
+	if err != nil {
+		return nil, fmt.Errorf("skill %q not found in kitchen %q", ing.Name, kitchen)
+	}
+	if skill.Status != models.SkillStatusAccepted {
+		return nil, fmt.Errorf("skill %q is not accepted (status: %s)", ing.Name, skill.Status)
+	}
+
+	tools := make([]models.ResolvedTool, 0, len(skill.RegisteredTools))
+	for _, toolName := range skill.RegisteredTools {
+		rt, err := r.resolveTool(ctx, kitchen, models.Ingredient{Name: toolName, Kind: models.IngredientTool})
+		if err != nil {
+			log.Warn().Str("skill", ing.Name).Str("tool", toolName).Err(err).Msg("Skill's registered tool failed to resolve")
+			continue
+		}
+		tools = append(tools, *rt)
+	}
+
+	instructions := ""
+	if skill.Manifest != nil {
+		instructions = skill.Manifest.Instructions
+	}
+
+	return &models.ResolvedSkill{
+		Name:         skill.Name,
+		Instructions: instructions,
+		Tools:        tools,
 	}, nil
 }
 

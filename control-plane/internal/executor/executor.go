@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,15 +27,11 @@ import (
 	"github.com/agentoven/agentoven/control-plane/internal/resolver"
 	"github.com/agentoven/agentoven/control-plane/internal/router"
 	"github.com/agentoven/agentoven/control-plane/internal/store"
-	inttelemetry "github.com/agentoven/agentoven/control-plane/internal/telemetry"
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 // DefaultMaxTurns is the maximum number of LLM ↔ tool loops.
@@ -74,6 +71,9 @@ type ExecutionTrace struct {
 	Turns     []Turn            `json:"turns"`
 	TotalMs   int64             `json:"total_ms"`
 	Usage     models.TokenUsage `json:"usage"`
+	// Pending is set when the run stopped for human approval of a tool call —
+	// see ErrPausedForApproval. Absent on every other trace.
+	Pending *PendingApproval `json:"pending,omitempty"`
 }
 
 // Turn is one iteration of the agentic loop.
@@ -106,6 +106,18 @@ type Executor struct {
 	gateway     ToolGateway
 	sessions    contracts.SessionStore
 	ragRegistry RAGRegistry // optional: enables retriever ingredient consumption
+
+	// journal, when set, makes runs durable — see Journal, SetJournal, Resume.
+	// nil by default: journaling is opt-in, so an embedder that has no use
+	// for resumability pays nothing for it.
+	journal Journal
+	// toolTimeout bounds one tool call; DefaultToolTimeout when zero.
+	toolTimeout time.Duration
+
+	// guardrails, when set, is evaluated around every tool call, not just the
+	// outer user message/final response the HTTP handlers already gate — see
+	// SetGuardrails and dispatchToolCall.
+	guardrails contracts.GuardrailService
 }
 
 // RAGRegistry provides access to registered RAG services.
@@ -118,10 +130,11 @@ type RAGRegistry interface {
 // NewExecutor creates a new managed-agent executor.
 func NewExecutor(s store.Store, r *router.ModelRouter, gw ToolGateway, sess contracts.SessionStore) *Executor {
 	return &Executor{
-		store:    s,
-		router:   r,
-		gateway:  gw,
-		sessions: sess,
+		store:       s,
+		router:      r,
+		gateway:     gw,
+		sessions:    sess,
+		toolTimeout: DefaultToolTimeout,
 	}
 }
 
@@ -131,350 +144,26 @@ func (e *Executor) SetRAGRegistry(reg RAGRegistry) {
 	e.ragRegistry = reg
 }
 
-// Execute runs the agentic loop for a managed agent.
-//
-// Flow:
-//  1. Load or create session (if sessionID provided and agent is agentic)
-//  2. Render the prompt template with variables
-//  3. Build messages — sliding context window for agentic agents, flat for reactive
-//  4. Call Model Router with native tool definitions
-//  5. If LLM returns tool_calls → execute each via MCP Gateway → add results → goto 4
-//  6. If LLM returns text → return as final response
-//  7. If max_turns reached → return with "max turns exceeded" warning
-//  8. Persist session with updated messages and token counts
-func (e *Executor) Execute(ctx context.Context, agent *models.Agent, userMessage string, resolved *models.ResolvedIngredients, promptVars map[string]string, thinkingEnabled bool, sessionID ...string) (string, *ExecutionTrace, error) {
-	traceID := uuid.New().String()
-	trace := &ExecutionTrace{
-		TraceID:   traceID,
-		AgentName: agent.Name,
-		Kitchen:   agent.Kitchen,
-	}
+// SetJournal makes every run through this Executor durable: each turn is
+// checkpointed, so an interrupted run can be continued with Resume instead of
+// starting over. Pass nil to disable journaling again.
+func (e *Executor) SetJournal(j Journal) {
+	e.journal = j
+}
 
-	// Root OTel span — child of the incoming HTTP span (if any).
-	// This makes every agent invocation visible in Jaeger / Tempo with full
-	// children for each LLM call and tool execution.
-	ctx, rootSpan := tracer.Start(ctx, "agent.run",
-		oteltrace.WithSpanKind(oteltrace.SpanKindInternal),
-		oteltrace.WithAttributes(
-			attribute.String("agent.name", agent.Name),
-			attribute.String("agent.kitchen", agent.Kitchen),
-			attribute.String("agent.mode", string(agent.Mode)),
-			attribute.String("agent.behavior", string(agent.Behavior)),
-			attribute.String("agentoven.trace_id", traceID),
-		),
-	)
-	defer func() {
-		rootSpan.SetAttributes(
-			attribute.Int64("agent.total_ms", trace.TotalMs),
-			attribute.Int("agent.turns", len(trace.Turns)),
-			attribute.Int64("agent.total_tokens", trace.Usage.TotalTokens),
-			attribute.Float64("agent.cost_usd", trace.Usage.EstimatedCost),
-		)
-		rootSpan.End()
-	}()
+// SetToolTimeout overrides DefaultToolTimeout for every tool call this
+// Executor dispatches.
+func (e *Executor) SetToolTimeout(d time.Duration) {
+	e.toolTimeout = d
+}
 
-	start := time.Now()
-	maxTurns := agent.MaxTurns
-	if maxTurns <= 0 {
-		maxTurns = DefaultMaxTurns
-	}
-
-	isAgentic := agent.Behavior == models.BehaviorAgentic
-
-	// ── Session management (agentic agents) ─────────────────
-	var session *models.Session
-	if isAgentic && e.sessions != nil {
-		var err error
-		sid := ""
-		if len(sessionID) > 0 && sessionID[0] != "" {
-			sid = sessionID[0]
-		}
-		if sid != "" {
-			session, err = e.sessions.GetSession(ctx, sid)
-			if err != nil {
-				log.Warn().Err(err).Str("session_id", sid).Msg("Session not found, creating new")
-				session = nil
-			}
-		}
-		if session == nil {
-			session = &models.Session{
-				ID:        uuid.New().String(),
-				AgentName: agent.Name,
-				Kitchen:   agent.Kitchen,
-				Status:    models.SessionActive,
-				Messages:  []models.ChatMessage{},
-				CreatedAt: time.Now().UTC(),
-				UpdatedAt: time.Now().UTC(),
-			}
-			if createErr := e.sessions.CreateSession(ctx, session); createErr != nil {
-				log.Warn().Err(createErr).Msg("Failed to create session, proceeding without persistence")
-				session = nil
-			}
-		}
-		if session != nil {
-			trace.SessionID = session.ID
-		}
-	}
-
-	// Build tool definitions for native tool calling
-	toolDefs := e.buildToolDefinitions(resolved.Tools)
-
-	// Build initial messages — sliding context for agentic, flat for reactive
-	var messages []models.ChatMessage
-	if isAgentic && session != nil && len(session.Messages) > 0 {
-		messages = e.buildSlidingContext(ctx, agent, resolved, session, userMessage, promptVars)
-	} else {
-		messages = e.buildInitialMessages(ctx, agent, resolved, userMessage, promptVars)
-	}
-
-	// Append current user message to session history
-	if session != nil {
-		session.Messages = append(session.Messages, models.ChatMessage{
-			Role:    "user",
-			Content: userMessage,
-		})
-	}
-
-	var totalUsage models.TokenUsage
-	var err error
-
-	for turn := 1; turn <= maxTurns; turn++ {
-		turnStart := time.Now()
-
-		// Call Model Router with native tool definitions
-		routeReq := &models.RouteRequest{
-			Messages:        messages,
-			Model:           resolved.Model.Model,
-			Strategy:        models.RoutingFallback,
-			Kitchen:         agent.Kitchen,
-			AgentRef:        agent.Name,
-			ThinkingEnabled: thinkingEnabled,
-			Tools:           toolDefs,
-			ToolChoice:      "auto",
-		}
-		if session != nil {
-			routeReq.SessionID = session.ID
-		}
-
-		// Use backup provider failover if configured on the agent.
-		// Set skip-trace context so the router doesn't create orphaned flat traces —
-		// the handler persists rich hierarchical spans from ExecutionTrace instead.
-		// OTel child spans are emitted here instead so Jaeger sees LLM + tool spans.
-		llmCtx, llmSpan := tracer.Start(ctx, fmt.Sprintf("llm.turn_%d", turn),
-			oteltrace.WithSpanKind(oteltrace.SpanKindClient),
-			oteltrace.WithAttributes(
-				attribute.String("llm.model", routeReq.Model),
-				attribute.Int("llm.turn", turn),
-				attribute.Int("llm.tools_available", len(toolDefs)),
-			),
-		)
-		routeCtx := router.ContextSkipTrace(llmCtx)
-		var routeResp *models.RouteResponse
-		if agent.BackupProvider != "" {
-			routeResp, err = e.router.RouteWithBackup(routeCtx, routeReq, agent.BackupProvider, agent.BackupModel)
-		} else {
-			routeResp, err = e.router.Route(routeCtx, routeReq)
-		}
-		if err != nil {
-			llmSpan.RecordError(err)
-			llmSpan.SetStatus(codes.Error, err.Error())
-			inttelemetry.RecordProviderCall(ctx, agent.Kitchen, "unknown", routeReq.Model, "error", time.Since(turnStart), 0, 0, 0)
-			llmSpan.End()
-			return "", trace, fmt.Errorf("model router call failed (turn %d): %w", turn, err)
-		}
-		inttelemetry.RecordProviderCall(
-			ctx,
-			agent.Kitchen,
-			routeResp.Provider,
-			routeReq.Model,
-			"ok",
-			time.Since(turnStart),
-			routeResp.Usage.InputTokens,
-			routeResp.Usage.OutputTokens,
-			routeResp.Usage.EstimatedCost,
-		)
-		llmSpan.SetAttributes(
-			attribute.Int64("llm.input_tokens", routeResp.Usage.InputTokens),
-			attribute.Int64("llm.output_tokens", routeResp.Usage.OutputTokens),
-			attribute.Float64("llm.cost_usd", routeResp.Usage.EstimatedCost),
-			attribute.String("llm.finish_reason", routeResp.FinishReason),
-			attribute.String("llm.provider", routeResp.Provider),
-		)
-		llmSpan.End()
-
-		// Accumulate token usage
-		totalUsage.InputTokens += routeResp.Usage.InputTokens
-		totalUsage.OutputTokens += routeResp.Usage.OutputTokens
-		totalUsage.TotalTokens += routeResp.Usage.TotalTokens
-		totalUsage.ThinkingTokens += routeResp.Usage.ThinkingTokens
-		totalUsage.EstimatedCost += routeResp.Usage.EstimatedCost
-
-		// Prefer native tool calls from RouteResponse, fall back to text parsing
-		toolCalls := e.extractToolCalls(routeResp)
-
-		turnRecord := Turn{
-			Number:         turn,
-			Request:        messages,
-			ThinkingBlocks: routeResp.ThinkingBlocks,
-			Usage:          routeResp.Usage,
-		}
-
-		if len(toolCalls) == 0 {
-			// No tool calls — LLM gave a direct text response
-			turnRecord.Response = routeResp.Content
-			turnRecord.LatencyMs = time.Since(turnStart).Milliseconds()
-			trace.Turns = append(trace.Turns, turnRecord)
-			trace.TotalMs = time.Since(start).Milliseconds()
-			trace.Usage = totalUsage
-
-			// Persist assistant response in session
-			if session != nil {
-				session.Messages = append(session.Messages, models.ChatMessage{
-					Role:    "assistant",
-					Content: routeResp.Content,
-				})
-				session.TurnCount++
-				session.TotalTokens += routeResp.Usage.TotalTokens
-				session.TotalCost += routeResp.Usage.EstimatedCost
-				session.UpdatedAt = time.Now().UTC()
-				if updateErr := e.sessions.UpdateSession(ctx, session); updateErr != nil {
-					log.Error().Err(updateErr).Str("session", session.ID).Msg("Failed to persist session")
-				}
-			}
-
-			log.Info().
-				Str("agent", agent.Name).
-				Int("turns", turn).
-				Int64("total_ms", trace.TotalMs).
-				Msg("Managed agent execution complete")
-
-			return routeResp.Content, trace, nil
-		}
-
-		// Execute tool calls via MCP Gateway
-		turnRecord.ToolCalls = toolCalls
-		var toolResults []ToolResult
-
-		for _, tc := range toolCalls {
-			_, toolSpan := tracer.Start(ctx, "tool."+tc.Name,
-				oteltrace.WithSpanKind(oteltrace.SpanKindClient),
-				oteltrace.WithAttributes(
-					attribute.String("tool.name", tc.Name),
-					attribute.String("tool.call_id", tc.ID),
-					attribute.String("agent.name", agent.Name),
-				),
-			)
-			result := e.executeTool(ctx, agent.Kitchen, tc)
-			if result.IsError {
-				toolSpan.SetStatus(codes.Error, result.Content)
-			} else {
-				toolSpan.SetStatus(codes.Ok, "")
-			}
-			toolSpan.SetAttributes(attribute.Bool("tool.is_error", result.IsError))
-			toolSpan.End()
-			toolResults = append(toolResults, result)
-		}
-
-		turnRecord.ToolResults = toolResults
-		turnRecord.LatencyMs = time.Since(turnStart).Milliseconds()
-		trace.Turns = append(trace.Turns, turnRecord)
-
-		// Build the assistant tool_calls for the next turn.
-		// Prefer native tool calls from the response; fall back to synthesising
-		// ToolCallResult entries from the already-extracted toolCalls slice.
-		// This is critical when litellm / some proxies strip tool_calls from the
-		// response body (e.g. codex-class models) — without matching tool_calls on
-		// the assistant message the API rejects subsequent tool results with
-		// "No tool call found for function call output with call_id <id>".
-		assistantToolCalls := routeResp.ToolCalls
-		if len(assistantToolCalls) == 0 && len(toolCalls) > 0 {
-			assistantToolCalls = make([]models.ToolCallResult, 0, len(toolCalls))
-			for _, tc := range toolCalls {
-				argsJSON, _ := json.Marshal(tc.Arguments)
-				assistantToolCalls = append(assistantToolCalls, models.ToolCallResult{
-					ID:   tc.ID,
-					Type: "function",
-					Function: struct {
-						Name      string `json:"name"`
-						Arguments string `json:"arguments"`
-					}{
-						Name:      tc.Name,
-						Arguments: string(argsJSON),
-					},
-				})
-			}
-		}
-
-		// Add assistant message with tool call info to conversation
-		// OpenAI requires assistant messages to include tool_calls when finish_reason is "tool_calls"
-		assistantMsg := models.ChatMessage{
-			Role:      "assistant",
-			Content:   routeResp.Content,
-			ToolCalls: assistantToolCalls,
-		}
-		messages = append(messages, assistantMsg)
-
-		// Add tool results as messages with tool_call_id for proper correlation
-		for _, tr := range toolResults {
-			toolMsg := models.ChatMessage{
-				Role:       "tool",
-				Content:    tr.Content,
-				Name:       tr.Name,
-				ToolCallID: tr.ToolCallID,
-			}
-			messages = append(messages, toolMsg)
-		}
-
-		// Persist tool exchange in session
-		if session != nil {
-			session.Messages = append(session.Messages, assistantMsg)
-			for _, tr := range toolResults {
-				session.Messages = append(session.Messages, models.ChatMessage{
-					Role:       "tool",
-					Content:    tr.Content,
-					Name:       tr.Name,
-					ToolCallID: tr.ToolCallID,
-				})
-			}
-			session.TotalTokens += routeResp.Usage.TotalTokens
-			session.TotalCost += routeResp.Usage.EstimatedCost
-		}
-
-		log.Debug().
-			Str("agent", agent.Name).
-			Int("turn", turn).
-			Int("tool_calls", len(toolCalls)).
-			Msg("Agentic loop continuing")
-	}
-
-	// Max turns exceeded
-	trace.TotalMs = time.Since(start).Milliseconds()
-	trace.Usage = totalUsage
-
-	// Persist session at max turns
-	if session != nil {
-		session.TurnCount += maxTurns
-		session.UpdatedAt = time.Now().UTC()
-		if updateErr := e.sessions.UpdateSession(ctx, session); updateErr != nil {
-			log.Error().Err(updateErr).Str("session", session.ID).Msg("Failed to persist session at max turns")
-		}
-	}
-
-	lastContent := ""
-	if len(trace.Turns) > 0 {
-		lastTurn := trace.Turns[len(trace.Turns)-1]
-		lastContent = lastTurn.Response
-		if lastContent == "" && len(lastTurn.ToolResults) > 0 {
-			lastContent = lastTurn.ToolResults[len(lastTurn.ToolResults)-1].Content
-		}
-	}
-
-	log.Warn().
-		Str("agent", agent.Name).
-		Int("max_turns", maxTurns).
-		Msg("Managed agent hit max turns")
-
-	return fmt.Sprintf("[Max turns (%d) reached] %s", maxTurns, lastContent), trace, nil
+// SetGuardrails makes every tool call an agent with Guardrails configured
+// dispatches also pass through them — not just the whole-request input/output
+// gating the HTTP handlers already do around the outer user message and final
+// response. Pass nil to disable (the default): an Executor with no guardrail
+// service configured skips the check entirely rather than failing closed.
+func (e *Executor) SetGuardrails(g contracts.GuardrailService) {
+	e.guardrails = g
 }
 
 // buildInitialMessages constructs the system prompt and user message for reactive agents.
@@ -517,10 +206,26 @@ func (e *Executor) buildSystemPrompt(ctx context.Context, agent *models.Agent, r
 		}
 	}
 
+	// ── Skills ─────────────────────────────────────────────────
+	// A skill's SKILL.md instructions are the one piece of an Agent Skills
+	// bundle that only ever reaches the model as text, never as a tool
+	// definition — this is "activation" in the format's progressive
+	// disclosure model (discovery already happened at bake time, when the
+	// skill was attached as an ingredient at all).
+	if len(resolved.Skills) > 0 {
+		var sb strings.Builder
+		sb.WriteString("\n\n## Skills\n")
+		for _, sk := range resolved.Skills {
+			fmt.Fprintf(&sb, "\n### %s\n%s\n", sk.Name, sk.Instructions)
+		}
+		systemPrompt += sb.String()
+	}
+
 	// Add tool instructions to system prompt (fallback for models without native tool calling)
-	if len(resolved.Tools) > 0 {
+	allTools := allResolvedTools(resolved)
+	if len(allTools) > 0 {
 		toolList := "\n\nAvailable tools:\n"
-		for _, t := range resolved.Tools {
+		for _, t := range allTools {
 			toolList += fmt.Sprintf("- %s: %s\n", t.Name, describeSchema(t.Schema))
 		}
 		toolList += "\nTo use a tool, respond with a JSON block: {\"tool_calls\": [{\"name\": \"tool_name\", \"arguments\": {...}}]}"
@@ -528,6 +233,23 @@ func (e *Executor) buildSystemPrompt(ctx context.Context, agent *models.Agent, r
 	}
 
 	return systemPrompt
+}
+
+// allResolvedTools flattens an agent's own tools together with every
+// attached skill's bundled tools into the one list buildToolDefinitions and
+// the system prompt's tool listing both need — a skill's tools are
+// dispatched through the exact same gateway path a plain Tool ingredient's
+// are, so nothing downstream needs to know the difference.
+func allResolvedTools(resolved *models.ResolvedIngredients) []models.ResolvedTool {
+	if len(resolved.Skills) == 0 {
+		return resolved.Tools
+	}
+	all := make([]models.ResolvedTool, 0, len(resolved.Tools))
+	all = append(all, resolved.Tools...)
+	for _, sk := range resolved.Skills {
+		all = append(all, sk.Tools...)
+	}
+	return all
 }
 
 // retrieveContext performs RAG retrieval using resolved retriever ingredients
@@ -797,7 +519,7 @@ func (e *Executor) extractToolCalls(resp *models.RouteResponse) []ToolCall {
 }
 
 // buildToolDefinitions creates native tool definitions for the LLM.
-func (e *Executor) buildToolDefinitions(tools []models.ResolvedTool) []models.ToolDefinition {
+func (e *Executor) buildToolDefinitions(agent *models.Agent, tools []models.ResolvedTool) []models.ToolDefinition {
 	defs := make([]models.ToolDefinition, 0, len(tools)+1)
 
 	// Add real MCP tools
@@ -814,10 +536,19 @@ func (e *Executor) buildToolDefinitions(tools []models.ResolvedTool) []models.To
 		defs = append(defs, def)
 	}
 
-	// Only add agentoven_delegate for orchestrator agents (those without their own
-	// tools). Agents with real MCP tools should use them directly — adding delegate
-	// alongside real tools causes the LLM to prefer delegation over direct execution.
-	if len(tools) == 0 {
+	// agentoven_delegate is offered in two cases: the original orchestrator
+	// pattern (an agent with no tools of its own — adding delegate alongside
+	// real tools otherwise causes the LLM to prefer delegation over direct
+	// execution), or when Subagents explicitly names who this agent may hand
+	// work to, which stays useful even for an agent that also has real tools.
+	agentProp := map[string]interface{}{
+		"type":        "string",
+		"description": "Name of the agent to delegate to",
+	}
+	if len(agent.Subagents) > 0 {
+		agentProp["enum"] = toInterfaceSlice(agent.Subagents)
+	}
+	if len(tools) == 0 || len(agent.Subagents) > 0 {
 		defs = append(defs, models.ToolDefinition{
 			Type: "function",
 			Function: models.ToolFunction{
@@ -826,10 +557,7 @@ func (e *Executor) buildToolDefinitions(tools []models.ResolvedTool) []models.To
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"agent": map[string]interface{}{
-							"type":        "string",
-							"description": "Name of the agent to delegate to",
-						},
+						"agent": agentProp,
 						"message": map[string]interface{}{
 							"type":        "string",
 							"description": "The task or question to send to the delegate agent",
@@ -842,6 +570,14 @@ func (e *Executor) buildToolDefinitions(tools []models.ResolvedTool) []models.To
 	}
 
 	return defs
+}
+
+func toInterfaceSlice(s []string) []interface{} {
+	out := make([]interface{}, len(s))
+	for i, v := range s {
+		out[i] = v
+	}
+	return out
 }
 
 // parseToolCalls attempts to extract tool calls from the LLM response.
@@ -887,10 +623,10 @@ func (e *Executor) parseToolCalls(content string) []ToolCall {
 
 // executeTool calls an MCP tool via the Gateway and returns the result.
 // Intercepts the virtual "agentoven_delegate" tool for agent-to-agent delegation.
-func (e *Executor) executeTool(ctx context.Context, kitchen string, tc ToolCall) ToolResult {
+func (e *Executor) executeTool(ctx context.Context, agent *models.Agent, tc ToolCall) ToolResult {
 	// Handle virtual delegation tool
 	if tc.Name == "agentoven_delegate" {
-		return e.executeDelegation(ctx, kitchen, tc)
+		return e.executeDelegation(ctx, agent, tc)
 	}
 
 	paramsJSON, _ := json.Marshal(models.MCPToolCallParams{
@@ -905,7 +641,7 @@ func (e *Executor) executeTool(ctx context.Context, kitchen string, tc ToolCall)
 		ID:      tc.ID,
 	}
 
-	mcpResp := e.gateway.HandleJSONRPC(ctx, kitchen, mcpReq)
+	mcpResp := e.gateway.HandleJSONRPC(ctx, agent.Kitchen, mcpReq)
 
 	if mcpResp.Error != nil {
 		return ToolResult{
@@ -942,11 +678,42 @@ func (e *Executor) executeTool(ctx context.Context, kitchen string, tc ToolCall)
 	}
 }
 
+// MaxDelegationDepth bounds how many agentoven_delegate hops a single
+// invocation can chain through. It is the primary safety net against runaway
+// recursion — a cycle (A delegates to B delegates back to A) is also detected
+// explicitly below for a clearer error, but the depth cap alone is what
+// guarantees termination even for a long chain that never repeats an agent.
+const MaxDelegationDepth = 5
+
+type delegationChainKey struct{}
+
+// delegationChain returns the agent names already in this call's delegation
+// stack, oldest first — empty for a top-level invocation that has never
+// delegated.
+func delegationChain(ctx context.Context) []string {
+	chain, _ := ctx.Value(delegationChainKey{}).([]string)
+	return chain
+}
+
+// ensureDelegationRoot seeds the delegation chain with the top-level agent's
+// name the first time a run starts (Execute/ExecuteStream/Resume), so the
+// very first delegate call already has one entry — the root — to detect a
+// direct A-delegates-to-A cycle against. It is a no-op on a context that
+// already carries a chain, which is exactly the case for a recursive call
+// executeDelegation makes into Execute for its target.
+func ensureDelegationRoot(ctx context.Context, rootAgentName string) context.Context {
+	if _, ok := ctx.Value(delegationChainKey{}).([]string); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, delegationChainKey{}, []string{rootAgentName})
+}
+
 // executeDelegation handles the agentoven_delegate virtual tool call.
 // It invokes another agent in the same kitchen and returns its response.
-func (e *Executor) executeDelegation(ctx context.Context, kitchen string, tc ToolCall) ToolResult {
+func (e *Executor) executeDelegation(ctx context.Context, agent *models.Agent, tc ToolCall) ToolResult {
 	targetAgent, _ := tc.Arguments["agent"].(string)
 	message, _ := tc.Arguments["message"].(string)
+	kitchen := agent.Kitchen
 
 	if targetAgent == "" || message == "" {
 		return ToolResult{
@@ -957,8 +724,37 @@ func (e *Executor) executeDelegation(ctx context.Context, kitchen string, tc Too
 		}
 	}
 
+	// An explicit Subagents allowlist is enforced server-side, not just shown
+	// to the model as a schema enum — the model's output is untrusted input.
+	if len(agent.Subagents) > 0 && !slices.Contains(agent.Subagents, targetAgent) {
+		return ToolResult{
+			ToolCallID: tc.ID,
+			Name:       tc.Name,
+			Content:    fmt.Sprintf("Error: '%s' is not in this agent's allowed subagents (%s)", targetAgent, strings.Join(agent.Subagents, ", ")),
+			IsError:    true,
+		}
+	}
+
+	chain := delegationChain(ctx)
+	if len(chain) >= MaxDelegationDepth {
+		return ToolResult{
+			ToolCallID: tc.ID,
+			Name:       tc.Name,
+			Content:    fmt.Sprintf("Error: delegation depth exceeded (max %d): %s -> %s", MaxDelegationDepth, strings.Join(chain, " -> "), targetAgent),
+			IsError:    true,
+		}
+	}
+	if slices.Contains(chain, targetAgent) {
+		return ToolResult{
+			ToolCallID: tc.ID,
+			Name:       tc.Name,
+			Content:    fmt.Sprintf("Error: delegation cycle detected: %s -> %s", strings.Join(chain, " -> "), targetAgent),
+			IsError:    true,
+		}
+	}
+
 	// Look up the target agent
-	agent, err := e.store.GetAgent(ctx, kitchen, targetAgent)
+	target, err := e.store.GetAgent(ctx, kitchen, targetAgent)
 	if err != nil {
 		return ToolResult{
 			ToolCallID: tc.ID,
@@ -968,18 +764,18 @@ func (e *Executor) executeDelegation(ctx context.Context, kitchen string, tc Too
 		}
 	}
 
-	if agent.Status != models.AgentStatusReady {
+	if target.Status != models.AgentStatusReady {
 		return ToolResult{
 			ToolCallID: tc.ID,
 			Name:       tc.Name,
-			Content:    fmt.Sprintf("Error: agent '%s' is not ready (status: %s)", targetAgent, agent.Status),
+			Content:    fmt.Sprintf("Error: agent '%s' is not ready (status: %s)", targetAgent, target.Status),
 			IsError:    true,
 		}
 	}
 
 	// For managed agents, resolve and execute directly
-	if agent.Mode == models.AgentModeManaged {
-		resolved := agent.ResolvedConfig
+	if target.Mode == models.AgentModeManaged {
+		resolved := target.ResolvedConfig
 		if resolved == nil {
 			return ToolResult{
 				ToolCallID: tc.ID,
@@ -989,7 +785,8 @@ func (e *Executor) executeDelegation(ctx context.Context, kitchen string, tc Too
 			}
 		}
 
-		response, _, delegateErr := e.Execute(ctx, agent, message, resolved, nil, false)
+		delegateCtx := context.WithValue(ctx, delegationChainKey{}, append(append([]string{}, chain...), targetAgent))
+		response, _, delegateErr := e.Execute(delegateCtx, target, message, resolved, nil, false)
 		if delegateErr != nil {
 			return ToolResult{
 				ToolCallID: tc.ID,

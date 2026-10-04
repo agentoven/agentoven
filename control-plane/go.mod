@@ -3,6 +3,7 @@ module github.com/agentoven/agentoven/control-plane
 go 1.24.0
 
 require (
+	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/expr-lang/expr v1.17.8
 	github.com/go-chi/chi/v5 v5.1.0
 	github.com/go-chi/cors v1.2.1
@@ -16,10 +17,10 @@ require (
 	go.opentelemetry.io/otel/sdk v1.31.0
 	go.opentelemetry.io/otel/sdk/metric v1.31.0
 	go.opentelemetry.io/otel/trace v1.31.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
-	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/go-logr/logr v1.4.2 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.22.0 // indirect

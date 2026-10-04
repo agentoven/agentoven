@@ -227,6 +227,30 @@ type Agent struct {
 	SummaryModel      string            `json:"summary_model,omitempty" db:"summary_model"`           // cheap model for context compression (e.g. "gpt-4o-mini")
 	ReasoningStrategy ReasoningStrategy `json:"reasoning_strategy,omitempty" db:"reasoning_strategy"` // "react", "plan-and-execute", "reflexion"
 
+	// OutputSchema, when set, constrains the agent's final text response to
+	// JSON matching this schema. OpenAI and Ollama enforce it natively
+	// (response_format); Anthropic enforces it by forcing a single synthetic
+	// tool call, which only engages when the agent has no tools of its own —
+	// see internal/router's structuredOutputTool.
+	OutputSchema map[string]interface{} `json:"output_schema,omitempty" db:"output_schema"`
+
+	// ApprovalTools names tools that pause the agentic loop for a human
+	// decision before executing, instead of running immediately like any
+	// other tool call. The executor returns ErrPausedForApproval with the
+	// pending call attached to the trace; a caller resumes with
+	// Executor.Resume once a person has approved or denied it.
+	ApprovalTools []string `json:"approval_tools,omitempty" db:"approval_tools"`
+
+	// Subagents names the agents this agent may hand work to via
+	// agentoven_delegate. When set, it both scopes the tool's "agent"
+	// argument to this allowlist (the model is shown the exact names it may
+	// pick from, and the executor rejects anything else) and keeps the
+	// delegate tool available even once this agent also has real tools of
+	// its own. Left empty, delegation falls back to the original orchestrator
+	// behavior: any ready agent in the same kitchen, offered only when this
+	// agent has no tools of its own — see executor.buildToolDefinitions.
+	Subagents []string `json:"subagents,omitempty" db:"subagents"`
+
 	// A2A Configuration — A2AEndpoint is the stable control-plane URL
 	// (always /agents/{name}/a2a). BackendEndpoint is the actual backend
 	// URL where the agent process or external service lives. The control
@@ -327,6 +351,11 @@ const (
 	// agent carries its own eval suite. The community edition records the
 	// reference; running it needs the scenario environment (Pro).
 	IngredientScenario IngredientKind = "scenario"
+	// IngredientSkill attaches a registered Skill (see Skill) to an agent.
+	// Unlike a plain Tool ingredient, a skill also contributes instructions
+	// to the system prompt — see resolver.resolveSkill and
+	// executor.buildSystemPrompt.
+	IngredientSkill IngredientKind = "skill"
 )
 
 type Ingredient struct {
@@ -898,6 +927,113 @@ type MCPTool struct {
 	UpdatedAt    time.Time              `json:"updated_at" db:"updated_at"`
 }
 
+// ── Skills ───────────────────────────────────────────────────
+//
+// A Skill is a SKILL.md bundle — the open, vendor-neutral Agent Skills
+// format (https://agentskills.io), not an AgentOven invention — registered
+// into a kitchen. Its manifest can declare bundled MCP servers (OpenHands'
+// `mcp_tools` extension to the base format); on acceptance, each one is
+// registered as an ordinary MCPTool row, so dispatch reuses the existing MCP
+// gateway path unchanged — see resolver.resolveSkill and
+// executor.buildToolDefinitions.
+
+// SkillStatus is where a registered skill sits in the verification pipeline.
+type SkillStatus string
+
+const (
+	// SkillStatusPending is set the instant a skill is registered, before
+	// its verification verdict comes back. A bake must never resolve a
+	// pending skill — see resolver.resolveSkill.
+	SkillStatusPending SkillStatus = "pending"
+	// SkillStatusAccepted means the provider-based intent check returned
+	// "accept" (or an admin later approved a "needs_review" skill). Its
+	// bundled MCP tools are registered and it is usable by agents.
+	SkillStatusAccepted SkillStatus = "accepted"
+	// SkillStatusRejected means the intent check found something concrete to
+	// object to. No tools are ever registered for a rejected skill, and
+	// nothing short of re-registering it fresh can change that — rejection
+	// is not a state an admin flips back from directly.
+	SkillStatusRejected SkillStatus = "rejected"
+	// SkillStatusNeedsReview means the verdict was ambiguous — not clean
+	// enough to auto-accept, not concrete enough to auto-reject. It stays
+	// inert (no tools registered, unusable by agents) until a human calls
+	// the skill's approve or reject endpoint.
+	SkillStatusNeedsReview SkillStatus = "needs_review"
+)
+
+// SkillSource records where a skill's bundle came from, for display and for
+// SkillManifest.Refresh — a skill installed from a local path or upload has
+// nothing to refresh from.
+type SkillSource string
+
+const (
+	SkillSourceInline SkillSource = "inline" // SKILL.md + files posted directly
+	SkillSourceUpload SkillSource = "upload" // staged via the chunked upload API
+	SkillSourcePath   SkillSource = "path"   // a directory on the server's own filesystem
+	SkillSourceGit    SkillSource = "git"    // cloned from a git URL at a ref
+)
+
+// SkillMCPServer is one bundled MCP server a skill's manifest declares —
+// OpenHands' `mcp_tools` extension to the base SKILL.md frontmatter.
+// CredentialRef names a KitchenCredential resolved at acceptance time into
+// the registered MCPTool's AuthConfig; it is never the raw secret itself —
+// see docs/architecture.md's "keep credentials out of skill content" rule,
+// carried over from how every other credential-bearing ingredient works here.
+type SkillMCPServer struct {
+	Name          string `json:"name"` // becomes the registered tool name: "<skill>.<name>"
+	Description   string `json:"description,omitempty"`
+	Transport     string `json:"transport"` // "http" or "sse", matches MCPTool.Transport
+	Endpoint      string `json:"endpoint"`
+	AuthType      string `json:"auth_type,omitempty"`      // "bearer", "api-key" — matches MCPTool.AuthConfig["type"]
+	AuthHeader    string `json:"auth_header,omitempty"`    // for auth_type "api-key"
+	CredentialRef string `json:"credential_ref,omitempty"` // KitchenCredential name supplying the token/key
+}
+
+// SkillManifest is a parsed SKILL.md: YAML frontmatter plus the markdown
+// body. Name and Description are the only fields loaded at discovery time
+// (progressive disclosure, same as every Agent Skills-compatible client);
+// Instructions (the body) only enters an agent's context once the skill is
+// actually attached — see executor.buildSystemPrompt.
+type SkillManifest struct {
+	Name         string           `json:"name" yaml:"name"`
+	Description  string           `json:"description" yaml:"description"`
+	License      string           `json:"license,omitempty" yaml:"license,omitempty"`
+	AllowedTools []string         `json:"allowed_tools,omitempty" yaml:"allowed-tools,omitempty"`
+	MCPServers   []SkillMCPServer `json:"mcp_tools,omitempty" yaml:"mcp_tools,omitempty"`
+	Instructions string           `json:"instructions"` // the markdown body, not part of frontmatter
+}
+
+// Skill is a skill registered into a kitchen.
+type Skill struct {
+	ID      string      `json:"id" db:"id"`
+	Kitchen string      `json:"kitchen" db:"kitchen"`
+	Name    string      `json:"name" db:"name"` // == Manifest.Name; unique within the kitchen
+	Source  SkillSource `json:"source" db:"source"`
+	// SourceRef is the git URL, server-side path, or upload ID this skill
+	// came from — empty for SkillSourceInline. Used by refresh, not by bake.
+	SourceRef string         `json:"source_ref,omitempty" db:"source_ref"`
+	Manifest  *SkillManifest `json:"manifest"`
+	Status    SkillStatus    `json:"status" db:"status"`
+
+	// VerificationVerdict/Reasoning/VerifiedAt/VerifiedByProvider record the
+	// provider-based intent check's outcome — see internal/skills.VerifyIntent.
+	// A "needs_review" skill keeps whatever the automated verdict said even
+	// after a human later approves or rejects it, so the record shows both
+	// opinions rather than overwriting the first with the second.
+	VerificationVerdict   string     `json:"verification_verdict,omitempty"`
+	VerificationReasoning string     `json:"verification_reasoning,omitempty"`
+	VerifiedAt            *time.Time `json:"verified_at,omitempty"`
+	VerifiedByProvider    string     `json:"verified_by_provider,omitempty"`
+
+	// RegisteredTools names the MCPTool rows created for this skill's bundled
+	// MCP servers once it reaches SkillStatusAccepted — empty before that.
+	RegisteredTools []string `json:"registered_tools,omitempty"`
+
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
+	CreatedBy string    `json:"created_by,omitempty" db:"created_by"`
+}
+
 // ── MCP Upstream (ADR-0014) ──────────────────────────────────
 // MCPUpstream represents a Microsoft MCP Gateway (or compatible) upstream
 // server that proxies tool calls to containerized MCP servers. This is a
@@ -962,6 +1098,16 @@ type RouteRequest struct {
 	// with cache-control hints. Anthropic uses explicit "ephemeral" breakpoints;
 	// OpenAI uses automatic prefix caching. Reduces costs on repeated prompts.
 	EnableCaching bool `json:"enable_caching,omitempty"`
+
+	// PinnedProvider, when set, routes exclusively to the named provider —
+	// no strategy ordering, no falling back to a different provider if it
+	// fails. Strategy-based fallback exists so a transient outage doesn't
+	// stall an agent; it is exactly the wrong behavior when a caller (a
+	// human, explicitly) chose this one provider and nothing else may be
+	// substituted — e.g. a consent-gated review of sensitive content, where
+	// silently sending it to a different provider than the one agreed to
+	// would defeat the point of asking at all.
+	PinnedProvider string `json:"pinned_provider,omitempty"`
 }
 
 // ResponseFormat specifies structured output from the LLM.
@@ -1235,6 +1381,19 @@ type ResolvedIngredients struct {
 	VectorStores []ResolvedVectorStore `json:"vector_stores,omitempty"`
 	Retrievers   []ResolvedRetriever   `json:"retrievers,omitempty"`
 	Scenarios    []ResolvedScenario    `json:"scenarios,omitempty"`
+	Skills       []ResolvedSkill       `json:"skills,omitempty"`
+}
+
+// ResolvedSkill is a Skill attached to an agent, resolved at bake time. Its
+// Tools are ordinary ResolvedTools — a skill's bundled MCP server is
+// registered as a real MCPTool row when the skill is accepted (see
+// RegisterSkill), so dispatch needs no code of its own: it goes through the
+// exact same gateway path any other tool does. Instructions is the skill's
+// SKILL.md body, appended to the system prompt under its own heading.
+type ResolvedSkill struct {
+	Name         string         `json:"name"`
+	Instructions string         `json:"instructions"`
+	Tools        []ResolvedTool `json:"tools,omitempty"`
 }
 
 // ResolvedScenario is a scenario an agent is evaluated against.

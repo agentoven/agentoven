@@ -290,6 +290,8 @@ Enterprise RAG add-ons — standalone monitoring, data lake connectors, and mana
 | 90 | **Cross-org agent federation** | Agents from different organizations can discover and invoke each other via A2A, with trust boundaries and access policies. | Pro |
 | 91 | **Distributed workflow engine** | Recipe execution across multiple nodes with job queue (Redis/NATS) for horizontal scaling. | Pro |
 | 92 | **Multi-region deployment** | Control plane replication across Azure regions with Cosmos DB as the geo-distributed store. | Pro |
+| 93 | **Lean Go agent-runner binary** | Standalone Go binary (`cmd/agent-runner`) embedding the executor/router/MCP-gateway stack, serving the same `/invoke`, `/invoke/stream`, `/a2a`, `/health` contract `agent_runner.py` does today — so `proxyToProcess`/`proxyToProcessStream`/A2A proxying need no changes. Replaces the Python runner as the image `internal/process/docker.go`/`k8s.go` deploy (`agentoven/agent-runner:latest` is referenced today but has no Dockerfile in this repo yet), so a single-agent pod no longer loads or depends on the full control plane. Planned after the core agent-harness work (durability, streaming, HITL, subagents, reactive memory, per-tool-call guardrails) lands. | OSS |
+| 94 | **Native Lambda/Azure Functions handlers** | Deploy the same agent-runner binary as a real AWS Lambda function (via `aws-lambda-go`) and an Azure Function (via Azure's Go custom-handler/worker SDK) — native per-cloud entrypoints, not the zero-dependency sidecar/web-adapter approach, by explicit choice. Depends on item 93 existing first. | OSS |
 
 ---
 
@@ -297,10 +299,10 @@ Enterprise RAG add-ons — standalone monitoring, data lake connectors, and mana
 
 | # | Item | Description | Repo |
 |---|------|-------------|------|
-| 93 | **Agent marketplace** | Marketplace for agent templates, recipes, and tool integrations. Curated by community, vetted by AgentOven team. | OSS + Pro |
-| 94 | **Compliance certifications** | SOC2, HIPAA, FedRAMP, GxP compliance for Pro/Enterprise tier. | Pro |
-| 95 | **Custom routing strategies** | Plugin system for user-defined routing strategies (e.g., A/B test, shadow traffic, canary). | Pro |
-| 96 | **SageMaker driver** | AWS SageMaker endpoints as a model provider for enterprise. | Pro |
+| 95 | **Agent marketplace** | Marketplace for agent templates, recipes, and tool integrations. Curated by community, vetted by AgentOven team. | OSS + Pro |
+| 96 | **Compliance certifications** | SOC2, HIPAA, FedRAMP, GxP compliance for Pro/Enterprise tier. | Pro |
+| 97 | **Custom routing strategies** | Plugin system for user-defined routing strategies (e.g., A/B test, shadow traffic, canary). | Pro |
+| 98 | **SageMaker driver** | AWS SageMaker endpoints as a model provider for enterprise. | Pro |
 
 ---
 

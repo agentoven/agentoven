@@ -76,6 +76,12 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 		r.Route("/agents", func(r chi.Router) {
 			r.Get("/", h.ListAgents)
 			r.Post("/", h.RegisterAgent)
+
+			// Durable execution — runs that stopped without finishing, across
+			// every agent in this kitchen. Listed before {agentName} so chi's
+			// static match takes this over the wildcard.
+			r.Get("/runs/unfinished", h.ListUnfinishedRuns)
+
 			r.Route("/{agentName}", func(r chi.Router) {
 				r.Get("/", h.GetAgent)
 				r.Put("/", h.UpdateAgent)
@@ -92,6 +98,10 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 				// global AGENTOVEN_REQUIRE_AUTH flag. Anonymous callers are rejected with 401.
 				r.With(middleware.RequireIdentity).Post("/invoke", h.InvokeAgent)
 				r.With(middleware.RequireIdentity).Post("/invoke/stream", h.StreamInvokeAgent)
+
+				// Durable execution — resume a run paused on an approval-gated
+				// tool call, or retry one interrupted mid-loop without pausing.
+				r.With(middleware.RequireIdentity).Post("/runs/{traceID}/resume", h.ResumeRun)
 
 				// Agent card (A2A-compatible metadata)
 				r.Get("/card", h.GetAgentCard)
@@ -192,6 +202,24 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 				r.Get("/", h.GetMCPTool)
 				r.Put("/", h.UpdateMCPTool)
 				r.Delete("/", h.DeleteMCPTool)
+			})
+		})
+
+		// Skills — the Agent Skills format (https://agentskills.io), register-by-SKILL.md
+		r.Route("/skills", func(r chi.Router) {
+			r.Get("/", h.ListSkills)
+			r.Post("/register", h.RegisterSkill)
+			r.Route("/upload", func(r chi.Router) {
+				r.Post("/begin", h.BeginSkillUpload)
+				r.Post("/chunk", h.ChunkSkillUpload)
+				r.Post("/commit", h.CommitSkillUpload)
+			})
+			r.Route("/{name}", func(r chi.Router) {
+				r.Get("/", h.GetSkill)
+				r.Delete("/", h.DeleteSkill)
+				r.Patch("/refresh", h.RefreshSkill)
+				r.Post("/approve", h.ApproveSkill)
+				r.Post("/reject", h.RejectSkill)
 			})
 		})
 

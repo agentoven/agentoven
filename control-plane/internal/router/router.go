@@ -115,6 +115,10 @@ type ModelRouter struct {
 	// catalog provides model-level pricing and capability lookups.
 	// Optional — when nil, falls back to defaultCosts map.
 	catalog CatalogLookup
+
+	// circuit tracks per-provider failure streaks so a provider that is
+	// clearly down stops eating the retry budget on every subsequent call.
+	circuit *circuitBreaker
 }
 
 // CatalogLookup is the interface the router needs from the model catalog.
@@ -197,6 +201,7 @@ func NewModelRouter(s store.Store) *ModelRouter {
 		latencies: make(map[string]int64),
 		costs:     make(map[string]*models.CostSummary),
 		drivers:   make(map[string]ProviderDriver),
+		circuit:   newCircuitBreaker(),
 	}
 
 	// Register built-in OSS drivers
@@ -511,6 +516,10 @@ func (mr *ModelRouter) Route(ctx context.Context, req *models.RouteRequest) (*mo
 		return nil, fmt.Errorf("no model providers configured")
 	}
 
+	if req.PinnedProvider != "" {
+		return mr.routePinned(ctx, req, providers)
+	}
+
 	strategy := req.Strategy
 	if strategy == "" {
 		strategy = models.RoutingFallback
@@ -522,13 +531,13 @@ func (mr *ModelRouter) Route(ctx context.Context, req *models.RouteRequest) (*mo
 	// Try each provider in order (fallback behavior)
 	var lastErr error
 	for _, provider := range ordered {
-		resp, err := mr.callProvider(ctx, &provider, req)
+		resp, err := mr.callWithRetry(ctx, &provider, req)
 		if err != nil {
 			log.Warn().
 				Str("provider", provider.Name).
 				Str("model", provider.Kind).
 				Err(err).
-				Msg("Provider call failed, trying next")
+				Msg("Provider call failed (after retries), trying next")
 			lastErr = err
 			continue
 		}
@@ -543,6 +552,25 @@ func (mr *ModelRouter) Route(ctx context.Context, req *models.RouteRequest) (*mo
 	}
 
 	return nil, fmt.Errorf("all providers failed, last error: %w", lastErr)
+}
+
+// routePinned serves a RouteRequest with PinnedProvider set: exactly one
+// named provider is tried, with no fallback to any other — see
+// RouteRequest.PinnedProvider for why that's the point, not a limitation.
+func (mr *ModelRouter) routePinned(ctx context.Context, req *models.RouteRequest, providers []models.ModelProvider) (*models.RouteResponse, error) {
+	for i := range providers {
+		if providers[i].Name != req.PinnedProvider {
+			continue
+		}
+		resp, err := mr.callWithRetry(ctx, &providers[i], req)
+		if err != nil {
+			return nil, fmt.Errorf("pinned provider %q failed: %w", req.PinnedProvider, err)
+		}
+		mr.trackCost(req.Kitchen, req.AgentRef, resp)
+		mr.recordTrace(ctx, req, resp)
+		return resp, nil
+	}
+	return nil, fmt.Errorf("pinned provider %q not found in kitchen %q", req.PinnedProvider, req.Kitchen)
 }
 
 // RouteWithBackup routes a request through the primary provider, and if all
@@ -589,7 +617,7 @@ func (mr *ModelRouter) RouteWithBackup(ctx context.Context, req *models.RouteReq
 		backupReq.Model = backup.Models[0]
 	}
 
-	resp, bErr = mr.callProvider(ctx, backup, &backupReq)
+	resp, bErr = mr.callWithRetry(ctx, backup, &backupReq)
 	if bErr != nil {
 		return nil, fmt.Errorf("primary providers failed (%w) and backup provider %q also failed: %v", err, backupProvider, bErr)
 	}
@@ -746,14 +774,25 @@ func (mr *ModelRouter) callProvider(ctx context.Context, provider *models.ModelP
 		model = provider.Models[0]
 	}
 
-	// Apply API key rotation: select the active key and inject it into
-	// the provider's Config map so downstream drivers always read the right key.
+	// Apply API key rotation: select the active key and inject it into the
+	// provider's Config map so downstream drivers always read the right key.
+	//
+	// Config is replaced with a fresh map rather than mutated in place. The
+	// store hands out providers as a shallow copy of its internal struct
+	// (store.MemoryStore.ListProviders/GetProvider): the struct is new, but
+	// Config is a map, a reference type, so that copy still points at the
+	// exact map the store's own background snapshot goroutine reads. Writing
+	// into it here raced that goroutine under -race; writing into a new map
+	// and only then pointing provider.Config at it never touches the store's
+	// map at all.
 	selectedKey := mr.SelectAPIKey(provider)
 	if selectedKey != "" {
-		if provider.Config == nil {
-			provider.Config = make(map[string]interface{})
+		withKey := make(map[string]interface{}, len(provider.Config)+1)
+		for k, v := range provider.Config {
+			withKey[k] = v
 		}
-		provider.Config["api_key"] = selectedKey
+		withKey["api_key"] = selectedKey
+		provider.Config = withKey
 	}
 
 	// Look up registered driver
@@ -799,10 +838,11 @@ func (mr *ModelRouter) callProvider(ctx context.Context, provider *models.ModelP
 // ── OpenAI / Azure OpenAI Provider ──────────────────────────
 
 type openAIRequest struct {
-	Model      string                  `json:"model"`
-	Messages   []models.ChatMessage    `json:"messages"`
-	Tools      []models.ToolDefinition `json:"tools,omitempty"`
-	ToolChoice interface{}             `json:"tool_choice,omitempty"`
+	Model          string                  `json:"model"`
+	Messages       []models.ChatMessage    `json:"messages"`
+	Tools          []models.ToolDefinition `json:"tools,omitempty"`
+	ToolChoice     interface{}             `json:"tool_choice,omitempty"`
+	ResponseFormat *models.ResponseFormat  `json:"response_format,omitempty"`
 }
 
 type openAIResponse struct {
@@ -837,7 +877,7 @@ func (mr *ModelRouter) callOpenAI(ctx context.Context, provider *models.ModelPro
 		return nil, fmt.Errorf("openai: api_key not configured for provider %s", provider.Name)
 	}
 
-	oaiReq := openAIRequest{Model: model, Messages: messages}
+	oaiReq := openAIRequest{Model: model, Messages: messages, ResponseFormat: req.ResponseFormat}
 	// Include tool definitions if provided by the executor
 	if len(req.Tools) > 0 {
 		oaiReq.Tools = req.Tools
@@ -940,11 +980,41 @@ type anthropicTool struct {
 }
 
 type anthropicRequest struct {
-	Model     string             `json:"model"`
-	System    string             `json:"system,omitempty"`
-	Messages  []anthropicMessage `json:"messages"`
-	MaxTokens int                `json:"max_tokens"`
-	Tools     []anthropicTool    `json:"tools,omitempty"`
+	Model      string             `json:"model"`
+	System     string             `json:"system,omitempty"`
+	Messages   []anthropicMessage `json:"messages"`
+	MaxTokens  int                `json:"max_tokens"`
+	Tools      []anthropicTool    `json:"tools,omitempty"`
+	ToolChoice interface{}        `json:"tool_choice,omitempty"`
+}
+
+// anthropicStructuredOutputTool is the name of the tool structuredOutputTool
+// synthesizes. Anthropic has no response_format — a forced tool call is the
+// standard workaround: the model "calls" this tool with the schema as its
+// arguments instead of writing free text, and callAnthropic moves those
+// arguments into RouteResponse.Content so a caller reading .Content sees the
+// same shape of structured JSON it would get from OpenAI's native
+// response_format, regardless of which provider actually answered.
+const anthropicStructuredOutputTool = "emit_structured_output"
+
+// structuredOutputTool builds the forced tool for a json_schema ResponseFormat.
+// Returns ok=false when format doesn't ask for one.
+func structuredOutputTool(format *models.ResponseFormat) (anthropicTool, bool) {
+	if format == nil || format.Type != "json_schema" {
+		return anthropicTool{}, false
+	}
+	schema := format.JSONSchema
+	// The executor wraps the schema as {"name":..., "schema": {...}, "strict":...}
+	// to match OpenAI's wire shape (router.go callOpenAI passes it through
+	// verbatim) — unwrap that here so Anthropic's tool gets the bare schema.
+	if inner, ok := schema["schema"].(map[string]interface{}); ok {
+		schema = inner
+	}
+	return anthropicTool{
+		Name:        anthropicStructuredOutputTool,
+		Description: "Emit the final answer as JSON matching the required schema. Always call this exactly once to give your answer; never answer in plain text.",
+		InputSchema: schema,
+	}, true
 }
 
 // anthropicMessage is one turn in Anthropic's wire format. Content is a plain
@@ -1097,6 +1167,18 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 			})
 		}
 	}
+	// Structured output only engages when the agent declares no real tools of
+	// its own — forcing a single tool_choice would otherwise silently disable
+	// every tool the agent actually needs to call. An agent that wants both
+	// tool use and a final structured answer gets OpenAI/Ollama's native
+	// response_format instead, which composes with tool calls; this is
+	// Anthropic's narrower, tool-only path.
+	if len(req.Tools) == 0 {
+		if sot, ok := structuredOutputTool(req.ResponseFormat); ok {
+			anthReq.Tools = []anthropicTool{sot}
+			anthReq.ToolChoice = map[string]string{"type": "tool", "name": anthropicStructuredOutputTool}
+		}
+	}
 
 	body, _ := json.Marshal(anthReq)
 
@@ -1141,6 +1223,15 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 				Timestamp: time.Now().UTC(),
 			})
 		case "tool_use":
+			// A forced structured-output call carries the answer as its
+			// arguments — surface it as Content, exactly like OpenAI's native
+			// response_format would, instead of as a tool call the executor
+			// would otherwise try to dispatch to a nonexistent tool.
+			if c.Name == anthropicStructuredOutputTool {
+				argsJSON, _ := json.Marshal(c.Input)
+				content += string(argsJSON)
+				continue
+			}
 			// Anthropic tool_use block → convert to ToolCallResult
 			argsJSON, _ := json.Marshal(c.Input)
 			toolCalls = append(toolCalls, models.ToolCallResult{
@@ -1157,10 +1248,19 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 		}
 	}
 
-	// Map Anthropic stop_reason to OpenAI-style finish_reason
+	// Map Anthropic stop_reason to OpenAI-style finish_reason. A stop_reason of
+	// "tool_use" whose only tool_use block was the synthetic structured-output
+	// call is reported as "stop", not "tool_calls" — toolCalls is empty for
+	// that case (its arguments went to Content instead), and a caller that
+	// trusts finish_reason over the empty slice should see an ordinary final
+	// answer, not a dangling signal that a tool call is still pending.
 	finishReason := anthResp.StopReason
 	if finishReason == "tool_use" {
-		finishReason = "tool_calls"
+		if len(toolCalls) > 0 {
+			finishReason = "tool_calls"
+		} else {
+			finishReason = "stop"
+		}
 	} else if finishReason == "end_turn" {
 		finishReason = "stop"
 	}
@@ -1197,7 +1297,7 @@ func (mr *ModelRouter) callOllama(ctx context.Context, provider *models.ModelPro
 		endpoint = "http://localhost:11434"
 	}
 
-	oaiReq := openAIRequest{Model: model, Messages: req.Messages}
+	oaiReq := openAIRequest{Model: model, Messages: req.Messages, ResponseFormat: req.ResponseFormat}
 
 	// Include tools if provided
 	if len(req.Tools) > 0 {
@@ -1230,10 +1330,16 @@ func (mr *ModelRouter) callOllama(ctx context.Context, provider *models.ModelPro
 		var ollamaErr struct {
 			Error string `json:"error"`
 		}
+		var msg error
 		if json.Unmarshal(respBody, &ollamaErr) == nil && ollamaErr.Error != "" {
-			return nil, fmt.Errorf("ollama: %s", ollamaErr.Error)
+			msg = fmt.Errorf("ollama: %s", ollamaErr.Error)
+		} else {
+			msg = fmt.Errorf("ollama: status %d: %s", httpResp.StatusCode, string(respBody))
 		}
-		return nil, fmt.Errorf("ollama: status %d: %s", httpResp.StatusCode, string(respBody))
+		if retryableStatus(httpResp.StatusCode) {
+			return nil, Retryable(httpResp.StatusCode, msg)
+		}
+		return nil, msg
 	}
 
 	var oaiResp openAIResponse
@@ -1478,16 +1584,24 @@ func parseOpenAIError(prefix string, status int, body []byte, model string) erro
 			Code    string `json:"code"`
 		} `json:"error"`
 	}
+	var msg error
 	if json.Unmarshal(body, &apiErr) == nil && apiErr.Error.Message != "" {
 		if apiErr.Error.Code == "model_not_found" || (status == 404 && model != "") {
+			// Never retryable: the model name itself is wrong.
 			return fmt.Errorf("%s: model %q not found — check the model name in your provider config", prefix, model)
 		}
 		if apiErr.Error.Code != "" {
-			return fmt.Errorf("%s: status %d: %s (%s)", prefix, status, apiErr.Error.Message, apiErr.Error.Code)
+			msg = fmt.Errorf("%s: status %d: %s (%s)", prefix, status, apiErr.Error.Message, apiErr.Error.Code)
+		} else {
+			msg = fmt.Errorf("%s: status %d: %s", prefix, status, apiErr.Error.Message)
 		}
-		return fmt.Errorf("%s: status %d: %s", prefix, status, apiErr.Error.Message)
+	} else {
+		msg = fmt.Errorf("%s: status %d: %s", prefix, status, string(body))
 	}
-	return fmt.Errorf("%s: status %d: %s", prefix, status, string(body))
+	if retryableStatus(status) {
+		return Retryable(status, msg)
+	}
+	return msg
 }
 
 // parseAnthropicError extracts a human-readable message from an Anthropic JSON error body.
@@ -1502,7 +1616,13 @@ func parseAnthropicError(prefix string, status int, body []byte, model string) e
 		if apiErr.Error.Type == "not_found_error" {
 			return fmt.Errorf("%s: model %q not found — check the model name (e.g. claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5). Note: Claude 4.6+ uses dateless IDs — do not append a date suffix", prefix, model)
 		}
+		if retryableStatus(status) {
+			return Retryable(status, fmt.Errorf("%s: status %d: %s (%s)", prefix, status, apiErr.Error.Message, apiErr.Error.Type))
+		}
 		return fmt.Errorf("%s: status %d: %s (%s)", prefix, status, apiErr.Error.Message, apiErr.Error.Type)
+	}
+	if retryableStatus(status) {
+		return Retryable(status, fmt.Errorf("%s: status %d: %s", prefix, status, string(body)))
 	}
 	return fmt.Errorf("%s: status %d: %s", prefix, status, string(body))
 }

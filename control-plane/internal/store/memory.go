@@ -25,6 +25,7 @@ type snapshot struct {
 	Providers     map[string]*models.ModelProvider       `json:"providers"`
 	RecipeRuns    map[string]*models.RecipeRun           `json:"recipe_runs"`
 	Tools         map[string]*models.MCPTool             `json:"tools"`
+	Skills        map[string]*models.Skill               `json:"skills"`
 	Prompts       map[string][]*models.Prompt            `json:"prompts"`        // key: kitchen:name → version history
 	Settings      map[string]*models.KitchenSettings     `json:"settings"`       // key: kitchen_id
 	AgentVersions map[string][]*models.Agent             `json:"agent_versions"` // key: kitchen:name → version history
@@ -55,6 +56,7 @@ type MemoryStore struct {
 	providers          map[string]*models.ModelProvider       // key: kitchen:name
 	recipeRuns         map[string]*models.RecipeRun           // key: id
 	tools              map[string]*models.MCPTool             // key: kitchen:name
+	skills             map[string]*models.Skill               // key: kitchen:name
 	prompts            map[string][]*models.Prompt            // key: kitchen:name → version history (newest last)
 	settings           map[string]*models.KitchenSettings     // key: kitchen_id
 	auditEvents        []*models.AuditEvent                   // append-only log
@@ -108,6 +110,7 @@ func NewMemoryStore() *MemoryStore {
 		providers:          make(map[string]*models.ModelProvider),
 		recipeRuns:         make(map[string]*models.RecipeRun),
 		tools:              make(map[string]*models.MCPTool),
+		skills:             make(map[string]*models.Skill),
 		prompts:            make(map[string][]*models.Prompt),
 		settings:           make(map[string]*models.KitchenSettings),
 		agentVersions:      make(map[string][]*models.Agent),
@@ -242,6 +245,7 @@ func (m *MemoryStore) saveSnapshot() {
 		Providers:     m.providers,
 		RecipeRuns:    m.recipeRuns,
 		Tools:         m.tools,
+		Skills:        m.skills,
 		Prompts:       m.prompts,
 		Settings:      m.settings,
 		AgentVersions: m.agentVersions,
@@ -324,6 +328,9 @@ func (m *MemoryStore) loadSnapshot() {
 	}
 	if snap.Tools != nil {
 		m.tools = snap.Tools
+	}
+	if snap.Skills != nil {
+		m.skills = snap.Skills
 	}
 	if snap.Prompts != nil {
 		m.prompts = snap.Prompts
@@ -1039,6 +1046,57 @@ func (m *MemoryStore) UpdateTool(_ context.Context, tool *models.MCPTool) error 
 func (m *MemoryStore) DeleteTool(_ context.Context, kitchen, name string) error {
 	m.mu.Lock()
 	delete(m.tools, key(kitchen, name))
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+// ── Skill Store ──────────────────────────────────────────────
+
+func (m *MemoryStore) ListSkills(_ context.Context, kitchen string) ([]models.Skill, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var result []models.Skill
+	for _, s := range m.skills {
+		if s.Kitchen == kitchen || kitchen == "" {
+			result = append(result, *s)
+		}
+	}
+	return result, nil
+}
+
+func (m *MemoryStore) GetSkill(_ context.Context, kitchen, name string) (*models.Skill, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	s, ok := m.skills[key(kitchen, name)]
+	if !ok {
+		return nil, &ErrNotFound{Entity: "skill", Key: name}
+	}
+	copy := *s
+	return &copy, nil
+}
+
+func (m *MemoryStore) CreateSkill(_ context.Context, skill *models.Skill) error {
+	m.mu.Lock()
+	copy := *skill
+	m.skills[key(skill.Kitchen, skill.Name)] = &copy
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) UpdateSkill(_ context.Context, skill *models.Skill) error {
+	m.mu.Lock()
+	copy := *skill
+	m.skills[key(skill.Kitchen, skill.Name)] = &copy
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) DeleteSkill(_ context.Context, kitchen, name string) error {
+	m.mu.Lock()
+	delete(m.skills, key(kitchen, name))
 	m.mu.Unlock()
 	m.requestSave()
 	return nil

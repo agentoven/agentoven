@@ -21,6 +21,7 @@ type Store interface {
 	ModelProviderStore
 	RecipeRunStore
 	MCPToolStore
+	SkillStore
 	PromptStore
 	KitchenSettingsStore
 	AuditStore
@@ -167,6 +168,16 @@ type MCPToolStore interface {
 	CreateTool(ctx context.Context, tool *models.MCPTool) error
 	UpdateTool(ctx context.Context, tool *models.MCPTool) error
 	DeleteTool(ctx context.Context, kitchen, name string) error
+}
+
+// ── Skill Store ──────────────────────────────────────────────
+
+type SkillStore interface {
+	ListSkills(ctx context.Context, kitchen string) ([]models.Skill, error)
+	GetSkill(ctx context.Context, kitchen, name string) (*models.Skill, error)
+	CreateSkill(ctx context.Context, skill *models.Skill) error
+	UpdateSkill(ctx context.Context, skill *models.Skill) error
+	DeleteSkill(ctx context.Context, kitchen, name string) error
 }
 
 // ── Prompt Store ────────────────────────────────────────────
