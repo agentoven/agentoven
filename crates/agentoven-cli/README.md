@@ -44,6 +44,12 @@ agentoven status
 | `agentoven agent cool <name>` | Pause a running agent |
 | `agentoven agent retire <name>` | Permanently retire an agent |
 | `agentoven agent test <name>` | Interactive A2A REPL |
+| `agentoven skills list` | List skills registered in the kitchen |
+| `agentoven skills get <name>` | Show a skill with its verification verdict and reasoning |
+| `agentoven skills install <git-url\|dir>` | Register a skill; a provider reviews it. Exits 2 on `needs_review`, 3 on `rejected` |
+| `agentoven skills approve\|reject <name>` | Decide a skill left at `needs_review` |
+| `agentoven skills stage <git-url\|dir>` | Stage a skill without reviewing it (Pro) |
+| `agentoven skills analyze <name> [--provider <p>]` | Send a staged skill to a model provider for review (Pro) |
 | `agentoven recipe create` | Create a multi-agent workflow |
 | `agentoven recipe bake <name>` | Execute a recipe |
 | `agentoven trace get <id>` | Inspect an execution trace |
