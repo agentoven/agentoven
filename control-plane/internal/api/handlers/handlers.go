@@ -27,6 +27,7 @@ import (
 	"github.com/agentoven/agentoven/control-plane/internal/catalog"
 	"github.com/agentoven/agentoven/control-plane/internal/ctxwindow"
 	"github.com/agentoven/agentoven/control-plane/internal/executor"
+	grails "github.com/agentoven/agentoven/control-plane/internal/guardrails"
 	"github.com/agentoven/agentoven/control-plane/internal/mcpgw"
 	"github.com/agentoven/agentoven/control-plane/internal/process"
 	"github.com/agentoven/agentoven/control-plane/internal/resolver"
@@ -58,6 +59,8 @@ type Handlers struct {
 	Catalog         *catalog.Catalog
 	Sessions        contracts.SessionStore
 	Guardrails      contracts.GuardrailService
+	// GuardrailPolicy supplies workspace-level guardrails (Pro). nil: only agents' own apply.
+	GuardrailPolicy contracts.WorkspaceGuardrailSource
 	SkillUploads    *skills.UploadStore
 
 	// RecipeExecutor is the pluggable execution backend for POST /{name}/bake.
@@ -688,8 +691,12 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ── Input Guardrails ────────────────────────────────────
-	if h.Guardrails != nil && len(agent.Guardrails) > 0 {
-		eval, gErr := h.Guardrails.EvaluateInput(r.Context(), agent.Guardrails, req.Message)
+	gr, grOK := h.requireGuardrails(w, r, agent, agent.Guardrails)
+	if !grOK {
+		return
+	}
+	if h.Guardrails != nil && len(gr) > 0 {
+		eval, gErr := h.Guardrails.EvaluateInput(r.Context(), gr, req.Message)
 		if gErr != nil {
 			log.Warn().Err(gErr).Str("agent", agentName).Msg("Input guardrail evaluation error (test)")
 		} else if !eval.Passed {
@@ -736,8 +743,8 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// ── Output Guardrails ─────────────────────────────────
-		if h.Guardrails != nil && len(agent.Guardrails) > 0 {
-			eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), agent.Guardrails, response)
+		if h.Guardrails != nil && len(gr) > 0 {
+			eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), gr, response)
 			if gErr != nil {
 				log.Warn().Err(gErr).Str("agent", agentName).Msg("Output guardrail evaluation error (test+tools)")
 			} else if !eval.Passed {
@@ -799,6 +806,17 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusBadGateway, "Framework agent test failed: "+err.Error())
 			return
 		}
+		if h.Guardrails != nil && len(gr) > 0 {
+			if eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), gr, response); gErr != nil {
+				log.Warn().Err(gErr).Str("agent", agentName).Msg("Output guardrail evaluation error (test, framework-native)")
+			} else if !eval.Passed {
+				respondJSON(w, http.StatusForbidden, map[string]interface{}{
+					"error":      "Output blocked by guardrails",
+					"guardrails": eval.Results,
+				})
+				return
+			}
+		}
 		respondJSON(w, http.StatusOK, map[string]interface{}{
 			"agent":      agentName,
 			"response":   response,
@@ -852,8 +870,8 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ── Output Guardrails ───────────────────────────────────
-	if h.Guardrails != nil && len(agent.Guardrails) > 0 {
-		eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), agent.Guardrails, resp.Content)
+	if h.Guardrails != nil && len(gr) > 0 {
+		eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), gr, resp.Content)
 		if gErr != nil {
 			log.Warn().Err(gErr).Str("agent", agentName).Msg("Output guardrail evaluation error (test)")
 		} else if !eval.Passed {
@@ -2663,6 +2681,27 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 			userParts = rest
 		}
 
+		// Guardrails: the workspace rules on top of the agent's own, on what comes in and
+		// (below) on what goes out — the same whether the agent runs in-process or in a
+		// separately deployed process. If they cannot be established the agent is not run.
+		gr, grErr := h.guardrailsFor(r.Context(), agent, agent.Guardrails)
+		if grErr != nil {
+			log.Error().Err(grErr).Str("agent", agentName).Msg("refusing A2A task: workspace guardrails could not be applied")
+			h.emitGuardrailAudit(r.Context(), agent.Kitchen, agentName, "policy", nil, grErr)
+			a2aRPCError(w, rpcID, -32004, "The guardrail policy for this agent could not be applied, so the agent was not run", nil)
+			return
+		}
+		if h.Guardrails != nil && len(gr) > 0 {
+			if eval, gErr := h.Guardrails.EvaluateInput(r.Context(), gr, userMessage); gErr != nil {
+				log.Warn().Err(gErr).Str("agent", agentName).Msg("Input guardrail evaluation error (A2A task)")
+				h.emitGuardrailAudit(r.Context(), agent.Kitchen, agentName, "input", nil, gErr)
+			} else if !eval.Passed {
+				h.emitGuardrailAudit(r.Context(), agent.Kitchen, agentName, "input", eval, nil)
+				a2aRPCError(w, rpcID, -32001, "Input blocked by guardrails", eval.Results)
+				return
+			}
+		}
+
 		// Create initial trace immediately so tasks/get can find it
 		initialTrace := &models.Trace{
 			ID:        taskID,
@@ -2739,6 +2778,19 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 			}
 		}
 
+		var outputBlocked *models.GuardrailEvaluation
+		if status == "completed" && response != "" && h.Guardrails != nil && len(gr) > 0 {
+			if eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), gr, response); gErr != nil {
+				log.Warn().Err(gErr).Str("agent", agentName).Msg("Output guardrail evaluation error (A2A task)")
+				h.emitGuardrailAudit(r.Context(), agent.Kitchen, agentName, "output", nil, gErr)
+			} else if !eval.Passed {
+				h.emitGuardrailAudit(r.Context(), agent.Kitchen, agentName, "output", eval, nil)
+				outputBlocked = eval
+				status = "blocked"
+				response = "" // never stored or returned
+			}
+		}
+
 		trace := &models.Trace{
 			ID:          taskID,
 			AgentName:   agentName,
@@ -2769,6 +2821,11 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 		// Persist executor spans for waterfall visualization
 		if execTrace != nil {
 			h.persistExecutorSpans(execCtx, execTrace)
+		}
+
+		if outputBlocked != nil {
+			a2aRPCError(w, rpcID, -32001, "Output blocked by guardrails", outputBlocked.Results)
+			return
 		}
 
 		// Build result with artifacts and usage so callers get the full response
@@ -2999,37 +3056,12 @@ func (h *Handlers) A2AAgentEndpoint(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 
-				effectiveGuardrails := h.resolveEnvGuardrails(agent.Guardrails, ae)
-				if h.Guardrails != nil && len(effectiveGuardrails) > 0 {
-					body, _ := io.ReadAll(r.Body)
-					r.Body = io.NopCloser(bytes.NewReader(body))
-					input := string(body)
-					eval, gErr := h.Guardrails.EvaluateInput(r.Context(), effectiveGuardrails, input)
-					if gErr != nil {
-						log.Warn().Err(gErr).Str("agent", agentName).Str("env", envSlug).Msg("Input guardrail eval error (gateway env)")
-						h.emitGuardrailAuditEnv(r.Context(), kitchen, agentName, envSlug, "input", nil, gErr)
-					} else if !eval.Passed {
-						h.emitGuardrailAuditEnv(r.Context(), kitchen, agentName, envSlug, "input", eval, nil)
-						w.Header().Set("Content-Type", "application/a2a+json")
-						json.NewEncoder(w).Encode(map[string]interface{}{
-							"jsonrpc": "2.0",
-							"error": map[string]interface{}{
-								"code":    -32001,
-								"message": "Input blocked by guardrails",
-								"data":    eval.Results,
-							},
-							"id": nil,
-						})
-						return
-					}
-				}
-
 				log.Info().Str("agent", agentName).Str("env", envSlug).
 					Str("backend", sanitizeURLForLog(ae.BackendEndpoint)).
 					Msg("Proxying env-scoped A2A request via stable gateway")
 
 				h.emitEnvA2AAudit(r.Context(), kitchen, agentName, envSlug)
-				h.proxyA2ARequest(w, r, ae.BackendEndpoint, agentName)
+				h.proxyA2AGuarded(w, r, ae.BackendEndpoint, agent, h.resolveEnvGuardrails(agent.Guardrails, ae), envSlug)
 				return
 			}
 		}
@@ -3075,7 +3107,7 @@ func (h *Handlers) A2AAgentEndpoint(w http.ResponseWriter, r *http.Request) {
 			Str("reason", backendReason).
 			Msg("Proxying env-scoped A2A request via stable gateway")
 
-		h.proxyA2ARequest(w, r, backendURL, agentName)
+		h.proxyA2AGuarded(w, r, backendURL, agent, agent.Guardrails, envSlug)
 		return
 	}
 
@@ -3114,7 +3146,7 @@ func (h *Handlers) A2AAgentEndpoint(w http.ResponseWriter, r *http.Request) {
 		Msg("Proxying A2A request to agent backend")
 
 	// ── Proxy the request ───────────────────────────────────
-	h.proxyA2ARequest(w, r, backendURL, agentName)
+	h.proxyA2AGuarded(w, r, backendURL, agent, agent.Guardrails, "")
 }
 
 // ResolveBackendEndpoint determines where to proxy A2A calls for an agent.
@@ -3208,34 +3240,6 @@ func (h *Handlers) A2AAgentEnvEndpoint(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Resolve effective guardrails based on ae.GuardrailPolicy
-		effectiveGuardrails := h.resolveEnvGuardrails(agent.Guardrails, ae)
-
-		// ── Input guardrails ─────────────────────────────────────────────
-		if h.Guardrails != nil && len(effectiveGuardrails) > 0 {
-			body, _ := io.ReadAll(r.Body)
-			r.Body = io.NopCloser(bytes.NewReader(body))
-			input := string(body)
-			eval, gErr := h.Guardrails.EvaluateInput(r.Context(), effectiveGuardrails, input)
-			if gErr != nil {
-				log.Warn().Err(gErr).Str("agent", agentName).Str("env", envSlug).Msg("Input guardrail eval error (env)")
-				h.emitGuardrailAuditEnv(r.Context(), kitchen, agentName, envSlug, "input", nil, gErr)
-			} else if !eval.Passed {
-				h.emitGuardrailAuditEnv(r.Context(), kitchen, agentName, envSlug, "input", eval, nil)
-				w.Header().Set("Content-Type", "application/a2a+json")
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"jsonrpc": "2.0",
-					"error": map[string]interface{}{
-						"code":    -32001,
-						"message": "Input blocked by guardrails",
-						"data":    eval.Results,
-					},
-					"id": nil,
-				})
-				return
-			}
-		}
-
 		log.Info().Str("agent", agentName).Str("env", envSlug).
 			Str("backend", sanitizeURLForLog(ae.BackendEndpoint)).
 			Msg("Proxying env-scoped A2A request (Pro)")
@@ -3243,7 +3247,8 @@ func (h *Handlers) A2AAgentEnvEndpoint(w http.ResponseWriter, r *http.Request) {
 		// Emit audit event with environment field
 		h.emitEnvA2AAudit(r.Context(), kitchen, agentName, envSlug)
 
-		h.proxyA2ARequest(w, r, ae.BackendEndpoint, agentName)
+		// Guardrails resolve per ae.GuardrailPolicy, with the workspace rules applied on top.
+		h.proxyA2AGuarded(w, r, ae.BackendEndpoint, agent, h.resolveEnvGuardrails(agent.Guardrails, ae), envSlug)
 		return
 	}
 
@@ -3268,7 +3273,7 @@ func (h *Handlers) A2AAgentEnvEndpoint(w http.ResponseWriter, r *http.Request) {
 		Str("reason", backendReason).
 		Msg("Proxying env-scoped A2A request to agent backend")
 
-	h.proxyA2ARequest(w, r, backendURL, agentName)
+	h.proxyA2AGuarded(w, r, backendURL, agent, agent.Guardrails, envSlug)
 }
 
 // resolveEnvBackendEndpoint finds the backend URL for an agent in a specific
@@ -4247,8 +4252,12 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	// ── Input Guardrails ────────────────────────────────────
 	// Evaluate BEFORE status check — bad input should be rejected
 	// regardless of agent state (security-first principle).
-	if h.Guardrails != nil && len(agent.Guardrails) > 0 {
-		eval, gErr := h.Guardrails.EvaluateInput(r.Context(), agent.Guardrails, req.Message)
+	gr, grOK := h.requireGuardrails(w, r, agent, agent.Guardrails)
+	if !grOK {
+		return
+	}
+	if h.Guardrails != nil && len(gr) > 0 {
+		eval, gErr := h.Guardrails.EvaluateInput(r.Context(), gr, req.Message)
 		if gErr != nil {
 			log.Warn().Err(gErr).Str("agent", agentName).Msg("Input guardrail evaluation error")
 			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "input", nil, gErr)
@@ -4323,8 +4332,8 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// ── Output Guardrails ─────────────────────────────────
-		if h.Guardrails != nil && len(agent.Guardrails) > 0 {
-			eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), agent.Guardrails, response)
+		if h.Guardrails != nil && len(gr) > 0 {
+			eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), gr, response)
 			if gErr != nil {
 				log.Warn().Err(gErr).Str("agent", agentName).Msg("Output guardrail evaluation error")
 			} else if !eval.Passed {
@@ -4359,8 +4368,8 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ── Output Guardrails ───────────────────────────────────
-	if h.Guardrails != nil && len(agent.Guardrails) > 0 {
-		eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), agent.Guardrails, response)
+	if h.Guardrails != nil && len(gr) > 0 {
+		eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), gr, response)
 		if gErr != nil {
 			log.Warn().Err(gErr).Str("agent", agentName).Msg("Output guardrail evaluation error")
 			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "output", nil, gErr)
@@ -4475,8 +4484,12 @@ func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.Guardrails != nil && len(agent.Guardrails) > 0 {
-		eval, gErr := h.Guardrails.EvaluateInput(r.Context(), agent.Guardrails, req.Message)
+	gr, grOK := h.requireGuardrails(w, r, agent, agent.Guardrails)
+	if !grOK {
+		return
+	}
+	if h.Guardrails != nil && len(gr) > 0 {
+		eval, gErr := h.Guardrails.EvaluateInput(r.Context(), gr, req.Message)
 		if gErr != nil {
 			log.Warn().Err(gErr).Str("agent", agentName).Msg("Input guardrail evaluation error")
 			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "input", nil, gErr)
@@ -4576,8 +4589,8 @@ func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 	// Output guardrails run after the fact here, unlike the synchronous path:
 	// tokens are already on the wire by the time the full response is known,
 	// so this can only flag/audit a violation, not retract what was sent.
-	if h.Guardrails != nil && len(agent.Guardrails) > 0 {
-		if eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), agent.Guardrails, response); gErr != nil {
+	if h.Guardrails != nil && len(gr) > 0 {
+		if eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), gr, response); gErr != nil {
 			log.Warn().Err(gErr).Str("agent", agentName).Msg("Output guardrail evaluation error")
 		} else if !eval.Passed {
 			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "output", eval, nil)
@@ -5749,9 +5762,13 @@ func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
 	session.Messages = append(session.Messages, userMsg)
 
 	// ── Input Guardrails (Session) ──────────────────────────
-	if h.Guardrails != nil && len(agent.Guardrails) > 0 {
+	gr, grOK := h.requireGuardrails(w, r, agent, agent.Guardrails)
+	if !grOK {
+		return
+	}
+	if h.Guardrails != nil && len(gr) > 0 {
 		// content includes the transcript of any spoken parts, so speech is checked too.
-		eval, gErr := h.Guardrails.EvaluateInput(r.Context(), agent.Guardrails, content)
+		eval, gErr := h.Guardrails.EvaluateInput(r.Context(), gr, content)
 		if gErr != nil {
 			log.Warn().Err(gErr).Str("agent", agentName).Msg("Session input guardrail error")
 			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "input", nil, gErr)
@@ -5853,8 +5870,8 @@ func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
 	latencyMs := time.Since(startTime).Milliseconds()
 
 	// ── Output Guardrails (Session) ─────────────────────────
-	if h.Guardrails != nil && len(agent.Guardrails) > 0 {
-		eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), agent.Guardrails, routeResp.Content)
+	if h.Guardrails != nil && len(gr) > 0 {
+		eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), gr, routeResp.Content)
 		if gErr != nil {
 			log.Warn().Err(gErr).Str("agent", agentName).Msg("Session output guardrail error")
 			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "output", nil, gErr)
@@ -6470,4 +6487,41 @@ func a2aFileToContentPart(f *a2aFilePart) models.ContentPart {
 		kind = "video"
 	}
 	return models.ContentPart{Type: kind, Media: media}
+}
+
+// EffectiveGuardrails returns the guardrails to enforce for an agent: its own list
+// combined with the kitchen's workspace guardrails (global rules), per ADR-0013.
+func (h *Handlers) EffectiveGuardrails(ctx context.Context, agent *models.Agent) ([]models.Guardrail, error) {
+	return h.guardrailsFor(ctx, agent, agent.Guardrails)
+}
+
+// guardrailsFor returns the guardrails to enforce for the agent: own (its list, or that
+// list after an environment policy) with the workspace guardrails applied on top. It
+// fails closed: an error means the workspace guardrails could not be established and the
+// agent must not run (guardrails.Effective).
+func (h *Handlers) guardrailsFor(ctx context.Context, agent *models.Agent, own []models.Guardrail) ([]models.Guardrail, error) {
+	return grails.Effective(ctx, h.GuardrailPolicy, agent.Kitchen, agent.Name, own)
+}
+
+// requireGuardrails resolves the guardrails to enforce or refuses the request. When the
+// workspace guardrails cannot be established the agent is not run: the caller gets a 503
+// with nothing about the rules, and the failure is audited.
+func (h *Handlers) requireGuardrails(w http.ResponseWriter, r *http.Request, agent *models.Agent, own []models.Guardrail) ([]models.Guardrail, bool) {
+	gr, err := h.guardrailsFor(r.Context(), agent, own)
+	if err != nil {
+		log.Error().Err(err).Str("agent", agent.Name).Str("kitchen", agent.Kitchen).Msg("refusing request: workspace guardrails could not be applied")
+		h.emitGuardrailAudit(r.Context(), agent.Kitchen, agent.Name, "policy", nil, err)
+		respondError(w, http.StatusServiceUnavailable, "the guardrail policy for this agent could not be applied, so the agent was not run")
+		return nil, false
+	}
+	return gr, true
+}
+
+// SetGuardrailPolicy makes workspace guardrails apply to every request this handler
+// serves and to every tool call the executor dispatches. Pass nil to turn them off.
+func (h *Handlers) SetGuardrailPolicy(src contracts.WorkspaceGuardrailSource) {
+	h.GuardrailPolicy = src
+	if h.Executor != nil {
+		h.Executor.SetGuardrailPolicy(src)
+	}
 }

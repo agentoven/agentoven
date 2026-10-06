@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
+	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	oteltrace "go.opentelemetry.io/otel/trace"
@@ -76,9 +77,16 @@ func (e *Executor) dispatchToolCall(ctx context.Context, agent *models.Agent, tc
 	// context (same direction as a user message — and the classic vector for
 	// a malicious MCP server or scraped page to smuggle in a prompt
 	// injection, which is exactly what the "input" stage's heuristics cover).
-	if e.guardrails != nil && len(agent.Guardrails) > 0 {
+	guards, gerr := e.guardrailsFor(ctx, agent)
+	if gerr != nil {
+		log.Error().Err(gerr).Str("agent", agent.Name).Str("tool", tc.Name).Msg("tool call not run: workspace guardrails could not be applied")
+		toolSpan.SetStatus(codes.Error, "guardrail policy unavailable")
+		toolSpan.SetAttributes(attribute.Bool("tool.is_error", true), attribute.Bool("tool.guardrail_blocked", true))
+		return ToolResult{ToolCallID: tc.ID, Name: tc.Name, IsError: true, Content: "Error: tool call not run, the guardrail policy could not be applied"}
+	}
+	if e.guardrails != nil && len(guards) > 0 {
 		argsJSON, _ := json.Marshal(tc.Arguments)
-		if eval, gErr := e.guardrails.EvaluateOutput(ctx, agent.Guardrails, string(argsJSON)); gErr == nil && eval != nil && !eval.Passed {
+		if eval, gErr := e.guardrails.EvaluateOutput(ctx, guards, string(argsJSON)); gErr == nil && eval != nil && !eval.Passed {
 			toolSpan.SetStatus(codes.Error, "tool call arguments blocked by guardrails")
 			toolSpan.SetAttributes(attribute.Bool("tool.is_error", true), attribute.Bool("tool.guardrail_blocked", true))
 			return ToolResult{ToolCallID: tc.ID, Name: tc.Name, IsError: true, Content: "Error: tool call arguments blocked by guardrails"}
@@ -94,8 +102,8 @@ func (e *Executor) dispatchToolCall(ctx context.Context, agent *models.Agent, tc
 
 	result := e.executeTool(callCtx, agent, tc)
 
-	if !result.IsError && e.guardrails != nil && len(agent.Guardrails) > 0 {
-		if eval, gErr := e.guardrails.EvaluateInput(ctx, agent.Guardrails, result.Content); gErr == nil && eval != nil && !eval.Passed {
+	if !result.IsError && e.guardrails != nil && len(guards) > 0 {
+		if eval, gErr := e.guardrails.EvaluateInput(ctx, guards, result.Content); gErr == nil && eval != nil && !eval.Passed {
 			result = ToolResult{ToolCallID: tc.ID, Name: tc.Name, IsError: true, Content: "Error: tool result blocked by guardrails"}
 		}
 	}

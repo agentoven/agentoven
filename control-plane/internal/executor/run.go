@@ -157,6 +157,9 @@ func (e *Executor) Execute(ctx context.Context, agent *models.Agent, userMessage
 // ExecuteMessage is Execute for a user turn that may carry media: images,
 // PDFs, or audio as ContentParts alongside its text.
 func (e *Executor) ExecuteMessage(ctx context.Context, agent *models.Agent, userMsg models.ChatMessage, resolved *models.ResolvedIngredients, promptVars map[string]string, thinkingEnabled bool, sessionID ...string) (string, *ExecutionTrace, error) {
+	if err := e.requireGuardrailPolicy(ctx, agent); err != nil {
+		return "", nil, err
+	}
 	ctx = ensureDelegationRoot(ctx, agent.Name)
 	userMessage := userMsg.Content
 	st := e.newRunState(ctx, agent, userMsg, resolved, promptVars, sessionID...)
@@ -181,6 +184,9 @@ func (e *Executor) ExecuteStream(ctx context.Context, agent *models.Agent, userM
 
 // ExecuteStreamMessage is ExecuteStream for a user turn that may carry media.
 func (e *Executor) ExecuteStreamMessage(ctx context.Context, agent *models.Agent, userMsg models.ChatMessage, resolved *models.ResolvedIngredients, promptVars map[string]string, thinkingEnabled bool, onEvent func(Event) error, sessionID ...string) (string, *ExecutionTrace, error) {
+	if err := e.requireGuardrailPolicy(ctx, agent); err != nil {
+		return "", nil, err
+	}
 	ctx = ensureDelegationRoot(ctx, agent.Name)
 	userMessage := userMsg.Content
 	st := e.newRunState(ctx, agent, userMsg, resolved, promptVars, sessionID...)
@@ -231,6 +237,9 @@ func (e *Executor) Resume(ctx context.Context, kitchen, traceID string, decision
 	}
 
 	agent := js.Header.Agent
+	if err := e.requireGuardrailPolicy(ctx, agent); err != nil {
+		return "", nil, err
+	}
 	ctx = ensureDelegationRoot(ctx, agent.Name)
 	resolved := js.Header.Resolved
 	st := &runState{

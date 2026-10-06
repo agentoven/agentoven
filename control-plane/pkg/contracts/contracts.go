@@ -417,6 +417,17 @@ type SessionStore interface {
 
 // ── Guardrail Service (R9) ──────────────────────────────────
 
+// WorkspaceGuardrailSource supplies a kitchen's workspace-level (global) guardrails
+// and the operator-approved exceptions for one agent. OSS has no store for them;
+// Pro implements it from its workspace guardrail tables. When none is set, only an
+// agent's own guardrails apply. How the two lists combine is fixed by
+// guardrails.MergeWithWorkspace (ADR-0013), so every edition behaves the same.
+type WorkspaceGuardrailSource interface {
+	WorkspaceGuardrails(ctx context.Context, kitchen string) ([]models.Guardrail, error)
+	// WorkspaceGuardrailExceptions returns the exceptions for this agent only.
+	WorkspaceGuardrailExceptions(ctx context.Context, kitchen, agent string) ([]models.WorkspaceGuardrailException, error)
+}
+
 // GuardrailService evaluates guardrails on agent input and output.
 // OSS ships a community implementation. Pro can override with
 // LLM-judge, external policy engines, or custom webhook validators.

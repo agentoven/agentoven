@@ -3,6 +3,7 @@ package executor_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -722,6 +723,50 @@ func TestGuardrailsBlockToolCallArguments(t *testing.T) {
 	}
 }
 
+// fakeWorkspace is a workspace guardrail source with a fixed rule list.
+type fakeWorkspace struct{ rules []models.Guardrail }
+
+func (f *fakeWorkspace) WorkspaceGuardrails(context.Context, string) ([]models.Guardrail, error) {
+	return f.rules, nil
+}
+func (f *fakeWorkspace) WorkspaceGuardrailExceptions(context.Context, string, string) ([]models.WorkspaceGuardrailException, error) {
+	return nil, nil
+}
+
+// An agent that attached no guardrails of its own is still protected on its tool calls by a
+// mandatory workspace rule — and unprotected, as before, when no workspace source is set.
+func TestWorkspaceGuardrailsApplyToToolCallsOfAnAgentWithNoRulesOfItsOwn(t *testing.T) {
+	run := func(withPolicy bool) (ran int32, blocked bool) {
+		d := &scriptedDriver{replies: []turnReply{
+			{toolCalls: []models.ToolCallResult{toolCall("1", "send_email", map[string]interface{}{"body": "ssn: 123-45-6789"})}},
+			{content: "done"},
+		}}
+		gw := newFakeGateway()
+		gw.register("send_email", func(map[string]interface{}) (string, bool) { atomic.AddInt32(&ran, 1); return "sent", false })
+		e := newTestExecutor(t, d, gw)
+		e.SetGuardrails(&fakeGuardrails{blockOutputSubstr: "123-45-6789"})
+		if withPolicy {
+			e.SetGuardrailPolicy(&fakeWorkspace{rules: []models.Guardrail{{ID: "ws-pii", Kind: models.GuardrailPIIDetection, Stage: models.GuardrailStageBoth, Enabled: true}}})
+		}
+		agent := testAgent()
+		agent.Guardrails = nil
+		tool := models.ResolvedTool{Name: "send_email", Schema: map[string]interface{}{"type": "object"}}
+		_, trace, err := e.Execute(context.Background(), agent, "email someone", resolvedWithTools(tool), nil, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := trace.Turns[0].ToolResults[0]
+		return atomic.LoadInt32(&ran), r.IsError && strings.Contains(r.Content, "blocked by guardrails")
+	}
+
+	if ran, blocked := run(true); ran != 0 || !blocked {
+		t.Fatalf("a mandatory workspace rule must block the call (ran=%d blocked=%v)", ran, blocked)
+	}
+	if ran, blocked := run(false); ran != 1 || blocked {
+		t.Fatalf("with no workspace source and no rules of its own nothing changes (ran=%d blocked=%v)", ran, blocked)
+	}
+}
+
 // ── skills ───────────────────────────────────────────────────
 
 func TestSkillInstructionsReachTheSystemPromptAndItsToolIsCallable(t *testing.T) {
@@ -867,5 +912,52 @@ func TestRunToolReportsBadArgumentsToTheModel(t *testing.T) {
 	out, isErr := e.RunTool(context.Background(), testAgent(), resolvedWithTools(), "c1", "x", `{not json`)
 	if !isErr || !strings.Contains(out, "not valid JSON") {
 		t.Fatalf("expected a clear argument error, got %q err=%v", out, isErr)
+	}
+}
+
+// failingWorkspace is a workspace guardrail source whose rules cannot be read.
+type failingWorkspace struct{}
+
+func (failingWorkspace) WorkspaceGuardrails(context.Context, string) ([]models.Guardrail, error) {
+	return nil, errors.New("workspace guardrails unavailable")
+}
+func (failingWorkspace) WorkspaceGuardrailExceptions(context.Context, string, string) ([]models.WorkspaceGuardrailException, error) {
+	return nil, nil
+}
+
+// An agent whose global guardrails cannot be established must not run at all: no model call,
+// no tool call.
+func TestAnAgentIsNotRunWhenItsWorkspaceGuardrailsCannotBeRead(t *testing.T) {
+	d := &scriptedDriver{replies: []turnReply{{content: "should never be produced"}}}
+	e := newTestExecutor(t, d, newFakeGateway())
+	e.SetGuardrails(&fakeGuardrails{})
+	e.SetGuardrailPolicy(failingWorkspace{})
+
+	_, _, err := e.Execute(context.Background(), testAgent(), "hello", resolvedWithTools(), nil, false)
+	if err == nil || !strings.Contains(err.Error(), "guardrail policy") {
+		t.Fatalf("the run must be refused with a guardrail-policy error, got %v", err)
+	}
+	if len(d.requests) != 0 {
+		t.Fatalf("the model must not have been called, was called %d times", len(d.requests))
+	}
+
+	_, _, err = e.ExecuteStream(context.Background(), testAgent(), "hello", resolvedWithTools(), nil, false, func(executor.Event) error { return nil })
+	if err == nil {
+		t.Fatal("a streaming run must be refused too")
+	}
+}
+
+func TestAToolCallIsNotRunWhenItsWorkspaceGuardrailsCannotBeRead(t *testing.T) {
+	gw := newFakeGateway()
+	var ran int32
+	gw.register("send_email", func(map[string]interface{}) (string, bool) { atomic.AddInt32(&ran, 1); return "sent", false })
+	e := newTestExecutor(t, &scriptedDriver{}, gw)
+	e.SetGuardrails(&fakeGuardrails{})
+	e.SetGuardrailPolicy(failingWorkspace{})
+	tool := models.ResolvedTool{Name: "send_email", Schema: map[string]interface{}{"type": "object"}}
+
+	out, isErr := e.RunTool(context.Background(), testAgent(), resolvedWithTools(tool), "c1", "send_email", `{"body":"hi"}`)
+	if !isErr || !strings.Contains(out, "guardrail policy") || atomic.LoadInt32(&ran) != 0 {
+		t.Fatalf("the tool must not run (ran=%d): %q err=%v", ran, out, isErr)
 	}
 }

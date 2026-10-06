@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/agentoven/agentoven/control-plane/internal/ctxwindow"
+	grails "github.com/agentoven/agentoven/control-plane/internal/guardrails"
 	"github.com/agentoven/agentoven/control-plane/internal/resolver"
 	"github.com/agentoven/agentoven/control-plane/internal/router"
 	"github.com/agentoven/agentoven/control-plane/internal/store"
@@ -118,6 +119,9 @@ type Executor struct {
 	// outer user message/final response the HTTP handlers already gate — see
 	// SetGuardrails and dispatchToolCall.
 	guardrails contracts.GuardrailService
+	// guardrailPolicy, when set, adds the kitchen's workspace guardrails to the
+	// agent's own for those tool-call checks. See SetGuardrailPolicy.
+	guardrailPolicy contracts.WorkspaceGuardrailSource
 }
 
 // RAGRegistry provides access to registered RAG services.
@@ -164,6 +168,32 @@ func (e *Executor) SetToolTimeout(d time.Duration) {
 // service configured skips the check entirely rather than failing closed.
 func (e *Executor) SetGuardrails(g contracts.GuardrailService) {
 	e.guardrails = g
+}
+
+// SetGuardrailPolicy makes the kitchen's workspace guardrails apply to tool calls
+// too, combined with the agent's own (guardrails.Effective). nil: only the agent's own.
+func (e *Executor) SetGuardrailPolicy(src contracts.WorkspaceGuardrailSource) {
+	e.guardrailPolicy = src
+}
+
+// guardrailsFor returns the guardrails to enforce for agent: its own with the kitchen's
+// workspace guardrails applied on top. It fails closed: an error means the workspace
+// guardrails could not be established and the agent must not run (see guardrails.Effective).
+func (e *Executor) guardrailsFor(ctx context.Context, agent *models.Agent) ([]models.Guardrail, error) {
+	return grails.Effective(ctx, e.guardrailPolicy, agent.Kitchen, agent.Name, agent.Guardrails)
+}
+
+// requireGuardrailPolicy refuses to start a run when the workspace guardrails that govern
+// the agent cannot be established. It is a no-op when no workspace source is configured.
+func (e *Executor) requireGuardrailPolicy(ctx context.Context, agent *models.Agent) error {
+	if e.guardrailPolicy == nil {
+		return nil
+	}
+	if _, err := e.guardrailsFor(ctx, agent); err != nil {
+		log.Error().Err(err).Str("agent", agent.Name).Msg("refusing to run: workspace guardrails could not be applied")
+		return fmt.Errorf("executor: agent not run, its guardrail policy could not be applied: %w", err)
+	}
+	return nil
 }
 
 // buildInitialMessages constructs the system prompt and user message for reactive agents.

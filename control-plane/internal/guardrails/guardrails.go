@@ -13,11 +13,13 @@ package guardrails
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 )
 
@@ -37,28 +39,23 @@ func (s *CommunityGuardrailService) EvaluateOutput(ctx context.Context, guardrai
 	return evaluate(guardrails, response, "output")
 }
 
-// MergeWithWorkspace merges workspace-level default guardrails with agent-level
-// guardrails following the precedence rules in ADR-0013:
+// MergeWithWorkspace combines a kitchen's workspace (global) guardrails with an agent's
+// own. Global rules are always applied; the agent's rules are applied on top of them.
 //
-//  1. Mandatory workspace rules (Overridable=false) are always included and take
-//     precedence over any agent rule of the same kind+stage — UNLESS an approved
-//     exception exists for this agent (exceptions is the pre-filtered list for
-//     the calling agent from workspace_guardrail_exceptions).
-//  2. Overridable workspace rules (Overridable=true) are included only if no agent
-//     rule of the same kind+stage exists.
-//  3. Agent-only rules are appended as-is.
+//   - Every enabled workspace rule applies to every agent in the kitchen, whether or not
+//     the agent attached anything, and nothing an agent defines replaces or switches off a
+//     global rule — not a rule of the same kind and stage, not a disabled agent rule.
+//   - The only way out is an approved exception for that specific agent (exceptions is
+//     the list for the calling agent only). Expired exceptions are ignored.
+//   - A workspace rule that is not Enabled applies to nobody. An agent's own rules are
+//     appended as they are; the evaluator skips the ones that are not enabled.
 //
-// exceptions must contain only the exceptions for the specific agent being invoked.
-// Expired exceptions (ExpiresAt non-zero and in the past) are silently ignored.
+// Guardrail.Overridable no longer has any effect: ADR-0013 once let an agent's rule of the
+// same kind and stage replace an "overridable" workspace default, and that was withdrawn
+// (2026-10-06) so that a global rule can never be weakened by the agent it governs.
 //
-// The caller should pass the result of MergeWithWorkspace to EvaluateInput/EvaluateOutput.
+// The caller should pass the result to EvaluateInput/EvaluateOutput.
 func MergeWithWorkspace(workspaceRules, agentRules []models.Guardrail, exceptions []models.WorkspaceGuardrailException) []models.Guardrail {
-	type key struct {
-		kind  models.GuardrailKind
-		stage models.GuardrailStage
-	}
-
-	// Build a set of guardrail IDs that are excepted for this agent (ignore expired).
 	now := time.Now()
 	exceptedIDs := make(map[string]struct{}, len(exceptions))
 	for _, ex := range exceptions {
@@ -68,48 +65,17 @@ func MergeWithWorkspace(workspaceRules, agentRules []models.Guardrail, exception
 		exceptedIDs[ex.GuardrailID] = struct{}{}
 	}
 
-	// Index agent rules by kind+stage for O(1) lookup.
-	agentByKey := make(map[key]struct{}, len(agentRules))
-	for _, r := range agentRules {
-		agentByKey[key{r.Kind, r.Stage}] = struct{}{}
-	}
-
 	merged := make([]models.Guardrail, 0, len(workspaceRules)+len(agentRules))
-
-	// Track which kind+stage slots are covered by a mandatory (non-excepted) workspace rule.
-	mandatoryByKey := make(map[key]struct{}, len(workspaceRules))
-
-	// Step 1: add mandatory workspace rules, skipping any with an approved exception.
 	for _, r := range workspaceRules {
-		if r.Overridable {
+		if !r.Enabled {
 			continue
 		}
 		if _, excepted := exceptedIDs[r.ID]; excepted {
-			continue // agent has an approved exemption — skip this mandatory rule
+			continue // an operator approved this agent being exempt from this rule
 		}
 		merged = append(merged, r)
-		mandatoryByKey[key{r.Kind, r.Stage}] = struct{}{}
 	}
-
-	// Step 2: add overridable workspace rules only when no agent rule covers the slot.
-	for _, r := range workspaceRules {
-		if !r.Overridable {
-			continue
-		}
-		if _, agentHas := agentByKey[key{r.Kind, r.Stage}]; !agentHas {
-			merged = append(merged, r)
-		}
-	}
-
-	// Step 3: add agent rules except where a non-excepted mandatory workspace rule
-	// already covers the slot (running both would double-evaluate unnecessarily).
-	for _, r := range agentRules {
-		if _, blocked := mandatoryByKey[key{r.Kind, r.Stage}]; !blocked {
-			merged = append(merged, r)
-		}
-	}
-
-	return merged
+	return append(merged, agentRules...)
 }
 
 // evaluate runs all applicable guardrails for the given stage.
@@ -464,4 +430,131 @@ func getIntConfig(config map[string]interface{}, key string) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// PolicyError means the workspace guardrails that must apply to an agent could not be
+// established: the source could not be read, or an enabled workspace rule cannot be
+// evaluated (see Validate). The agent must not run: a global rule that cannot be applied
+// is not a rule that can be skipped.
+type PolicyError struct {
+	Kitchen, Agent string
+	Err            error
+}
+
+func (e *PolicyError) Error() string {
+	return "workspace guardrails could not be applied to agent " + e.Agent + " in kitchen " + e.Kitchen + ": " + e.Err.Error()
+}
+
+func (e *PolicyError) Unwrap() error { return e.Err }
+
+// Effective returns the guardrails that apply to an agent: its own rules (own — its list,
+// or that list adjusted by an environment policy) with the kitchen's workspace rules from
+// src applied on top (MergeWithWorkspace). With no source, or no workspace rules for the
+// kitchen, it is own unchanged.
+//
+// It fails closed. If the source cannot be read, or any enabled workspace rule is
+// unreadable, it returns a *PolicyError and the caller must refuse to run the agent.
+func Effective(ctx context.Context, src contracts.WorkspaceGuardrailSource, kitchen, agent string, own []models.Guardrail) ([]models.Guardrail, error) {
+	if src == nil {
+		return own, nil
+	}
+	fail := func(err error) ([]models.Guardrail, error) {
+		return nil, &PolicyError{Kitchen: kitchen, Agent: agent, Err: err}
+	}
+	workspace, err := src.WorkspaceGuardrails(ctx, kitchen)
+	if err != nil {
+		return fail(err)
+	}
+	if len(workspace) == 0 {
+		return own, nil
+	}
+	for _, r := range workspace {
+		if !r.Enabled {
+			continue
+		}
+		if err := Validate(r); err != nil {
+			return fail(fmt.Errorf("rule %q (%s): %w", r.ID, r.Kind, err))
+		}
+	}
+	exceptions, err := src.WorkspaceGuardrailExceptions(ctx, kitchen, agent)
+	if err != nil {
+		return fail(err)
+	}
+	return MergeWithWorkspace(workspace, own, exceptions), nil
+}
+
+// Validate reports why a guardrail could not do its job as configured: an unknown kind or
+// stage, or a config the evaluator would read as "nothing to check" (which it passes
+// silently). Effective applies it to enabled workspace rules so that one that cannot work
+// stops the agent instead of quietly doing nothing.
+func Validate(g models.Guardrail) error {
+	switch g.Stage {
+	case "", models.GuardrailStageInput, models.GuardrailStageOutput, models.GuardrailStageBoth:
+	default:
+		return fmt.Errorf("unknown stage %q", g.Stage)
+	}
+	switch g.Kind {
+	case models.GuardrailContentFilter:
+		return needStrings(g.Config, "blocked_words")
+	case models.GuardrailPIIDetection:
+		raw, ok := g.Config["patterns"]
+		if !ok {
+			return nil // no list means all built-in patterns
+		}
+		list, ok := raw.([]interface{})
+		if !ok {
+			return fmt.Errorf("patterns must be a list of pattern names")
+		}
+		for _, p := range list {
+			name, _ := p.(string)
+			if _, known := builtInPIIPatterns[name]; !known {
+				return fmt.Errorf("unknown PII pattern %v", p)
+			}
+		}
+		return nil
+	case models.GuardrailTopicRestriction:
+		if needStrings(g.Config, "blocked_topics") != nil && needStrings(g.Config, "allowed_topics") != nil {
+			return fmt.Errorf("needs blocked_topics or allowed_topics, a non-empty list of strings")
+		}
+		return nil
+	case models.GuardrailMaxLength:
+		chars, okC := getIntConfig(g.Config, "max_characters")
+		words, okW := getIntConfig(g.Config, "max_words")
+		if !(okC && chars > 0) && !(okW && words > 0) {
+			return fmt.Errorf("needs max_characters or max_words greater than zero")
+		}
+		return nil
+	case models.GuardrailRegexFilter:
+		pattern, _ := g.Config["pattern"].(string)
+		if pattern == "" {
+			return fmt.Errorf("needs a pattern")
+		}
+		if _, err := regexp.Compile(pattern); err != nil {
+			return fmt.Errorf("invalid pattern: %w", err)
+		}
+		return nil
+	case models.GuardrailPromptInjection, models.GuardrailCustom:
+		return nil
+	case models.GuardrailLlamaGuard:
+		if endpoint, _ := g.Config["endpoint"].(string); endpoint == "" {
+			return fmt.Errorf("needs an endpoint")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown guardrail kind")
+	}
+}
+
+// needStrings requires config[key] to be a non-empty list of non-empty strings.
+func needStrings(config map[string]interface{}, key string) error {
+	list, _ := config[key].([]interface{})
+	if len(list) == 0 {
+		return fmt.Errorf("needs %s, a non-empty list of strings", key)
+	}
+	for _, v := range list {
+		if s, ok := v.(string); !ok || s == "" {
+			return fmt.Errorf("%s must contain only non-empty strings", key)
+		}
+	}
+	return nil
 }
