@@ -31,6 +31,9 @@ Repository = "https://github.com/agentoven/agentoven"
 Documentation = "https://docs.agentoven.dev"
 
 [project.optional-dependencies]
+realtime = [
+    "websockets>=14",
+]
 runtime = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",

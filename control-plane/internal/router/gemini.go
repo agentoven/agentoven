@@ -30,8 +30,23 @@ type geminiContent struct {
 // geminiPart represents a content part (text, function call, or function response).
 type geminiPart struct {
 	Text             string                `json:"text,omitempty"`
+	InlineData       *geminiBlob           `json:"inlineData,omitempty"`
+	FileData         *geminiFileData       `json:"fileData,omitempty"`
 	FunctionCall     *geminiFunctionCall   `json:"functionCall,omitempty"`
 	FunctionResponse *geminiFunctionResult `json:"functionResponse,omitempty"`
+}
+
+// geminiBlob is base64 media sent inline with a request.
+type geminiBlob struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"`
+}
+
+// geminiFileData references media by URI (a Gemini Files API upload or a
+// public URL).
+type geminiFileData struct {
+	MimeType string `json:"mimeType"`
+	FileURI  string `json:"fileUri"`
 }
 
 // geminiFunctionCall is returned by the model when it wants to call a tool.
@@ -298,10 +313,11 @@ func (mr *ModelRouter) callGemini(ctx context.Context, provider *models.ModelPro
 				Parts: []geminiPart{{Text: msg.Content}},
 			}
 		case "user":
-			contents = append(contents, geminiContent{
-				Role:  "user",
-				Parts: []geminiPart{{Text: msg.Content}},
-			})
+			parts, err := mr.geminiUserParts(ctx, provider, model, msg)
+			if err != nil {
+				return nil, err
+			}
+			contents = append(contents, geminiContent{Role: "user", Parts: parts})
 		case "assistant":
 			parts := []geminiPart{}
 			if msg.Content != "" {

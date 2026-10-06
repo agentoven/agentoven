@@ -13,6 +13,7 @@ import {
   Database,
   Search,
   Plug,
+  Sparkles,
   GitBranch,
   ChevronDown,
   ChevronRight,
@@ -63,6 +64,7 @@ const navGroups: NavGroup[] = [
     items: [
       { to: '/providers', label: 'Providers', icon: Cpu },
       { to: '/tools', label: 'Tools', icon: Wrench },
+      { to: '/skills', label: 'Skills', icon: Sparkles },
     ],
   },
   {

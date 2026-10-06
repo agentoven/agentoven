@@ -1,14 +1,16 @@
 module github.com/agentoven/agentoven/control-plane
 
-go 1.24.0
+go 1.24.1
 
 require (
 	github.com/cenkalti/backoff/v4 v4.3.0
+	github.com/coder/websocket v1.8.15
 	github.com/expr-lang/expr v1.17.8
 	github.com/go-chi/chi/v5 v5.1.0
 	github.com/go-chi/cors v1.2.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.8.0
+	github.com/ledongthuc/pdf v0.0.0-20260907135840-6c8c28e0e8a0
 	github.com/rs/zerolog v1.33.0
 	go.opentelemetry.io/otel v1.31.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.31.0

@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"bufio"
+	"net"
 	"net/http"
 	"time"
 
@@ -27,6 +29,17 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 	n, err := rw.ResponseWriter.Write(b)
 	rw.bytes += n
 	return n, err
+}
+
+// Unwrap lets http.NewResponseController (and the WebSocket library) reach the
+// real connection. Without it this wrapper hides Hijack, so a WebSocket upgrade
+// anywhere below the logger is refused with a 501.
+func (rw *responseWriter) Unwrap() http.ResponseWriter { return rw.ResponseWriter }
+
+func (rw *responseWriter) Flush() { _ = http.NewResponseController(rw.ResponseWriter).Flush() }
+
+func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return http.NewResponseController(rw.ResponseWriter).Hijack()
 }
 
 // Logger returns structured request logging middleware.

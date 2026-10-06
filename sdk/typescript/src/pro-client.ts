@@ -25,11 +25,16 @@
  * ```
  */
 
+import { audioClipFromWire, audioFromBytes } from './media.js';
+import { resolveModalities, supportsModality, type AnyModality } from './modalities.js';
+import { connectRealtime, type RealtimeSession, type WebSocketFactory } from './realtime.js';
 import type {
+  AgentCard,
   AgentEnvironment,
   AgentOvenClientOptions,
   AuditEvent,
   CreateGuardrailRequest,
+  CreateProviderRequest,
   CreateScheduleRequest,
   CreateServiceAccountResponse,
   Deployment,
@@ -37,9 +42,13 @@ import type {
   EpisodeRecord,
   Guardrail,
   GuardrailException,
+  InvokeOptions,
+  InvokeResult,
   Kitchen,
   KitchenMember,
   Promotion,
+  Provider,
+  RealtimeToken,
   Recipe,
   RecipeRun,
   Schedule,
@@ -47,12 +56,16 @@ import type {
   ScenarioRun,
   ScenarioRunRequest,
   ScopedAPIKey,
+  SendSessionMessageOptions,
   ServerInfo,
   ServiceAccount,
   Session,
+  SessionMessageResponse,
   TestRun,
   TestSuite,
   TraceabilityMatrix,
+  UpdateProviderRequest,
+  UpdateProviderResponse,
   UpsertAgentEnvironmentRequest,
   User,
   UserRole,
@@ -69,6 +82,35 @@ export class AgentOvenAPIError extends Error {
     this.name = 'AgentOvenAPIError';
   }
 }
+
+/**
+ * The agent's provider does not offer the `audio` modality, so it cannot take
+ * or give speech (HTTP 400). Enable audio on the provider, or move the agent to
+ * one that supports it — see `agentCard(name).modalities`.
+ */
+export class AudioModalityError extends AgentOvenAPIError {
+  constructor(statusCode: number, detail: unknown) {
+    super(statusCode, detail);
+    this.name = 'AudioModalityError';
+  }
+
+  /** The server's explanation. */
+  get reason(): string {
+    return errorText(this.detail);
+  }
+}
+
+const NO_AUDIO = 'does not offer the audio modality';
+
+function errorText(detail: unknown): string {
+  if (typeof detail === 'object' && detail !== null) {
+    const d = detail as { error?: unknown; message?: unknown };
+    return String(d.error ?? d.message ?? JSON.stringify(detail));
+  }
+  return String(detail);
+}
+
+const seg = encodeURIComponent;
 
 export class ProClient {
   private readonly baseUrl: string;
@@ -538,6 +580,142 @@ export class ProClient {
     return this.get('/api/v1/license/phone-home');
   }
 
+  // ── Providers & modalities ─────────────────────────────────────────────────
+  // Modalities are a property of the provider: an agent has exactly the
+  // modalities of its own provider. See ./modalities.ts.
+
+  async listProviders(): Promise<Provider[]> {
+    return this.get('/api/v1/models/providers');
+  }
+
+  async getProvider(name: string): Promise<Provider> {
+    return this.get(`/api/v1/models/providers/${seg(name)}`);
+  }
+
+  /**
+   * Register a model provider. `modalities` takes the builder or a wire-format
+   * object and is validated before the request is sent.
+   */
+  async createProvider(req: CreateProviderRequest): Promise<Provider> {
+    const { api_key, modalities, config, ...rest } = req;
+    const cfg = providerConfig(config, api_key, modalities, false);
+    return this.post('/api/v1/models/providers', { models: [], is_default: false, ...rest, config: cfg });
+  }
+
+  /**
+   * Update a provider; only what you pass changes. `config` keys are merged,
+   * `modalities` is merged per modality, and `null` deletes a key or a whole
+   * modality (back to its default).
+   */
+  async updateProvider(name: string, req: UpdateProviderRequest = {}): Promise<UpdateProviderResponse> {
+    const { api_key, modalities, config, is_default, ...rest } = req;
+    const body: Record<string, unknown> = { ...rest };
+    const cfg = providerConfig(config, api_key, modalities, true);
+    if (Object.keys(cfg).length > 0) body.config = cfg;
+    // The server overwrites is_default on every update; keep the current value.
+    body.is_default = is_default ?? (await this.getProvider(name)).is_default;
+    return this.put(`/api/v1/models/providers/${seg(name)}`, body);
+  }
+
+  // ── Agent card ─────────────────────────────────────────────────────────────
+
+  /** The agent's A2A card; `card.modalities` lists what its provider offers. */
+  async agentCard(name: string): Promise<AgentCard> {
+    return this.get(`/api/v1/agents/${seg(name)}/card`);
+  }
+
+  /** Whether the agent can use `modality` (`text` is always true). */
+  async supports(agent: string, modality: AnyModality): Promise<boolean> {
+    return supportsModality(await this.agentCard(agent), modality);
+  }
+
+  // ── Invoke (text and cascaded voice) ───────────────────────────────────────
+
+  /**
+   * Run a managed agent once. Cascaded voice needs the `audio` modality on the
+   * agent's provider:
+   *
+   * ```ts
+   * const r = await pro.invoke('support-agent', {
+   *   audio: await audioFromPath('question.wav'),
+   *   voiceOutput: true,
+   *   voice: 'alloy',
+   * });
+   * console.log(r.transcript, r.response);
+   * await saveAudio(r.audio!, 'answer'); // answer.mp3
+   * ```
+   *
+   * Rejects with {@link AudioModalityError} when the provider does not offer audio.
+   */
+  async invoke(agent: string, options: InvokeOptions): Promise<InvokeResult> {
+    if (!options.message && options.audio === undefined) throw new Error('invoke needs a message, audio, or both');
+    if (options.voice && !options.voiceOutput) throw new Error('voice only applies with voiceOutput: true');
+    const body: Record<string, unknown> = {};
+    if (options.message) body.message = options.message;
+    if (options.audio !== undefined) {
+      const a =
+        options.audio instanceof Uint8Array || options.audio instanceof ArrayBuffer
+          ? audioFromBytes(options.audio, options.audioMimeType)
+          : options.audio;
+      body.audio = { data: a.data, mime_type: a.mimeType };
+    }
+    if (options.voiceOutput) body.voice_output = true;
+    if (options.voice) body.voice = options.voice;
+    if (options.variables) body.variables = options.variables;
+    if (options.sessionId) body.session_id = options.sessionId;
+    if (options.thinkingEnabled) body.thinking_enabled = true;
+
+    const raw = await this.post<Record<string, any>>(`/api/v1/agents/${seg(agent)}/invoke`, body);
+    return {
+      agent: raw.agent ?? '',
+      response: raw.response ?? '',
+      traceId: raw.trace_id ?? '',
+      sessionId: raw.session_id ?? '',
+      turns: raw.turns ?? 0,
+      usage: raw.usage ?? {},
+      latencyMs: raw.latency_ms ?? 0,
+      transcript: raw.transcript ?? undefined,
+      audio: raw.audio ? audioClipFromWire(raw.audio) : undefined,
+      raw,
+    };
+  }
+
+  // ── Agent sessions & attachments ───────────────────────────────────────────
+  // Multi-turn conversations on an agent (POST /agents/{name}/sessions). Not to
+  // be confused with the Pro session directory behind createSession().
+
+  /** Start a conversation with a ready agent. */
+  async createAgentSession(
+    agent: string,
+    opts: { maxTurns?: number; metadata?: Record<string, unknown> } = {},
+  ): Promise<{ id: string; status: string; [key: string]: unknown }> {
+    const body: Record<string, unknown> = {};
+    if (opts.maxTurns) body.max_turns = opts.maxTurns;
+    if (opts.metadata) body.metadata = opts.metadata;
+    return this.post(`/api/v1/agents/${seg(agent)}/sessions`, body);
+  }
+
+  /**
+   * Send a turn, optionally with images, PDFs, audio or video. Audio
+   * attachments are transcribed first and need the `audio` modality; images,
+   * PDFs and video need `image` / `pdf` / `video`.
+   */
+  async sendSessionMessage(
+    agent: string,
+    sessionId: string,
+    options: SendSessionMessageOptions,
+  ): Promise<SessionMessageResponse> {
+    const attachments = options.attachments ?? [];
+    if (!options.content && attachments.length === 0) {
+      throw new Error('a session message needs content, attachments, or both');
+    }
+    const body: Record<string, unknown> = { content: options.content ?? '' };
+    if (attachments.length > 0) body.content_parts = attachments;
+    if (options.promptVars) body.prompt_vars = options.promptVars;
+    if (options.metadata) body.metadata = options.metadata;
+    return this.post(`/api/v1/agents/${seg(agent)}/sessions/${seg(sessionId)}/messages`, body);
+  }
+
   // ── Audit events ───────────────────────────────────────────────────────────
 
   async listAuditEvents(opts: { limit?: number; action?: string; agent?: string; environment?: string } = {}): Promise<AuditEvent[]> {
@@ -551,6 +729,37 @@ export class ProClient {
   }
 
   // ── Internal helpers ───────────────────────────────────────────────────────
+
+  /**
+   * Mint a short-lived token a *browser* can use to open the realtime socket.
+   *
+   * Browsers cannot set headers on a WebSocket, so a backend that holds the API
+   * key calls this and hands the token to the page, which connects with
+   * `connectRealtime({ url, agent, token })`. The token is bound to the agent
+   * and kitchen, is only checked when the socket opens, and expires in
+   * `ttlSeconds` (1-300).
+   */
+  async realtimeToken(agent: string, ttlSeconds = 60): Promise<RealtimeToken> {
+    if (!Number.isInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > 300) {
+      throw new Error('ttlSeconds must be a whole number of seconds between 1 and 300');
+    }
+    return this.post(`/api/v1/realtime/${seg(agent)}/token`, { ttl_seconds: ttlSeconds });
+  }
+
+  /**
+   * Open a realtime voice session with `agent`. See {@link connectRealtime}.
+   * Node with a global WebSocket (verified on Node 24), or pass `webSocket` to supply your own.
+   *
+   * The agent always runs on its own provider, which must offer the `realtime`
+   * modality. Pass `token` (from {@link realtimeToken}) to connect the way a
+   * browser does — no auth headers, the token as a WebSocket subprotocol.
+   */
+  realtime(
+    agent: string,
+    options: { voice?: string; model?: string; token?: string; webSocket?: WebSocketFactory } = {},
+  ): Promise<RealtimeSession> {
+    return connectRealtime({ url: this.baseUrl, apiKey: this.apiKey, kitchen: this.kitchen, agent, ...options });
+  }
 
   private headers(kitchenOverride?: string): Record<string, string> {
     const kitchen = kitchenOverride ?? this.kitchen;
@@ -580,6 +789,9 @@ export class ProClient {
       } catch {
         detail = await res.text();
       }
+      if (res.status === 400 && errorText(detail).includes(NO_AUDIO)) {
+        throw new AudioModalityError(res.status, detail);
+      }
       throw new AgentOvenAPIError(res.status, detail);
     }
 
@@ -602,4 +814,22 @@ export class ProClient {
   private async delete(path: string, kitchenOverride?: string): Promise<void> {
     await this.request<void>('DELETE', path, undefined, kitchenOverride);
   }
+}
+
+function providerConfig(
+  config: Record<string, unknown> | undefined,
+  apiKey: string | undefined,
+  modalities: Parameters<typeof resolveModalities>[0] | undefined,
+  allowClear: boolean,
+): Record<string, unknown> {
+  const cfg: Record<string, unknown> = { ...(config ?? {}) };
+  if (apiKey !== undefined) cfg.api_key = apiKey;
+  if (modalities !== undefined) {
+    if ('modalities' in cfg) throw new Error("pass modalities or config.modalities, not both");
+    cfg.modalities = modalities;
+  }
+  if ('modalities' in cfg) {
+    cfg.modalities = resolveModalities(cfg.modalities as Parameters<typeof resolveModalities>[0], { allowClear });
+  }
+  return cfg;
 }

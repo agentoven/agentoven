@@ -2,6 +2,9 @@
  * TypeScript type definitions for the AgentOven SDK.
  */
 
+import type { AudioClip, AudioInput, ContentPart } from './media.js';
+import type { ModalitiesBuilder, ModalitiesConfig, ModalitiesUpdate } from './modalities.js';
+
 export interface AgentOvenClientOptions {
   /** Control plane URL. Default: http://localhost:8080 */
   url?: string;
@@ -518,6 +521,136 @@ export interface ServerInfo {
     plan: string;
     license_id?: string;
   };
+}
+
+// ── Providers & modalities ────────────────────────────────────────────────────
+
+/** A model provider as the control plane reports it. */
+export interface Provider {
+  id?: string;
+  name: string;
+  kind: string;
+  endpoint?: string;
+  models: string[];
+  /** Stored config (secrets are masked). `config.modalities` holds the overrides. */
+  config?: Record<string, unknown>;
+  is_default: boolean;
+  created_at?: string;
+  /**
+   * Effective modalities (`["text", "image", ...]`): the union over the
+   * provider's models of what the driver, the model catalog and
+   * `config.modalities` allow. The server computes it on list, get, create and
+   * update responses; an older server may omit it on create/update, in which
+   * case call `getProvider` for the effective list.
+   */
+  modalities?: string[];
+}
+
+export interface CreateProviderRequest {
+  name: string;
+  kind: string;
+  endpoint?: string;
+  models?: string[];
+  /** Convenience for `config.api_key`. */
+  api_key?: string;
+  config?: Record<string, unknown>;
+  /** Builder (`modalities()`) or the wire-format `config.modalities` object. Validated before sending. */
+  modalities?: ModalitiesBuilder | ModalitiesConfig;
+  is_default?: boolean;
+}
+
+export interface UpdateProviderRequest {
+  kind?: string;
+  endpoint?: string;
+  models?: string[];
+  api_key?: string;
+  /** Merged into the stored config. */
+  config?: Record<string, unknown>;
+  /** Merged per modality; `null` deletes a key or a whole modality. */
+  modalities?: ModalitiesBuilder | ModalitiesUpdate;
+  /**
+   * The server overwrites `is_default` on every update. When omitted, the
+   * current value is read first and sent back unchanged (one extra GET).
+   */
+  is_default?: boolean;
+}
+
+export interface UpdateProviderResponse {
+  provider: Provider;
+  /** Ready agents burnt because their model was removed from the provider. */
+  agents_burnt: number;
+}
+
+/** An agent's A2A card. `modalities` is what its provider offers. */
+export interface AgentCard {
+  name: string;
+  description?: string;
+  url: string;
+  version?: string;
+  capabilities: Record<string, boolean | undefined>;
+  skills?: { id: string; name: string; description?: string }[];
+  defaultInputModes?: string[];
+  defaultOutputModes?: string[];
+  modalities?: string[];
+}
+
+/** A short-lived token a browser can use to open the realtime socket. */
+export interface RealtimeToken {
+  token: string;
+  expires_in: number;
+}
+
+// ── Invoke, agent sessions ───────────────────────────────────────────────────
+
+export interface InvokeOptions {
+  message?: string;
+  /** Spoken input (needs the `audio` modality). Build with `audioFromPath` / `audioFromBytes` / `audioFromBase64`, or pass raw bytes plus `audioMimeType`. */
+  audio?: AudioInput | Uint8Array | ArrayBuffer;
+  /** Only for raw-bytes `audio` of a format the SDK cannot recognise. */
+  audioMimeType?: string;
+  /** Also return the reply as speech. */
+  voiceOutput?: boolean;
+  /** TTS voice, default `alloy`. Only with `voiceOutput`. */
+  voice?: string;
+  variables?: Record<string, string>;
+  sessionId?: string;
+  thinkingEnabled?: boolean;
+}
+
+export interface InvokeResult {
+  agent: string;
+  response: string;
+  traceId: string;
+  sessionId: string;
+  turns: number;
+  usage: Record<string, unknown>;
+  latencyMs: number;
+  /** What the server heard, when `audio` was sent. */
+  transcript?: string;
+  /** The spoken reply, decoded, when `voiceOutput` was set. */
+  audio?: AudioClip;
+  /** The full response body. */
+  raw: Record<string, unknown>;
+}
+
+export interface SendSessionMessageOptions {
+  content?: string;
+  /** Images, PDFs, audio, video: `Attachment.fromPath` / `fromBytes` / `fromUrl`. */
+  attachments?: ContentPart[];
+  promptVars?: Record<string, string>;
+  metadata?: Record<string, unknown>;
+}
+
+/** The reply to a session message. */
+export interface SessionMessageResponse {
+  session_id: string;
+  turn_number: number;
+  content: string;
+  finish_reason?: string;
+  usage?: Record<string, unknown>;
+  latency_ms?: number;
+  status?: string;
+  [key: string]: unknown;
 }
 
 // ── API Error ─────────────────────────────────────────────────────────────────

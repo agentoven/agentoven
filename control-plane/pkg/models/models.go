@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -784,6 +785,11 @@ type ModelProvider struct {
 	IsDefault bool                   `json:"is_default" db:"is_default"`
 	CreatedAt time.Time              `json:"created_at" db:"created_at"`
 
+	// Modalities is what an agent on this provider can use beyond text,
+	// computed for API responses from the driver, the model catalog and
+	// Config["modalities"]. Never stored.
+	Modalities []string `json:"modalities,omitempty" db:"-"`
+
 	// API Key Rotation — multiple keys with automatic rotation
 	APIKeys          []APIKeyEntry `json:"api_keys,omitempty"`
 	RotationStrategy string        `json:"rotation_strategy,omitempty" db:"rotation_strategy"` // "round-robin", "random", "weighted"
@@ -908,6 +914,18 @@ type NotifyResult struct {
 	Success   bool      `json:"success"`
 	Error     string    `json:"error,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
+}
+
+// SortProvidersForSelection orders providers deterministically — the kitchen's
+// default first, then by name — so anything that picks "the first capable
+// provider" picks the same one every time. Store listings are unordered.
+func SortProvidersForSelection(ps []ModelProvider) {
+	sort.SliceStable(ps, func(i, j int) bool {
+		if ps[i].IsDefault != ps[j].IsDefault {
+			return ps[i].IsDefault
+		}
+		return ps[i].Name < ps[j].Name
+	})
 }
 
 // ── MCP Tool ─────────────────────────────────────────────────
@@ -1141,13 +1159,28 @@ type ToolCallResult struct {
 
 // ContentPart represents one piece of a multi-part message (text, image, tool_use, tool_result).
 type ContentPart struct {
-	Type       string                 `json:"type"` // "text", "image_url", "tool_use", "tool_result"
+	Type       string                 `json:"type"` // "text", "image_url", "audio", "video", "file", "tool_use", "tool_result"
 	Text       string                 `json:"text,omitempty"`
 	ImageURL   *ImageURL              `json:"image_url,omitempty"`    // for type=image_url
+	Media      *MediaRef              `json:"media,omitempty"`        // for type=audio|video|file
 	ToolUseID  string                 `json:"tool_use_id,omitempty"`  // for type=tool_result
 	Content    string                 `json:"content,omitempty"`      // for type=tool_result (text content)
 	ToolCallID string                 `json:"tool_call_id,omitempty"` // for tool results
 	Extra      map[string]interface{} `json:"extra,omitempty"`        // provider-specific extensions
+}
+
+// MediaRef points at non-text bytes a ContentPart carries. Exactly one of
+// URL, Data, or BlobRef should be set: URL is fetched by the provider or
+// the harness, Data is inline base64 (small payloads only), and BlobRef
+// names an object in the blob store, so large bytes never sit in trace or
+// session JSON. MimeType is always required — it is how a driver decides
+// which provider wire format applies.
+type MediaRef struct {
+	MimeType string `json:"mime_type"`
+	URL      string `json:"url,omitempty"`
+	Data     string `json:"data,omitempty"`     // base64
+	BlobRef  string `json:"blob_ref,omitempty"` // blobstore key
+	Name     string `json:"name,omitempty"`     // original filename, for display and provider file uploads
 }
 
 // ImageURL describes an image for vision-capable models.
@@ -1957,16 +1990,19 @@ type GatewayMessage struct {
 // AgentCard is the A2A-protocol agent card that describes an agent's capabilities,
 // endpoints, and supported interaction patterns to external callers.
 type AgentCard struct {
-	Name           string            `json:"name"`
-	Description    string            `json:"description,omitempty"`
-	URL            string            `json:"url"` // A2A endpoint URL
-	Version        string            `json:"version,omitempty"`
-	Provider       AgentCardProvider `json:"provider,omitempty"`
-	Capabilities   AgentCapabilities `json:"capabilities"`
-	Skills         []AgentSkill      `json:"skills,omitempty"`
-	InputModes     []string          `json:"defaultInputModes,omitempty"`  // "text", "image", "audio", "video"
-	OutputModes    []string          `json:"defaultOutputModes,omitempty"` // "text", "image", "audio"
-	Authentication *AgentAuth        `json:"authentication,omitempty"`
+	Name         string            `json:"name"`
+	Description  string            `json:"description,omitempty"`
+	URL          string            `json:"url"` // A2A endpoint URL
+	Version      string            `json:"version,omitempty"`
+	Provider     AgentCardProvider `json:"provider,omitempty"`
+	Capabilities AgentCapabilities `json:"capabilities"`
+	Skills       []AgentSkill      `json:"skills,omitempty"`
+	InputModes   []string          `json:"defaultInputModes,omitempty"`  // "text", "image", "audio", "video"
+	OutputModes  []string          `json:"defaultOutputModes,omitempty"` // "text", "image", "audio"
+	// Modalities is everything the agent's provider lets it do beyond text:
+	// image, pdf, video, audio (cascaded voice) and realtime (live voice).
+	Modalities     []string   `json:"modalities,omitempty"`
+	Authentication *AgentAuth `json:"authentication,omitempty"`
 }
 
 // AgentCardProvider identifies who built/operates the agent.

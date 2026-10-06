@@ -32,9 +32,12 @@ Usage::
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
+import urllib.parse
 import urllib.request
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence, Union
 
 from agentoven._native import (
     Agent,
@@ -47,8 +50,23 @@ from agentoven._native import (
     Step,
 )
 
+from agentoven.media import Attachment, AudioInput, InvokeResult
+from agentoven.modalities import (
+    AgentCard,
+    Modalities,
+    Provider,
+    ProviderUpdate,
+    validate_modalities,
+)
+
+if TYPE_CHECKING:
+    from agentoven.realtime import RealtimeConnection
+
 __all__ = [
     "AgentOvenClient",
+    "AgentOvenAPIError",
+    "AudioModalityError",
+    "RealtimeToken",
     # Re-export data types so callers only need to import from agentoven.client
     "Agent",
     "AgentStatus",
@@ -639,6 +657,262 @@ class AgentOvenClient:
         """Trigger and return license phone-home status (Pro)."""
         return self._get("/api/v1/license/phone-home")
 
+    # ── Providers & modalities ────────────────────────────────────────────
+    # Modalities are a property of the provider: an agent has exactly the
+    # modalities of its own provider. See :mod:`agentoven.modalities`.
+
+    def list_providers(self) -> list[Provider]:
+        """List the kitchen's model providers, each with its effective ``modalities``."""
+        return [Provider.from_dict(p) for p in self._get("/api/v1/models/providers")]
+
+    def get_provider(self, name: str) -> Provider:
+        return Provider.from_dict(self._get(f"/api/v1/models/providers/{_seg(name)}"))
+
+    def create_provider(
+        self,
+        name: str,
+        kind: str,
+        api_key: Optional[str] = None,
+        endpoint: Optional[str] = None,
+        models: Optional[Sequence[str]] = None,
+        config: Optional[Mapping[str, Any]] = None,
+        modalities: Union[Modalities, Mapping[str, Any], None] = None,
+        is_default: bool = False,
+    ) -> Provider:
+        """Register a model provider.
+
+        ``modalities`` takes a :class:`~agentoven.Modalities` (or the raw
+        ``config.modalities`` dict) and is validated before the request is sent::
+
+            client.create_provider(
+                "openai", "openai", api_key="sk-...", models=["gpt-4o"],
+                modalities=Modalities(pdf=False, audio=AudioConfig(stt_model="whisper-1")),
+            )
+        """
+        cfg = _provider_config(config, api_key, modalities, allow_clear=False)
+        body: dict[str, Any] = {
+            "name": name,
+            "kind": kind,
+            "models": list(models or []),
+            "config": cfg,
+            "is_default": is_default,
+        }
+        if endpoint:
+            body["endpoint"] = endpoint
+        return Provider.from_dict(self._post("/api/v1/models/providers", body))
+
+    def update_provider(
+        self,
+        name: str,
+        kind: Optional[str] = None,
+        endpoint: Optional[str] = None,
+        models: Optional[Sequence[str]] = None,
+        config: Optional[Mapping[str, Any]] = None,
+        api_key: Optional[str] = None,
+        modalities: Union[Modalities, Mapping[str, Any], None] = None,
+        is_default: Optional[bool] = None,
+    ) -> ProviderUpdate:
+        """Update a provider. Only what you pass changes.
+
+        ``config`` keys are merged into the stored config, and ``modalities`` is
+        merged per modality: set what you pass, leave the rest. Use
+        :data:`~agentoven.CLEAR` as a value to delete a setting (or a whole
+        modality) and fall back to the default::
+
+            client.update_provider("openai", modalities=Modalities(pdf=CLEAR))
+
+        The server overwrites ``is_default`` on every update, so when you do not
+        pass it the current value is read first and sent back unchanged (one
+        extra GET) — otherwise any update would silently un-default the provider.
+        """
+        body: dict[str, Any] = {}
+        if kind is not None:
+            body["kind"] = kind
+        if endpoint is not None:
+            body["endpoint"] = endpoint
+        if models is not None:
+            body["models"] = list(models)
+        cfg = _provider_config(config, api_key, modalities, allow_clear=True)
+        if cfg:
+            body["config"] = cfg
+        if is_default is None:
+            is_default = self.get_provider(name).is_default
+        body["is_default"] = is_default
+        data = self._put(f"/api/v1/models/providers/{_seg(name)}", body)
+        return ProviderUpdate(
+            provider=Provider.from_dict(data.get("provider") or {}),
+            agents_burnt=int(data.get("agents_burnt", 0) or 0),
+        )
+
+    # ── Agent card ────────────────────────────────────────────────────────
+
+    def agent_card(self, name: str) -> AgentCard:
+        """The agent's A2A card. ``card.modalities`` lists what its provider
+        offers and ``card.supports("audio")`` answers for one modality."""
+        return AgentCard.from_dict(self._get(f"/api/v1/agents/{_seg(name)}/card"))
+
+    def supports(self, agent: str, modality: str) -> bool:
+        """Shorthand for ``client.agent_card(agent).supports(modality)``."""
+        return self.agent_card(agent).supports(modality)
+
+    # ── Invoke (text and cascaded voice) ──────────────────────────────────
+
+    def invoke(
+        self,
+        agent: str,
+        message: Optional[str] = None,
+        *,
+        audio: Union[AudioInput, bytes, str, "os.PathLike[str]", None] = None,
+        audio_mime_type: Optional[str] = None,
+        voice_output: bool = False,
+        voice: Optional[str] = None,
+        variables: Optional[Mapping[str, str]] = None,
+        session_id: Optional[str] = None,
+        thinking_enabled: bool = False,
+    ) -> InvokeResult:
+        """Run a managed agent once.
+
+        Cascaded voice — needs the ``audio`` modality on the agent's provider::
+
+            result = client.invoke(
+                "support-agent",
+                audio="question.wav",      # path, bytes, Path or AudioInput
+                voice_output=True,
+                voice="alloy",
+            )
+            print(result.transcript)       # what the agent heard
+            print(result.response)         # its text reply
+            result.save_audio("answer")    # -> answer.mp3
+
+        ``audio`` and ``message`` can be combined (the transcript is appended to
+        the message). For raw ``bytes`` of a format the SDK cannot recognise,
+        pass ``audio_mime_type``. Raises :class:`AudioModalityError` when the
+        agent's provider does not offer audio.
+        """
+        if not message and audio is None:
+            raise ValueError("invoke needs a message, audio, or both")
+        if voice and not voice_output:
+            raise ValueError("voice only applies with voice_output=True")
+        body: dict[str, Any] = {}
+        if message:
+            body["message"] = message
+        if audio is not None:
+            body["audio"] = AudioInput.coerce(audio, audio_mime_type).to_wire()
+        if voice_output:
+            body["voice_output"] = True
+        if voice:
+            body["voice"] = voice
+        if variables:
+            body["variables"] = dict(variables)
+        if session_id:
+            body["session_id"] = session_id
+        if thinking_enabled:
+            body["thinking_enabled"] = True
+        return InvokeResult.from_dict(self._post(f"/api/v1/agents/{_seg(agent)}/invoke", body))
+
+    # ── Agent sessions & attachments ──────────────────────────────────────
+    # Multi-turn conversations on an agent (POST /agents/{name}/sessions). Not
+    # to be confused with the Pro session directory behind create_session().
+
+    def create_agent_session(
+        self,
+        agent: str,
+        max_turns: Optional[int] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Start a conversation with a ready agent. Returns the session (``id``...)."""
+        body: dict[str, Any] = {}
+        if max_turns:
+            body["max_turns"] = max_turns
+        if metadata:
+            body["metadata"] = dict(metadata)
+        return self._post(f"/api/v1/agents/{_seg(agent)}/sessions", body)
+
+    def send_session_message(
+        self,
+        agent: str,
+        session_id: str,
+        content: str = "",
+        attachments: Optional[Sequence[Attachment]] = None,
+        prompt_vars: Optional[Mapping[str, str]] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Send a turn, optionally with images, PDFs, audio or video.
+
+        ``attachments`` become typed ``content_parts``; build them with
+        :meth:`Attachment.from_path`, ``from_bytes`` or ``from_url``. Audio
+        attachments are transcribed first and need the ``audio`` modality;
+        images, PDFs and video need ``image`` / ``pdf`` / ``video``. Returns the
+        session response (``content``, ``turn_number``, ``usage``...).
+        """
+        if not content and not attachments:
+            raise ValueError("a session message needs content, attachments, or both")
+        body: dict[str, Any] = {"content": content}
+        if attachments:
+            body["content_parts"] = [a.to_content_part() for a in attachments]
+        if prompt_vars:
+            body["prompt_vars"] = dict(prompt_vars)
+        if metadata:
+            body["metadata"] = dict(metadata)
+        return self._post(
+            f"/api/v1/agents/{_seg(agent)}/sessions/{_seg(session_id)}/messages", body
+        )
+
+    # ── Realtime voice (Pro) ──────────────────────────────────────────────
+
+    def realtime_token(self, agent: str, ttl_seconds: int = 60) -> "RealtimeToken":
+        """Mint a short-lived token a *browser* can use to open the realtime socket.
+
+        Browsers cannot set headers on a WebSocket, so a backend that holds the
+        API key calls this and hands the token to the page, which connects with
+        the ``agentoven.v1`` / ``agentoven-token.<token>`` subprotocols (see the
+        TypeScript ``connectRealtime({ token })``). The token is bound to the
+        agent and kitchen, is only checked when the socket opens, and expires in
+        ``ttl_seconds`` (1-300).
+        """
+        if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or not 1 <= ttl_seconds <= 300:
+            raise ValueError("ttl_seconds must be a whole number of seconds between 1 and 300")
+        data = self._post(f"/api/v1/realtime/{_seg(agent)}/token", {"ttl_seconds": ttl_seconds})
+        return RealtimeToken(token=data.get("token", ""), expires_in=int(data.get("expires_in", 0) or 0))
+
+    def realtime(
+        self,
+        agent: str,
+        voice: Optional[str] = None,
+        model: Optional[str] = None,
+        token: Optional[str] = None,
+    ) -> "RealtimeConnection":
+        """Open a realtime voice session with ``agent``.
+
+        Returns an async context manager yielding a ``RealtimeSession``. See
+        :mod:`agentoven.realtime`. Requires ``pip install "agentoven[realtime]"``.
+
+        The agent always runs on its own provider, which must offer the
+        ``realtime`` modality. By default the call authenticates with this
+        client's API key and kitchen headers. Pass ``token`` (from
+        :meth:`realtime_token`) to connect the way a browser does: no auth
+        headers, the token offered as the ``agentoven-token.<token>`` WebSocket
+        subprotocol.
+        """
+        from agentoven.realtime import (
+            TOKEN_SUBPROTOCOL_PREFIX,
+            WS_SUBPROTOCOL,
+            RealtimeConnection,
+            check_subprotocol_token,
+            realtime_url,
+        )
+
+        url = realtime_url(self._url, agent, voice, model)
+        if token:
+            check_subprotocol_token(token)
+            return RealtimeConnection(
+                url, {}, subprotocols=[WS_SUBPROTOCOL, TOKEN_SUBPROTOCOL_PREFIX + token]
+            )
+        headers = {"X-Kitchen": self._kitchen, "X-Kitchen-Id": self._kitchen}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        return RealtimeConnection(url, headers)
+
     # ── Internal HTTP helpers ─────────────────────────────────────────────
 
     def _headers(self) -> dict[str, str]:
@@ -665,6 +939,8 @@ class AgentOvenClient:
                 detail = json.loads(raw)
             except Exception:
                 detail = raw.decode(errors="replace")
+            if exc.code == 400 and _NO_AUDIO in _error_text(detail):
+                raise AudioModalityError(exc.code, detail) from exc
             raise AgentOvenAPIError(exc.code, detail) from exc
 
     def _get(self, path: str) -> Any:
@@ -680,6 +956,49 @@ class AgentOvenClient:
         return self._request("DELETE", path)
 
 
+@dataclass
+class RealtimeToken:
+    """A browser-safe realtime token and its lifetime in seconds."""
+
+    token: str
+    expires_in: int
+
+    def __repr__(self) -> str:  # never print the secret
+        return f"RealtimeToken(expires_in={self.expires_in})"
+
+
+_NO_AUDIO = "does not offer the audio modality"
+
+
+def _seg(value: str) -> str:
+    """Escape one URL path segment."""
+    return urllib.parse.quote(value, safe="")
+
+
+def _error_text(detail: Any) -> str:
+    if isinstance(detail, dict):
+        return str(detail.get("error") or detail.get("message") or detail)
+    return str(detail)
+
+
+def _provider_config(
+    config: Optional[Mapping[str, Any]],
+    api_key: Optional[str],
+    modalities: Union[Modalities, Mapping[str, Any], None],
+    allow_clear: bool,
+) -> dict[str, Any]:
+    cfg: dict[str, Any] = dict(config or {})
+    if api_key is not None:
+        cfg["api_key"] = api_key
+    if modalities is not None:
+        if "modalities" in cfg:
+            raise ValueError("pass modalities= or config['modalities'], not both")
+        cfg["modalities"] = modalities
+    if "modalities" in cfg:
+        cfg["modalities"] = validate_modalities(cfg["modalities"], allow_clear=allow_clear)
+    return cfg
+
+
 class AgentOvenAPIError(Exception):
     """Raised when the control plane returns a non-2xx response."""
 
@@ -687,3 +1006,13 @@ class AgentOvenAPIError(Exception):
         self.status_code = status_code
         self.detail = detail
         super().__init__(f"AgentOven API error {status_code}: {detail}")
+
+
+class AudioModalityError(AgentOvenAPIError):
+    """The agent's provider does not offer the ``audio`` modality, so it cannot
+    take or give speech (HTTP 400). Enable audio on the provider, or move the
+    agent to one that supports it — see ``client.agent_card(name).modalities``."""
+
+    @property
+    def message(self) -> str:
+        return _error_text(self.detail)

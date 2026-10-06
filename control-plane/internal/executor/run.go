@@ -46,7 +46,7 @@ type loopOpts struct {
 // newRunState builds a fresh run: a new trace ID, session handling identical
 // to the original single-function Execute, and initial messages for either a
 // reactive (flat) or agentic (sliding-window) agent.
-func (e *Executor) newRunState(ctx context.Context, agent *models.Agent, userMessage string, resolved *models.ResolvedIngredients, promptVars map[string]string, sessionID ...string) *runState {
+func (e *Executor) newRunState(ctx context.Context, agent *models.Agent, userMsg models.ChatMessage, resolved *models.ResolvedIngredients, promptVars map[string]string, sessionID ...string) *runState {
 	traceID := uuid.New().String()
 	st := &runState{
 		traceID: traceID,
@@ -108,12 +108,12 @@ func (e *Executor) newRunState(ctx context.Context, agent *models.Agent, userMes
 	st.session = session
 
 	if session != nil && len(session.Messages) > 0 {
-		st.messages = e.buildSlidingContext(ctx, agent, resolved, session, userMessage, promptVars)
+		st.messages = e.buildSlidingContext(ctx, agent, resolved, session, userMsg, promptVars)
 	} else {
-		st.messages = e.buildInitialMessages(ctx, agent, resolved, userMessage, promptVars)
+		st.messages = e.buildInitialMessages(ctx, agent, resolved, userMsg, promptVars)
 	}
 	if session != nil {
-		session.Messages = append(session.Messages, models.ChatMessage{Role: "user", Content: userMessage})
+		session.Messages = append(session.Messages, userMsg)
 	}
 	return st
 }
@@ -151,8 +151,15 @@ func outputResponseFormat(agent *models.Agent) *models.ResponseFormat {
 // Execute returns ErrPausedForApproval and trace.Turns' last entry has no
 // result for it yet. Resume continues from there once a human has decided.
 func (e *Executor) Execute(ctx context.Context, agent *models.Agent, userMessage string, resolved *models.ResolvedIngredients, promptVars map[string]string, thinkingEnabled bool, sessionID ...string) (string, *ExecutionTrace, error) {
+	return e.ExecuteMessage(ctx, agent, textMessage(userMessage), resolved, promptVars, thinkingEnabled, sessionID...)
+}
+
+// ExecuteMessage is Execute for a user turn that may carry media: images,
+// PDFs, or audio as ContentParts alongside its text.
+func (e *Executor) ExecuteMessage(ctx context.Context, agent *models.Agent, userMsg models.ChatMessage, resolved *models.ResolvedIngredients, promptVars map[string]string, thinkingEnabled bool, sessionID ...string) (string, *ExecutionTrace, error) {
 	ctx = ensureDelegationRoot(ctx, agent.Name)
-	st := e.newRunState(ctx, agent, userMessage, resolved, promptVars, sessionID...)
+	userMessage := userMsg.Content
+	st := e.newRunState(ctx, agent, userMsg, resolved, promptVars, sessionID...)
 	if e.journal != nil {
 		if err := e.journal.Start(ctx, JournalHeader{
 			TraceID: st.traceID, Kitchen: agent.Kitchen, Agent: agent, Resolved: resolved,
@@ -169,8 +176,14 @@ func (e *Executor) Execute(ctx context.Context, agent *models.Agent, userMessage
 // boundary as the loop runs — the primitive a caller streams to a user over
 // SSE/websocket from, instead of waiting for the whole run to finish.
 func (e *Executor) ExecuteStream(ctx context.Context, agent *models.Agent, userMessage string, resolved *models.ResolvedIngredients, promptVars map[string]string, thinkingEnabled bool, onEvent func(Event) error, sessionID ...string) (string, *ExecutionTrace, error) {
+	return e.ExecuteStreamMessage(ctx, agent, textMessage(userMessage), resolved, promptVars, thinkingEnabled, onEvent, sessionID...)
+}
+
+// ExecuteStreamMessage is ExecuteStream for a user turn that may carry media.
+func (e *Executor) ExecuteStreamMessage(ctx context.Context, agent *models.Agent, userMsg models.ChatMessage, resolved *models.ResolvedIngredients, promptVars map[string]string, thinkingEnabled bool, onEvent func(Event) error, sessionID ...string) (string, *ExecutionTrace, error) {
 	ctx = ensureDelegationRoot(ctx, agent.Name)
-	st := e.newRunState(ctx, agent, userMessage, resolved, promptVars, sessionID...)
+	userMessage := userMsg.Content
+	st := e.newRunState(ctx, agent, userMsg, resolved, promptVars, sessionID...)
 	if e.journal != nil {
 		if err := e.journal.Start(ctx, JournalHeader{
 			TraceID: st.traceID, Kitchen: agent.Kitchen, Agent: agent, Resolved: resolved,
@@ -181,6 +194,10 @@ func (e *Executor) ExecuteStream(ctx context.Context, agent *models.Agent, userM
 		}
 	}
 	return e.runLoop(ctx, st, thinkingEnabled, loopOpts{onEvent: newEventSink(onEvent), journal: e.journal})
+}
+
+func textMessage(text string) models.ChatMessage {
+	return models.ChatMessage{Role: "user", Content: text}
 }
 
 // Resume continues a run from its journal: a plain interrupted run (process

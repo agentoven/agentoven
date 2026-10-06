@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
+import { skillsPro } from './api';
 
 const LOCAL_STORAGE_SYNC_EVENT = 'ao-local-storage-sync';
 
@@ -65,4 +66,20 @@ export function useAPI<T>(fetcher: () => Promise<T>) {
   }, [refetch]);
 
   return { data, loading, error, refetch };
+}
+
+// Pro-only routes are detected by probing, not by a flag: the OSS control plane has no edition
+// endpoint, and Pro's routes simply don't exist there (404). Cached so each page mount doesn't re-probe.
+let skillsProProbe: Promise<boolean> | null = null;
+
+/** `null` while detecting, then whether Pro's governed skill routes (/skills/pro) exist. */
+export function useSkillsPro() {
+  const [available, setAvailable] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    skillsProProbe ??= skillsPro.available();
+    skillsProProbe.then((ok) => { if (!cancelled) setAvailable(ok); });
+    return () => { cancelled = true; };
+  }, []);
+  return available;
 }

@@ -37,6 +37,33 @@ pub enum JudgeCommands {
     Queue(QueueArgs),
     /// Grade one judgment yourself, for the judge's calibration.
     Review(ReviewArgs),
+    /// Fit a System One judge's probabilities to your reviews (Jev, Laya).
+    ///
+    /// Prints the fitted temperature and the calibration error before and
+    /// after. Nothing changes unless you pass --apply, which saves it into the
+    /// judge and changes the judge's version.
+    Calibrate(CalibrateArgs),
+    /// Ask a judge about recent items as written and negated, and report how
+    /// often it contradicts itself. Records nothing.
+    Probe(ProbeArgs),
+}
+
+#[derive(Args)]
+pub struct CalibrateArgs {
+    /// Judge name.
+    pub name: String,
+    /// Save the fitted temperature into the judge. Needs 50 or more reviews.
+    #[arg(long)]
+    pub apply: bool,
+}
+
+#[derive(Args)]
+pub struct ProbeArgs {
+    /// Judge name.
+    pub name: String,
+    /// How many recent items to probe (each costs two judge calls).
+    #[arg(long, default_value_t = 30)]
+    pub limit: u32,
 }
 
 #[derive(Args)]
@@ -155,6 +182,8 @@ pub async fn execute(cmd: JudgeCommands) -> anyhow::Result<()> {
         JudgeCommands::Judgments(a) => judgments(a).await,
         JudgeCommands::Queue(a) => queue(a).await,
         JudgeCommands::Review(a) => review(a).await,
+        JudgeCommands::Calibrate(a) => calibrate(a).await,
+        JudgeCommands::Probe(a) => probe(a).await,
     }
 }
 
@@ -168,14 +197,18 @@ async fn list() -> anyhow::Result<()> {
     }
     println!(
         "  {:<22} {:<34} {:<14} {:<8} {}",
-        "NAME".bold(), "MODEL".bold(), "VERSION".bold(), "REVIEW".bold(), "CREATED BY".bold()
+        "NAME".bold(), "KIND · MODEL".bold(), "VERSION".bold(), "REVIEW".bold(), "CREATED BY".bold()
     );
     println!("  {}", "─".repeat(100).dimmed());
     for j in &judges {
         println!(
             "  {:<22} {:<34} {:<14} {:<8} {}",
             j["name"].as_str().unwrap_or("-"),
-            format!("{}/{}", j["provider"].as_str().unwrap_or("?"), j["model"].as_str().unwrap_or("?")),
+            if j["kind"].as_str() == Some("system-one") {
+                format!("system-one · {}", j["model"].as_str().unwrap_or("?"))
+            } else {
+                format!("{}/{}", j["provider"].as_str().unwrap_or("?"), j["model"].as_str().unwrap_or("?"))
+            },
             j["version"].as_str().unwrap_or("-"),
             format!("{:.0}%", j["review_rate"].as_f64().unwrap_or(0.0) * 100.0),
             j["created_by"].as_str().unwrap_or("-"),
@@ -379,6 +412,20 @@ async fn stats(args: StatsArgs) -> anyhow::Result<()> {
     println!("  cost          ${:.4} · {} tokens in · {} out",
         s["cost_usd"].as_f64().unwrap_or(0.0), s["tokens_in"], s["tokens_out"]);
     println!("  mean score    {:.3} · histogram {}", s["mean_score"].as_f64().unwrap_or(0.0), s["histogram"]);
+    if let Some(c) = s["mean_confidence"].as_f64() {
+        let low = s["low_confidence"].as_i64().unwrap_or(0);
+        let target = s["escalate"].as_str().unwrap_or("");
+        let route = match target {
+            "" => "queued for human review".to_string(),
+            "human" => "queued for human review".to_string(),
+            other => format!("escalated to {}", other),
+        };
+        println!("  confidence    mean {:.2} · {} below {:.2}, {}", c, low, s["min_confidence"].as_f64().unwrap_or(0.0), route);
+    }
+    if let Some(f) = s["fitted"].as_object().filter(|f| !f.is_empty()) {
+        println!("  temperature   {:.2} fitted on {} reviews · calibration error {:.3} → {:.3}",
+            f["temperature"].as_f64().unwrap_or(1.0), f["labels"], f["ece_before"].as_f64().unwrap_or(0.0), f["ece_after"].as_f64().unwrap_or(0.0));
+    }
     let n = &s["noise"];
     println!("  noise         {} repeated items · mean spread {:.2} · max {:.2} · {} unstable",
         n["repeated_items"], n["mean_spread"].as_f64().unwrap_or(0.0),
@@ -400,6 +447,9 @@ async fn stats(args: StatsArgs) -> anyhow::Result<()> {
         println!("  calibration   agreement {} [{} – {}] · kappa {} · bias {:+.3} · n={}",
             pct(&cal["agreement"]), pct(&cal["agreement_ci"]["low"]), pct(&cal["agreement_ci"]["high"]),
             kappa(cal), cal["bias"].as_f64().unwrap_or(0.0), cal["n"]);
+        if let Some(e) = cal["ece"].as_f64() {
+            println!("                calibration error (ECE) {:.3}", e);
+        }
     }
     let h = &s["human_agreement"];
     if !h.is_null() {
@@ -482,5 +532,65 @@ async fn review(args: ReviewArgs) -> anyhow::Result<()> {
         "✓".green().bold(),
         out["reviewer"].as_str().unwrap_or("you").bold()
     );
+    Ok(())
+}
+
+async fn calibrate(args: CalibrateArgs) -> anyhow::Result<()> {
+    let client = pro_gate::build_client()?;
+    let path = format!("/api/v1/judges/{}/calibrate{}", args.name, if args.apply { "?apply=1" } else { "" });
+    let out: serde_json::Value = match client.raw_post(&path, &serde_json::json!({})).await {
+        Ok(v) => v,
+        Err(e) => {
+            println!("\n  {} {}\n", "✗".red().bold(), e.to_string().dimmed());
+            return Ok(());
+        }
+    };
+    let fit = &out["fit"];
+    println!(
+        "\n  {} {} · {} reviews · temperature {:.2} (currently {:.2})",
+        "⚖️ ".bold(), args.name.bold(), fit["n"], fit["temperature"].as_f64().unwrap_or(1.0), out["current_temperature"].as_f64().unwrap_or(1.0)
+    );
+    println!(
+        "  calibration error {:.3} → {:.3}",
+        fit["ece_before"].as_f64().unwrap_or(0.0), fit["ece_after"].as_f64().unwrap_or(0.0)
+    );
+    if !fit["reliable"].as_bool().unwrap_or(false) {
+        println!("  {} fewer than 50 reviews: provisional. Review more with {}", "⚠".yellow().bold(),
+            format!("agentoven judge queue {}", args.name).cyan());
+    }
+    if let Some(n) = out["note"].as_str() {
+        println!("  {} {}", "·".dimmed(), n);
+    }
+    if out["applied"].as_bool().unwrap_or(false) {
+        println!("  {} applied: the judge is now version {} (verdicts under earlier versions are not comparable)\n",
+            "✓".green().bold(), out["new_version"].as_str().unwrap_or("?"));
+    } else if !args.apply {
+        println!("  {} dry run: pass {} to save it\n", "→".dimmed(), "--apply".cyan());
+    }
+    Ok(())
+}
+
+async fn probe(args: ProbeArgs) -> anyhow::Result<()> {
+    let client = pro_gate::build_client()?;
+    let out: serde_json::Value = match client
+        .raw_post(&format!("/api/v1/judges/{}/probe?limit={}", args.name, args.limit), &serde_json::json!({}))
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            println!("\n  {} {}\n", "✗".red().bold(), e.to_string().dimmed());
+            return Ok(());
+        }
+    };
+    let r = &out["report"];
+    let rate = r["rate"].as_f64().unwrap_or(0.0);
+    let flipped = format!("{} of {} contradicted themselves", r["flipped"], r["n"]);
+    println!(
+        "\n  {} {} · {} ({:.0}%, 95% CI {:.0}%–{:.0}%)",
+        "⚖️ ".bold(), args.name.bold(), flipped, rate * 100.0,
+        r["rate_ci"]["low"].as_f64().unwrap_or(0.0) * 100.0, r["rate_ci"]["high"].as_f64().unwrap_or(0.0) * 100.0
+    );
+    println!("  {}", out["verdict"].as_str().unwrap_or(""));
+    println!("  {} {} probed · {} failed · ${:.4}\n", "·".dimmed(), out["tested"], out["failed"], out["cost_usd"].as_f64().unwrap_or(0.0));
     Ok(())
 }

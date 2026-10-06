@@ -17,6 +17,7 @@ pub mod recipe;
 pub mod server;
 pub mod service_account;
 pub mod session;
+pub mod skills;
 pub mod connector;
 pub mod eval;
 pub mod judge;
@@ -79,6 +80,10 @@ pub enum Commands {
     /// 🔌 Manage model providers (OpenAI, Anthropic, Ollama, etc.).
     #[command(subcommand)]
     Provider(provider::ProviderCommands),
+
+    /// 🧩 Install and review Agent Skills (SKILL.md bundles).
+    #[command(subcommand)]
+    Skills(skills::SkillsCommands),
 
     /// 🛠️  Manage MCP tools.
     #[command(subcommand)]
@@ -173,11 +178,30 @@ pub enum OutputFormat {
 
 /// Execute the CLI command.
 pub async fn execute(cli: Cli) -> anyhow::Result<()> {
-    match cli.command {
+    let Cli {
+        command,
+        url,
+        api_key,
+        kitchen,
+        output,
+    } = cli;
+    match command {
         Commands::Init(args) => init::execute(args).await,
         Commands::Apply(args) => apply::execute(args).await,
         Commands::Agent(cmd) => agent::execute(*cmd).await,
         Commands::Provider(cmd) => provider::execute(cmd).await,
+        Commands::Skills(cmd) => {
+            skills::execute(
+                cmd,
+                skills::Globals {
+                    url,
+                    api_key,
+                    kitchen,
+                    output,
+                },
+            )
+            .await
+        }
         Commands::Tool(cmd) => tool::execute(cmd).await,
         Commands::Prompt(cmd) => prompt::execute(cmd).await,
         Commands::Recipe(cmd) => recipe::execute(cmd).await,

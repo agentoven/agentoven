@@ -6,6 +6,7 @@ import { RecipesPage } from './pages/Recipes';
 import { PromptsPage } from './pages/Prompts';
 import { ProvidersPage } from './pages/Providers';
 import { ToolsPage } from './pages/Tools';
+import { SkillsPage } from './pages/Skills';
 import { TracesPage } from './pages/Traces';
 import { TraceDetailPage } from './pages/TraceDetail';
 import { OverviewPage } from './pages/Overview';
@@ -32,6 +33,7 @@ function App() {
           <Route path="/providers" element={<ProvidersPage />} />
           <Route path="/catalog" element={<CatalogPage />} />
           <Route path="/tools" element={<ToolsPage />} />
+          <Route path="/skills" element={<SkillsPage />} />
           <Route path="/traces" element={<TracesPage />} />
           <Route path="/traces/:traceId" element={<TraceDetailPage />} />
           <Route path="/embeddings" element={<EmbeddingsPage />} />

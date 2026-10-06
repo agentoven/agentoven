@@ -1,13 +1,17 @@
 package handlers
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/agentoven/agentoven/control-plane/internal/api/middleware"
 	"github.com/agentoven/agentoven/control-plane/internal/embeddings"
 	ragpkg "github.com/agentoven/agentoven/control-plane/internal/rag"
 	"github.com/agentoven/agentoven/control-plane/internal/vectorstore"
+	"github.com/agentoven/agentoven/control-plane/pkg/documents"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
@@ -84,6 +88,13 @@ func (h *RAGHandlers) RAGIngest(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "documents array is required"})
 		return
 	}
+
+	docs, err := normalizeDocuments(req.Documents)
+	if err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	req.Documents = docs
 
 	if h.RAGRegistry == nil {
 		respondJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "RAG service not configured"})
@@ -327,4 +338,30 @@ func (h *RAGHandlers) ListConnectors(w http.ResponseWriter, r *http.Request) {
 		"connectors": []interface{}{},
 		"note":       "data connectors require Pro license",
 	})
+}
+
+// normalizeDocuments turns binary documents into indexable text. A document
+// whose mime_type is application/pdf carries its bytes base64-encoded in
+// content; it is replaced by the text extracted from the PDF before chunking.
+// Every other document passes through unchanged.
+func normalizeDocuments(docs []models.RawDocument) ([]models.RawDocument, error) {
+	out := make([]models.RawDocument, 0, len(docs))
+	for i, d := range docs {
+		if !strings.EqualFold(strings.TrimSpace(d.MIMEType), "application/pdf") {
+			out = append(out, d)
+			continue
+		}
+		raw, err := base64.StdEncoding.DecodeString(d.Content)
+		if err != nil {
+			return nil, fmt.Errorf("documents[%d]: pdf content must be base64: %w", i, err)
+		}
+		text, err := documents.PDFText(raw)
+		if err != nil {
+			return nil, fmt.Errorf("documents[%d]: %w", i, err)
+		}
+		d.Content = text
+		d.MIMEType = "text/plain"
+		out = append(out, d)
+	}
+	return out, nil
 }

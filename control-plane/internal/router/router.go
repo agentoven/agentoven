@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/agentoven/agentoven/control-plane/internal/store"
+	"github.com/agentoven/agentoven/control-plane/pkg/blobstore"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -83,6 +84,9 @@ type SecretResolver interface {
 type ModelRouter struct {
 	store  store.Store
 	client *http.Client
+
+	// blobs resolves media parts that reference stored bytes (blob_ref).
+	blobs blobstore.Store
 
 	// SecretResolver resolves provider API key references at runtime.
 	secretResolver SecretResolver
@@ -229,6 +233,11 @@ func (mr *ModelRouter) RegisterDriver(driver ProviderDriver) {
 
 // SetCatalog wires the model catalog into the router for model-level pricing.
 // Called after both router and catalog are initialized in buildServer().
+// SetBlobStore lets media parts reference stored bytes by blob_ref.
+func (mr *ModelRouter) SetBlobStore(b blobstore.Store) {
+	mr.blobs = b
+}
+
 func (mr *ModelRouter) SetCatalog(cat CatalogLookup) {
 	mr.catalog = cat
 	log.Info().Msg("Model catalog wired into router for pricing")
@@ -839,10 +848,37 @@ func (mr *ModelRouter) callProvider(ctx context.Context, provider *models.ModelP
 
 type openAIRequest struct {
 	Model          string                  `json:"model"`
-	Messages       []models.ChatMessage    `json:"messages"`
+	Messages       []openAIMessage         `json:"messages"`
 	Tools          []models.ToolDefinition `json:"tools,omitempty"`
 	ToolChoice     interface{}             `json:"tool_choice,omitempty"`
 	ResponseFormat *models.ResponseFormat  `json:"response_format,omitempty"`
+}
+
+// openAIMessage is the wire shape of one chat message. Content is a string for
+// text-only messages and a parts array when media is attached.
+type openAIMessage struct {
+	Role       string                  `json:"role"`
+	Content    interface{}             `json:"content"`
+	ToolCalls  []models.ToolCallResult `json:"tool_calls,omitempty"`
+	ToolCallID string                  `json:"tool_call_id,omitempty"`
+	Name       string                  `json:"name,omitempty"`
+}
+
+// openAIMessages converts chat history into OpenAI wire messages, mapping any
+// media parts and refusing modalities the model cannot take.
+func (mr *ModelRouter) openAIMessages(ctx context.Context, prov *models.ModelProvider, model string, msgs []models.ChatMessage) ([]openAIMessage, error) {
+	out := make([]openAIMessage, 0, len(msgs))
+	for _, m := range msgs {
+		content, err := mr.openAIContent(ctx, prov, model, m)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, openAIMessage{
+			Role: m.Role, Content: content, ToolCalls: m.ToolCalls,
+			ToolCallID: m.ToolCallID, Name: m.Name,
+		})
+	}
+	return out, nil
 }
 
 type openAIResponse struct {
@@ -877,7 +913,11 @@ func (mr *ModelRouter) callOpenAI(ctx context.Context, provider *models.ModelPro
 		return nil, fmt.Errorf("openai: api_key not configured for provider %s", provider.Name)
 	}
 
-	oaiReq := openAIRequest{Model: model, Messages: messages, ResponseFormat: req.ResponseFormat}
+	oaiMsgs, err := mr.openAIMessages(ctx, provider, model, messages)
+	if err != nil {
+		return nil, err
+	}
+	oaiReq := openAIRequest{Model: model, Messages: oaiMsgs, ResponseFormat: req.ResponseFormat}
 	// Include tool definitions if provided by the executor
 	if len(req.Tools) > 0 {
 		oaiReq.Tools = req.Tools
@@ -1061,10 +1101,19 @@ type anthropicContentBlock struct {
 // generic history stores them is exactly what produced "Unexpected role
 // \"tool\"" once, and would still violate Anthropic's turn-pairing even after
 // the role were merely renamed.
-func anthropicMessagesFrom(msgs []models.ChatMessage) []anthropicMessage {
+func (mr *ModelRouter) anthropicMessagesFrom(ctx context.Context, prov *models.ModelProvider, model string, msgs []models.ChatMessage) ([]anthropicMessage, error) {
 	var out []anthropicMessage
 	for i := 0; i < len(msgs); i++ {
 		m := msgs[i]
+
+		if hasMediaParts(m) && m.Role != "tool" {
+			content, err := mr.anthropicContent(ctx, prov, model, m)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, anthropicMessage{Role: m.Role, Content: content})
+			continue
+		}
 
 		if m.Role == "tool" {
 			var blocks []anthropicContentBlock
@@ -1099,7 +1148,17 @@ func anthropicMessagesFrom(msgs []models.ChatMessage) []anthropicMessage {
 
 		out = append(out, anthropicMessage{Role: m.Role, Content: m.Content})
 	}
-	return out
+	return out, nil
+}
+
+// hasMediaParts reports whether a message carries any non-text content part.
+func hasMediaParts(m models.ChatMessage) bool {
+	for _, p := range m.ContentParts {
+		if k := partKind(p); k != "text" && k != "" {
+			return true
+		}
+	}
+	return false
 }
 
 type anthropicResponse struct {
@@ -1156,7 +1215,11 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 		}
 	}
 
-	anthReq := anthropicRequest{Model: model, System: systemText, Messages: anthropicMessagesFrom(filteredMessages), MaxTokens: maxTokens}
+	anthMsgs, err := mr.anthropicMessagesFrom(ctx, provider, model, filteredMessages)
+	if err != nil {
+		return nil, err
+	}
+	anthReq := anthropicRequest{Model: model, System: systemText, Messages: anthMsgs, MaxTokens: maxTokens}
 	// Convert tool definitions to Anthropic format
 	if len(req.Tools) > 0 {
 		for _, td := range req.Tools {
@@ -1190,6 +1253,7 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("x-api-key", apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
+	httpReq.Header.Set("anthropic-beta", anthropicFilesBeta)
 
 	httpResp, err := mr.clientFor(provider).Do(httpReq)
 	if err != nil {
@@ -1297,7 +1361,11 @@ func (mr *ModelRouter) callOllama(ctx context.Context, provider *models.ModelPro
 		endpoint = "http://localhost:11434"
 	}
 
-	oaiReq := openAIRequest{Model: model, Messages: req.Messages, ResponseFormat: req.ResponseFormat}
+	oaiMsgs, err := mr.openAIMessages(ctx, provider, model, req.Messages)
+	if err != nil {
+		return nil, err
+	}
+	oaiReq := openAIRequest{Model: model, Messages: oaiMsgs, ResponseFormat: req.ResponseFormat}
 
 	// Include tools if provided
 	if len(req.Tools) > 0 {
@@ -1537,6 +1605,23 @@ func (mr *ModelRouter) TestProvider(ctx context.Context, provider *models.ModelP
 		return result
 
 	default:
+		// A kind with its own wire format (Gemini, Vertex, Bedrock, ...) is tested
+		// by its driver. Sending it an OpenAI-style call, as every unknown kind used
+		// to get, fails for a valid key — and a failed test burns the agent at bake.
+		if d := mr.GetDriver(provider.Kind); d != nil && !openAICompatibleKinds[provider.Kind] {
+			err := d.HealthCheck(testCtx, provider)
+			result.LatencyMs = time.Since(start).Milliseconds()
+			if err != nil {
+				result.Error = err.Error()
+				return result
+			}
+			result.Healthy = true
+			if len(provider.Models) > 0 {
+				result.Model = provider.Models[0]
+			}
+			return result
+		}
+
 		// Unknown provider kind — try OpenAI-compatible test
 		model := ""
 		if len(provider.Models) > 0 {
@@ -1553,6 +1638,10 @@ func (mr *ModelRouter) TestProvider(ctx context.Context, provider *models.ModelP
 		return result
 	}
 }
+
+// openAICompatibleKinds speak the OpenAI chat API, so TestProvider checks them
+// with the same minimal chat call as OpenAI itself.
+var openAICompatibleKinds = map[string]bool{"litellm": true, "openrouter": true}
 
 // parseGoogleAPIError extracts a human-readable message from a Google API JSON
 // error body. Falls back to the raw string if the body is not JSON.

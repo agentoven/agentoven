@@ -29,6 +29,11 @@ type frontmatter struct {
 	MCPServers   []models.SkillMCPServer `yaml:"mcp_tools,omitempty"`
 }
 
+// reservedSkillNames are path segments the skills API uses in the place a skill
+// name would go (/skills/pro/..., /skills/register, /skills/upload/...), so a
+// skill with one of these names could never be addressed.
+var reservedSkillNames = map[string]bool{"pro": true, "register": true, "upload": true}
+
 // ParseManifest parses a SKILL.md file's raw bytes into a SkillManifest.
 // name and description are required, matching every Agent Skills-compatible
 // client's own validation — a skill without them can never reach the
@@ -49,6 +54,9 @@ func ParseManifest(data []byte) (*models.SkillManifest, error) {
 	}
 	if strings.TrimSpace(parsed.Description) == "" {
 		return nil, fmt.Errorf("SKILL.md frontmatter must set 'description'")
+	}
+	if reservedSkillNames[strings.ToLower(strings.TrimSpace(parsed.Name))] {
+		return nil, fmt.Errorf("skill name %q is reserved (it is a path segment of the skills API); choose another name", strings.TrimSpace(parsed.Name))
 	}
 
 	for i, srv := range parsed.MCPServers {
