@@ -20,7 +20,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         .map((s: string) => s.replace(/^\s*-\s*/, '').trim())
         .filter(Boolean);
     }
-    throw new APIError(body.error || `API error ${res.status}`, res.status, details);
+    throw new APIError(body.error || `API error ${res.status}`, res.status, details, body);
   }
   // 204 No Content or empty body — return without parsing JSON
   if (res.status === 204 || res.headers.get('content-length') === '0') {
@@ -33,10 +33,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export class APIError extends Error {
   status: number;
   details?: string[];
-  constructor(message: string, status: number, details?: string[]) {
+  /** Parsed JSON error body, for endpoints whose non-2xx responses carry data (e.g. a 422 skill verdict). */
+  body?: unknown;
+  constructor(message: string, status: number, details?: string[], body?: unknown) {
     super(message);
     this.status = status;
     this.details = details;
+    this.body = body;
   }
 }
 
@@ -556,6 +559,143 @@ export const connectorsAPI = {
     if (Array.isArray(res)) return res;
     return res?.connectors ?? [];
   },
+};
+
+// ── Skills ────────────────────────────────────────────────────
+// Agent Skills (SKILL.md bundles). OSS registers + verifies in one call; Pro adds a
+// staged flow under /skills/pro whose analyze step can pin a provider. Approve/reject of a
+// needs_review skill is an OSS endpoint used by both flows.
+
+export type SkillStatus = 'pending' | 'accepted' | 'rejected' | 'needs_review';
+export type SkillSource = 'inline' | 'upload' | 'path' | 'git';
+export type SkillVerdict = 'accept' | 'reject' | 'needs_review';
+
+export interface SkillMCPServer {
+  name: string;
+  description?: string;
+  transport: string;
+  endpoint: string;
+  auth_type?: string;
+  auth_header?: string;
+  credential_ref?: string;
+}
+
+export interface SkillManifest {
+  name: string;
+  description: string;
+  license?: string;
+  allowed_tools?: string[];
+  mcp_tools?: SkillMCPServer[];
+  instructions: string;
+}
+
+export interface Skill {
+  id: string;
+  kitchen: string;
+  name: string;
+  source: SkillSource;
+  source_ref?: string;
+  manifest: SkillManifest | null;
+  status: SkillStatus;
+  verification_verdict?: SkillVerdict | '';
+  verification_reasoning?: string;
+  verified_at?: string;
+  verified_by_provider?: string;
+  registered_tools?: string[];
+  created_at: string;
+  updated_at: string;
+  created_by?: string;
+}
+
+/** Where a skill bundle comes from. Only the fields for the chosen source are sent. */
+export interface SkillSourceRequest {
+  source: 'git' | 'path' | 'inline';
+  git_url?: string;
+  git_ref?: string;
+  path?: string;
+  skill_md?: string;
+}
+
+/**
+ * Normalized result of a verification call. OSS register and Pro analyze answer with different
+ * shapes and non-2xx codes for "blocked" (422) and "needs review" (202); this flattens them.
+ */
+export interface SkillOutcome {
+  outcome: 'accepted' | 'needs_review' | 'rejected';
+  reasoning: string;
+  note?: string;
+  skill?: Skill;
+}
+
+export interface SkillStageResult {
+  skill: Skill;
+  available_providers: string[];
+  note?: string;
+}
+
+export interface SkillAnalyzeRequest {
+  /** Optional: pin the provider; omitted means the kitchen's default. Analysis sends the bundle to that provider's model. */
+  provider?: string;
+}
+
+function toSkillOutcome(body: Record<string, unknown>): SkillOutcome {
+  const status = String(body.status ?? '');
+  const isSkill = typeof body.manifest === 'object' && typeof body.name === 'string';
+  return {
+    outcome: status === 'accepted' ? 'accepted' : status === 'rejected' ? 'rejected' : 'needs_review',
+    reasoning: String((isSkill ? body.verification_reasoning : body.reasoning) ?? ''),
+    note: typeof body.note === 'string' ? body.note : undefined,
+    skill: isSkill ? (body as unknown as Skill) : undefined,
+  };
+}
+
+async function postForSkillOutcome(path: string, payload: unknown): Promise<SkillOutcome> {
+  try {
+    const body = await request<Record<string, unknown>>(path, { method: 'POST', body: JSON.stringify(payload) });
+    return toSkillOutcome(body);
+  } catch (e) {
+    // 422 means "verified and blocked": the body is the verdict, not an error to surface as one.
+    if (e instanceof APIError && e.status === 422 && e.body && typeof e.body === 'object') {
+      return toSkillOutcome(e.body as Record<string, unknown>);
+    }
+    throw e;
+  }
+}
+
+const skillPath = (name: string) => `/skills/${encodeURIComponent(name)}`;
+
+export const skills = {
+  list: async () => (await request<{ skills: Skill[] | null }>('/skills')).skills ?? [],
+  get: (name: string) => request<Skill>(skillPath(name)),
+  register: (req: SkillSourceRequest) => postForSkillOutcome('/skills/register', req),
+  delete: (name: string) => request<void>(skillPath(name), { method: 'DELETE' }),
+  approve: (name: string, note?: string) =>
+    request<Skill>(`${skillPath(name)}/approve`, { method: 'POST', body: JSON.stringify({ note: note || undefined }) }),
+  reject: (name: string, note?: string) =>
+    request<Skill>(`${skillPath(name)}/reject`, { method: 'POST', body: JSON.stringify({ note: note || undefined }) }),
+};
+
+export const skillsPro = {
+  /**
+   * Pro-only routes are simply absent (404/405) on OSS, so probe with a request that has no side
+   * effects on Pro (stage with an empty body is rejected as a 400/412 before anything is stored).
+   */
+  available: async (): Promise<boolean> => {
+    try {
+      const res = await fetch(`${BASE}/skills/pro/stage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      return res.status !== 404 && res.status !== 405;
+    } catch {
+      return false;
+    }
+  },
+  stage: (req: SkillSourceRequest) =>
+    request<SkillStageResult>('/skills/pro/stage', { method: 'POST', body: JSON.stringify(req) }),
+  analyze: (name: string, req: SkillAnalyzeRequest) =>
+    postForSkillOutcome(`/skills/pro/${encodeURIComponent(name)}/analyze`, req),
 };
 
 // ── Model Catalog ─────────────────────────────────────────────

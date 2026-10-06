@@ -17,13 +17,20 @@ const statusColors: Record<string, string> = {
   burnt: 'bg-red-500/20 text-red-400',
   success: 'bg-emerald-500/20 text-emerald-400',
   error: 'bg-red-500/20 text-red-400',
+  // Skills: lifecycle status and verification verdict
+  accepted: 'bg-emerald-500/20 text-emerald-400',
+  accept: 'bg-emerald-500/20 text-emerald-400',
+  rejected: 'bg-red-500/20 text-red-400',
+  reject: 'bg-red-500/20 text-red-400',
+  needs_review: 'bg-amber-500/20 text-amber-400',
+  pending: 'bg-blue-500/20 text-blue-400',
 };
 
 export function StatusBadge({ status }: { status: string }) {
   const color = statusColors[status] ?? 'bg-slate-500/20 text-slate-400';
   return (
     <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${color}`}>
-      {status}
+      {status.replace(/_/g, ' ')}
     </span>
   );
 }
