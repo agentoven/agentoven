@@ -46,6 +46,7 @@ import (
 	"github.com/agentoven/agentoven/control-plane/internal/vectorstore"
 	"github.com/agentoven/agentoven/control-plane/internal/workflow"
 	"github.com/agentoven/agentoven/control-plane/pkg/agentexec"
+	"github.com/agentoven/agentoven/control-plane/pkg/blobstore"
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 
@@ -266,6 +267,20 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 	cat := catalog.NewCatalog("")
 	cat.Start(ctx)
 	mr.SetCatalog(cat) // wire catalog into router for model-level pricing
+
+	// Media parts (images, PDFs, audio) referenced by blob_ref are read from
+	// here. AGENTOVEN_BLOB_DIR points it at a persistent volume; on serverless
+	// platforms the default under the temp dir is scratch only, so durable
+	// media should go through provider file IDs instead.
+	blobDir := os.Getenv("AGENTOVEN_BLOB_DIR")
+	if blobDir == "" {
+		blobDir = os.TempDir() + "/agentoven-blobs"
+	}
+	if bs, bErr := blobstore.NewLocalStore(blobDir); bErr != nil {
+		log.Warn().Err(bErr).Str("dir", blobDir).Msg("Blob store unavailable — blob_ref media parts will be refused")
+	} else {
+		mr.SetBlobStore(bs)
+	}
 	log.Info().Msg("✅ Model catalog initialized")
 
 	// ── Session Store (Release 8) ───────────────────────────

@@ -35,7 +35,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 	r.Use(chimw.RequestID)
 	r.Use(chimw.RealIP)
 	r.Use(chimw.Recoverer)
-	r.Use(chimw.Compress(5))
+	r.Use(middleware.SkipForUpgrade(chimw.Compress(5)))
 	r.Use(middleware.Logger)
 	r.Use(middleware.TenantExtractor)
 	r.Use(middleware.Telemetry)

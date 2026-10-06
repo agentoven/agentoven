@@ -93,3 +93,15 @@ body
 		t.Fatal("expected an error for an mcp_tools entry with no endpoint")
 	}
 }
+
+func TestParseManifestRejectsNamesThatShadowTheSkillsAPI(t *testing.T) {
+	for _, name := range []string{"pro", "Pro", "register", "upload"} {
+		data := []byte("---\nname: " + name + "\ndescription: d\n---\nbody\n")
+		if _, err := skills.ParseManifest(data); err == nil || !strings.Contains(err.Error(), "reserved") {
+			t.Errorf("name %q must be rejected as reserved, got %v", name, err)
+		}
+	}
+	if _, err := skills.ParseManifest([]byte("---\nname: professional\ndescription: d\n---\nbody\n")); err != nil {
+		t.Fatalf("a name that merely starts with a reserved word is fine: %v", err)
+	}
+}

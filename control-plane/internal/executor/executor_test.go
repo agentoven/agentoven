@@ -786,3 +786,86 @@ func TestGuardrailsBlockToolResultsBeforeTheyReenterTheConversation(t *testing.T
 		t.Fatalf("expected a prompt-injection-shaped tool result to be blocked before re-entering the model's context, got %+v", result)
 	}
 }
+
+func TestMediaPartsReachTheModelRequest(t *testing.T) {
+	d := &scriptedDriver{replies: []turnReply{{content: "it is a cat"}}}
+	e := newTestExecutor(t, d, newFakeGateway())
+
+	msg := models.ChatMessage{Role: "user", Content: "what is this?", ContentParts: []models.ContentPart{
+		{Type: "image", Media: &models.MediaRef{MimeType: "image/png", Data: "aGk="}},
+	}}
+	resp, _, err := e.ExecuteMessage(context.Background(), testAgent(), msg, resolvedWithTools(), nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp != "it is a cat" {
+		t.Fatalf("unexpected response %q", resp)
+	}
+
+	sent := d.requests[0].Messages
+	last := sent[len(sent)-1]
+	if last.Role != "user" || len(last.ContentParts) != 1 || last.ContentParts[0].Media == nil {
+		t.Fatalf("the user turn must reach the model with its media part intact, got %+v", last)
+	}
+}
+
+// ── realtime hooks ───────────────────────────────────────────
+
+func TestRealtimeSetupReturnsPromptAndToolDefinitions(t *testing.T) {
+	e := newTestExecutor(t, &scriptedDriver{}, newFakeGateway())
+	agent := testAgent()
+	agent.Description = "You are a booking agent."
+	tool := models.ResolvedTool{Name: "lookup_order", Schema: map[string]interface{}{"type": "object", "description": "find an order"}}
+
+	prompt, defs := e.RealtimeSetup(context.Background(), agent, resolvedWithTools(tool), nil)
+	if !strings.Contains(prompt, "You are a booking agent.") {
+		t.Fatalf("expected the agent's system prompt, got %q", prompt)
+	}
+	found := false
+	for _, d := range defs {
+		found = found || d.Function.Name == "lookup_order"
+	}
+	if !found {
+		t.Fatalf("expected the agent's tool among the definitions, got %+v", defs)
+	}
+}
+
+func TestRunToolExecutesThroughTheGateway(t *testing.T) {
+	gw := newFakeGateway()
+	gw.register("lookup_order", func(args map[string]interface{}) (string, bool) {
+		return "order " + args["id"].(string) + " shipped", false
+	})
+	e := newTestExecutor(t, &scriptedDriver{}, gw)
+	tool := models.ResolvedTool{Name: "lookup_order", Schema: map[string]interface{}{"type": "object"}}
+
+	out, isErr := e.RunTool(context.Background(), testAgent(), resolvedWithTools(tool), "c1", "lookup_order", `{"id":"A-1"}`)
+	if isErr || out != "order A-1 shipped" {
+		t.Fatalf("unexpected result %q err=%v", out, isErr)
+	}
+}
+
+func TestRunToolRefusesApprovalGatedTools(t *testing.T) {
+	gw := newFakeGateway()
+	var ran int32
+	gw.register("issue_refund", func(map[string]interface{}) (string, bool) { atomic.AddInt32(&ran, 1); return "refunded", false })
+	e := newTestExecutor(t, &scriptedDriver{}, gw)
+	agent := testAgent()
+	agent.ApprovalTools = []string{"issue_refund"}
+	tool := models.ResolvedTool{Name: "issue_refund", Schema: map[string]interface{}{"type": "object"}}
+
+	out, isErr := e.RunTool(context.Background(), agent, resolvedWithTools(tool), "c1", "issue_refund", `{}`)
+	if !isErr || !strings.Contains(out, "needs human approval") {
+		t.Fatalf("an approval-gated tool must be refused with a clear reason, got %q err=%v", out, isErr)
+	}
+	if atomic.LoadInt32(&ran) != 0 {
+		t.Fatal("a gated tool must never run during a live voice session")
+	}
+}
+
+func TestRunToolReportsBadArgumentsToTheModel(t *testing.T) {
+	e := newTestExecutor(t, &scriptedDriver{}, newFakeGateway())
+	out, isErr := e.RunTool(context.Background(), testAgent(), resolvedWithTools(), "c1", "x", `{not json`)
+	if !isErr || !strings.Contains(out, "not valid JSON") {
+		t.Fatalf("expected a clear argument error, got %q err=%v", out, isErr)
+	}
+}

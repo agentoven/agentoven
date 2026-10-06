@@ -167,10 +167,10 @@ func (e *Executor) SetGuardrails(g contracts.GuardrailService) {
 }
 
 // buildInitialMessages constructs the system prompt and user message for reactive agents.
-func (e *Executor) buildInitialMessages(ctx context.Context, agent *models.Agent, resolved *models.ResolvedIngredients, userMessage string, promptVars map[string]string) []models.ChatMessage {
+func (e *Executor) buildInitialMessages(ctx context.Context, agent *models.Agent, resolved *models.ResolvedIngredients, userMsg models.ChatMessage, promptVars map[string]string) []models.ChatMessage {
 	messages := make([]models.ChatMessage, 0, 3)
 
-	systemPrompt := e.buildSystemPrompt(ctx, agent, resolved, userMessage, promptVars)
+	systemPrompt := e.buildSystemPrompt(ctx, agent, resolved, userMsg.Content, promptVars)
 	if systemPrompt != "" {
 		messages = append(messages, models.ChatMessage{
 			Role:    "system",
@@ -178,11 +178,7 @@ func (e *Executor) buildInitialMessages(ctx context.Context, agent *models.Agent
 		})
 	}
 
-	// User message
-	messages = append(messages, models.ChatMessage{
-		Role:    "user",
-		Content: userMessage,
-	})
+	messages = append(messages, userMsg)
 
 	return messages
 }
@@ -333,18 +329,18 @@ func (e *Executor) retrieveContext(ctx context.Context, kitchen string, retrieve
 // When the total token count exceeds ContextBudget, the oldest non-system
 // messages are summarized using the agent's SummaryModel (or the primary
 // model as fallback), and replaced with a single summary message.
-func (e *Executor) buildSlidingContext(ctx context.Context, agent *models.Agent, resolved *models.ResolvedIngredients, session *models.Session, userMessage string, promptVars map[string]string) []models.ChatMessage {
+func (e *Executor) buildSlidingContext(ctx context.Context, agent *models.Agent, resolved *models.ResolvedIngredients, session *models.Session, userMsg models.ChatMessage, promptVars map[string]string) []models.ChatMessage {
 	budget := ctxwindow.EffectiveBudget(agent.ContextBudget, 0)
 
 	// Build the system prompt (includes RAG retrieval for retriever ingredients)
-	systemPrompt := e.buildSystemPrompt(ctx, agent, resolved, userMessage, promptVars)
+	systemPrompt := e.buildSystemPrompt(ctx, agent, resolved, userMsg.Content, promptVars)
 	systemMsg := models.ChatMessage{Role: "system", Content: systemPrompt}
 
 	// Start with system + all session history + new user message
 	allMessages := make([]models.ChatMessage, 0, len(session.Messages)+2)
 	allMessages = append(allMessages, systemMsg)
 	allMessages = append(allMessages, session.Messages...)
-	allMessages = append(allMessages, models.ChatMessage{Role: "user", Content: userMessage})
+	allMessages = append(allMessages, userMsg)
 
 	// Estimate total tokens
 	totalTokens := ctxwindow.EstimateTokensForMessages(allMessages)
@@ -356,7 +352,7 @@ func (e *Executor) buildSlidingContext(ctx context.Context, agent *models.Agent,
 
 	// Over budget — compress older messages into a summary
 	systemTokens := ctxwindow.EstimateTokens(systemMsg.Content)
-	userTokens := ctxwindow.EstimateTokens(userMessage)
+	userTokens := ctxwindow.EstimateTokens(userMsg.Content)
 	reservedTokens := systemTokens + userTokens + 500 // 500 tokens buffer for summary overhead
 
 	// Find how many recent messages we can keep within budget
@@ -397,7 +393,7 @@ func (e *Executor) buildSlidingContext(ctx context.Context, agent *models.Agent,
 		})
 	}
 	result = append(result, recentMessages...)
-	result = append(result, models.ChatMessage{Role: "user", Content: userMessage})
+	result = append(result, userMsg)
 
 	log.Debug().
 		Str("agent", agent.Name).

@@ -1678,6 +1678,7 @@ func (h *Handlers) ListProviders(w http.ResponseWriter, r *http.Request) {
 	for i, p := range providers {
 		cp := p
 		masked[i] = *maskProviderKeys(&cp)
+		masked[i].Modalities = h.providerModalities(&p)
 	}
 	respondJSON(w, http.StatusOK, masked)
 }
@@ -1686,6 +1687,11 @@ func (h *Handlers) CreateProvider(w http.ResponseWriter, r *http.Request) {
 	var req models.ModelProvider
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if err := h.Router.CheckModalities(&req); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -1699,7 +1705,9 @@ func (h *Handlers) CreateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Info().Str("provider", req.Name).Str("kind", req.Kind).Msg("Model provider registered")
-	respondJSON(w, http.StatusCreated, req)
+	created := maskProviderKeys(&req) // never echo the API key back
+	created.Modalities = h.providerModalities(&req)
+	respondJSON(w, http.StatusCreated, created)
 }
 
 func (h *Handlers) GetProvider(w http.ResponseWriter, r *http.Request) {
@@ -1714,7 +1722,34 @@ func (h *Handlers) GetProvider(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	respondJSON(w, http.StatusOK, maskProviderKeys(provider))
+	masked := maskProviderKeys(provider)
+	masked.Modalities = h.providerModalities(provider)
+	respondJSON(w, http.StatusOK, masked)
+}
+
+// providerModalities lists what an agent on the provider can use: the union
+// over the provider's models, since image input depends on the model.
+func (h *Handlers) providerModalities(p *models.ModelProvider) []string {
+	if h.Router == nil {
+		return nil
+	}
+	names := p.Models
+	if len(names) == 0 {
+		names = []string{""}
+	}
+	have := map[string]bool{}
+	for _, model := range names {
+		for _, m := range h.Router.Modalities(p, model) {
+			have[m] = true
+		}
+	}
+	var out []string
+	for _, m := range models.AllModalities {
+		if have[m] {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 func (h *Handlers) DeleteProvider(w http.ResponseWriter, r *http.Request) {
@@ -1741,11 +1776,22 @@ func (h *Handlers) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req models.ModelProvider
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
+	var req models.ModelProvider
+	if err := json.Unmarshal(body, &req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	// is_default is a plain bool on the model, so "false" and "not sent" look
+	// the same there; only change it when the caller actually sent it.
+	var sent struct {
+		IsDefault *bool `json:"is_default"`
+	}
+	_ = json.Unmarshal(body, &sent)
 
 	if req.Kind != "" {
 		provider.Kind = req.Kind
@@ -1756,16 +1802,32 @@ func (h *Handlers) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	if len(req.Models) > 0 {
 		provider.Models = req.Models
 	}
+	// Check the update itself before merging: merging drops emptied entries,
+	// which would hide a typo like an unknown modality with no settings.
+	if err := models.ValidateModalities(req.Config); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if req.Config != nil {
 		// Merge config — don't overwrite existing keys that aren't in the update
 		if provider.Config == nil {
 			provider.Config = map[string]interface{}{}
 		}
 		for k, v := range req.Config {
+			if k == "modalities" {
+				provider.Config[k] = models.MergeModalities(provider.Config[k], v)
+				continue
+			}
 			provider.Config[k] = v
 		}
 	}
-	provider.IsDefault = req.IsDefault
+	if sent.IsDefault != nil {
+		provider.IsDefault = *sent.IsDefault
+	}
+	if err := h.Router.CheckModalities(provider); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Update CA bundle if provided. Sending an empty string keeps the existing
 	// bundle. Sending a non-empty PEM string replaces it (or sets it for the
@@ -1818,8 +1880,10 @@ func (h *Handlers) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Info().Str("provider", name).Int("agents_burnt", burntCount).Msg("Model provider updated")
+	updated := maskProviderKeys(provider)
+	updated.Modalities = h.providerModalities(provider)
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"provider":     maskProviderKeys(provider),
+		"provider":     updated,
 		"agents_burnt": burntCount,
 	})
 }
@@ -2433,8 +2497,10 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 		Message struct {
 			Role  string `json:"role"`
 			Parts []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
+				Type string          `json:"type"`
+				Text string          `json:"text"`
+				File *a2aFilePart    `json:"file,omitempty"`
+				Data json.RawMessage `json:"data,omitempty"`
 			} `json:"parts"`
 		} `json:"message"`
 		ProviderConfig struct {
@@ -2460,11 +2526,24 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 
 	kitchen := middleware.GetKitchen(r.Context())
 
-	// Extract text from message parts
+	// Extract text, file, and data parts. Text goes to the prompt; files become
+	// media content parts; structured data is sent as its JSON text so it is
+	// never silently dropped.
 	var userMessage string
+	var userParts []models.ContentPart
 	for _, part := range taskReq.Message.Parts {
-		if part.Type == "text" || part.Type == "" {
+		switch part.Type {
+		case "text", "":
 			userMessage += part.Text
+		case "file":
+			if part.File == nil {
+				continue
+			}
+			userParts = append(userParts, a2aFileToContentPart(part.File))
+		case "data":
+			if len(part.Data) > 0 {
+				userMessage += "\n" + string(part.Data)
+			}
 		}
 	}
 
@@ -2565,6 +2644,25 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 			return
 		}
 
+		// Speech parts are transcribed by the agent's own provider, so this waits
+		// until the agent is known.
+		if len(userParts) > 0 {
+			transcript, rest, err := h.transcribeAudioParts(r.Context(), agent, userParts)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/a2a+json")
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"jsonrpc": "2.0",
+					"error":   map[string]interface{}{"code": -32602, "message": err.Error()},
+					"id":      rpcID,
+				})
+				return
+			}
+			if transcript != "" {
+				userMessage = strings.TrimSpace(userMessage + " " + transcript)
+			}
+			userParts = rest
+		}
+
 		// Create initial trace immediately so tasks/get can find it
 		initialTrace := &models.Trace{
 			ID:        taskID,
@@ -2623,7 +2721,8 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 				}
 			}
 		} else {
-			resp, et, execErr := h.Executor.Execute(execCtx, agent, userMessage, resolved, nil, false)
+			userMsg := models.ChatMessage{Role: "user", Content: userMessage, ContentParts: userParts}
+			resp, et, execErr := h.Executor.ExecuteMessage(execCtx, agent, userMsg, resolved, nil, false)
 			response = resp
 			execTrace = et
 			if execErr != nil {
@@ -4111,10 +4210,38 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		Variables       map[string]string `json:"variables,omitempty"`        // prompt template variables
 		ThinkingEnabled bool              `json:"thinking_enabled,omitempty"` // enable extended thinking
 		SessionID       string            `json:"session_id,omitempty"`       // continue a prior conversation — any agent, not just agentic
+		Audio           *audioInput       `json:"audio,omitempty"`            // spoken input, transcribed before the turn
+		VoiceOutput     bool              `json:"voice_output,omitempty"`     // also return the reply as speech
+		Voice           string            `json:"voice,omitempty"`            // TTS voice name, default "alloy"
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Message == "" {
-		respondError(w, http.StatusBadRequest, "Request must include a non-empty 'message' field")
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+	if req.Message == "" && req.Audio == nil {
+		respondError(w, http.StatusBadRequest, "Request must include a non-empty 'message' or 'audio' field")
+		return
+	}
+
+	// Cascaded voice, step 1: speech in becomes text before anything else runs,
+	// so guardrails and the agent see the same thing a typed message would give.
+	var transcript string
+	if req.Audio != nil {
+		engine, err := h.speechEngineFor(r.Context(), agent)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		transcript, err = transcribeAudioInput(r.Context(), engine, req.Audio)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, "could not transcribe audio: "+err.Error())
+			return
+		}
+		if req.Message == "" {
+			req.Message = transcript
+		} else {
+			req.Message = req.Message + "\n" + transcript
+		}
 	}
 
 	// ── Input Guardrails ────────────────────────────────────
@@ -4209,14 +4336,18 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		respondJSON(w, http.StatusOK, map[string]interface{}{
+		out := map[string]interface{}{
 			"agent":      agentName,
 			"response":   response,
 			"trace_id":   traceRecord.ID,
 			"turns":      1,
 			"usage":      traceRecord.Usage,
 			"latency_ms": traceRecord.DurationMs,
-		})
+		}
+		if !h.addSpeech(w, r.Context(), agent, out, response, transcript, req.VoiceOutput, req.Voice) {
+			return
+		}
+		respondJSON(w, http.StatusOK, out)
 		return
 	}
 
@@ -4277,7 +4408,7 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	// Persist executor turns as hierarchical spans
 	h.persistExecutorSpans(r.Context(), trace)
 
-	respondJSON(w, http.StatusOK, map[string]interface{}{
+	out := map[string]interface{}{
 		"agent":           agentName,
 		"response":        response,
 		"trace_id":        trace.TraceID,
@@ -4286,7 +4417,11 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		"usage":           trace.Usage,
 		"latency_ms":      trace.TotalMs,
 		"execution_trace": trace,
-	})
+	}
+	if !h.addSpeech(w, r.Context(), agent, out, response, transcript, req.VoiceOutput, req.Voice) {
+		return
+	}
+	respondJSON(w, http.StatusOK, out)
 }
 
 // StreamInvokeAgent executes a managed agent's agentic loop over SSE: proxies
@@ -5597,15 +5732,26 @@ func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Append user message to session history
+	transcript, parts, err := h.transcribeAudioParts(r.Context(), agent, req.ContentParts)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	content := req.Content
+	if transcript != "" {
+		content = strings.TrimSpace(content + " " + transcript)
+	}
 	userMsg := models.ChatMessage{
-		Role:    "user",
-		Content: req.Content,
+		Role:         "user",
+		Content:      content,
+		ContentParts: parts,
 	}
 	session.Messages = append(session.Messages, userMsg)
 
 	// ── Input Guardrails (Session) ──────────────────────────
 	if h.Guardrails != nil && len(agent.Guardrails) > 0 {
-		eval, gErr := h.Guardrails.EvaluateInput(r.Context(), agent.Guardrails, req.Content)
+		// content includes the transcript of any spoken parts, so speech is checked too.
+		eval, gErr := h.Guardrails.EvaluateInput(r.Context(), agent.Guardrails, content)
 		if gErr != nil {
 			log.Warn().Err(gErr).Str("agent", agentName).Msg("Session input guardrail error")
 			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "input", nil, gErr)
@@ -5922,21 +6068,26 @@ func (h *Handlers) GetAgentCard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Check for vision support via catalog
-	if h.Catalog != nil && agent.ModelName != "" {
-		providerKind := ""
-		if agent.ModelProvider != "" {
-			if prov, err := h.Store.GetProvider(r.Context(), agent.Kitchen, agent.ModelProvider); err == nil {
-				providerKind = prov.Kind
+	// What the agent can take in and give out is what its provider offers.
+	if h.Router != nil {
+		if prov, model, err := h.agentProvider(r.Context(), agent); err == nil {
+			card.Modalities = h.Router.Modalities(prov, model)
+			for _, m := range card.Modalities {
+				switch m {
+				case models.ModalityImage:
+					card.Capabilities.Vision = true
+					card.InputModes = append(card.InputModes, m)
+				case models.ModalityPDF, models.ModalityVideo:
+					card.InputModes = append(card.InputModes, m)
+				case models.ModalityAudio:
+					card.InputModes = append(card.InputModes, m)
+					card.OutputModes = append(card.OutputModes, m)
+				}
 			}
-		}
-		if cap := h.Catalog.Lookup(providerKind, agent.ModelName); cap != nil {
-			if cap.SupportsVision {
-				card.InputModes = append(card.InputModes, "image")
-				card.Capabilities.Vision = true
-			}
-			if cap.SupportsJSON {
-				card.Capabilities.StructuredOutput = true
+			if h.Catalog != nil {
+				if cap := h.Catalog.Lookup(prov.Kind, model); cap != nil && cap.SupportsJSON {
+					card.Capabilities.StructuredOutput = true
+				}
 			}
 		}
 	}
@@ -6291,4 +6442,32 @@ func (h *Handlers) HandleRevokeCrossKitchenGrant(w http.ResponseWriter, r *http.
 	}
 	log.Info().Str("id", grantID).Msg("Cross-kitchen grant revoked")
 	respondJSON(w, http.StatusOK, map[string]string{"status": "revoked", "id": grantID})
+}
+
+// a2aFilePart is the A2A "file" part body: either inline base64 bytes or a URI.
+type a2aFilePart struct {
+	Name     string `json:"name,omitempty"`
+	MimeType string `json:"mimeType"`
+	Bytes    string `json:"bytes,omitempty"` // base64
+	URI      string `json:"uri,omitempty"`
+}
+
+func a2aFileToContentPart(f *a2aFilePart) models.ContentPart {
+	media := &models.MediaRef{MimeType: f.MimeType, Name: f.Name}
+	if f.Bytes != "" {
+		media.Data = f.Bytes
+	} else {
+		media.URL = f.URI
+	}
+	kind := "file"
+	mime := strings.ToLower(f.MimeType)
+	switch {
+	case strings.HasPrefix(mime, "image/"):
+		kind = "image"
+	case strings.HasPrefix(mime, "audio/"):
+		kind = "audio"
+	case strings.HasPrefix(mime, "video/"):
+		kind = "video"
+	}
+	return models.ContentPart{Type: kind, Media: media}
 }
