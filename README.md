@@ -278,6 +278,7 @@ The `agentoven` CLI provides **55+ commands** across **13 command groups** for c
 | `agentoven provider` | `list`, `add`, `get`, `update`, `remove`, `test`, `discover` | Model provider management (OpenAI, Anthropic, Gemini, OpenRouter, Ollama, LiteLLM) |
 | `agentoven tool` | `list`, `add`, `get`, `update`, `remove` | MCP tool management |
 | `agentoven prompt` | `list`, `add`, `get`, `update`, `remove`, `validate`, `versions` | Versioned prompt template management |
+| `agentoven skills` | `list`, `get`, `install`, `refresh`, `remove`, `approve`, `reject`, `stage` (Pro), `analyze` (Pro) | Install and review Agent Skills (`SKILL.md` bundles) from a git URL or local directory; `install`/`analyze` send the skill to a model provider for review |
 | `agentoven recipe` | `create`, `list`, `get`, `delete`, `bake`, `runs`, `approve` | Multi-agent workflow orchestration |
 | `agentoven session` | `list`, `create`, `get`, `delete`, `send`, `chat` | Multi-turn chat session management |
 | `agentoven kitchen` | `list`, `get`, `settings`, `update-settings` | Workspace/tenant management |

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### 🎙️ SDK: Modalities, Media and Voice
+- **Provider modalities** — Python (`Modalities`, `AudioConfig`, `RealtimeConfig`, `CLEAR`) and TypeScript (`modalities()` builder) helpers for `config.modalities`, validated client-side with the server's rules; wired into new `create_provider` / `update_provider` (`createProvider` / `updateProvider`) plus `list_providers` / `get_provider`, which expose the effective `modalities`
+- **Agent card** — `client.agent_card(name)` / `pro.agentCard(name)` expose `modalities`, with `supports(...)`
+- **Cascaded voice** — `invoke(audio=..., voice_output=True, voice=...)` returns the transcript and decoded reply audio, with a save helper; `AudioModalityError` for an agent whose provider does not offer audio
+- **Attachments** — images, PDFs, audio and video as typed `content_parts` on session messages (`send_session_message` / `sendSessionMessage`), from path, bytes or URL with MIME inference
+- **Realtime tokens** — `realtime_token` / `realtimeToken` and token auth for browsers (`agentoven.v1` + `agentoven-token.<token>` subprotocols; Python `realtime(token=...)`, TypeScript `connectRealtime({ token })`); a guardrail close (1008) now surfaces as a `RealtimeError` with the reason
+- **Docs** — "Modalities" sections in the Python and new TypeScript SDK READMEs
+
+---
+
 ## [0.8.5-beta-3] — 2026-06-08
 
 ### 🔧 SDK Contract Hardening
