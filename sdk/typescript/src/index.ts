@@ -39,16 +39,63 @@ export {
   createAgent,
 } from '../index.js';
 
+// Realtime voice (Pro)
+export {
+  connectRealtime,
+  realtimeUrl,
+  RealtimeSession,
+  RealtimeError,
+  REALTIME_AUDIO_FORMAT,
+  REALTIME_SUBPROTOCOL,
+  REALTIME_TOKEN_SUBPROTOCOL_PREFIX,
+  REALTIME_CLOSE_POLICY,
+} from './realtime.js';
+export type { RealtimeEvent, RealtimeEventType, RealtimeOptions, WebSocketLike, WebSocketFactory } from './realtime.js';
+
+// Modalities (provider config helpers), media attachments and cascaded voice
+export {
+  ALL_MODALITIES,
+  ModalitiesBuilder,
+  ModalitiesError,
+  modalities,
+  resolveModalities,
+  supportsModality,
+  validateModalities,
+} from './modalities.js';
+export type {
+  AnyModality,
+  AudioModality,
+  AudioOptions,
+  ModalitiesConfig,
+  ModalitiesUpdate,
+  ModalityName,
+  RealtimeModality,
+  RealtimeOptions as RealtimeModalityOptions,
+  ToggleModality,
+} from './modalities.js';
+export {
+  Attachment,
+  audioFromBase64,
+  audioFromBytes,
+  audioFromPath,
+  guessMimeType,
+  saveAudio,
+  sniffMimeType,
+} from './media.js';
+export type { AttachmentOptions, AudioClip, AudioInput, ContentPart, ContentPartType, MediaRef } from './media.js';
+
 // Pro REST client
-export { ProClient, AgentOvenAPIError } from './pro-client.js';
+export { ProClient, AgentOvenAPIError, AudioModalityError } from './pro-client.js';
 
 // Re-export all types
 export type {
+  AgentCard,
   AgentOvenClientOptions,
   AssertionResult,
   AuditEvent,
   Branch,
   CreateGuardrailRequest,
+  CreateProviderRequest,
   CreateScheduleRequest,
   CreateServiceAccountResponse,
   Deployment,
@@ -59,12 +106,17 @@ export type {
   GuardrailException,
   GuardrailKind,
   GuardrailStage,
+  InvokeOptions,
+  InvokeResult,
   Ingredient as IngredientType,
   Kitchen,
   KitchenMember,
   Promotion,
+  Provider,
+  RealtimeToken,
   Recipe as RecipeType,
   RegisterAgentOptions,
+  SendSessionMessageOptions,
   Schedule,
   Scenario,
   ScenarioResult,
@@ -73,6 +125,7 @@ export type {
   ServerInfo,
   ServiceAccount,
   Session,
+  SessionMessageResponse,
   Step,
   TestCase,
   TestResult,
@@ -80,6 +133,8 @@ export type {
   TestRunSummary,
   TestSuite,
   TraceabilityMatrix,
+  UpdateProviderRequest,
+  UpdateProviderResponse,
   User,
   UserRole,
   Workload,

@@ -26,12 +26,46 @@ from agentoven._native import (
     Recipe,
     Step,
 )
-from agentoven.client import AgentOvenClient, AgentOvenAPIError
+from agentoven.client import AgentOvenClient, AgentOvenAPIError, AudioModalityError, RealtimeToken
+from agentoven.media import Attachment, AudioClip, AudioInput, InvokeResult
+from agentoven.modalities import (
+    CLEAR,
+    AgentCard,
+    AudioConfig,
+    Modalities,
+    ModalitiesError,
+    ModalityConfig,
+    Provider,
+    ProviderUpdate,
+    RealtimeConfig,
+    validate_modalities,
+)
+from agentoven.realtime import RealtimeError, RealtimeEvent, RealtimeSession
 
 __all__ = [
     # Full client (OSS + Pro REST coverage) — use this in new code
     "AgentOvenClient",
     "AgentOvenAPIError",
+    "AudioModalityError",
+    "RealtimeToken",
+    "RealtimeError",
+    "RealtimeEvent",
+    "RealtimeSession",
+    # Modalities, media and voice
+    "AgentCard",
+    "Attachment",
+    "AudioClip",
+    "AudioConfig",
+    "AudioInput",
+    "CLEAR",
+    "InvokeResult",
+    "Modalities",
+    "ModalitiesError",
+    "ModalityConfig",
+    "Provider",
+    "ProviderUpdate",
+    "RealtimeConfig",
+    "validate_modalities",
     # Data types
     "Agent",
     "AgentStatus",
