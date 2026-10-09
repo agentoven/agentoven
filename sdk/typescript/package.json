@@ -22,6 +22,9 @@
     "type": "git",
     "url": "https://github.com/agentoven/agentoven"
   },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "homepage": "https://agentoven.dev",
   "napi": {
     "name": "agentoven",

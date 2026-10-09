@@ -52,6 +52,8 @@ jobs:
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} -p agentoven-cli
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
       - name: Package
         run: |
@@ -131,7 +133,7 @@ jobs:
           # Linux aarch64 — manylinux (glibc)
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            manylinux: auto
+            manylinux: '2_28'
           # Linux x86_64 — musl (Alpine)
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
@@ -334,7 +336,7 @@ jobs:
       - name: Build native module
         working-directory: sdk/typescript
         run: |
-          npx napi build --platform --release --target ${{ matrix.settings.target }} ./native
+          npx napi build --platform --release --target ${{ matrix.settings.target }} --cargo-cwd ./native
 
       - uses: actions/upload-artifact@v4
         with:
@@ -353,7 +355,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
+          # The SDK is published to GitHub Packages (scope @agentoven), not npmjs.
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@agentoven'
 
       - name: Install dependencies
         working-directory: sdk/typescript
@@ -366,6 +370,10 @@ jobs:
           pattern: sdk-bindings-*
           merge-multiple: true
 
+      - name: Create per-platform package folders
+        working-directory: sdk/typescript
+        run: npx napi create-npm-dir -t .
+
       - name: Move artifacts
         working-directory: sdk/typescript
         run: npx napi artifacts --dir artifacts
@@ -377,10 +385,10 @@ jobs:
       - name: Publish
         working-directory: sdk/typescript
         run: |
-          npx napi prepublish -t npm
-          npm publish --access public
+          npx napi prepublish -t npm --skip-gh-release
+          npm publish
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ── Create GitHub Release ────────────────────────────────────
   release:
