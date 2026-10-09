@@ -172,6 +172,9 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
           args: --release --out dist --find-interpreter
+        env:
+          # The runner's default Python can be newer than the PyO3 version supports.
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: '1'
       - uses: actions/upload-artifact@v4
         with:
           name: python-wheels-${{ matrix.target }}
@@ -218,7 +221,7 @@ jobs:
       - name: Upload to PyPI
         run: |
           pip install twine
-          twine upload dist/*
+          twine upload --skip-existing dist/*
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
@@ -337,6 +340,8 @@ jobs:
         working-directory: sdk/typescript
         run: |
           npx napi build --platform --release --target ${{ matrix.settings.target }} --cargo-cwd ./native
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
       - uses: actions/upload-artifact@v4
         with:
