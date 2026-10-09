@@ -83,6 +83,10 @@ type SessionConfig struct {
 	Voice        string
 	Instructions string // the agent's system prompt
 	Tools        []ToolDef
+	// WebSearch asks the provider to ground answers with its own web search, where it has one
+	// (Gemini Live: Google Search). Providers cannot combine it with function tools, so it is
+	// applied only when Tools is empty.
+	WebSearch bool
 }
 
 // ToolCall is a function call the model made.

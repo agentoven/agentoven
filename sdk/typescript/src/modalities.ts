@@ -30,13 +30,13 @@
  */
 
 /** The modalities that take configuration. Text is always on. */
-export type ModalityName = 'image' | 'pdf' | 'video' | 'audio' | 'realtime';
+export type ModalityName = 'image' | 'pdf' | 'video' | 'audio' | 'realtime' | 'web';
 
 /** Every modality in display order, as the server lists them. */
-export const ALL_MODALITIES = ['text', 'image', 'pdf', 'video', 'audio', 'realtime'] as const;
+export const ALL_MODALITIES = ['text', 'image', 'pdf', 'video', 'audio', 'realtime', 'web'] as const;
 export type AnyModality = (typeof ALL_MODALITIES)[number];
 
-/** Settings of image, pdf and video: just on/off. */
+/** Settings of image, pdf, video and web: just on/off. */
 export interface ToggleModality {
   enabled?: boolean;
 }
@@ -59,6 +59,8 @@ export interface ModalitiesConfig {
   video?: ToggleModality;
   audio?: AudioModality;
   realtime?: RealtimeModality;
+  /** Built-in web search (Gemini's Google Search). Off until enabled. */
+  web?: ToggleModality;
 }
 
 type Nullable<T> = { [K in keyof T]?: T[K] | null };
@@ -70,6 +72,7 @@ export interface ModalitiesUpdate {
   video?: Nullable<ToggleModality> | null;
   audio?: Nullable<AudioModality> | null;
   realtime?: Nullable<RealtimeModality> | null;
+  web?: Nullable<ToggleModality> | null;
 }
 
 /** Thrown for an invalid modalities config or an unknown modality name. */
@@ -86,6 +89,7 @@ const SETTINGS: Record<ModalityName, readonly string[]> = {
   video: ['enabled'],
   audio: ['enabled', 'stt_model', 'tts_model'],
   realtime: ['enabled', 'model'],
+  web: ['enabled'],
 };
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
@@ -114,7 +118,7 @@ export function validateModalities(
     if (!(name in SETTINGS)) {
       const hint = name === 'text' ? 'text is always on and takes no entry; ' : '';
       throw new ModalitiesError(
-        `config.modalities.${name}: ${hint}unknown modality (use image, pdf, video, audio, realtime)`,
+        `config.modalities.${name}: ${hint}unknown modality (use image, pdf, video, audio, realtime, web)`,
       );
     }
     const allowed = SETTINGS[name as ModalityName];
@@ -184,6 +188,14 @@ export class ModalitiesBuilder {
   /** Turn video input on or off. */
   video(enabled: boolean): this {
     return this.set('video', { enabled });
+  }
+
+  /**
+   * Built-in web search (Gemini's Grounding with Google Search, in chat and Live). Off until
+   * enabled: each grounded query is billed, and Gemini cannot combine it with function tools.
+   */
+  web(enabled: boolean): this {
+    return this.set('web', { enabled });
   }
 
   /** Cascaded voice. A bare boolean is shorthand for `{ enabled }`. */

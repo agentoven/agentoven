@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ALL_MODALITIES,
   ModalitiesError,
   modalities,
   resolveModalities,
@@ -52,7 +53,7 @@ describe('validateModalities mirrors the server', () => {
   it('rejects text with a hint, and unknown names', () => {
     expect(() => validateModalities({ text: { enabled: true } })).toThrow(/text is always on and takes no entry/);
     expect(() => validateModalities({ smell: {} })).toThrow(
-      /config\.modalities\.smell: unknown modality \(use image, pdf, video, audio, realtime\)/,
+      /config\.modalities\.smell: unknown modality \(use image, pdf, video, audio, realtime, web\)/,
     );
   });
 
@@ -94,5 +95,14 @@ describe('supportsModality', () => {
   });
   it('rejects a misspelt name', () => {
     expect(() => supportsModality(card, 'audo' as never)).toThrow(/unknown modality 'audo'/);
+  });
+});
+
+describe('the web modality', () => {
+  it('is a modality like the others, off until enabled, with just an enabled flag', () => {
+    expect(ALL_MODALITIES).toContain('web');
+    expect(modalities().web(true).build()).toEqual({ web: { enabled: true } });
+    expect(() => validateModalities({ web: { enabled: 'yes' } })).toThrow(ModalitiesError);
+    expect(() => validateModalities({ web: { model: 'x' } })).toThrow(/unknown setting/);
   });
 });

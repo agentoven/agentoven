@@ -31,10 +31,14 @@ const (
 	ModalityVideo    = "video"
 	ModalityAudio    = "audio"    // cascaded voice: speech-to-text in, text-to-speech out
 	ModalityRealtime = "realtime" // live speech-to-speech session
+	// ModalityWeb is the provider's own web search (Gemini's Grounding with Google Search).
+	// Unlike the others it is off until switched on: each grounded query is billed, and the
+	// provider cannot combine it with function tools.
+	ModalityWeb = "web"
 )
 
 // AllModalities is the display order of every modality.
-var AllModalities = []string{ModalityText, ModalityImage, ModalityPDF, ModalityVideo, ModalityAudio, ModalityRealtime}
+var AllModalities = []string{ModalityText, ModalityImage, ModalityPDF, ModalityVideo, ModalityAudio, ModalityRealtime, ModalityWeb}
 
 // modalitySettings lists the keys each modality accepts. "enabled" is a bool;
 // the rest are strings.
@@ -44,6 +48,7 @@ var modalitySettings = map[string][]string{
 	ModalityVideo:    {"enabled"},
 	ModalityAudio:    {"enabled", "stt_model", "tts_model"},
 	ModalityRealtime: {"enabled", "model"},
+	ModalityWeb:      {"enabled"},
 }
 
 func (p *ModelProvider) modalityEntry(name string) map[string]interface{} {
@@ -96,7 +101,7 @@ func ValidateModalities(config map[string]interface{}) error {
 			if name != ModalityText {
 				hint = ""
 			}
-			return fmt.Errorf("config.modalities.%s: %sunknown modality (use image, pdf, video, audio, realtime)", name, hint)
+			return fmt.Errorf("config.modalities.%s: %sunknown modality (use image, pdf, video, audio, realtime, web)", name, hint)
 		}
 		entry, ok := all[name].(map[string]interface{})
 		if !ok && all[name] == nil {

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
@@ -63,7 +64,10 @@ type geminiFunctionResult struct {
 
 // geminiTool wraps function declarations for the Gemini API.
 type geminiTool struct {
-	FunctionDeclarations []geminiFunctionDecl `json:"functionDeclarations"`
+	FunctionDeclarations []geminiFunctionDecl `json:"functionDeclarations,omitempty"`
+	// GoogleSearch switches on Grounding with Google Search. Gemini does not accept it in the
+	// same request as function declarations.
+	GoogleSearch *struct{} `json:"googleSearch,omitempty"`
 }
 
 // geminiFunctionDecl describes a tool the model can use.
@@ -376,6 +380,11 @@ func (mr *ModelRouter) callGemini(ctx context.Context, provider *models.ModelPro
 		gemReq.ToolConfig = &geminiToolConfig{
 			FunctionCallingConfig: &geminiFCConfig{Mode: "AUTO"},
 		}
+		if mr.WebSearchOn(provider) {
+			warnWebSearchSkipped(provider.Name)
+		}
+	} else if mr.WebSearchOn(provider) {
+		gemReq.Tools = []geminiTool{{GoogleSearch: &struct{}{}}}
 	}
 
 	body, _ := json.Marshal(gemReq)
@@ -516,3 +525,17 @@ var (
 	_ ModelDiscoveryDriver   = (*GeminiDriver)(nil)
 	_ EmbeddingCapableDriver = (*GeminiDriver)(nil)
 )
+
+// WebSearch reports that Gemini has built-in web search the harness can enable (the provider's
+// "web" modality turns it on).
+func (d *GeminiDriver) WebSearch() bool { return true }
+
+var webSearchSkipped sync.Map
+
+// warnWebSearchSkipped says, once per provider, that web search was left out of a request
+// because the agent has function tools, which Gemini cannot combine with it.
+func warnWebSearchSkipped(provider string) {
+	if _, seen := webSearchSkipped.LoadOrStore(provider, true); !seen {
+		log.Warn().Str("provider", provider).Msg("gemini: web search is enabled but this agent has tools, and Gemini cannot combine Google Search with function calling; the request goes out without web search")
+	}
+}

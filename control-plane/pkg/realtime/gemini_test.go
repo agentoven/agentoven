@@ -335,3 +335,27 @@ func TestGeminiNormalCloseIsErrClosed(t *testing.T) {
 		t.Fatalf("expected ErrClosed, got %v", err)
 	}
 }
+
+func TestGeminiSetupAddsGoogleSearchOnlyWhenAskedAndWhenThereAreNoFunctionTools(t *testing.T) {
+	tools := func(t *testing.T, cfg realtime.SessionConfig) []interface{} {
+		t.Helper()
+		f := newFakeGeminiLive(t, false)
+		connectGemini(t, f, cfg)
+		setup := f.waitFrames(t, 1)[0]["setup"].(map[string]interface{})
+		got, _ := setup["tools"].([]interface{})
+		return got
+	}
+
+	if got := tools(t, realtime.SessionConfig{Model: "m"}); got != nil {
+		t.Fatalf("no web search unless asked, got %v", got)
+	}
+	got := tools(t, realtime.SessionConfig{Model: "m", WebSearch: true})
+	if len(got) != 1 || got[0].(map[string]interface{})["googleSearch"] == nil {
+		t.Fatalf("expected googleSearch, got %v", got)
+	}
+	withFn := tools(t, realtime.SessionConfig{Model: "m", WebSearch: true,
+		Tools: []realtime.ToolDef{{Name: "ping", Description: "d", Parameters: map[string]interface{}{"type": "object"}}}})
+	if len(withFn) != 1 || withFn[0].(map[string]interface{})["googleSearch"] != nil || withFn[0].(map[string]interface{})["functionDeclarations"] == nil {
+		t.Fatalf("function tools win, Gemini cannot combine them with search: %v", withFn)
+	}
+}

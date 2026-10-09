@@ -49,7 +49,7 @@ __all__ = [
 ]
 
 #: Display order of every modality, matching the server.
-ALL_MODALITIES = ("text", "image", "pdf", "video", "audio", "realtime")
+ALL_MODALITIES = ("text", "image", "pdf", "video", "audio", "realtime", "web")
 
 # Keys each configurable modality accepts. "enabled" is a bool, the rest strings.
 _SETTINGS = {
@@ -58,6 +58,7 @@ _SETTINGS = {
     "video": ("enabled",),
     "audio": ("enabled", "stt_model", "tts_model"),
     "realtime": ("enabled", "model"),
+    "web": ("enabled",),  # built-in web search (Gemini Google Search); off until enabled
 }
 
 
@@ -91,7 +92,7 @@ def _check_name(name: str) -> None:
         return
     hint = "text is always on and takes no entry; " if name == "text" else ""
     raise ModalitiesError(
-        f"config.modalities.{name}: {hint}unknown modality (use image, pdf, video, audio, realtime)"
+        f"config.modalities.{name}: {hint}unknown modality (use image, pdf, video, audio, realtime, web)"
     )
 
 
@@ -218,6 +219,7 @@ class Modalities:
     video: _Entry = None
     audio: _Entry = None
     realtime: _Entry = None
+    web: _Entry = None  # built-in web search; unlike the others it is off until enabled
 
     def to_config(self, allow_clear: bool = True) -> dict[str, Any]:
         """The value for ``config["modalities"]``, validated.

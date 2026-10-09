@@ -102,6 +102,9 @@ func geminiSetup(cfg SessionConfig) map[string]interface{} {
 		}
 		setup["tools"] = []map[string]interface{}{{"functionDeclarations": decls}}
 	}
+	if len(cfg.Tools) == 0 && cfg.WebSearch {
+		setup["tools"] = []map[string]interface{}{{"googleSearch": map[string]interface{}{}}}
+	}
 	return map[string]interface{}{"setup": setup}
 }
 

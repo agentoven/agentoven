@@ -366,3 +366,68 @@ func TestProviderTestUsesTheDriversHealthCheckForNonOpenAIKinds(t *testing.T) {
 		t.Fatalf("a bad key must fail with Google's message, not an OpenAI one: %+v", bad)
 	}
 }
+
+func TestWebSearchIsOffUntilTheProviderSwitchesItOnAndOnlyGeminiHasIt(t *testing.T) {
+	mr := voiceRouter(t)
+	on := map[string]interface{}{"api_key": "k", "modalities": map[string]interface{}{"web": map[string]interface{}{"enabled": true}}}
+
+	if mr.WebSearchOn(provider("gemini", "", map[string]interface{}{"api_key": "k"})) {
+		t.Fatal("web search must be off by default: grounded queries are billed")
+	}
+	g := provider("gemini", "", on)
+	if !mr.WebSearchOn(g) || !strings.Contains(strings.Join(mr.Modalities(g, "gemini-2.5-flash"), ","), "web") {
+		t.Fatalf("enabled on Gemini: on and listed, got %v", mr.Modalities(g, "gemini-2.5-flash"))
+	}
+	if mr.WebSearchOn(provider("openai", "", on)) {
+		t.Fatal("OpenAI has no built-in web search in this driver, so enabling it changes nothing")
+	}
+	if err := mr.CheckModalities(provider("openai", "", on)); err == nil || !strings.Contains(err.Error(), "no built-in web search") {
+		t.Fatalf("saving web:true on a provider that cannot do it must be refused, got %v", err)
+	}
+	if err := mr.CheckModalities(g); err != nil {
+		t.Fatalf("Gemini accepts it: %v", err)
+	}
+}
+
+func geminiRequestBody(t *testing.T, mr *ModelRouter, p *models.ModelProvider, tools []models.ToolDefinition) map[string]interface{} {
+	t.Helper()
+	var body map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`))
+	}))
+	defer srv.Close()
+	p.Endpoint = srv.URL + "/v1beta"
+	_, err := mr.GetDriver("gemini").Call(context.Background(), p, &models.RouteRequest{
+		Model: "gemini-2.5-flash", Tools: tools, Messages: []models.ChatMessage{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func TestGeminiChatSendsGoogleSearchOnlyWhenOnAndWhenThereAreNoFunctionTools(t *testing.T) {
+	mr := voiceRouter(t)
+	on := map[string]interface{}{"api_key": "k", "modalities": map[string]interface{}{"web": map[string]interface{}{"enabled": true}}}
+
+	off := geminiRequestBody(t, mr, provider("gemini", "", map[string]interface{}{"api_key": "k"}), nil)
+	if off["tools"] != nil {
+		t.Fatalf("off by default, no tools expected: %v", off["tools"])
+	}
+	withSearch := geminiRequestBody(t, mr, provider("gemini", "", on), nil)
+	tools, _ := withSearch["tools"].([]interface{})
+	if len(tools) != 1 {
+		t.Fatalf("expected one tool, got %v", withSearch["tools"])
+	}
+	entry := tools[0].(map[string]interface{})
+	if _, ok := entry["googleSearch"]; !ok || entry["functionDeclarations"] != nil {
+		t.Fatalf("expected only googleSearch, got %v", entry)
+	}
+
+	fn := []models.ToolDefinition{{Type: "function", Function: models.ToolFunction{Name: "lookup", Description: "d", Parameters: map[string]interface{}{"type": "object"}}}}
+	withTools := geminiRequestBody(t, mr, provider("gemini", "", on), fn)
+	ts, _ := withTools["tools"].([]interface{})
+	if len(ts) != 1 || ts[0].(map[string]interface{})["googleSearch"] != nil {
+		t.Fatalf("function tools win: Gemini cannot combine them with search, got %v", withTools["tools"])
+	}
+}

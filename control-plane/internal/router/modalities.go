@@ -35,6 +35,21 @@ func (mr *ModelRouter) SpeechFor(p *models.ModelProvider) audio.EngineProvider {
 	return d
 }
 
+// webSearcher is implemented by a driver whose API has built-in web search the harness can
+// switch on for a request (Gemini's Grounding with Google Search).
+type webSearcher interface{ WebSearch() bool }
+
+// WebSearchOn reports whether built-in web search is switched on for the provider: its
+// driver offers it AND the provider's web modality is enabled. Unlike the other modalities
+// it is never on by default.
+func (mr *ModelRouter) WebSearchOn(p *models.ModelProvider) bool {
+	if w, ok := mr.GetDriver(p.Kind).(webSearcher); !ok || !w.WebSearch() {
+		return false
+	}
+	on, set := p.ModalityEnabled(models.ModalityWeb)
+	return set && on
+}
+
 func off(p *models.ModelProvider, modality string) bool {
 	on, set := p.ModalityEnabled(modality)
 	return set && !on
@@ -50,6 +65,8 @@ func (mr *ModelRouter) Supports(p *models.ModelProvider, model, modality string)
 		return mr.SpeechFor(p) != nil
 	case models.ModalityRealtime:
 		return mr.RealtimeFor(p) != nil
+	case models.ModalityWeb:
+		return mr.WebSearchOn(p)
 	}
 	caps := mr.mediaCapsFor(p, model)
 	switch modality {
@@ -82,6 +99,9 @@ func (mr *ModelRouter) CheckModalities(p *models.ModelProvider) error {
 		return err
 	}
 	driver := mr.GetDriver(p.Kind)
+	if w, ok := driver.(webSearcher); (!ok || !w.WebSearch()) && p.ModalityConfigured(models.ModalityWeb) && !off(p, models.ModalityWeb) {
+		return fmt.Errorf("config.modalities.web: provider kind %q has no built-in web search", p.Kind)
+	}
 	_, speech := driver.(audio.EngineProvider)
 	_, live := driver.(realtime.Driver)
 	for _, c := range []struct {

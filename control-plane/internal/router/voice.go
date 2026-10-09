@@ -81,6 +81,7 @@ const geminiLivePath = "/ws/google.ai.generativelanguage.v1beta.GenerativeServic
 
 func (d *GeminiDriver) OpenRealtime(ctx context.Context, p *models.ModelProvider, cfg realtime.SessionConfig) (realtime.Upstream, error) {
 	cfg.Model = pick(cfg.Model, p.ModalitySetting(models.ModalityRealtime, "model"), "gemini-3.8-live")
+	cfg.WebSearch = d.router.WebSearchOn(p)
 	return realtime.DialGemini(ctx, realtime.DialOptions{
 		Endpoint: geminiLiveEndpoint(p.Endpoint), APIKey: d.router.SelectAPIKey(p), HTTPClient: d.router.clientFor(p),
 	}, cfg)
