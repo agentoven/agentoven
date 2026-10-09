@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/static/img/logo.svg" alt="AgentOven" width="200" />
+  <img src="https://docs.agentoven.dev/logo.png" alt="AgentOven" width="200" />
 </p>
 
 <h1 align="center">AgentOven</h1>
