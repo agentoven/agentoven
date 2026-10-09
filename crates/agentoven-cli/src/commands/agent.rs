@@ -1148,8 +1148,7 @@ async fn test(args: TestArgs) -> anyhow::Result<()> {
 
     if let Some(msg) = &args.message {
         println!("  {} {}", "You:".bold(), msg);
-        let a2a_base = format!("http://localhost:8080/agents/{}/a2a", args.name);
-        let a2a_client = a2a_ao::A2AClient::new(&a2a_base);
+        let a2a_client = a2a_client_for(&args.name);
         match a2a_client.send_message_text(msg).await {
             Ok(task) => {
                 println!(
@@ -1172,8 +1171,7 @@ async fn test(args: TestArgs) -> anyhow::Result<()> {
         }
     }
 
-    let a2a_base = format!("http://localhost:8080/agents/{}/a2a", args.name);
-    let a2a_client = a2a_ao::A2AClient::new(&a2a_base);
+    let a2a_client = a2a_client_for(&args.name);
     let mut current_task_id: Option<String> = None;
 
     while let Ok(input) = dialoguer::Input::<String>::new()
@@ -1418,4 +1416,16 @@ async fn versions(args: VersionsArgs) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// An A2A client for one agent, pointed at the configured control plane and carrying the
+/// configured credential. Running an agent over A2A needs an identity, like `invoke` does.
+fn a2a_client_for(agent: &str) -> a2a_ao::A2AClient {
+    let cfg = agentoven_core::AgentOvenConfig::load();
+    let base = format!("{}/agents/{}/a2a", cfg.url.trim_end_matches('/'), agent);
+    let client = a2a_ao::A2AClient::new(&base);
+    match cfg.auth_credential() {
+        Some(token) => client.with_auth(token),
+        None => client,
+    }
 }

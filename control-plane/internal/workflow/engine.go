@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/agentoven/agentoven/control-plane/pkg/a2aauth"
 	"net/http"
 	"strings"
 	"sync"
@@ -973,6 +974,12 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 	if effectiveKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+effectiveKey)
 	}
+	// This is the control plane calling its own A2A gateway. The in-process secret says so,
+	// which is what keeps a scheduled or anonymously triggered run working now that the
+	// gateway requires an identity, and what lets the gateway believe the provider TLS
+	// settings below. A user's key above, when there is one, still identifies who asked.
+	httpReq.Header.Set(a2aauth.InternalHeader, a2aauth.InternalKey())
+	httpReq.Header.Set("X-Kitchen", kitchen)
 	if run.Environment != "" {
 		// Forward the environment context so the CP gateway and target agent
 		// can observe which environment triggered this invocation.

@@ -45,6 +45,7 @@ import (
 	"github.com/agentoven/agentoven/control-plane/internal/telemetry"
 	"github.com/agentoven/agentoven/control-plane/internal/vectorstore"
 	"github.com/agentoven/agentoven/control-plane/internal/workflow"
+	"github.com/agentoven/agentoven/control-plane/pkg/a2aauth"
 	"github.com/agentoven/agentoven/control-plane/pkg/agentexec"
 	"github.com/agentoven/agentoven/control-plane/pkg/blobstore"
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
@@ -300,6 +301,17 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 
 	// Build handlers + API router
 	h := handlers.New(dataStore, mr, gw, wf, cat, sessStore, pm)
+
+	// The key agent pods' A2A tokens are derived from: each pod is started holding a token for
+	// itself, and the control plane presents it when it relays a call. Without it pods behave
+	// as before (they accept the call), and that is logged rather than silent.
+	if a2aSecret, err := a2aauth.Secret(config.DataDir()); err != nil {
+		log.Warn().Err(err).Msg("⚠️  No key for agent pod A2A tokens: pods will not authenticate the control plane")
+	} else {
+		h.A2ASecret = a2aSecret
+		pm.SetA2ASecret(a2aSecret)
+		a2aauth.UseSecret(a2aSecret)
+	}
 	h.ServerInfo = models.CommunityServerInfo(pubCfg.Version)
 
 	// ── Guardrails (R9) ────────────────────────────────────

@@ -2553,6 +2553,12 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 
 	kitchen := middleware.GetKitchen(r.Context())
 
+	// Only the platform chooses how a provider is connected to (see providerOverrideAllowed).
+	if strings.TrimSpace(taskReq.ProviderConfig.Name) != "" && !providerOverrideAllowed(r) {
+		log.Warn().Str("provider", taskReq.ProviderConfig.Name).Msg("A2A tasks/send: ignored a provider TLS override from a caller that is not the platform")
+		taskReq.ProviderConfig.Name, taskReq.ProviderConfig.CABundle, taskReq.ProviderConfig.TLSSkipVerify = "", "", false
+	}
+
 	// Extract text, file, and data parts. Text goes to the prompt; files become
 	// media content parts; structured data is sent as its JSON text so it is
 	// never silently dropped.
@@ -3464,7 +3470,9 @@ var backendHTTPClient = func() *http.Client {
 // proxyA2ARequest relays an HTTP request to a backend agent endpoint and
 // streams the response back to the caller. This is the core of the
 // control-plane-as-gateway pattern (ADR-0007).
-func (h *Handlers) proxyA2ARequest(w http.ResponseWriter, r *http.Request, backendURL, agentName string) {
+// managed says the backend is a process this platform launched, which is the only kind that is
+// given the pod token; an external agent's URL is somebody else's and gets nothing of ours.
+func (h *Handlers) proxyA2ARequest(w http.ResponseWriter, r *http.Request, backendURL, agentName, kitchen string, managed bool) {
 	// Read the original request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -3475,6 +3483,12 @@ func (h *Handlers) proxyA2ARequest(w http.ResponseWriter, r *http.Request, backe
 			"id":      nil,
 		})
 		return
+	}
+
+	// A TLS override for the provider connection is the platform's to set; a pod must not be
+	// told to skip verification because a caller asked.
+	if !providerOverrideAllowed(r) {
+		body, _ = stripProviderOverride(body)
 	}
 
 	// Use the backend URL as-is — it already contains the full path (e.g. /a2a).
@@ -3493,6 +3507,9 @@ func (h *Handlers) proxyA2ARequest(w http.ResponseWriter, r *http.Request, backe
 	}
 	proxyReq.Header.Set("Content-Type", "application/json")
 	proxyReq.Header.Set("X-AgentOven-Agent", agentName)
+	if managed {
+		h.signPodRequest(proxyReq, kitchen, agentName)
+	}
 
 	// Forward the request to the backend
 	resp, err := backendHTTPClient.Do(proxyReq)
@@ -4059,6 +4076,7 @@ func (h *Handlers) proxyToProcess(
 		return "", nil, fmt.Errorf("failed to build proxy request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	h.signPodRequest(httpReq, agent.Kitchen, agent.Name)
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	httpResp, err := client.Do(httpReq)
@@ -4145,6 +4163,7 @@ func (h *Handlers) proxyToProcessStream(
 		return fmt.Errorf("failed to build stream request: %w", err)
 	}
 	podReq.Header.Set("Content-Type", "application/json")
+	h.signPodRequest(podReq, agent.Kitchen, agent.Name)
 
 	// Use a long timeout — stream can run for the full agentic loop duration.
 	client := &http.Client{Timeout: 10 * time.Minute}

@@ -2,7 +2,9 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // Config holds all configuration for the AgentOven control plane.
@@ -68,4 +70,16 @@ func envBool(key string, fallback bool) bool {
 		}
 	}
 	return fallback
+}
+
+// DataDir is where the control plane keeps its local files (the snapshot, keys): AGENTOVEN_DATA_DIR,
+// or ~/.agentoven. It is empty only when neither is available.
+func DataDir() string {
+	if d := strings.TrimSpace(os.Getenv("AGENTOVEN_DATA_DIR")); d != "" {
+		return d
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".agentoven")
+	}
+	return ""
 }

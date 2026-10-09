@@ -129,7 +129,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 
 				// Per-agent A2A (also reachable at root /agents/{agentName}/a2a)
 				r.Route("/a2a", func(r chi.Router) {
-					r.Post("/", h.A2AAgentEndpoint)
+					r.With(middleware.RequireIdentity).Post("/", h.A2AAgentEndpoint)
 					r.Get("/.well-known/agent-card.json", h.ServeAgentSpecificCard)
 				})
 			})
@@ -363,15 +363,16 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 		r.Get("/sse", h.MCPSSEEndpoint)
 	})
 
-	// A2A Gateway — agent-to-agent protocol endpoint
+	// A2A Gateway — agent-to-agent protocol endpoint. Running a task needs an identity, like
+	// /invoke does; only the agent card (discovery) is public. See middleware.isAuthPublic.
 	r.Route("/a2a", func(r chi.Router) {
-		r.Post("/", h.A2AEndpoint)
+		r.With(middleware.RequireIdentity).Post("/", h.A2AEndpoint)
 		r.Get("/.well-known/agent-card.json", h.ServeAgentCard)
 	})
 
 	// Per-agent A2A endpoints
 	r.Route("/agents/{agentName}/a2a", func(r chi.Router) {
-		r.Post("/", h.A2AAgentEndpoint)
+		r.With(middleware.RequireIdentity).Post("/", h.A2AAgentEndpoint)
 		r.Get("/.well-known/agent-card.json", h.ServeAgentSpecificCard)
 	})
 
@@ -379,7 +380,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 	// When environments are configured, bake sets the A2A endpoint here.
 	// Clients calling this route get the backend for that specific environment.
 	r.Route("/env/{envSlug}/agents/{agentName}/a2a", func(r chi.Router) {
-		r.Post("/", h.A2AAgentEnvEndpoint)
+		r.With(middleware.RequireIdentity).Post("/", h.A2AAgentEnvEndpoint)
 		r.Get("/.well-known/agent-card.json", h.ServeAgentSpecificCard)
 	})
 

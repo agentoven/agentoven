@@ -25,8 +25,12 @@ Environment variables (set by the control plane):
   AGENT_SKILLS                — comma-separated skill list
   AGENTOVEN_CONTROL_PLANE_URL — control plane base URL for delegation callbacks
   CONTROL_PLANE_TOKEN         — X-Service-Token value for control plane API auth
+  AGENT_A2A_TOKEN             — this agent's own token; POST requests must present it in
+                                X-AgentOven-A2A-Token (the control plane does when it relays).
+                                Without it the runner accepts any caller and says so.
 """
 
+import hmac
 import json
 import os
 import sys
@@ -43,6 +47,7 @@ import threading
 # ── Configuration ──────────────────────────────────────────────────────────────
 
 AGENT_NAME        = os.environ.get("AGENT_NAME", "unnamed-agent")
+A2A_TOKEN         = os.environ.get("AGENT_A2A_TOKEN", "")
 AGENT_KITCHEN     = os.environ.get("AGENT_KITCHEN", "default")
 AGENT_PORT        = int(os.environ.get("AGENT_PORT", "9000"))
 AGENT_DESCRIPTION = os.environ.get("AGENT_DESCRIPTION", "An AgentOven managed agent")
@@ -791,6 +796,30 @@ def _jsonrpc_error(req_id, code, message):
     return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
 
 
+# ── Caller authentication ──────────────────────────────────────────────────────
+
+_warned_open = False
+
+
+def _caller_authorized(headers):
+    """Whether a POST may run this agent.
+
+    The control plane starts the runner with a token for this one agent and presents it when it
+    relays a call, so anything else that can reach the port (another pod, a port-forward) is
+    refused. A runner started without a token cannot tell the control plane from anyone, so it
+    keeps accepting calls, loudly, rather than stop working.
+    """
+    global _warned_open
+    if not A2A_TOKEN:
+        if not _warned_open:
+            _warned_open = True
+            print(f"[{AGENT_NAME}] WARNING: no AGENT_A2A_TOKEN; accepting unauthenticated calls from anything "
+                  f"that can reach this port", file=sys.stderr)
+        return True
+    presented = headers.get("X-AgentOven-A2A-Token", "")
+    return bool(presented) and hmac.compare_digest(presented.encode(), A2A_TOKEN.encode())
+
+
 # ── HTTP Handler ───────────────────────────────────────────────────────────────
 
 class AgentHandler(BaseHTTPRequestHandler):
@@ -818,6 +847,12 @@ class AgentHandler(BaseHTTPRequestHandler):
     # ── POST ───────────────────────────────────────────────────────────────────
 
     def do_POST(self):
+        if not _caller_authorized(self.headers):
+            # The body is not read, so the connection cannot be reused.
+            self.close_connection = True
+            self._respond_json(401, {"error": "authentication_required",
+                                     "message": "This agent only accepts calls from the control plane."})
+            return
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length)
         try:

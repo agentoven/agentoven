@@ -152,7 +152,7 @@ func (h *Handlers) proxyA2AGuarded(w http.ResponseWriter, r *http.Request, backe
 		return
 	}
 	if h.Guardrails == nil || len(gr) == 0 {
-		h.proxyA2ARequest(w, r, backendURL, agent.Name)
+		h.proxyA2ARequest(w, r, backendURL, agent.Name, agent.Kitchen, agent.Mode == models.AgentModeManaged)
 		return
 	}
 
@@ -160,7 +160,7 @@ func (h *Handlers) proxyA2AGuarded(w http.ResponseWriter, r *http.Request, backe
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	req := parseA2ARequest(body)
 	if !req.hasMsg {
-		h.proxyA2ARequest(w, r, backendURL, agent.Name)
+		h.proxyA2ARequest(w, r, backendURL, agent.Name, agent.Kitchen, agent.Mode == models.AgentModeManaged)
 		return
 	}
 
@@ -186,12 +186,12 @@ func (h *Handlers) proxyA2AGuarded(w http.ResponseWriter, r *http.Request, backe
 	}
 
 	if req.streaming {
-		h.proxyA2ARequest(w, r, backendURL, agent.Name)
+		h.proxyA2ARequest(w, r, backendURL, agent.Name, agent.Kitchen, agent.Mode == models.AgentModeManaged)
 		return
 	}
 
 	rec := newBufferedResponse()
-	h.proxyA2ARequest(rec, r, backendURL, agent.Name)
+	h.proxyA2ARequest(rec, r, backendURL, agent.Name, agent.Kitchen, agent.Mode == models.AgentModeManaged)
 	if out := a2aResponseText(rec.body.Bytes()); out != "" {
 		if eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), gr, out); gErr != nil {
 			log.Warn().Err(gErr).Str("agent", agent.Name).Msg("Output guardrail evaluation error (A2A)")

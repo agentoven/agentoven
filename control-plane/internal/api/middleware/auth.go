@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
+	"github.com/agentoven/agentoven/control-plane/pkg/a2aauth"
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	pkgmw "github.com/agentoven/agentoven/control-plane/pkg/middleware"
 	"github.com/rs/zerolog/log"
@@ -39,7 +41,7 @@ func NewAuthMiddleware(chain contracts.AuthProviderChain) *AuthMiddleware {
 func (am *AuthMiddleware) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Public paths — skip auth
-		if isAuthPublicPath(r.URL.Path) {
+		if isAuthPublic(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -56,6 +58,13 @@ func (am *AuthMiddleware) Handler(next http.Handler) http.Handler {
 				"message": err.Error(),
 			})
 			return
+		}
+
+		// The workflow engine and the control plane (relaying to a pod) are not users, but
+		// they are who calls the A2A routes in-process, so they are recognised there, and
+		// only there, by a secret a user does not have.
+		if identity == nil {
+			identity = trustedA2ACaller(r)
 		}
 
 		// No identity and auth is required → reject
@@ -123,6 +132,69 @@ func RequireIdentity(next http.Handler) http.Handler {
 	})
 }
 
+// isAuthPublic reports whether a request may skip authentication.
+//
+// The A2A gateway's public surface is its discovery documents, and only for GET: they
+// advertise what an agent can do and are how another agent finds it. Running a task is not
+// discovery, so `POST /a2a` is authenticated like every other way of running an agent.
+func isAuthPublic(r *http.Request) bool {
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		switch r.URL.Path {
+		case "/.well-known/agent.json", "/a2a/.well-known/agent-card.json":
+			return true
+		}
+	}
+	return isAuthPublicPath(r.URL.Path)
+}
+
+// isA2AExecutionPath reports whether a path runs an agent over A2A: the gateway root, or a
+// per-agent or per-environment endpoint, as opposed to a discovery document under it.
+func isA2AExecutionPath(path string) bool {
+	if strings.HasSuffix(path, "/.well-known/agent-card.json") || strings.HasSuffix(path, "/.well-known/agent.json") {
+		return false
+	}
+	return path == "/a2a" || strings.HasSuffix(path, "/a2a") || strings.HasSuffix(path, "/a2a/")
+}
+
+// trustedA2ACaller recognises the callers that are neither users nor API keys: the workflow
+// engine, which holds a secret that never leaves this process, and the control plane, whose
+// token for this one agent was handed to this pod when it started. It returns nil for
+// everything else, and for every route that is not A2A execution.
+func trustedA2ACaller(r *http.Request) *contracts.Identity {
+	if r.Method != http.MethodPost || !isA2AExecutionPath(r.URL.Path) {
+		return nil
+	}
+	if a2aauth.Equal(r.Header.Get(a2aauth.InternalHeader), a2aauth.InternalKey()) {
+		return &contracts.Identity{Subject: "internal:workflow", Provider: "internal", Kind: "service_account", Role: "baker"}
+	}
+	podToken := os.Getenv(a2aauth.PodTokenEnv)
+	if a2aauth.Equal(r.Header.Get(a2aauth.PodTokenHeader), podToken) {
+		return &contracts.Identity{Subject: "internal:control-plane", Provider: "internal", Kind: "service_account", Role: "baker"}
+	}
+	// An agent pod that was started without a token (one launched by an operator that does
+	// not yet hand one out) cannot tell the control plane from anyone else, and refusing every
+	// call would stop it working. It keeps accepting them, loudly. This is only ever true in a
+	// pod: the control plane has no AGENT_NAME.
+	if podToken == "" && os.Getenv("AGENT_NAME") != "" {
+		legacyPodWarning.Do(func() {
+			log.Warn().Str("agent", os.Getenv("AGENT_NAME")).
+				Msg("⚠️  This agent pod has no " + a2aauth.PodTokenEnv + ": it accepts unauthenticated A2A calls from anything that can reach it. Start it with a token (see ADR-0030).")
+		})
+		return &contracts.Identity{Subject: "internal:unauthenticated-pod", Provider: "internal", Kind: "service_account", Role: "baker"}
+	}
+	return nil
+}
+
+var legacyPodWarning sync.Once
+
+// IsInternalCaller reports whether a request came from a caller recognised by
+// trustedA2ACaller. Settings only the platform itself may choose, such as a TLS override
+// for a provider connection, are honoured for these callers and no one else.
+func IsInternalCaller(r *http.Request) bool {
+	id := pkgmw.GetIdentity(r.Context())
+	return id != nil && id.Provider == "internal"
+}
+
 // isAuthPublicPath returns true for paths that should skip authentication.
 func isAuthPublicPath(path string) bool {
 	publicPaths := []string{
@@ -130,7 +202,6 @@ func isAuthPublicPath(path string) bool {
 		"/healthz",
 		"/readyz",
 		"/version",
-		"/.well-known/agent.json",
 	}
 	for _, p := range publicPaths {
 		if path == p {
@@ -139,10 +210,6 @@ func isAuthPublicPath(path string) bool {
 	}
 	// Auth login endpoints must be publicly accessible (SSO callbacks too)
 	if path == "/auth/login" || strings.HasPrefix(path, "/auth/saml") || strings.HasPrefix(path, "/auth/oidc") {
-		return true
-	}
-	// A2A discovery endpoints
-	if strings.HasPrefix(path, "/a2a") {
 		return true
 	}
 	// MCP protocol endpoint (auth handled by MCP layer)

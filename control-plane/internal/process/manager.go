@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/agentoven/agentoven/control-plane/pkg/a2aauth"
 	"os"
 	"sync"
 	"time"
@@ -77,6 +78,7 @@ type Manager struct {
 	ports           *portAllocator
 	controlPlaneURL string // injected for AGENTOVEN_CONTROL_PLANE_URL env var
 	saSecret        string // AGENTOVEN_SA_SECRET — used to mint per-pod service-account tokens
+	a2aSecret       []byte // key each pod's own A2A token is derived from (pkg/a2aauth)
 }
 
 // NewManager creates a new ProcessManager with all executors initialized.
@@ -95,6 +97,12 @@ func NewManager() *Manager {
 // into every agent process environment. Called during server startup.
 func (m *Manager) SetControlPlaneURL(u string) {
 	m.controlPlaneURL = u
+}
+
+// SetA2ASecret stores the key a pod's A2A token is derived from. Each pod is started with a
+// token for itself only, which it requires from whoever calls its A2A endpoint.
+func (m *Manager) SetA2ASecret(secret []byte) {
+	m.a2aSecret = secret
 }
 
 // SetSASecret stores the HMAC secret used to mint per-pod service-account tokens.
@@ -410,6 +418,12 @@ func (m *Manager) buildEnvironment(agent *models.Agent, port int) map[string]str
 		if err == nil {
 			env["AGENT_DATA_SOURCES_JSON"] = string(dataJSON)
 		}
+	}
+
+	// The pod's own A2A token: it accepts an A2A call only from a caller presenting it, and
+	// the control plane presents it when it relays. Derived per kitchen and agent.
+	if tok := a2aauth.PodToken(m.a2aSecret, agent.Kitchen, agent.Name); tok != "" {
+		env[a2aauth.PodTokenEnv] = tok
 	}
 
 	// Control plane URL — SDK uses this for callbacks (e.g. Pro checkpointer)
