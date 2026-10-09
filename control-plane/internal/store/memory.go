@@ -275,7 +275,7 @@ func (m *MemoryStore) saveSnapshot() {
 
 	// Write to temp file then rename for atomicity
 	tmp := m.snapshotPath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil { // the snapshot holds credentials and tokens: owner only
 		log.Error().Err(err).Str("path", tmp).Msg("Failed to write snapshot tmp")
 		return
 	}

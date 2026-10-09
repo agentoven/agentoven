@@ -25,14 +25,14 @@ type frontmatter struct {
 	Name         string                  `yaml:"name"`
 	Description  string                  `yaml:"description"`
 	License      string                  `yaml:"license,omitempty"`
-	AllowedTools []string                `yaml:"allowed-tools,omitempty"`
+	AllowedTools toolList                `yaml:"allowed-tools,omitempty"`
 	MCPServers   []models.SkillMCPServer `yaml:"mcp_tools,omitempty"`
 }
 
 // reservedSkillNames are path segments the skills API uses in the place a skill
-// name would go (/skills/pro/..., /skills/register, /skills/upload/...), so a
+// name would go (/skills/pro/..., /skills/register, /skills/upload/..., /skills/import), so a
 // skill with one of these names could never be addressed.
-var reservedSkillNames = map[string]bool{"pro": true, "register": true, "upload": true}
+var reservedSkillNames = map[string]bool{"pro": true, "register": true, "upload": true, "import": true, "catalogs": true}
 
 // ParseManifest parses a SKILL.md file's raw bytes into a SkillManifest.
 // name and description are required, matching every Agent Skills-compatible
@@ -63,8 +63,8 @@ func ParseManifest(data []byte) (*models.SkillManifest, error) {
 		if strings.TrimSpace(srv.Name) == "" {
 			return nil, fmt.Errorf("mcp_tools[%d] must set 'name'", i)
 		}
-		if srv.Transport != "http" && srv.Transport != "sse" {
-			return nil, fmt.Errorf("mcp_tools[%d] (%s): transport must be 'http' or 'sse', got %q", i, srv.Name, srv.Transport)
+		if srv.Transport != "http" && srv.Transport != "sse" && srv.Transport != "mcp" {
+			return nil, fmt.Errorf("mcp_tools[%d] (%s): transport must be 'http', 'sse' or 'mcp', got %q", i, srv.Name, srv.Transport)
 		}
 		if strings.TrimSpace(srv.Endpoint) == "" {
 			return nil, fmt.Errorf("mcp_tools[%d] (%s): endpoint is required", i, srv.Name)
@@ -75,10 +75,56 @@ func ParseManifest(data []byte) (*models.SkillManifest, error) {
 		Name:         strings.TrimSpace(parsed.Name),
 		Description:  strings.TrimSpace(parsed.Description),
 		License:      parsed.License,
-		AllowedTools: parsed.AllowedTools,
+		AllowedTools: []string(parsed.AllowedTools),
 		MCPServers:   parsed.MCPServers,
 		Instructions: strings.TrimSpace(body),
 	}, nil
+}
+
+// toolList reads allowed-tools in either form skills use in the wild: a YAML
+// list, or one string of space- or comma-separated entries such as
+// "Bash(git add:*) Read" (the Agent Skills spec's form). Spaces inside
+// parentheses belong to the entry.
+type toolList []string
+
+func (l *toolList) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.SequenceNode {
+		var items []string
+		if err := n.Decode(&items); err != nil {
+			return err
+		}
+		*l = items
+		return nil
+	}
+	var s string
+	if err := n.Decode(&s); err != nil {
+		return fmt.Errorf("allowed-tools must be a list or a string: %w", err)
+	}
+	*l = splitTools(s)
+	return nil
+}
+
+func splitTools(s string) []string {
+	var out []string
+	depth, start := 0, 0
+	flush := func(end int) {
+		if t := strings.TrimSpace(s[start:end]); t != "" {
+			out = append(out, t)
+		}
+		start = end + 1
+	}
+	for i, c := range s {
+		switch {
+		case c == '(':
+			depth++
+		case c == ')' && depth > 0:
+			depth--
+		case depth == 0 && (c == ' ' || c == ',' || c == '\n' || c == '\t'):
+			flush(i)
+		}
+	}
+	flush(len(s))
+	return out
 }
 
 // splitFrontmatter separates a SKILL.md's leading "---"-fenced YAML block

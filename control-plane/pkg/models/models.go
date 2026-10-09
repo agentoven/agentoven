@@ -930,19 +930,32 @@ func SortProvidersForSelection(ps []ModelProvider) {
 
 // ── MCP Tool ─────────────────────────────────────────────────
 
+// MCPTransportStreamableHTTP is the MCPTool.Transport of a tool served by a
+// remote MCP server over streamable HTTP (see internal/mcpgw).
+const MCPTransportStreamableHTTP = "mcp"
+
 type MCPTool struct {
 	ID           string                 `json:"id" db:"id"`
 	Name         string                 `json:"name" db:"name"`
 	Description  string                 `json:"description" db:"description"`
 	Kitchen      string                 `json:"kitchen" db:"kitchen"`
 	Endpoint     string                 `json:"endpoint" db:"endpoint"`
-	Transport    string                 `json:"transport" db:"transport"` // http, sse, stdio
+	Transport    string                 `json:"transport" db:"transport"`               // http, sse, mcp (remote MCP server over streamable HTTP), stdio
+	RemoteName   string                 `json:"remote_name,omitempty" db:"remote_name"` // mcp transport: the tool's name on the remote server (Name is what agents see)
+	Skill        string                 `json:"skill,omitempty" db:"skill"`             // the skill that registered this tool; the gateway serves it only while that skill is active
 	Schema       map[string]interface{} `json:"schema,omitempty"`
 	AuthConfig   map[string]interface{} `json:"auth_config,omitempty"`
 	Capabilities []string               `json:"capabilities"` // ["tool"], ["notify"], ["tool","notify"]
 	Enabled      bool                   `json:"enabled" db:"enabled"`
 	CreatedAt    time.Time              `json:"created_at" db:"created_at"`
 	UpdatedAt    time.Time              `json:"updated_at" db:"updated_at"`
+}
+
+// RemoteTool is one tool a remote MCP server advertises (see mcpgw.ListRemoteTools).
+type RemoteTool struct {
+	Name        string
+	Description string
+	InputSchema map[string]interface{}
 }
 
 // ── Skills ───────────────────────────────────────────────────
@@ -989,6 +1002,7 @@ const (
 	SkillSourceUpload SkillSource = "upload" // staged via the chunked upload API
 	SkillSourcePath   SkillSource = "path"   // a directory on the server's own filesystem
 	SkillSourceGit    SkillSource = "git"    // cloned from a git URL at a ref
+	SkillSourcePlugin SkillSource = "plugin" // one skill of a plugin imported from a git repository
 )
 
 // SkillMCPServer is one bundled MCP server a skill's manifest declares —
@@ -998,13 +1012,13 @@ const (
 // see docs/architecture.md's "keep credentials out of skill content" rule,
 // carried over from how every other credential-bearing ingredient works here.
 type SkillMCPServer struct {
-	Name          string `json:"name"` // becomes the registered tool name: "<skill>.<name>"
-	Description   string `json:"description,omitempty"`
-	Transport     string `json:"transport"` // "http" or "sse", matches MCPTool.Transport
-	Endpoint      string `json:"endpoint"`
-	AuthType      string `json:"auth_type,omitempty"`      // "bearer", "api-key" — matches MCPTool.AuthConfig["type"]
-	AuthHeader    string `json:"auth_header,omitempty"`    // for auth_type "api-key"
-	CredentialRef string `json:"credential_ref,omitempty"` // KitchenCredential name supplying the token/key
+	Name          string `json:"name" yaml:"name"` // part of the registered tool name: "<skill>_<name>"
+	Description   string `json:"description,omitempty" yaml:"description,omitempty"`
+	Transport     string `json:"transport" yaml:"transport"` // "http", "sse" or "mcp", matches MCPTool.Transport; "mcp" registers every tool the server offers
+	Endpoint      string `json:"endpoint" yaml:"endpoint"`
+	AuthType      string `json:"auth_type,omitempty" yaml:"auth_type,omitempty"`           // "bearer", "api-key" — matches MCPTool.AuthConfig["type"]
+	AuthHeader    string `json:"auth_header,omitempty" yaml:"auth_header,omitempty"`       // for auth_type "api-key"
+	CredentialRef string `json:"credential_ref,omitempty" yaml:"credential_ref,omitempty"` // KitchenCredential name supplying the token/key
 }
 
 // SkillManifest is a parsed SKILL.md: YAML frontmatter plus the markdown

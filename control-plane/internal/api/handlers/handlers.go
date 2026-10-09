@@ -39,6 +39,7 @@ import (
 	pkgmw "github.com/agentoven/agentoven/control-plane/pkg/middleware"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/agentoven/agentoven/control-plane/pkg/skills"
+	"github.com/agentoven/agentoven/control-plane/pkg/toolauth"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -62,6 +63,13 @@ type Handlers struct {
 	// GuardrailPolicy supplies workspace-level guardrails (Pro). nil: only agents' own apply.
 	GuardrailPolicy contracts.WorkspaceGuardrailSource
 	SkillUploads    *skills.UploadStore
+	// A2ASecret is the key the control plane's tokens for agent pods are derived from (a2aauth).
+	A2ASecret []byte
+	// SkillRouteGuard, if set, wraps every /api/v1/skills route. An edition that has roles uses it
+	// to decide who may register, approve or delete a skill; with none, any authenticated caller may.
+	SkillRouteGuard func(next http.Handler) http.Handler
+	// FetchSkillPlugin checks out a plugin; nil means skills.FetchPlugin.
+	FetchSkillPlugin func(ctx context.Context, spec skills.ImportSpec) (*skills.Plugin, string, func(), error)
 
 	// RecipeExecutor is the pluggable execution backend for POST /{name}/bake.
 	// OSS: nil — BakeRecipe falls through to h.Workflow.ExecuteRecipe directly.
@@ -2092,7 +2100,8 @@ func (h *Handlers) ListMCPTools(w http.ResponseWriter, r *http.Request) {
 	if tools == nil {
 		tools = []models.MCPTool{}
 	}
-	respondJSON(w, http.StatusOK, tools)
+	// A tool's authentication is never returned; see pkg/toolauth.
+	respondJSON(w, http.StatusOK, toolauth.RedactTools(tools))
 }
 
 func (h *Handlers) RegisterMCPTool(w http.ResponseWriter, r *http.Request) {
@@ -2136,7 +2145,7 @@ func (h *Handlers) RegisterMCPTool(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Info().Str("tool", req.Name).Str("transport", req.Transport).Str("kitchen", kitchen).Msg("MCP tool registered")
-	respondJSON(w, http.StatusCreated, req)
+	respondJSON(w, http.StatusCreated, toolauth.RedactTool(req))
 }
 
 // BulkRegisterMCPTools registers multiple MCP tools in a single request.
@@ -2188,7 +2197,7 @@ func (h *Handlers) BulkRegisterMCPTools(w http.ResponseWriter, r *http.Request) 
 	log.Info().Int("count", len(created)).Str("kitchen", kitchen).Msg("Bulk MCP tools registered")
 	respondJSON(w, http.StatusCreated, map[string]interface{}{
 		"created": len(created),
-		"tools":   created,
+		"tools":   toolauth.RedactTools(created),
 	})
 }
 
@@ -2205,7 +2214,7 @@ func (h *Handlers) GetMCPTool(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	respondJSON(w, http.StatusOK, tool)
+	respondJSON(w, http.StatusOK, toolauth.RedactTool(*tool))
 }
 
 func (h *Handlers) DeleteMCPTool(w http.ResponseWriter, r *http.Request) {
@@ -2267,7 +2276,7 @@ func (h *Handlers) UpdateMCPTool(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Info().Str("tool", toolName).Str("kitchen", kitchen).Msg("MCP tool updated")
-	respondJSON(w, http.StatusOK, tool)
+	respondJSON(w, http.StatusOK, toolauth.RedactTool(*tool))
 }
 
 // ══════════════════════════════════════════════════════════════

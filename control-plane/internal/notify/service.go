@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/agentoven/agentoven/control-plane/pkg/toolauth"
 	"net/http"
 	"sync"
 	"time"
@@ -262,7 +263,11 @@ func (s *Service) sendMCPNotification(ctx context.Context, tool *models.MCPTool,
 		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	applyAuth(req, tool.AuthConfig)
+	auth, err := toolauth.Resolve(ctx, s.store, tool.Kitchen, tool.AuthConfig)
+	if err != nil {
+		return fmt.Errorf("notify tool %q: %w", tool.Name, err)
+	}
+	applyAuth(req, auth)
 
 	return s.sendWithRetries(req)
 }

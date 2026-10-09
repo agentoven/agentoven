@@ -20,6 +20,7 @@ import (
 
 	"github.com/agentoven/agentoven/control-plane/internal/store"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
+	"github.com/agentoven/agentoven/control-plane/pkg/toolauth"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
@@ -121,9 +122,20 @@ func (gw *Gateway) handleToolsList(ctx context.Context, kitchen string, req *mod
 	}
 
 	mcpTools := make([]models.MCPToolInfo, 0, len(tools))
+	active := map[string]bool{} // skill name -> usable, so each skill is looked up once
 	for _, t := range tools {
 		if !t.Enabled {
 			continue
+		}
+		if t.Skill != "" {
+			ok, seen := active[t.Skill]
+			if !seen {
+				ok = gw.skillActive(ctx, kitchen, t.Skill) == nil
+				active[t.Skill] = ok
+			}
+			if !ok {
+				continue
+			}
 		}
 		mcpTools = append(mcpTools, models.MCPToolInfo{
 			Name:        t.Name,
@@ -182,6 +194,23 @@ func (gw *Gateway) handleToolsCall(ctx context.Context, kitchen string, req *mod
 		}
 	}
 
+	// A tool a skill registered is served only while that skill is active. This is checked on
+	// every call, not at bake, so suspending or deleting a skill stops its tools at once, even
+	// for an agent that was baked while the skill was fine.
+	if tool.Skill != "" {
+		if err := gw.skillActive(ctx, kitchen, tool.Skill); err != nil {
+			return &models.MCPResponse{
+				Jsonrpc: "2.0",
+				Error: &models.MCPError{
+					Code:    -32003,
+					Message: "Skill not active",
+					Data:    fmt.Sprintf("Tool '%s' belongs to skill '%s': %s", params.Name, tool.Skill, err.Error()),
+				},
+				ID: req.ID,
+			}
+		}
+	}
+
 	// Execute the tool based on transport
 	result, err := gw.executeTool(ctx, tool, &params)
 	if err != nil {
@@ -207,18 +236,26 @@ func (gw *Gateway) handleToolsCall(ctx context.Context, kitchen string, req *mod
 
 // executeTool dispatches tool execution based on the tool's transport.
 func (gw *Gateway) executeTool(ctx context.Context, tool *models.MCPTool, params *models.MCPToolCallParams) (*models.MCPToolResult, error) {
+	// The tool names a credential; its value is read now, for this call only. A credential
+	// that cannot be read fails the call: it is never made without its authentication.
+	auth, err := toolauth.Resolve(ctx, gw.store, tool.Kitchen, tool.AuthConfig)
+	if err != nil {
+		return nil, fmt.Errorf("tool %q: %w", tool.Name, err)
+	}
 	switch tool.Transport {
 	case "http":
-		return gw.executeHTTPTool(ctx, tool, params)
+		return gw.executeHTTPTool(ctx, tool, params, auth)
 	case "sse":
-		return gw.executeSSETool(ctx, tool, params)
+		return gw.executeSSETool(ctx, tool, params, auth)
+	case TransportMCP:
+		return gw.executeMCPTool(ctx, tool, params, auth)
 	default:
-		return gw.executeHTTPTool(ctx, tool, params)
+		return gw.executeHTTPTool(ctx, tool, params, auth)
 	}
 }
 
 // executeHTTPTool calls a tool over HTTP (POST with JSON body).
-func (gw *Gateway) executeHTTPTool(ctx context.Context, tool *models.MCPTool, params *models.MCPToolCallParams) (*models.MCPToolResult, error) {
+func (gw *Gateway) executeHTTPTool(ctx context.Context, tool *models.MCPTool, params *models.MCPToolCallParams, auth map[string]interface{}) (*models.MCPToolResult, error) {
 	// Build the request body — send as MCP tools/call
 	rpcReq := map[string]interface{}{
 		"jsonrpc": "2.0",
@@ -238,7 +275,7 @@ func (gw *Gateway) executeHTTPTool(ctx context.Context, tool *models.MCPTool, pa
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	// Apply auth if configured
-	gw.applyAuth(httpReq, tool)
+	toolauth.Apply(httpReq, auth)
 
 	resp, err := gw.client.Do(httpReq)
 	if err != nil {
@@ -272,7 +309,7 @@ func (gw *Gateway) executeHTTPTool(ctx context.Context, tool *models.MCPTool, pa
 }
 
 // executeSSETool calls a tool over SSE transport.
-func (gw *Gateway) executeSSETool(ctx context.Context, tool *models.MCPTool, params *models.MCPToolCallParams) (*models.MCPToolResult, error) {
+func (gw *Gateway) executeSSETool(ctx context.Context, tool *models.MCPTool, params *models.MCPToolCallParams, auth map[string]interface{}) (*models.MCPToolResult, error) {
 	// For SSE, we POST the request and read SSE events
 	rpcReq := map[string]interface{}{
 		"jsonrpc": "2.0",
@@ -291,7 +328,7 @@ func (gw *Gateway) executeSSETool(ctx context.Context, tool *models.MCPTool, par
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
-	gw.applyAuth(httpReq, tool)
+	toolauth.Apply(httpReq, auth)
 
 	resp, err := gw.client.Do(httpReq)
 	if err != nil {
@@ -320,27 +357,17 @@ func (gw *Gateway) executeSSETool(ctx context.Context, tool *models.MCPTool, par
 	}, nil
 }
 
-// applyAuth adds authentication headers based on tool config.
-func (gw *Gateway) applyAuth(req *http.Request, tool *models.MCPTool) {
-	if tool.AuthConfig == nil {
-		return
+// skillActive reports why a skill's tools may not be served, or nil when they may. Only an
+// accepted skill is active; a missing one (deleted) is not.
+func (gw *Gateway) skillActive(ctx context.Context, kitchen, name string) error {
+	skill, err := gw.store.GetSkill(ctx, kitchen, name)
+	if err != nil {
+		return fmt.Errorf("the skill is no longer registered")
 	}
-
-	authType, _ := tool.AuthConfig["type"].(string)
-	switch authType {
-	case "bearer":
-		if token, ok := tool.AuthConfig["token"].(string); ok {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
-	case "api-key":
-		header, _ := tool.AuthConfig["header"].(string)
-		key, _ := tool.AuthConfig["key"].(string)
-		if header != "" && key != "" {
-			req.Header.Set(header, key)
-		}
-	case "basic":
-		// basic auth would be set via URL or explicit header
+	if skill.Status != models.SkillStatusAccepted {
+		return fmt.Errorf("the skill is %s", skill.Status)
 	}
+	return nil
 }
 
 // ── SSE Subscription Management ─────────────────────────────

@@ -15,6 +15,7 @@ import (
 	pkgmw "github.com/agentoven/agentoven/control-plane/pkg/middleware"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/agentoven/agentoven/control-plane/pkg/skills"
+	"github.com/agentoven/agentoven/control-plane/pkg/toolauth"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -134,16 +135,27 @@ func (h *Handlers) RegisterSkill(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	status, body := h.registerBundle(r.Context(), kitchen, models.SkillSource(req.Source), sourceRefFor(req), bundle, req.Credentials)
+	respondJSON(w, status, body)
+}
+
+// errorBody is the JSON respondError writes, for code that returns a status
+// and body instead of writing a response.
+func errorBody(msg string) map[string]string { return map[string]string{"error": msg} }
+
+// registerBundle takes a skill bundle through verification and, if it is
+// accepted, registration, and returns the HTTP status and body that describe
+// the outcome. It is what RegisterSkill answers with, and what a plugin import
+// runs once per skill.
+func (h *Handlers) registerBundle(ctx context.Context, kitchen string, source models.SkillSource, sourceRef string, bundle skills.Bundle, credentials map[string]string) (int, interface{}) {
 	manifest, err := bundle.Manifest()
 	if err != nil {
-		respondError(w, http.StatusBadRequest, "invalid SKILL.md: "+err.Error())
-		return
+		return http.StatusBadRequest, errorBody("invalid SKILL.md: " + err.Error())
 	}
 
-	verdict, reasoning, providerUsed, err := skills.VerifyIntent(r.Context(), h.Router, kitchen, manifest, bundle)
+	verdict, reasoning, providerUsed, err := skills.VerifyIntent(ctx, h.Router, kitchen, manifest, bundle)
 	if err != nil {
-		respondError(w, http.StatusBadGateway, "skill verification failed: "+err.Error())
-		return
+		return http.StatusBadGateway, errorBody("skill verification failed: " + err.Error())
 	}
 
 	now := time.Now().UTC()
@@ -151,8 +163,8 @@ func (h *Handlers) RegisterSkill(w http.ResponseWriter, r *http.Request) {
 		ID:                    uuid.New().String(),
 		Kitchen:               kitchen,
 		Name:                  manifest.Name,
-		Source:                models.SkillSource(req.Source),
-		SourceRef:             sourceRefFor(req),
+		Source:                source,
+		SourceRef:             sourceRef,
 		Manifest:              manifest,
 		VerificationVerdict:   string(verdict),
 		VerificationReasoning: reasoning,
@@ -161,11 +173,11 @@ func (h *Handlers) RegisterSkill(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:             now,
 		UpdatedAt:             now,
 	}
-	if id := pkgmw.GetIdentity(r.Context()); id != nil {
+	if id := pkgmw.GetIdentity(ctx); id != nil {
 		skill.CreatedBy = id.Subject
 	}
 
-	h.finalizeSkillRegistration(w, r, kitchen, skill, verdict, reasoning, bundle, req.Credentials)
+	return h.finalizeSkill(ctx, kitchen, skill, verdict, reasoning, credentials)
 }
 
 func sourceRefFor(req skillRegisterRequest) string {
@@ -182,100 +194,111 @@ func sourceRefFor(req skillRegisterRequest) string {
 	}
 }
 
-// finalizeSkillRegistration applies a verdict: reject persists and refuses,
-// needs_review persists inert and waits for a human, accept registers the
-// skill's bundled MCP tools and activates it. Shared by RegisterSkill and
-// RefreshSkill, which both end at "I have a bundle and a verdict, now what".
+// finalizeSkillRegistration writes finalizeSkill's outcome as the response.
 func (h *Handlers) finalizeSkillRegistration(w http.ResponseWriter, r *http.Request, kitchen string, skill *models.Skill, verdict skills.Verdict, reasoning string, bundle skills.Bundle, credentialOverrides map[string]string) {
+	status, body := h.finalizeSkill(r.Context(), kitchen, skill, verdict, reasoning, credentialOverrides)
+	respondJSON(w, status, body)
+}
+
+// saveSkill stores a skill, replacing the record when one with this name already
+// exists. A refresh re-registers a skill that is already on record, and a
+// database store (unlike the in-memory one, which overwrites) rejects a second
+// insert of the same name.
+func (h *Handlers) saveSkill(ctx context.Context, skill *models.Skill) error {
+	if _, err := h.Store.GetSkill(ctx, skill.Kitchen, skill.Name); err == nil {
+		return h.Store.UpdateSkill(ctx, skill)
+	}
+	return h.Store.CreateSkill(ctx, skill)
+}
+
+// finalizeSkill applies a verdict: reject persists and refuses, needs_review
+// persists inert and waits for a human, accept registers the skill's bundled
+// MCP tools and activates it. It returns the HTTP status and body for the
+// outcome. Shared by RegisterSkill, RefreshSkill and plugin import, which all
+// end at "I have a skill and a verdict, now what".
+func (h *Handlers) finalizeSkill(ctx context.Context, kitchen string, skill *models.Skill, verdict skills.Verdict, reasoning string, credentialOverrides map[string]string) (int, interface{}) {
 	switch verdict {
 	case skills.VerdictReject:
 		skill.Status = models.SkillStatusRejected
-		if err := h.Store.CreateSkill(r.Context(), skill); err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
+		if err := h.saveSkill(ctx, skill); err != nil {
+			return http.StatusInternalServerError, errorBody(err.Error())
 		}
-		respondJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
+		return http.StatusUnprocessableEntity, map[string]interface{}{
 			"status":    skill.Status,
 			"reasoning": reasoning,
-		})
-		return
+		}
 
 	case skills.VerdictNeedsReview:
 		skill.Status = models.SkillStatusNeedsReview
-		if err := h.Store.CreateSkill(r.Context(), skill); err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
+		if err := h.saveSkill(ctx, skill); err != nil {
+			return http.StatusInternalServerError, errorBody(err.Error())
 		}
-		respondJSON(w, http.StatusAccepted, map[string]interface{}{
+		return http.StatusAccepted, map[string]interface{}{
 			"status":    skill.Status,
 			"reasoning": reasoning,
 			"note":      "inconclusive automated review — an admin must approve or reject this skill before it can be used",
-		})
-		return
+		}
 
 	case skills.VerdictAccept:
-		registered, err := h.registerSkillTools(r.Context(), kitchen, skill.Name, skill.Manifest, credentialOverrides)
+		registered, err := h.registerSkillTools(ctx, kitchen, skill.Name, skill.Manifest, credentialOverrides)
 		if err != nil {
-			respondError(w, http.StatusInternalServerError, "accepted skill, but failed to register its tools: "+err.Error())
-			return
+			return http.StatusInternalServerError, errorBody("accepted skill, but failed to register its tools: " + err.Error())
 		}
 		skill.RegisteredTools = registered
 		skill.Status = models.SkillStatusAccepted
-		if err := h.Store.CreateSkill(r.Context(), skill); err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
+		if err := h.saveSkill(ctx, skill); err != nil {
+			return http.StatusInternalServerError, errorBody(err.Error())
 		}
-		respondJSON(w, http.StatusCreated, skill)
-		return
+		return http.StatusCreated, skill
 
 	default:
-		respondError(w, http.StatusInternalServerError, fmt.Sprintf("unexpected verdict %q", verdict))
+		return http.StatusInternalServerError, errorBody(fmt.Sprintf("unexpected verdict %q", verdict))
 	}
 }
 
-// registerSkillTools creates one MCPTool row per bundled MCP server a
-// skill's manifest declares, namespaced "<skill>.<server>" to avoid
-// colliding with the kitchen's own tools, and returns their names. Dispatch
-// for these needs no new code at all: they go through the same gateway path
-// (internal/mcpgw) any other registered tool does.
+// registerSkillTools creates the MCPTool rows for the MCP servers a skill's
+// manifest bundles (see skills.ToolsForServer for how each is named and
+// expanded) and returns their names. Dispatch needs no new code: they go
+// through the same gateway path (internal/mcpgw) any other registered tool does.
 func (h *Handlers) registerSkillTools(ctx context.Context, kitchen, skillName string, manifest *models.SkillManifest, credentialOverrides map[string]string) ([]string, error) {
+	var lister skills.RemoteToolLister
+	if h.MCPGateway != nil {
+		lister = h.MCPGateway
+	}
+
 	registered := make([]string, 0, len(manifest.MCPServers))
 	for _, srv := range manifest.MCPServers {
-		toolName := skillName + "." + srv.Name
-
-		authConfig, err := h.resolveSkillServerAuth(ctx, kitchen, srv, credentialOverrides)
+		stored, err := h.resolveSkillServerAuth(ctx, kitchen, srv, credentialOverrides)
+		if err != nil {
+			return registered, fmt.Errorf("resolving credentials for %q: %w", srv.Name, err)
+		}
+		// The credential's value is read here only to ask the server what it offers; the tools
+		// keep its name, so a rotation needs no re-registration.
+		discovery, err := toolauth.Resolve(ctx, h.Store, kitchen, stored)
 		if err != nil {
 			return registered, fmt.Errorf("resolving credentials for %q: %w", srv.Name, err)
 		}
 
-		tool := &models.MCPTool{
-			ID:           uuid.New().String(),
-			Name:         toolName,
-			Description:  srv.Description,
-			Kitchen:      kitchen,
-			Endpoint:     srv.Endpoint,
-			Transport:    srv.Transport,
-			AuthConfig:   authConfig,
-			Capabilities: []string{"tool"},
-			Enabled:      true,
-			CreatedAt:    time.Now().UTC(),
-			UpdatedAt:    time.Now().UTC(),
+		tools, err := skills.ToolsForServer(ctx, lister, kitchen, skillName, srv, discovery, stored)
+		if err != nil {
+			return registered, err
 		}
-		if err := h.Store.CreateTool(ctx, tool); err != nil {
-			return registered, fmt.Errorf("registering tool %q: %w", toolName, err)
+		for _, tool := range tools {
+			if err := h.Store.CreateTool(ctx, tool); err != nil {
+				return registered, fmt.Errorf("registering tool %q: %w", tool.Name, err)
+			}
+			registered = append(registered, tool.Name)
 		}
-		registered = append(registered, toolName)
 	}
 	return registered, nil
 }
 
-// resolveSkillServerAuth builds an MCPTool.AuthConfig for a skill's bundled
-// MCP server from a named KitchenCredential — never from a raw secret in the
-// manifest itself, matching how every other credential-bearing ingredient in
-// this codebase works. A request's credentialOverrides (keyed by server
-// name) take precedence over the manifest's own CredentialRef, since the
-// kitchen admin registering the skill decides which credential it gets, not
-// the skill's author.
+// resolveSkillServerAuth builds the AuthConfig a skill's bundled MCP server's tools are stored
+// with: the type and the NAME of a kitchen credential, never its value (see pkg/toolauth). The
+// credential must exist now, so a typo is caught at registration rather than at the first call.
+// A request's credentialOverrides (keyed by server name) take precedence over the manifest's own
+// CredentialRef, since the kitchen admin registering the skill decides which credential it gets,
+// not the skill's author.
 func (h *Handlers) resolveSkillServerAuth(ctx context.Context, kitchen string, srv models.SkillMCPServer, credentialOverrides map[string]string) (map[string]interface{}, error) {
 	if srv.AuthType == "" {
 		return nil, nil
@@ -287,20 +310,18 @@ func (h *Handlers) resolveSkillServerAuth(ctx context.Context, kitchen string, s
 	if ref == "" {
 		return nil, fmt.Errorf("declares auth_type %q but no credential_ref was given", srv.AuthType)
 	}
-	cred, err := h.Store.GetKitchenCredential(ctx, kitchen, ref)
-	if err != nil {
+	if _, err := h.Store.GetKitchenCredential(ctx, kitchen, ref); err != nil {
 		return nil, fmt.Errorf("credential %q not found in kitchen %q", ref, kitchen)
 	}
-
 	switch srv.AuthType {
 	case "bearer":
-		return map[string]interface{}{"type": "bearer", "token": cred.Value}, nil
+		return toolauth.Ref("bearer", "", ref), nil
 	case "api-key":
 		header := srv.AuthHeader
 		if header == "" {
 			header = "X-API-Key"
 		}
-		return map[string]interface{}{"type": "api-key", "header": header, "key": cred.Value}, nil
+		return toolauth.Ref("api-key", header, ref), nil
 	default:
 		return nil, fmt.Errorf("unsupported auth_type %q", srv.AuthType)
 	}

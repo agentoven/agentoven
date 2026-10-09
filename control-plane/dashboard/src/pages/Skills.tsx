@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Sparkles, Plus, Trash2, ShieldAlert, ShieldCheck, ShieldX, X as XIcon } from 'lucide-react';
+import { Sparkles, Plus, Library, Trash2, ShieldAlert, ShieldCheck, ShieldX, X as XIcon } from 'lucide-react';
 import {
   skills, skillsPro, providers, APIError,
   type Skill, type SkillOutcome, type SkillSourceRequest,
@@ -9,6 +9,7 @@ import {
   PageHeader, Card, EmptyState, StatusBadge,
   Spinner, ErrorBanner, Button, Modal,
 } from '../components/UI';
+import { PluginImportDialog } from '../components/PluginImport';
 
 const inputCls = 'w-full px-3 py-2 rounded-lg bg-[var(--ao-bg)] border border-[var(--ao-border)] text-sm outline-none focus:border-[var(--ao-brand)]';
 
@@ -41,6 +42,7 @@ export function SkillsPage() {
   const { data, loading, error, refetch } = useAPI(skills.list);
   const proAvailable = useSkillsPro();
   const [showRegister, setShowRegister] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState<string | null>(null);
 
@@ -52,9 +54,14 @@ export function SkillsPage() {
         title="Skills"
         description="Agent Skills (SKILL.md bundles) registered in this kitchen, with their verification results"
         action={
-          <Button onClick={() => setShowRegister(true)}>
-            <Plus size={16} className="mr-1.5" /> Register Skill
-          </Button>
+          <div className="flex gap-2">
+            <Button variant="secondary" onClick={() => setShowImport(true)}>
+              <Library size={16} className="mr-1.5" /> Import plugin
+            </Button>
+            <Button onClick={() => setShowRegister(true)}>
+              <Plus size={16} className="mr-1.5" /> Register Skill
+            </Button>
+          </div>
         }
       />
 
@@ -129,6 +136,8 @@ export function SkillsPage() {
           />
         )
       )}
+
+      <PluginImportDialog open={showImport} onClose={() => { setShowImport(false); refetch(); }} />
 
       <RegisterSkillDialog
         open={showRegister}

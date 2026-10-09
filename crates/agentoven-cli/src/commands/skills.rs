@@ -16,6 +16,10 @@
 //! `@owner/slug` registry resolution, so that form is refused with an
 //! explanation rather than faked.
 //!
+//! Catalogs (`catalog`, `import`) are the registry: git repositories that
+//! publish a Claude Code or Codex marketplace index, such as Anthropic's and
+//! OpenAI's. `import` takes a plugin's skills and remote MCP servers from one.
+//!
 //! Exit codes for the verdict-producing commands (`install`, `refresh`,
 //! `analyze`): 0 accepted, 2 needs_review, 3 rejected; any other failure is 1.
 
@@ -56,9 +60,9 @@ Source kinds the server supports (and so the CLI):
   --server-path   Treat <source> as a directory on the CONTROL PLANE's own
                   filesystem (nothing is uploaded). Can be refreshed later.
 
-NOT supported: `@owner/slug` references. The control plane has no skills
-registry or marketplace to resolve them against; the CLI refuses them rather
-than guessing. Install from a git URL or a directory instead.";
+NOT supported: `@owner/slug` references; the CLI refuses them rather than
+guessing. To install from a catalog (Anthropic's, OpenAI's, or your own), use
+`agentoven skills catalog` to browse and `agentoven skills import` to install.";
 
 #[derive(Subcommand)]
 pub enum SkillsCommands {
@@ -104,6 +108,30 @@ Requires AgentOven Pro and the skill:analyze permission. Exit codes: 0 \
 accepted, 2 needs_review, 3 rejected, 1 any other failure."
     )]
     Analyze(AnalyzeArgs),
+    /// Browse the plugin catalogs this kitchen has approved (requires AgentOven Pro).
+    #[command(
+        long_about = "List the kitchen's catalogs and install policy (GET /api/v1/skills/pro/catalogs), or \
+with a SOURCE the plugins one of them lists. A catalog is a git repository with a Claude Code \
+(.claude-plugin/marketplace.json) or Codex (.agents/plugins/marketplace.json) index. SOURCE is a \
+catalog's name or part of its URL, such as `openai`. Entries the kitchen's allowlist or pin policy \
+refuses show as blocked.\n\n\
+A kitchen starts with Anthropic's two catalogs and OpenAI's; administrators change the list and the \
+allowlist in the dashboard. Requires AgentOven Pro."
+    )]
+    Catalog(CatalogArgs),
+    /// Import a plugin's skills and remote MCP servers.
+    #[command(
+        long_about = "Import a plugin: its skills and the MCP servers it reaches over HTTP. What an AgentOven \
+agent cannot use (slash commands, hooks, local stdio servers) is listed as skipped.\n\n\
+PLUGIN is either the https git URL of a plugin repository, imported directly and reviewed by the \
+router's provider (every edition: POST /api/v1/skills/import), or a plugin name from a catalog (see \
+`skills catalog`; AgentOven Pro). A catalog import is pinned to the commit the catalog listed, must \
+pass the kitchen's allowlist, and only STAGES the skills: nothing is sent to a model until you \
+review them with `skills analyze <name> --provider P`, or pass --provider to do that here.\n\n\
+Use --dry-run first: it shows what would be imported and sends nothing to a model. \
+Exit codes: 0 all accepted (or staged), 2 something needs_review, 3 something rejected, 1 any failure."
+    )]
+    Import(ImportArgs),
     /// Approve a skill left at needs_review.
     Approve(ApproveArgs),
     /// Reject a skill left at needs_review.
@@ -172,6 +200,51 @@ pub struct AnalyzeArgs {
     /// Map a bundled MCP server to a kitchen credential: SERVER=CREDENTIAL (repeatable).
     #[arg(long = "credential", value_name = "SERVER=CREDENTIAL")]
     pub credentials: Vec<String>,
+}
+
+#[derive(Args)]
+pub struct CatalogArgs {
+    /// Catalog to list: its name or part of its URL (e.g. `openai`). Omit to list the catalogs and the install policy.
+    pub source: Option<String>,
+    /// Only plugins whose name, description or category contains this text.
+    #[arg(long, short = 'q')]
+    pub query: Option<String>,
+    /// Most plugins to show.
+    #[arg(long, default_value_t = 30)]
+    pub limit: usize,
+}
+
+#[derive(Args)]
+pub struct ImportArgs {
+    /// A plugin name from a catalog, or the https git URL of a plugin repository.
+    pub plugin: String,
+    /// Catalog to find the plugin in (its name, or part of its URL, such as `openai`). All enabled catalogs are searched if omitted.
+    #[arg(long)]
+    pub from: Option<String>,
+    /// Pro catalog imports: after staging, analyze every skill with this provider (this sends their text to it).
+    #[arg(long)]
+    pub provider: Option<String>,
+    /// Git branch or tag.
+    #[arg(long = "ref")]
+    pub git_ref: Option<String>,
+    /// Exact commit to install; catalog entries usually carry one already.
+    #[arg(long)]
+    pub sha: Option<String>,
+    /// The plugin's directory inside the repository.
+    #[arg(long)]
+    pub path: Option<String>,
+    /// A skill directory to take, relative to the plugin (repeatable). Default: all of them.
+    #[arg(long = "skill-path", value_name = "DIR")]
+    pub skill_paths: Vec<String>,
+    /// Take only this skill, by name (repeatable). A plugin with more than 40 skills needs this.
+    #[arg(long, value_name = "NAME")]
+    pub only: Vec<String>,
+    /// Map an MCP server to a kitchen credential: SERVER=CREDENTIAL (repeatable).
+    #[arg(long = "credential", value_name = "SERVER=CREDENTIAL")]
+    pub credentials: Vec<String>,
+    /// Show what would be imported; register nothing and call no model.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
@@ -275,6 +348,8 @@ pub async fn run(cmd: SkillsCommands, api: &Api, json: bool) -> anyhow::Result<R
         SkillsCommands::Remove(a) => remove(api, &a, json).await,
         SkillsCommands::Stage(a) => stage(api, a, json).await,
         SkillsCommands::Analyze(a) => analyze(api, a, json).await,
+        SkillsCommands::Catalog(a) => catalog(api, &a, json).await,
+        SkillsCommands::Import(a) => import(api, a, json).await,
         SkillsCommands::Approve(a) => {
             review(api, &a.name, "approve", a.note.as_deref(), json).await
         }
@@ -668,9 +743,9 @@ pub fn resolve_source(args: &SourceArgs) -> anyhow::Result<Source> {
 
     if raw.starts_with('@') {
         bail!(
-            "'{raw}' looks like an @owner/slug registry reference, which AgentOven does not support: \
-the control plane has no skills registry or marketplace to resolve it against. \
-Install from a git URL (agentoven skills install https://github.com/owner/repo) or a local directory instead."
+            "'{raw}' looks like an @owner/slug registry reference, which AgentOven does not support. \
+Browse the catalogs with `agentoven skills catalog` and install from one with `agentoven skills import <plugin>`, \
+or install from a git URL (agentoven skills install https://github.com/owner/repo) or a local directory."
         );
     }
 
@@ -1093,6 +1168,546 @@ fn skill_path(name: &str, suffix: &str) -> String {
     format!("/api/v1/skills/{}{}", encode_segment(name), suffix)
 }
 
+// ── Catalogs and plugin import ───────────────────────────────
+//
+// Importing from a git URL is on every edition (`POST /api/v1/skills/import`: fetch, review,
+// register). Browsing catalogs and importing by name is the Pro registry
+// (`/api/v1/skills/pro/{catalogs,catalog,import}`), which stages the skills and leaves the
+// review, and the choice of provider, to `skills analyze` (or `--provider` here).
+
+/// The kitchen's catalogs (Pro), enabled or not.
+async fn registry_catalogs(api: &Api) -> anyhow::Result<Value> {
+    let reply = api
+        .send(reqwest::Method::GET, "/api/v1/skills/pro/catalogs", None)
+        .await?;
+    if pro_routes_missing(&reply) {
+        return Err(pro_required("skills catalog"));
+    }
+    if reply.status != 200 {
+        return Err(api_error("list catalogs", &reply));
+    }
+    Ok(reply.body)
+}
+
+/// Resolve what the user typed (an id, a URL, or part of a name or URL) to one enabled catalog.
+fn pick_catalog(settings: &Value, wanted: &str) -> anyhow::Result<Value> {
+    let enabled: Vec<&Value> = settings["catalogs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["enabled"].as_bool().unwrap_or(false))
+        .collect();
+    let label = |c: &Value| {
+        format!(
+            "    {}  {}",
+            c["name"].as_str().unwrap_or("-"),
+            c["url"].as_str().unwrap_or("")
+        )
+    };
+    let list = |v: &[&Value]| v.iter().map(|c| label(c)).collect::<Vec<_>>().join("\n");
+    if let Some(c) = enabled
+        .iter()
+        .find(|c| c["id"] == wanted || c["url"] == wanted)
+    {
+        return Ok((*c).clone());
+    }
+    let w = wanted.to_lowercase();
+    let hits: Vec<&Value> = enabled
+        .iter()
+        .copied()
+        .filter(|c| {
+            c["url"].as_str().unwrap_or("").to_lowercase().contains(&w)
+                || c["name"].as_str().unwrap_or("").to_lowercase().contains(&w)
+        })
+        .collect();
+    match hits.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => bail!(
+            "no enabled catalog matches '{wanted}'. The enabled catalogs are:\n{}",
+            list(&enabled)
+        ),
+        many => bail!(
+            "'{wanted}' matches more than one catalog; use more of the name or URL:\n{}",
+            list(many)
+        ),
+    }
+}
+
+async fn registry_entries(
+    api: &Api,
+    catalog_id: &str,
+    query: Option<&str>,
+    limit: usize,
+) -> anyhow::Result<Reply> {
+    let mut path = format!(
+        "/api/v1/skills/pro/catalog?catalog={}&limit={limit}",
+        encode_segment(catalog_id)
+    );
+    if let Some(q) = query.filter(|q| !q.is_empty()) {
+        path += &format!("&q={}", encode_segment(q));
+    }
+    let reply = api.send(reqwest::Method::GET, &path, None).await?;
+    if pro_routes_missing(&reply) {
+        return Err(pro_required("skills catalog"));
+    }
+    if reply.status != 200 {
+        return Err(api_error("browse catalog", &reply));
+    }
+    Ok(reply)
+}
+
+async fn catalog(api: &Api, args: &CatalogArgs, json: bool) -> anyhow::Result<Report> {
+    let settings = registry_catalogs(api).await?;
+    let Some(wanted) = &args.source else {
+        if json {
+            return Ok(ok(pretty(&settings)));
+        }
+        return Ok(ok(render_catalog_settings(&settings)));
+    };
+    let catalog = pick_catalog(&settings, wanted)?;
+    let reply = registry_entries(
+        api,
+        catalog["id"].as_str().unwrap_or(""),
+        args.query.as_deref(),
+        args.limit,
+    )
+    .await?;
+    if json {
+        return Ok(ok(pretty(&reply.body)));
+    }
+    Ok(ok(render_catalog(&reply.body, wanted)))
+}
+
+fn render_catalog_settings(settings: &Value) -> String {
+    let mut out = String::from("  Catalogs:\n");
+    for c in settings["catalogs"].as_array().into_iter().flatten() {
+        let state = if c["enabled"].as_bool().unwrap_or(false) {
+            "on ".green().to_string()
+        } else {
+            "off".dimmed().to_string()
+        };
+        out += &format!(
+            "    {state}  {:<28} {}\n",
+            truncate(c["name"].as_str().unwrap_or("-"), 28),
+            c["url"].as_str().unwrap_or("").dimmed()
+        );
+    }
+    let p = &settings["policy"];
+    let prefixes: Vec<&str> = p["allowed_prefixes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .collect();
+    out += &format!(
+        "\n  Install policy: {}; also allowed: {}\n",
+        if p["require_pin"].as_bool().unwrap_or(false) {
+            "pinned plugins only"
+        } else {
+            "pins not required"
+        },
+        if prefixes.is_empty() {
+            "(only the catalogs themselves)".to_string()
+        } else {
+            prefixes.join(", ")
+        }
+    );
+    out += &format!(
+        "\n  {} agentoven skills catalog <name or part of a URL>   e.g. `agentoven skills catalog openai`\n",
+        "→".dimmed()
+    );
+    out
+}
+
+fn render_catalog(body: &Value, from: &str) -> String {
+    let entries = body["entries"].as_array().cloned().unwrap_or_default();
+    let total = body["total"].as_u64().unwrap_or(entries.len() as u64);
+    if entries.is_empty() {
+        return "  (no plugins match)\n".to_string();
+    }
+    let mut out = format!(
+        "  {:<30} {:<14} {:<10} {}\n",
+        "PLUGIN".bold(),
+        "CATEGORY".bold(),
+        "STATE".bold(),
+        "DESCRIPTION".bold()
+    );
+    out += &format!("  {}\n", "─".repeat(92).dimmed());
+    let mut blocked = 0;
+    for e in &entries {
+        let installable = e["installable"].as_bool().unwrap_or(true);
+        if !installable {
+            blocked += 1;
+        }
+        let state = if installable {
+            format!("{:<10}", "ok").green().to_string()
+        } else {
+            format!("{:<10}", "blocked").yellow().to_string()
+        };
+        out += &format!(
+            "  {:<30} {:<14} {} {}\n",
+            truncate(e["name"].as_str().unwrap_or("-"), 30),
+            truncate(e["category"].as_str().unwrap_or("-"), 14),
+            state,
+            truncate(
+                e["description"]
+                    .as_str()
+                    .unwrap_or("-")
+                    .lines()
+                    .next()
+                    .unwrap_or("-"),
+                48
+            ),
+        );
+    }
+    out += &format!(
+        "\n  {} showing {} of {} — import one with `agentoven skills import <plugin> --from {from}`\n",
+        "→".dimmed(),
+        entries.len(),
+        total
+    );
+    if blocked > 0 {
+        out += &format!(
+            "  {} {blocked} blocked by this kitchen's allowlist or pin policy (see `agentoven skills catalog`); an administrator changes it in the dashboard\n",
+            "·".dimmed()
+        );
+    }
+    out
+}
+
+/// The repository name of a git URL, for a plugin that has no manifest of its own.
+fn name_from_git_url(url: &str) -> Option<String> {
+    let last = url.trim_end_matches('/').rsplit('/').next()?;
+    let name = last.strip_suffix(".git").unwrap_or(last);
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+async fn import(api: &Api, args: ImportArgs, json: bool) -> anyhow::Result<Report> {
+    // A git URL is imported directly on any edition; a name goes through the Pro registry.
+    let by_url = looks_like_git_url(&args.plugin);
+    let mut body = if by_url {
+        let mut b = json!({ "git_url": args.plugin });
+        if let Some(n) = name_from_git_url(&args.plugin) {
+            b["name"] = json!(n);
+        }
+        b
+    } else {
+        find_in_catalogs(api, &args.plugin, args.from.as_deref()).await?
+    };
+    // Flags override what a catalog entry says.
+    for (key, val) in [
+        ("git_ref", &args.git_ref),
+        ("git_sha", &args.sha),
+        ("path", &args.path),
+    ] {
+        if let Some(v) = val.as_ref().filter(|v| !v.is_empty()) {
+            body[key] = json!(v);
+        }
+    }
+    if !args.skill_paths.is_empty() {
+        body["skill_paths"] = json!(args.skill_paths);
+    }
+    if !args.only.is_empty() {
+        body["only"] = json!(args.only);
+    }
+    let creds = parse_credentials(&args.credentials)?;
+    if !creds.is_empty() {
+        body["credentials"] = json!(creds);
+    }
+    if args.dry_run {
+        body["dry_run"] = json!(true);
+    }
+    if by_url && args.provider.is_some() {
+        bail!("--provider applies to the Pro registry (import by name); an import from a URL reviews with the router's provider");
+    }
+
+    let path = if by_url {
+        "/api/v1/skills/import"
+    } else {
+        "/api/v1/skills/pro/import"
+    };
+    let reply = api.send(reqwest::Method::POST, path, Some(&body)).await?;
+    if !by_url && pro_routes_missing(&reply) {
+        return Err(pro_required("skills import <plugin name>"));
+    }
+    if reply.status != 200 {
+        return Err(api_error("import plugin", &reply));
+    }
+    let mut result = reply.body;
+
+    // Pro staged the skills and sent nothing to a model. With --provider, review them now.
+    if !by_url && !args.dry_run {
+        if let Some(provider) = &args.provider {
+            analyze_staged(api, &mut result, provider).await?;
+        }
+    }
+
+    let code = if args.dry_run {
+        0
+    } else {
+        import_exit_code(&result)
+    };
+    let stdout = if json {
+        pretty(&result)
+    } else {
+        render_import(&result, args.dry_run)
+    };
+    Ok(Report { stdout, code })
+}
+
+/// Analyze every skill Pro just staged with `provider`, and replace the staged results with the verdicts.
+async fn analyze_staged(api: &Api, result: &mut Value, provider: &str) -> anyhow::Result<()> {
+    let staged: Vec<String> = result["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["status"] == "staged")
+        .filter_map(|r| r["name"].as_str().map(String::from))
+        .collect();
+    let mut verdicts: Vec<Value> = result["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["status"] != "staged")
+        .cloned()
+        .collect();
+    for name in staged {
+        let reply = api
+            .send(
+                reqwest::Method::POST,
+                &skill_path(&name, "/analyze"),
+                Some(&json!({ "provider": provider })),
+            )
+            .await?;
+        let row = match verdict_of(&reply) {
+            Some(v) => json!({
+                "name": name,
+                "status": match v {
+                    Verdict::Accepted => "accepted",
+                    Verdict::NeedsReview => "needs_review",
+                    Verdict::Rejected => "rejected",
+                },
+                "reasoning": reply.body["verification_reasoning"]
+                    .as_str()
+                    .or_else(|| reply.body["reasoning"].as_str())
+                    .unwrap_or(""),
+            }),
+            None => json!({ "name": name, "status": "error", "error": reply.error_message() }),
+        };
+        verdicts.push(row);
+    }
+    result["results"] = json!(verdicts);
+    result["analyzed_with"] = json!(provider);
+    Ok(())
+}
+
+/// Find a plugin by name in the enabled catalogs; its entry's `install` object is the import request.
+async fn find_in_catalogs(api: &Api, plugin: &str, from: Option<&str>) -> anyhow::Result<Value> {
+    let settings = registry_catalogs(api).await?;
+    let searched: Vec<Value> = match from {
+        Some(f) => vec![pick_catalog(&settings, f)?],
+        None => settings["catalogs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|c| c["enabled"].as_bool().unwrap_or(false))
+            .cloned()
+            .collect(),
+    };
+    let mut found: Vec<(String, Value)> = Vec::new();
+    for c in &searched {
+        let reply =
+            registry_entries(api, c["id"].as_str().unwrap_or(""), Some(plugin), 200).await?;
+        for e in reply.body["entries"].as_array().into_iter().flatten() {
+            if e["name"]
+                .as_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case(plugin))
+            {
+                if e["installable"] == false {
+                    bail!(
+                        "'{plugin}' is blocked in this kitchen: {}",
+                        e["blocked_reason"].as_str().unwrap_or("not allowed")
+                    );
+                }
+                found.push((
+                    c["name"].as_str().unwrap_or("").to_string(),
+                    e["install"].clone(),
+                ));
+            }
+        }
+    }
+    let names = || {
+        searched
+            .iter()
+            .map(|c| c["name"].as_str().unwrap_or("-"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match found.len() {
+        1 => Ok(found.remove(0).1),
+        0 => bail!(
+            "no plugin named '{plugin}' in {}. Browse with `agentoven skills catalog <source>`, or pass a git URL.",
+            names()
+        ),
+        _ => bail!(
+            "'{plugin}' is in more than one catalog ({}); choose with --from.",
+            found
+                .iter()
+                .map(|(s, _)| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// Worst outcome wins: a failure is 1, then rejected 3, then needs_review 2. Staged is not an outcome.
+fn import_exit_code(body: &Value) -> i32 {
+    let statuses: Vec<&str> = body["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r["status"].as_str())
+        .collect();
+    if statuses.contains(&"error") {
+        1
+    } else if statuses.contains(&"rejected") {
+        EXIT_REJECTED
+    } else if statuses.contains(&"needs_review") {
+        EXIT_NEEDS_REVIEW
+    } else {
+        0
+    }
+}
+
+fn render_import(body: &Value, dry_run: bool) -> String {
+    let p = &body["plugin"];
+    let field = |k: &str| p[k].as_str().filter(|v| !v.is_empty());
+    let mut out = format!(
+        "  {} {}{}{}\n",
+        field("name").unwrap_or("plugin").bold(),
+        field("version")
+            .map(|v| format!("{v} "))
+            .unwrap_or_default(),
+        format!("({})", field("format").unwrap_or("?")).dimmed(),
+        field("license")
+            .map(|l| format!("  {l}"))
+            .unwrap_or_default()
+    );
+    if let Some(d) = field("description") {
+        out += &format!(
+            "  {}\n",
+            truncate(d.lines().next().unwrap_or(""), 100).dimmed()
+        );
+    }
+
+    let skills = body["skills"].as_array().cloned().unwrap_or_default();
+    let servers = body["servers"].as_array().cloned().unwrap_or_default();
+    if dry_run {
+        out += &format!("\n  {} ({}):\n", "Would import".bold(), skills.len());
+        for s in &skills {
+            out += &format!(
+                "    {:<28} {}\n",
+                truncate(s["name"].as_str().unwrap_or("-"), 28),
+                truncate(s["description"].as_str().unwrap_or(""), 60).dimmed()
+            );
+        }
+        for s in &servers {
+            let note = if s["needs_credential"].as_bool().unwrap_or(false) {
+                format!(
+                    "needs a credential: --credential {}=<kitchen credential>",
+                    s["name"].as_str().unwrap_or("?")
+                )
+            } else {
+                String::new()
+            };
+            out += &format!(
+                "    {:<28} {} {}\n",
+                format!("MCP {}", s["name"].as_str().unwrap_or("-")),
+                s["endpoint"].as_str().unwrap_or("").dimmed(),
+                note.yellow()
+            );
+        }
+        if let Some(n) = body["server_skill"].as_str() {
+            out += &format!(
+                "    {} the servers register as the skill '{n}'\n",
+                "·".dimmed()
+            );
+        }
+    } else {
+        out += &format!(
+            "\n  {:<28} {:<13} {}\n",
+            "SKILL".bold(),
+            "STATUS".bold(),
+            ""
+        );
+        for r in body["results"].as_array().into_iter().flatten() {
+            let status = r["status"].as_str().unwrap_or("-");
+            let cell = format!("{status:<13}");
+            let cell = cell.replacen(status, &status_colored(status), 1);
+            let detail = r["error"]
+                .as_str()
+                .filter(|e| !e.is_empty())
+                .or_else(|| r["reasoning"].as_str())
+                .unwrap_or("");
+            out += &format!(
+                "  {:<28} {} {}\n",
+                truncate(r["name"].as_str().unwrap_or("-"), 28),
+                cell,
+                truncate(detail.lines().next().unwrap_or(""), 60).dimmed()
+            );
+        }
+    }
+
+    let skipped = body["skipped"].as_array().cloned().unwrap_or_default();
+    if !skipped.is_empty() {
+        out += &format!("\n  {} ({}):\n", "Left out".bold(), skipped.len());
+        for s in &skipped {
+            let what = [s["component"].as_str(), s["name"].as_str()]
+                .iter()
+                .flatten()
+                .filter(|v| !v.is_empty())
+                .copied()
+                .collect::<Vec<_>>()
+                .join(" ");
+            out += &format!(
+                "    {:<28} {}\n",
+                truncate(&what, 28),
+                s["reason"].as_str().unwrap_or("").dimmed()
+            );
+        }
+    }
+
+    let staged = body["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|r| r["status"] == "staged");
+    if dry_run {
+        out += &format!(
+            "\n  {} run again without --dry-run to register these (each skill is reviewed by a model provider)\n",
+            "→".dimmed()
+        );
+    } else if staged {
+        let providers: Vec<&str> = body["available_providers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .collect();
+        out += &format!(
+            "\n  {} staged, not reviewed: nothing was sent to a model. Review each with\n     agentoven skills analyze <name> --provider <{}>\n     or re-run with --provider to analyze them all now.\n",
+            "→".dimmed(),
+            providers.join("|")
+        );
+    } else if import_exit_code(body) == EXIT_NEEDS_REVIEW {
+        out += &format!(
+            "\n  {} approve or reject with `agentoven skills approve <name>` / `reject <name>`\n",
+            "→".dimmed()
+        );
+    }
+    out
+}
+
 // ── Tests ────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1142,7 +1757,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("does not support"), "{err}");
-        assert!(err.contains("no skills registry"), "{err}");
+        assert!(err.contains("skills catalog"), "{err}");
     }
 
     #[test]
@@ -1931,5 +2546,449 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("cannot reach the control plane"), "{err}");
+    }
+
+    // ── Catalogs and plugin import ──
+
+    const OPENAI: &str = "https://github.com/openai/plugins.git";
+    const ANTHROPIC: &str = "https://github.com/anthropics/skills.git";
+
+    fn settings_body() -> Value {
+        json!({
+            "catalogs": [
+                {"id": "id-anth", "url": ANTHROPIC, "name": "Anthropic skills", "enabled": true},
+                {"id": "id-oai", "url": OPENAI, "name": "OpenAI plugins", "enabled": true},
+                {"id": "id-off", "url": "https://github.com/off/cat.git", "name": "Disabled", "enabled": false}
+            ],
+            "policy": {"require_pin": true, "allowed_prefixes": ["https://github.com/openai"]}
+        })
+    }
+
+    fn settings_route() -> Route {
+        route("GET", "/api/v1/skills/pro/catalogs", 200, settings_body())
+    }
+
+    fn entry(name: &str, install: Value) -> Value {
+        json!({"name": name, "description": format!("{name} does things"), "category": "dev", "install": install, "installable": true})
+    }
+
+    #[tokio::test]
+    async fn catalog_without_a_source_lists_catalogs_and_the_policy() {
+        no_color();
+        let (base, _) = fake_server(vec![settings_route()]).await;
+        let rep = run(parse(&["catalog"]), &api(&base), false).await.unwrap();
+        assert_eq!(rep.code, 0);
+        for want in [
+            "Anthropic skills",
+            "OpenAI plugins",
+            "Disabled",
+            "pinned plugins only",
+            "https://github.com/openai",
+            "skills catalog openai",
+        ] {
+            assert!(
+                rep.stdout.contains(want),
+                "missing {want:?} in:\n{}",
+                rep.stdout
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_resolves_a_name_and_marks_blocked_entries() {
+        no_color();
+        let path = "/api/v1/skills/pro/catalog?catalog=id-oai&limit=30&q=lin";
+        let mut blocked = entry("stranger", json!({}));
+        blocked["installable"] = json!(false);
+        blocked["blocked_reason"] = json!("not on the allowlist");
+        let (base, log) = fake_server(vec![
+            settings_route(),
+            route(
+                "GET",
+                path,
+                200,
+                json!({"name": "openai-curated", "total": 2, "entries": [entry("linear", json!({})), blocked]}),
+            ),
+        ])
+        .await;
+        let rep = run(
+            parse(&["catalog", "openai", "-q", "lin"]),
+            &api(&base),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(rep.stdout.contains("linear does things"), "{}", rep.stdout);
+        assert!(rep.stdout.contains("blocked"), "{}", rep.stdout);
+        assert!(
+            rep.stdout.contains("1 blocked by this kitchen's allowlist"),
+            "{}",
+            rep.stdout
+        );
+        assert!(rep.stdout.contains("--from openai"), "{}", rep.stdout);
+        assert_eq!(log.lock().unwrap()[1].path, path);
+    }
+
+    #[tokio::test]
+    async fn registry_commands_on_a_community_server_say_requires_pro() {
+        let (base, _) = fake_server(vec![]).await; // no Pro routes: chi's plain 404
+        for cmd in [vec!["catalog"], vec!["import", "linear"]] {
+            let e = run(parse(&cmd), &api(&base), false)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("requires AgentOven Pro"), "{cmd:?}: {e}");
+        }
+    }
+
+    #[test]
+    fn pick_catalog_matches_enabled_catalogs_only_and_explains_failures() {
+        let s = settings_body();
+        assert_eq!(pick_catalog(&s, "openai").unwrap()["id"], "id-oai");
+        assert_eq!(pick_catalog(&s, "Anthropic").unwrap()["id"], "id-anth");
+        assert_eq!(pick_catalog(&s, "id-oai").unwrap()["id"], "id-oai");
+        assert_eq!(pick_catalog(&s, ANTHROPIC).unwrap()["id"], "id-anth");
+        let none = pick_catalog(&s, "disabled").unwrap_err().to_string();
+        assert!(
+            none.contains("no enabled catalog") && none.contains("OpenAI plugins"),
+            "{none}"
+        );
+        let many = pick_catalog(&s, "github.com").unwrap_err().to_string();
+        assert!(many.contains("more than one catalog"), "{many}");
+    }
+
+    fn analyze_route(name: &str, status: u16, body: Value) -> Route {
+        route(
+            "POST",
+            Box::leak(format!("/api/v1/skills/{name}/analyze").into_boxed_str()),
+            status,
+            body,
+        )
+    }
+
+    #[tokio::test]
+    async fn import_by_name_stages_through_pro_and_says_how_to_review() {
+        no_color();
+        let install = json!({"git_url": OPENAI, "git_sha": "abc123", "path": "plugins/vercel", "name": "vercel"});
+        let staged = json!({
+            "plugin": {"name": "vercel", "version": "0.21.4", "format": "codex", "license": "", "description": "Deploy"},
+            "skills": [], "servers": [], "skipped": [{"component": "commands", "name": "11", "reason": "slash commands belong to Claude Code and Codex"}],
+            "results": [{"name": "deploy", "status": "staged"}],
+            "available_providers": ["p1", "p2"]
+        });
+        let (base, log) = fake_server(vec![
+            settings_route(),
+            route("GET", "/api/v1/skills/pro/catalog?catalog=id-oai&limit=200&q=vercel", 200,
+                json!({"total": 2, "entries": [entry("vercel", install.clone()), entry("vercel-labs", json!({}))]})),
+            route("POST", "/api/v1/skills/pro/import", 200, staged),
+        ])
+        .await;
+        let cmd = parse(&[
+            "import",
+            "vercel",
+            "--from",
+            "openai",
+            "--only",
+            "deploy",
+            "--credential",
+            "api=key",
+        ]);
+        let rep = run(cmd, &api(&base), false).await.unwrap();
+        assert_eq!(rep.code, 0, "staged is not a failure");
+        for want in [
+            "deploy",
+            "staged",
+            "Left out",
+            "commands 11",
+            "nothing was sent to a model",
+            "skills analyze <name> --provider <p1|p2>",
+        ] {
+            assert!(
+                rep.stdout.contains(want),
+                "missing {want:?} in:\n{}",
+                rep.stdout
+            );
+        }
+        let posted = log.lock().unwrap().last().unwrap().clone();
+        assert_eq!(posted.path, "/api/v1/skills/pro/import");
+        assert_eq!(
+            posted.body,
+            json!({"git_url": OPENAI, "git_sha": "abc123", "path": "plugins/vercel", "name": "vercel",
+                   "only": ["deploy"], "credentials": {"api": "key"}})
+        );
+    }
+
+    #[tokio::test]
+    async fn import_by_name_with_provider_analyzes_each_staged_skill() {
+        no_color();
+        let install = json!({"git_url": OPENAI, "git_sha": "abc123", "name": "acme"});
+        let staged = json!({
+            "plugin": {"name": "acme", "format": "claude"}, "skills": [], "servers": [], "skipped": [],
+            "results": [{"name": "alpha", "status": "staged"}, {"name": "beta", "status": "staged"}, {"name": "gamma", "status": "staged"}],
+            "available_providers": ["p1"]
+        });
+        let (base, log) = fake_server(vec![
+            settings_route(),
+            route("GET", "/api/v1/skills/pro/catalog?catalog=id-oai&limit=200&q=acme", 200, json!({"entries": [entry("acme", install)]})),
+            route("GET", "/api/v1/skills/pro/catalog?catalog=id-anth&limit=200&q=acme", 200, json!({"entries": []})),
+            route("POST", "/api/v1/skills/pro/import", 200, staged),
+            analyze_route("alpha", 200, json!({"name": "alpha", "status": "accepted", "manifest": {}, "verification_reasoning": "fine"})),
+            analyze_route("beta", 202, json!({"name": "beta", "status": "needs_review", "manifest": {}, "verification_reasoning": "fetches a URL"})),
+            analyze_route("gamma", 409, json!({"error": "skill \"gamma\" is \"accepted\", not pending analysis"})),
+        ])
+        .await;
+        let rep = run(
+            parse(&["import", "acme", "--provider", "p1"]),
+            &api(&base),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rep.code, 1, "an error outranks needs_review");
+        for want in [
+            "alpha",
+            "accepted",
+            "beta",
+            "needs_review",
+            "fetches a URL",
+            "gamma",
+            "not pending analysis",
+        ] {
+            assert!(
+                rep.stdout.contains(want),
+                "missing {want:?} in:\n{}",
+                rep.stdout
+            );
+        }
+        let reqs = log.lock().unwrap().clone();
+        let analyze: Vec<_> = reqs
+            .iter()
+            .filter(|r| r.path.ends_with("/analyze"))
+            .collect();
+        assert_eq!(analyze.len(), 3);
+        assert!(analyze.iter().all(|r| r.body == json!({"provider": "p1"})));
+    }
+
+    #[tokio::test]
+    async fn import_by_name_reports_blocked_not_found_and_ambiguous() {
+        let mut blocked = entry("stranger", json!({}));
+        blocked["installable"] = json!(false);
+        blocked["blocked_reason"] =
+            json!("https://github.com/x/y.git is not on this kitchen's allowlist");
+        let (base, _) = fake_server(vec![
+            settings_route(),
+            route(
+                "GET",
+                "/api/v1/skills/pro/catalog?catalog=id-anth&limit=200&q=pdf",
+                200,
+                json!({"entries": [entry("pdf", json!({"git_url": ANTHROPIC}))]}),
+            ),
+            route(
+                "GET",
+                "/api/v1/skills/pro/catalog?catalog=id-oai&limit=200&q=pdf",
+                200,
+                json!({"entries": [entry("pdf", json!({"git_url": OPENAI}))]}),
+            ),
+            route(
+                "GET",
+                "/api/v1/skills/pro/catalog?catalog=id-oai&limit=200&q=nope",
+                200,
+                json!({"entries": []}),
+            ),
+            route(
+                "GET",
+                "/api/v1/skills/pro/catalog?catalog=id-oai&limit=200&q=stranger",
+                200,
+                json!({"entries": [blocked]}),
+            ),
+        ])
+        .await;
+        let e = run(parse(&["import", "pdf"]), &api(&base), false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("more than one catalog") && e.contains("--from"),
+            "{e}"
+        );
+        let e = run(
+            parse(&["import", "nope", "--from", "openai"]),
+            &api(&base),
+            false,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("no plugin named 'nope'"), "{e}");
+        let e = run(
+            parse(&["import", "stranger", "--from", "openai"]),
+            &api(&base),
+            false,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("blocked in this kitchen") && e.contains("allowlist"),
+            "{e}"
+        );
+    }
+
+    #[tokio::test]
+    async fn import_by_git_url_uses_the_oss_route_and_dry_run_registers_nothing() {
+        no_color();
+        let result = json!({
+            "plugin": {"name": "acme", "version": "2.0.0", "format": "claude", "license": "MIT", "description": "Acme tools"},
+            "skills": [{"name": "alpha", "description": "Does alpha.", "dir": "skills/alpha"}],
+            "servers": [{"name": "hosted", "endpoint": "https://mcp.example.com/mcp", "needs_credential": true}],
+            "server_skill": "acme", "skipped": []
+        });
+        let (base, log) =
+            fake_server(vec![route("POST", "/api/v1/skills/import", 200, result)]).await;
+        let cmd = parse(&[
+            "import",
+            "https://github.com/o/acme.git",
+            "--dry-run",
+            "--sha",
+            "abc",
+            "--path",
+            "plugins/acme",
+        ]);
+        let rep = run(cmd, &api(&base), false).await.unwrap();
+        assert_eq!(rep.code, 0);
+        for want in [
+            "Would import",
+            "alpha",
+            "MCP hosted",
+            "needs a credential: --credential hosted=",
+            "skill 'acme'",
+            "without --dry-run",
+        ] {
+            assert!(
+                rep.stdout.contains(want),
+                "missing {want:?} in:\n{}",
+                rep.stdout
+            );
+        }
+        assert_eq!(
+            log.lock().unwrap()[0].body,
+            json!({"git_url": "https://github.com/o/acme.git", "name": "acme", "git_sha": "abc",
+                   "path": "plugins/acme", "dry_run": true})
+        );
+
+        // --provider is a Pro-registry option; a URL import reviews with the router's provider.
+        let e = run(
+            parse(&[
+                "import",
+                "https://github.com/o/acme.git",
+                "--provider",
+                "p1",
+            ]),
+            &api(&base),
+            false,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("--provider applies to the Pro registry"), "{e}");
+    }
+
+    #[test]
+    fn import_exit_code_is_the_worst_outcome() {
+        let r = |statuses: &[&str]| json!({"results": statuses.iter().map(|s| json!({"name": "x", "status": s})).collect::<Vec<_>>()});
+        assert_eq!(import_exit_code(&r(&["accepted", "accepted"])), 0);
+        assert_eq!(
+            import_exit_code(&r(&["accepted", "needs_review"])),
+            EXIT_NEEDS_REVIEW
+        );
+        assert_eq!(
+            import_exit_code(&r(&["needs_review", "rejected"])),
+            EXIT_REJECTED
+        );
+        assert_eq!(import_exit_code(&r(&["rejected", "error"])), 1);
+    }
+
+    #[tokio::test]
+    async fn import_needing_review_exits_2_and_says_what_to_do() {
+        no_color();
+        let result = json!({
+            "plugin": {"name": "acme", "format": "claude"}, "skills": [], "servers": [], "skipped": [],
+            "results": [{"name": "alpha", "status": "needs_review", "reasoning": "Script fetches a URL."},
+                        {"name": "beta", "status": "error", "error": "a skill with this name is already registered"}]
+        });
+        let (base, _) = fake_server(vec![route(
+            "POST",
+            "/api/v1/skills/import",
+            200,
+            result.clone(),
+        )])
+        .await;
+        let rep = run(
+            parse(&["import", "https://github.com/o/acme.git"]),
+            &api(&base),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rep.code, 1, "an error outranks needs_review");
+        assert!(rep.stdout.contains("already registered"), "{}", rep.stdout);
+
+        let mut only_review = result;
+        only_review["results"].as_array_mut().unwrap().pop();
+        let (base, _) = fake_server(vec![route(
+            "POST",
+            "/api/v1/skills/import",
+            200,
+            only_review,
+        )])
+        .await;
+        let rep = run(
+            parse(&["import", "https://github.com/o/acme.git"]),
+            &api(&base),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rep.code, EXIT_NEEDS_REVIEW);
+        assert!(rep.stdout.contains("skills approve"), "{}", rep.stdout);
+    }
+
+    #[tokio::test]
+    async fn import_surfaces_a_server_refusal() {
+        let (base, _) = fake_server(vec![route(
+            "POST",
+            "/api/v1/skills/import",
+            400,
+            json!({"error": "git location \"/etc\" must be an https:// URL"}),
+        )])
+        .await;
+        let e = run(
+            parse(&["import", "https://github.com/o/x.git"]),
+            &api(&base),
+            false,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("400") && e.contains("must be an https:// URL"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn name_comes_from_the_repo_in_a_git_url() {
+        assert_eq!(
+            name_from_git_url("https://github.com/o/acme.git").as_deref(),
+            Some("acme")
+        );
+        assert_eq!(
+            name_from_git_url("https://github.com/o/acme/").as_deref(),
+            Some("acme")
+        );
+        assert_eq!(
+            name_from_git_url("https://github.com/o/acme").as_deref(),
+            Some("acme")
+        );
     }
 }

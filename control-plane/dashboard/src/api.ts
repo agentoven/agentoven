@@ -698,6 +698,73 @@ export const skillsPro = {
     postForSkillOutcome(`/skills/pro/${encodeURIComponent(name)}/analyze`, req),
 };
 
+// ── Skill catalogs and plugin import ──────────────────────────
+// Importing a plugin (Claude Code or Codex layout) from a git location registers its skills and
+// remote MCP servers through the same verification as POST /skills/register. Browsing catalogs
+// of plugins, with an allowlist, is AgentOven Pro.
+
+/** Where a plugin lives. */
+export interface PluginLocation {
+  git_url: string;
+  git_ref?: string;
+  /** Exact commit the catalog reviewed. */
+  git_sha?: string;
+  /** The plugin's directory inside the repository. */
+  path?: string;
+  name?: string;
+  skill_paths?: string[];
+}
+
+export interface PluginSkill {
+  name: string;
+  description: string;
+  dir: string;
+}
+
+export interface ImportServer {
+  name: string;
+  endpoint: string;
+  needs_credential?: boolean;
+}
+
+export interface ImportSkipped {
+  component: string;
+  name?: string;
+  reason: string;
+}
+
+export type ImportStatus = 'accepted' | 'needs_review' | 'rejected' | 'error';
+
+export interface ImportResult {
+  name: string;
+  status: ImportStatus;
+  reasoning?: string;
+  error?: string;
+}
+
+export interface ImportResponse {
+  plugin: { name: string; description?: string; version?: string; license?: string; format: string };
+  skills: PluginSkill[] | null;
+  servers: ImportServer[] | null;
+  /** Name of the skill that carries the plugin's MCP servers. */
+  server_skill?: string;
+  skipped: ImportSkipped[] | null;
+  /** Absent on a dry run. */
+  results?: ImportResult[];
+}
+
+export interface ImportRequest extends PluginLocation {
+  /** Skill names to take; empty takes all. */
+  only?: string[];
+  dry_run?: boolean;
+  /** MCP server name to kitchen credential name. */
+  credentials?: Record<string, string>;
+}
+
+export const pluginImport = {
+  run: (req: ImportRequest) => request<ImportResponse>('/skills/import', { method: 'POST', body: JSON.stringify(req) }),
+};
+
 // ── Model Catalog ─────────────────────────────────────────────
 
 export interface ModelCapability {

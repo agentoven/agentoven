@@ -93,7 +93,9 @@ func LoadDir(root string) (Bundle, error) {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
+		// A symlink in a cloned repo could point anywhere on this machine
+		// (/etc/passwd, a credentials file); never follow one into a bundle.
+		if d.IsDir() || d.Type()&os.ModeSymlink != 0 {
 			return nil
 		}
 		rel, relErr := filepath.Rel(root, path)

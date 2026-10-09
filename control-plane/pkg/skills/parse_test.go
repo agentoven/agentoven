@@ -79,6 +79,30 @@ body
 	}
 }
 
+func TestParseManifestAcceptsMCPTransport(t *testing.T) {
+	data := []byte(`---
+name: hosted
+description: uses a hosted MCP server
+mcp_tools:
+  - name: server
+    transport: mcp
+    endpoint: https://mcp.example.com/v2/mcp
+    auth_type: api-key
+    auth_header: X-Key
+    credential_ref: hosted-key
+---
+body
+`)
+	m, err := skills.ParseManifest(data)
+	if err != nil || len(m.MCPServers) != 1 || m.MCPServers[0].Transport != "mcp" {
+		t.Fatalf("manifest = %+v, err = %v", m, err)
+	}
+	// The snake_case keys must reach the struct; an untagged field would silently drop them.
+	if srv := m.MCPServers[0]; srv.AuthType != "api-key" || srv.AuthHeader != "X-Key" || srv.CredentialRef != "hosted-key" {
+		t.Fatalf("auth fields lost: %+v", srv)
+	}
+}
+
 func TestParseManifestRejectsMCPServerWithNoEndpoint(t *testing.T) {
 	data := []byte(`---
 name: bad
@@ -103,5 +127,24 @@ func TestParseManifestRejectsNamesThatShadowTheSkillsAPI(t *testing.T) {
 	}
 	if _, err := skills.ParseManifest([]byte("---\nname: professional\ndescription: d\n---\nbody\n")); err != nil {
 		t.Fatalf("a name that merely starts with a reserved word is fine: %v", err)
+	}
+}
+
+func TestParseManifestAcceptsAllowedToolsAsListOrString(t *testing.T) {
+	cases := map[string]string{
+		"list":        "allowed-tools:\n  - Read\n  - Bash(git add:*)",
+		"spaces":      "allowed-tools: Read Bash(git add:*)",
+		"commas":      "allowed-tools: Read, Bash(git add:*)",
+		"folded-text": "allowed-tools: >\n  Read\n  Bash(git add:*)",
+	}
+	for name, field := range cases {
+		data := []byte("---\nname: x\ndescription: y\n" + field + "\n---\nbody\n")
+		m, err := skills.ParseManifest(data)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(m.AllowedTools) != 2 || m.AllowedTools[0] != "Read" || m.AllowedTools[1] != "Bash(git add:*)" {
+			t.Errorf("%s: allowed tools = %q", name, m.AllowedTools)
+		}
 	}
 }

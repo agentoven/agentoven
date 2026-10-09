@@ -207,8 +207,20 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 
 		// Skills — the Agent Skills format (https://agentskills.io), register-by-SKILL.md
 		r.Route("/skills", func(r chi.Router) {
+			// An edition with roles guards who may register, approve or delete a skill. The guard is
+			// read per request, so it can be set after the router is built.
+			r.Use(func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+					if h.SkillRouteGuard != nil {
+						h.SkillRouteGuard(next).ServeHTTP(w, req)
+						return
+					}
+					next.ServeHTTP(w, req)
+				})
+			})
 			r.Get("/", h.ListSkills)
 			r.Post("/register", h.RegisterSkill)
+			r.Post("/import", h.ImportSkillPlugin)
 			r.Route("/upload", func(r chi.Router) {
 				r.Post("/begin", h.BeginSkillUpload)
 				r.Post("/chunk", h.ChunkSkillUpload)
