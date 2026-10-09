@@ -13,7 +13,7 @@ _Nothing yet._
 
 ---
 
-## [0.9.2] — 2026-10-09
+## [0.9.0] — 2026-10-09
 
 ### 🔒 Security
 - **A2A needs an identity** — only `GET` agent cards stay public. Every A2A `POST` route (`/a2a`, `/a2a/agents/{name}`, the environment route, the legacy route) now requires an authenticated caller, the same as `/invoke`. **Anonymous A2A task execution no longer works**; callers must send an API key or token
@@ -39,7 +39,7 @@ _Nothing yet._
 - CI, release workflow and the control-plane image build with **Go 1.27** (`go.mod` requires 1.26)
 
 ### 📦 Versioning
-- Release line advanced to **0.9.2** for the control plane, Rust crates, dashboard, Python SDK and TypeScript SDK
+- Release line advanced to **0.9.0** for the control plane, Rust crates, dashboard, Python SDK and TypeScript SDK
 - This release also carries work that landed after 0.8.6 and was not recorded here: the durable streaming harness, the kitchen skill registry and `agentoven skills` CLI, multimodal input, cascaded voice and the realtime relay, workspace guardrails that fail closed, and kitchen-scoped provider CRUD
 
 ### 🎙️ SDK: Modalities, Media and Voice
