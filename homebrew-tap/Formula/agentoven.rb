@@ -2,7 +2,7 @@ class Agentoven < Formula
   desc "Open-source enterprise agent control plane, A2A and MCP native"
   homepage "https://agentoven.dev"
   url "https://github.com/agentoven/agentoven/archive/refs/tags/v0.9.0.tar.gz"
-  sha256 "bc286af8338e89361f5e878a91206473078fb8595aa9ce6109617f866f289b89"
+  sha256 "a384b2d56cb50c64f826cb2789e93a41dd2c44214a4fe80dee43c3b6f5ef39e2"
   license "Apache-2.0"
   head "https://github.com/agentoven/agentoven.git", branch: "main"
 
