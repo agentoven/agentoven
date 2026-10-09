@@ -165,16 +165,15 @@ jobs:
             3.10
             3.11
             3.12
+            3.13
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           working-directory: sdk/python
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
-          args: --release --out dist --find-interpreter
-        env:
-          # The runner's default Python can be newer than the PyO3 version supports.
-          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: '1'
+          # Only the interpreters the pinned PyO3 supports; the images also carry newer ones.
+          args: --release --out dist --interpreter python3.9 python3.10 python3.11 python3.12 python3.13
       - uses: actions/upload-artifact@v4
         with:
           name: python-wheels-${{ matrix.target }}
@@ -349,6 +348,16 @@ jobs:
           path: sdk/typescript/*.node
           if-no-files-found: error
 
+      # The loader napi generates is the same for every target; take it from one build.
+      - uses: actions/upload-artifact@v4
+        if: matrix.settings.target == 'x86_64-unknown-linux-gnu'
+        with:
+          name: sdk-bindings-loader
+          path: |
+            sdk/typescript/index.js
+            sdk/typescript/index.d.ts
+          if-no-files-found: error
+
   # ── Publish @agentoven/sdk to npm ────────────────────────────
   npm-publish:
     name: Publish npm
@@ -382,6 +391,10 @@ jobs:
       - name: Move artifacts
         working-directory: sdk/typescript
         run: npx napi artifacts --dir artifacts
+
+      - name: Use the generated loader
+        working-directory: sdk/typescript
+        run: cp artifacts/index.js artifacts/index.d.ts .
 
       - name: Build TypeScript
         working-directory: sdk/typescript
