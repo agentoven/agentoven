@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [0.8.9] — 2026-10-09
+
+### 🔒 Security
+- **A2A needs an identity** — only `GET` agent cards stay public. Every A2A `POST` route (`/a2a`, `/a2a/agents/{name}`, the environment route, the legacy route) now requires an authenticated caller, the same as `/invoke`. **Anonymous A2A task execution no longer works**; callers must send an API key or token
+- **Trusted internal callers** — the recipe engine and managed agent pods are recognised by an internal key or an HMAC pod token (`pkg/a2aauth`), not by network path. The key derives from a shared secret (`AGENTOVEN_A2A_SECRET` or `AGENTOVEN_SA_SECRET`, else a persisted `a2a.secret`), so replicas agree
+- **Pods verify the control plane** — managed agent processes are started with `AGENT_A2A_TOKEN` and reject callers without it (401). The token is sent only to agents the platform launched, never to an external agent URL
+- **Provider TLS overrides** — a CA bundle or skip-verify on `tasks/send` is honoured only for internal callers
+- **Tool credentials never returned** — a tool's authentication is redacted from every API response
+- **Snapshot file mode** — the in-memory store's snapshot is written `0600`
+
+### 🧩 Skills and MCP
+- **MCP client gateway** — the gateway is a real MCP client (official Go SDK, streamable HTTP), so a skill can serve a hosted MCP server's tools; new transport `mcp`
+- **Plugin import** — `POST /api/v1/skills/import` imports skills from a Claude Code or Codex plugin in a git repository (https only, pinned to a commit, `dry_run` supported). Also in the dashboard (Import plugin) and the CLI (`agentoven skills import`)
+- **Tool authentication by reference** — a tool stores the name of a credential, not its value (`credential_ref`, `pkg/toolauth`); the gateway resolves it on every call, so rotating a credential needs no re-registration
+- **Unapproved skills are unusable** — the gateway denies a tool whose skill is not accepted on each call and hides it from `tools/list`
+- **Skill route guard** — an optional `SkillRouteGuard` lets an edition with roles decide who may register, approve or delete skills
+- **CLI** — `agentoven skills catalog` and `import`
+- **Example** — `examples/skills/firecrawl`
+
+### 🎙️ Modalities
+- **Gemini web modality** — the Gemini driver and realtime package handle the web modality; SDK helpers updated
+
+### 🔧 Build
+- CI, release workflow and the control-plane image build with **Go 1.27** (`go.mod` requires 1.26)
+
+### 📦 Versioning
+- Release line advanced to **0.8.9** for the control plane, Rust crates, dashboard, Python SDK and TypeScript SDK
+- This release also carries work that landed after 0.8.6 and was not recorded here: the durable streaming harness, the kitchen skill registry and `agentoven skills` CLI, multimodal input, cascaded voice and the realtime relay, workspace guardrails that fail closed, and kitchen-scoped provider CRUD
+
 ### 🎙️ SDK: Modalities, Media and Voice
 - **Provider modalities** — Python (`Modalities`, `AudioConfig`, `RealtimeConfig`, `CLEAR`) and TypeScript (`modalities()` builder) helpers for `config.modalities`, validated client-side with the server's rules; wired into new `create_provider` / `update_provider` (`createProvider` / `updateProvider`) plus `list_providers` / `get_provider`, which expose the effective `modalities`
 - **Agent card** — `client.agent_card(name)` / `pro.agentCard(name)` expose `modalities`, with `supports(...)`
