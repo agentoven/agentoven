@@ -52,15 +52,11 @@ brew untap agentoven/tap
 
 ## Publishing (maintainers)
 
-After creating a GitHub release with tag `vX.Y.Z`:
+The formula builds from the release source tarball. After tagging `vX.Y.Z` in `agentoven/agentoven`:
 
-1. Download the source tarball: `https://github.com/agentoven/agentoven/archive/refs/tags/vX.Y.Z.tar.gz`
-2. Compute SHA256: `shasum -a 256 vX.Y.Z.tar.gz`
-3. Update `Formula/agentoven.rb` with the new URL, version, and SHA256
-4. Push to `agentoven/homebrew-tap`
+1. Compute the tarball checksum: `curl -sL https://github.com/agentoven/agentoven/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256`
+2. Update `url` and `sha256` in `Formula/agentoven.rb`.
+3. Check it: `brew style`, `brew install --build-from-source`, `brew test` and `brew audit --strict --new --online agentoven/tap/agentoven`.
+4. Push to `main`.
 
-The [release workflow](https://github.com/agentoven/agentoven/blob/main/.github/workflows/release.yml) automates this.
-
-## License
-
-Apache2.0 — see [LICENSE](https://github.com/agentoven/agentoven/blob/main/LICENSE)
+The release workflow in `agentoven/agentoven` does steps 1, 2 and 4 when the `HOMEBREW_TAP_TOKEN` secret is set.

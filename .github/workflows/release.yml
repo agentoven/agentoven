@@ -455,7 +455,6 @@ jobs:
           cd homebrew-tap
           sed -i "s|url \".*\"|url \"https://github.com/agentoven/agentoven/archive/refs/tags/v${{ steps.version.outputs.version }}.tar.gz\"|" Formula/agentoven.rb
           sed -i "s|sha256 \".*\"|sha256 \"${{ steps.sha.outputs.sha256 }}\"|" Formula/agentoven.rb
-          sed -i "s|agentoven .*\"|agentoven ${{ steps.version.outputs.version }}\"|" Formula/agentoven.rb
 
       - name: Commit and push
         working-directory: homebrew-tap

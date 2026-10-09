@@ -1,62 +1,61 @@
-# typed: false
-# frozen_string_literal: true
-
-# 🏺 AgentOven — Bake production-ready AI agents
-# Formula installs: agentoven CLI (Rust) + agentoven-server (Go) + dashboard (React)
-
 class Agentoven < Formula
-  desc "Open-source enterprise agent control plane — A2A & MCP native"
+  desc "Open-source enterprise agent control plane, A2A and MCP native"
   homepage "https://agentoven.dev"
-  url "https://github.com/agentoven/agentoven/archive/refs/tags/v0.5.1.tar.gz"
-  sha256 "PLACEHOLDER_SHA256"
+  url "https://github.com/agentoven/agentoven/archive/refs/tags/v0.9.0.tar.gz"
+  sha256 "8d62ec8fa2cb361ba54d87e824d236341abc682a0ebd23bcf85fb8e0e6796372"
   license "Apache-2.0"
   head "https://github.com/agentoven/agentoven.git", branch: "main"
 
-  depends_on "rust" => :build
   depends_on "go" => :build
   depends_on "node" => :build
+  depends_on "rust" => :build
 
   def install
-    # ── 1. Build Rust CLI ──────────────────────────────
-    system "cargo", "build", "--release", "-p", "agentoven-cli"
-    bin.install "target/release/agentoven"
+    # The CLI.
+    system "cargo", "install", *std_cargo_args(path: "crates/agentoven-cli")
 
-    # ── 2. Build Go control-plane server ───────────────
     cd "control-plane" do
-      system "go", "build",
-             "-trimpath",
-             "-ldflags", "-s -w",
-             "-o", bin/"agentoven-server",
-             "./cmd/server"
+      # The dashboard is static files the server serves from AGENTOVEN_DASHBOARD_DIR.
+      cd "dashboard" do
+        system "npm", "ci", "--ignore-scripts"
+        system "npm", "run", "build"
+        pkgshare.install "dist" => "dashboard"
+      end
+
+      # The control plane.
+      system "go", "build", *std_go_args(output: libexec/"bin/agentoven-server", ldflags: "-s -w"), "./cmd/server"
     end
 
-    # ── 3. Build dashboard ─────────────────────────────
-    cd "control-plane/dashboard" do
-      system "npm", "install", "--ignore-scripts"
-      system "npm", "run", "build"
-      pkgshare.install "dist" => "dashboard"
-    end
+    (bin/"agentoven-server").write_env_script libexec/"bin/agentoven-server",
+                                              AGENTOVEN_DASHBOARD_DIR: pkgshare/"dashboard"
   end
 
   def caveats
     <<~EOS
-      🏺 AgentOven has been installed!
+      Start the control plane (port 8080 by default):
+        agentoven-server
 
-      Quick start:
-        agentoven dashboard          # start server + open dashboard
-        agentoven --help             # see all commands
+      Then use the CLI against it:
+        agentoven --help
 
-      The control-plane server can also be run directly:
-        agentoven-server             # starts on port 8080
-
-      Dashboard static files are installed at:
-        #{pkgshare}/dashboard
+      Data is kept in ~/.agentoven; set AGENTOVEN_DATA_DIR to change it.
     EOS
   end
 
   test do
-    assert_match "agentoven 0.3.0", shell_output("#{bin}/agentoven --version")
-    assert_predicate bin/"agentoven-server", :exist?
-    assert_predicate pkgshare/"dashboard/index.html", :exist?
+    assert_match version.to_s, shell_output("#{bin}/agentoven --version")
+    assert_path_exists pkgshare/"dashboard/index.html"
+
+    port = free_port
+    ENV["AGENTOVEN_PORT"] = port.to_s
+    ENV["AGENTOVEN_DATA_DIR"] = testpath/"data"
+    pid = spawn bin/"agentoven-server"
+    begin
+      sleep 5
+      assert_match "healthy", shell_output("curl -s http://127.0.0.1:#{port}/health")
+    ensure
+      Process.kill("TERM", pid)
+      Process.wait(pid)
+    end
   end
 end
