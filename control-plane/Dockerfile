@@ -1,5 +1,5 @@
 # ── Dashboard build stage ──────────────────────────────────────
-FROM node:22-alpine AS dashboard-builder
+FROM node:24-alpine AS dashboard-builder
 
 WORKDIR /build/dashboard
 COPY dashboard/package.json dashboard/package-lock.json ./
@@ -8,7 +8,7 @@ COPY dashboard/ ./
 RUN npm run build
 
 # ── Go build stage ────────────────────────────────────────────
-FROM golang:1.24-alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 RUN apk add --no-cache git ca-certificates
 
@@ -28,7 +28,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     ./cmd/server
 
 # ── Runtime stage ─────────────────────────────────────────────
-FROM alpine:3.21
+FROM alpine:3.23
 
 RUN apk add --no-cache ca-certificates tzdata && \
     adduser -D -g '' agentoven

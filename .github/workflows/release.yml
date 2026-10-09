@@ -10,7 +10,7 @@ permissions:
   packages: write
 
 env:
-  GO_VERSION: '1.24'
+  GO_VERSION: '1.27'
 
 jobs:
   # ── Build CLI binaries (Rust) ────────────────────────────────
