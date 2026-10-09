@@ -140,7 +140,7 @@ jobs:
             manylinux: musllinux_1_2
           # macOS Intel
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-15-intel
             manylinux: ''
           # macOS Apple Silicon
           - target: aarch64-apple-darwin
@@ -403,8 +403,11 @@ jobs:
       - name: Publish
         working-directory: sdk/typescript
         run: |
-          npx napi prepublish -t npm --skip-gh-release
-          npm publish
+          # Per-platform packages first. A package version cannot be published twice, so on a
+          # re-run of the same tag this reports the existing ones and carries on.
+          npx napi prepublish -t npm --skip-gh-release || echo "prepublish: some platform packages already exist"
+          # prepublishOnly would run the step above a second time.
+          npm publish --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
