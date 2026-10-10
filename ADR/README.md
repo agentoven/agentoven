@@ -72,3 +72,4 @@ What other options were evaluated and why were they rejected?
 | [0025](0025-agent-as-identity-principal.md) | Agent as a first-class identity principal | Proposed | 2026-07-07 |
 | [0026](0026-rag-runtime-separate-process.md) | RAG/KAG runtime as a separate process | Proposed | 2026-07-10 |
 | [0027](0027-pooled-agent-runtime.md) | Pooled agent runtime — request-time config injection into a per-kitchen warm process pool | Proposed | 2026-08-18 |
+| [0028](0028-knowledge-ingredient-seam.md) | The `knowledge` ingredient seam — OSS hooks for the Pro knowledge engine | Proposed | 2026-10-10 |
