@@ -1,0 +1,5 @@
+# deepagents needs Python 3.11 or newer.
+agentoven[runtime]
+deepagents
+langchain-openai   # or the integration for your model provider: langchain-anthropic, langchain-ollama, ...
+httpx

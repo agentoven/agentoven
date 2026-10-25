@@ -367,6 +367,7 @@ fn parse_toml_manifest(content: &str) -> anyhow::Result<Vec<Manifest>> {
 fn parse_framework(s: &str) -> AgentFramework {
     match s.to_lowercase().as_str() {
         "langchain" | "langgraph" => AgentFramework::Langchain,
+        "deepagents" | "deep-agents" | "deep_agents" => AgentFramework::Deepagents,
         "crewai" => AgentFramework::Crewai,
         "openai" | "openai-sdk" => AgentFramework::Openai,
         "autogen" => AgentFramework::Autogen,

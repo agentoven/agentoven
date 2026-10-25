@@ -1,0 +1,20 @@
+{
+  "name": "deep-researcher",
+  "description": "Plans, reads the web and writes a cited report.",
+  "mode": "managed",
+  "runtime": "deepagents",
+  "execution_mode": "local",
+  "entrypoint": "/path/to/venv/bin/python /path/to/examples/deep-research-agent/agent.py",
+  "ingredients": [
+    { "kind": "model", "name": "gpt-4o", "required": true, "config": { "provider": "openai", "model": "gpt-4o" } }
+  ],
+  "guardrails": [
+    {
+      "id": "no-pii-out",
+      "kind": "pii_detection",
+      "stage": "output",
+      "enabled": true,
+      "config": { "patterns": ["ssn", "credit_card"] }
+    }
+  ]
+}

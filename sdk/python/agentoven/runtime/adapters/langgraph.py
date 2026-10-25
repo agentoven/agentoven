@@ -18,7 +18,9 @@ Usage::
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
+
+from agentoven.runtime.adapters._context import invoke_kwargs
 
 
 class LangGraphAdapter:
@@ -29,16 +31,24 @@ class LangGraphAdapter:
     and the last ``AIMessage`` content is returned.
     """
 
-    def __init__(self, graph: Any) -> None:
+    def __init__(self, graph: Any, context: Any = None) -> None:
         """
         Args:
             graph: A compiled LangGraph graph (result of ``StateGraph.compile()``).
                    Must accept ``{"messages": list}`` as its input.
+            context: What a graph built with ``context_schema=`` reads from ``runtime.context``:
+                     an object, or a callable that builds one for each call. Defaults to an
+                     instance of the graph's own ``context_schema`` (its default settings).
         """
         self._graph = graph
+        self._context = context
 
-    async def run(self, message: str) -> str:
-        """Invoke the LangGraph graph and return the final AI response."""
+    async def run(self, message: str, ctx: Optional[Any] = None) -> Any:
+        """Invoke the LangGraph graph and return the final AI response.
+
+        The conversation's session ID becomes the LangGraph ``thread_id``, so a graph compiled
+        with a checkpointer continues a conversation across calls.
+        """
         import asyncio
 
         try:
@@ -51,13 +61,22 @@ class LangGraphAdapter:
 
         state = {"messages": [HumanMessage(content=message)]}
 
+        session = getattr(ctx, "session_id", None)
+        config = {"configurable": {"thread_id": session}} if session else {}
+
+        extra = invoke_kwargs(self._graph, self._context)
         if hasattr(self._graph, "ainvoke"):
-            result = await self._graph.ainvoke(state)
+            result = await self._graph.ainvoke(state, config, **extra)
         else:
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, self._graph.invoke, state)
+            result = await loop.run_in_executor(None, lambda: self._graph.invoke(state, config, **extra))
 
-        return _extract_last_ai_message(result)
+        # Usage is totalled from the AI messages' own usage_metadata, so the control plane records
+        # what the graph's model calls cost instead of zero.
+        from agentoven.runtime.adapters.deepagents import usage_of
+        from agentoven.runtime.server import HandlerResult
+
+        return HandlerResult(response=_extract_last_ai_message(result), usage=usage_of(result))
 
 
 def _extract_last_ai_message(result: Any) -> str:

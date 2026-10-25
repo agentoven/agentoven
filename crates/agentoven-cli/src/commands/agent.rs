@@ -9,6 +9,7 @@ use agentoven_core::ingredient::Ingredient;
 fn framework_display(f: &AgentFramework) -> &'static str {
     match f {
         AgentFramework::Langchain => "langchain",
+        AgentFramework::Deepagents => "deepagents",
         AgentFramework::Crewai => "crewai",
         AgentFramework::Openai => "openai",
         AgentFramework::Autogen => "autogen",
@@ -83,7 +84,7 @@ pub struct RegisterArgs {
     #[arg(long)]
     pub description: Option<String>,
 
-    /// Framework (langgraph, crewai, openai-sdk, autogen, managed, custom).
+    /// Framework (langgraph, deepagents, crewai, openai-sdk, autogen, managed, custom).
     #[arg(long)]
     pub framework: Option<String>,
 
@@ -659,6 +660,7 @@ async fn register_agent_with_client(agent: &Agent) -> anyhow::Result<()> {
 fn parse_framework(s: &str) -> AgentFramework {
     match s {
         "langgraph" | "langchain" => AgentFramework::Langchain,
+        "deepagents" | "deep-agents" | "deep_agents" => AgentFramework::Deepagents,
         "crewai" => AgentFramework::Crewai,
         "openai" | "openai-sdk" => AgentFramework::Openai,
         "autogen" => AgentFramework::Autogen,

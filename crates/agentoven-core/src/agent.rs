@@ -325,6 +325,9 @@ pub enum AgentFramework {
     /// LangGraph / LangChain agents.
     #[serde(alias = "lang-graph", alias = "langgraph")]
     Langchain,
+    /// Deep Agents (a LangGraph-based agent harness).
+    #[serde(alias = "deep-agents", alias = "deep_agents")]
+    Deepagents,
     /// CrewAI agents.
     #[serde(alias = "crew-ai")]
     Crewai,
@@ -395,5 +398,17 @@ mod tests {
         assert_eq!(agent.status, AgentStatus::Draft);
         assert_eq!(agent.ingredients.len(), 1);
         assert_eq!(agent.tags, vec!["nlp", "summarization"]);
+    }
+
+    #[test]
+    fn deep_agents_is_its_own_framework() {
+        for name in ["deepagents", "deep-agents", "deep_agents"] {
+            let f: AgentFramework = serde_json::from_str(&format!("\"{name}\"")).unwrap();
+            assert_eq!(f, AgentFramework::Deepagents, "{name}");
+        }
+        assert_eq!(serde_json::to_string(&AgentFramework::Deepagents).unwrap(), "\"deepagents\"");
+        // It must not be mistaken for the framework it is built on.
+        let lg: AgentFramework = serde_json::from_str("\"langgraph\"").unwrap();
+        assert_ne!(lg, AgentFramework::Deepagents);
     }
 }
