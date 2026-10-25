@@ -9,7 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### 🤖 Agentic bots (computer-use agents)
+- **`agenticbot` runtime (seam)** — `Agent.Bot` (`BotConfig`), `contracts.BotControl` (Pro is the sole manager; the community edition refuses), `SandboxProfile` applied by the docker and Kubernetes executors (read-only rootfs, capabilities dropped, non-root, resource limits, runtime class, egress NetworkPolicy), no general control-plane token or provider key inside a bot, every run registered before it starts, a 30-minute invoke timeout for bots. A2A messages and `agentoven_delegate` calls that start a bot run are registered with the bot manager first; `contracts.ToolRunner` lets a bot gate run kitchen tools (and skill tools) in the control plane under the executor's guardrails; a bot's environment carries no tool JSON; `BotConfig` gains shell/files/persistence/takeover/tools settings. See ADR-0029
+
+### 🔒 Security
+- **Guardrails hold on every runtime** — streamed replies (`/invoke/stream`, A2A `message/stream`) from a framework-native agent with output rules are held back and released only after the check; the per-agent A2A gateway checks the message text (not the JSON-RPC envelope) in and the reply out; a framework-native agent's session messages reach its process instead of the raw model; a resumed run's answer is checked. An agent with no output rule still streams as it arrives. Guardrail-evaluator errors on the new paths fail closed
+- **Hosted processes can be kept off the provider's key** — with a model gateway installed (Pro), a process is given a credential that opens only the gateway
+- **Local process executor** — `Stop` and the exit monitor both called `cmd.Wait` (a data race); one goroutine now reaps the process
+
+### ✨ Long-running agents
+- **Per-run budgets** — `Agent.Budget` / per-request `budget` caps cost, tokens, active time and turns; a run that reaches a cap checkpoints and pauses (HTTP 402 with the numbers), and resumes with an `extend`. Subagents draw from a reserved share of the parent's. A dollar cap on a model with no known price is refused (422). Previously uncounted spend (the paused turn, delegated children, summaries) is counted
+- **Background tasks** — `POST /api/v1/tasks`, `GET /tasks[/{id}]`, an SSE event stream, `cancel` and `resume`; A2A `tasks/send` with `configuration.blocking=false`, `tasks/get`, `tasks/cancel`. Default per-task caps, per-kitchen concurrency, optional automatic crash recovery (`AGENTOVEN_TASK_RECOVERY=auto`)
+- **Journal v2** — delta records (linear growth), the model's reply and each tool result journaled as they land, crash-safe mid-turn recovery, a sidecar index and a janitor (`AGENTOVEN_JOURNAL_RETENTION_DAYS`). Old journals still replay; new ones cannot be resumed by an older binary
+- **Long-run context hygiene** — capped tool results, in-loop history compaction, a pinned `agentoven_notes` memory, stall detection, bounded retries of transient model errors
+- **Deep Agents runtime** — `runtime: deepagents`, with `DeepAgentsAdapter` and `build_deep_agent` in the Python SDK, a guide and an example. The SDK server now implements the full process contract (`/health`, `/invoke/stream`, `/a2a`, the pod token, `AGENT_PORT`, `AGENT_READY`); Kubernetes honours `Entrypoint`
+- **Seams for Pro** — `contracts.SubagentRuntime` (dynamic subagents), `ModelRouter.SetSpendGate`, `contracts.RunScopes` and `process.Manager.SetModelGateway`
+
+### 🐛 Fixes
+- A framework-native agent's `session_id` is passed to its process as `thread_id` on invoke and stream
+- `A2A tasks/get` is scoped to the caller's kitchen
+- `ResumeRun` checks that the run belongs to the agent in the URL; one of several concurrent resumes of the same pause wins
+- A run whose caller went away stops at the next turn instead of running to completion
+- A run that ran out of turns is recorded as `max_turns`, not as a success
 
 ---
 

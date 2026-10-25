@@ -66,6 +66,23 @@ AgentOven provides a unified control plane with:
 | 🔐 **Governance** | Pluggable auth (API keys, service accounts, SSO), RBAC, audit logs |
 | 🔎 **RAG Pipelines** | 5 retrieval strategies with vector stores and embedding management |
 
+## How AgentOven differs from Deep Agents
+
+[Deep Agents](https://github.com/langchain-ai/deepagents) is an agent harness: a Python library whose
+`create_deep_agent()` returns a LangGraph graph that plans with a todo list, keeps a virtual filesystem,
+spawns subagents and compresses its own context. AgentOven is the control plane around agents, whatever
+framework they are written in. The two fit together: AgentOven hosts a Deep Agent as a runtime, next to
+LangChain and LangGraph ([guide](docs/deep-agents.md), [example](examples/deep-research-agent)).
+
+| | Deep Agents | AgentOven |
+|---|---|---|
+| **Layer** | A library inside your agent's Python process | A control plane around agents of any framework; hosts LangChain, LangGraph, Deep Agents and CrewAI, or runs the loop itself |
+| **What is enforced outside the agent process** | The harness is the agent's own code | Guardrails on every input and output, an A2A gateway that authenticates each agent, kitchen isolation and an audit trail, on every runtime including a hosted Deep Agent |
+| **Long runs and spend** | Planning, files and subagents within a run; its docs describe no spend controls | A journal that makes a run resumable, tool approvals, background tasks, and per-run caps on spend, tokens, time and turns that pause for a person at the limit. Capping a hosted framework's spend needs the metered model gateway (Pro) |
+| **Subagents** | A built-in `task` tool, in the agent's process | Delegation to registered agents, charged to the parent's budget. Model-driven spawning of budgeted subagents is Pro |
+
+Write the agent with the harness you like and run it under AgentOven.
+
 ## Architecture
 
 ```
