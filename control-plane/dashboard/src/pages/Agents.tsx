@@ -9,6 +9,8 @@ import {
 } from '../components/UI';
 import { AgentLogViewer } from '../components/AgentLogViewer';
 import { ActionDropdown, type MenuItem } from '../components/ActionDropdown';
+import { ModelPicker } from '../components/ModelPicker';
+import { AddProviderDrawer } from '../components/AddProviderDrawer';
 
 // ── Catalog Info Helpers ─────────────────────────────────────
 
@@ -630,7 +632,8 @@ const emptyGuardrail = (): GuardrailRow => ({
 
 function AgentForm({ onCreated }: { onCreated: () => void }) {
   const providersFetch = useCallback(() => providers.list(), []);
-  const { data: providerList } = useAPI(providersFetch);
+  const { data: providerList, refetch: refetchProviders } = useAPI(providersFetch);
+  const [showAddProvider, setShowAddProvider] = useState(false);
 
   const [form, setForm] = useState({
     name: '', description: '', framework: '',
@@ -880,26 +883,24 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
             {/* Primary model */}
             <div className="p-3 rounded-lg border border-[var(--ao-border)] bg-[var(--ao-bg)]">
               <p className="text-xs font-semibold text-[var(--ao-text-muted)] uppercase tracking-wider mb-3">Primary Model</p>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Provider</label>
-                  <select value={form.model_provider} onChange={(e) => setForm({ ...form, model_provider: e.target.value, model_name: '' })} className={inputCls}>
-                    <option value="">Select provider...</option>
-                    {providerList?.map((p) => <option key={p.name} value={p.name}>{p.name} ({p.kind})</option>)}
-                  </select>
+              <ModelPicker
+                providers={providerList ?? []}
+                provider={form.model_provider}
+                model={form.model_name}
+                onChange={(provider, model) => setForm({ ...form, model_provider: provider, model_name: model })}
+                onAddProvider={() => setShowAddProvider(true)}
+              />
+              {selectedProvider && availableModels.length === 0 && (
+                <div className="mt-3">
+                  <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Model name</label>
+                  <input value={form.model_name} onChange={(e) => setForm({ ...form, model_name: e.target.value })} className={inputCls} placeholder="gpt-4o" />
                 </div>
-                <div>
-                  <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Model</label>
-                  {availableModels.length > 0 ? (
-                    <select value={form.model_name} onChange={(e) => setForm({ ...form, model_name: e.target.value })} className={inputCls}>
-                      <option value="">Select model...</option>
-                      {availableModels.map((m) => <option key={m} value={m}>{m}</option>)}
-                    </select>
-                  ) : (
-                    <input value={form.model_name} onChange={(e) => setForm({ ...form, model_name: e.target.value })} className={inputCls} placeholder="gpt-4o" />
-                  )}
-                </div>
-              </div>
+              )}
+              <AddProviderDrawer
+                open={showAddProvider}
+                onClose={() => setShowAddProvider(false)}
+                onCreated={(p) => { refetchProviders(); setForm({ ...form, model_provider: p.name, model_name: p.models?.[0] ?? '' }); }}
+              />
               {selectedProvider && form.model_name && (
                 <ModelCatalogInfo providerKind={selectedProvider.kind} modelName={form.model_name} />
               )}
@@ -1071,7 +1072,8 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
 
 function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => void }) {
   const providersFetch = useCallback(() => providers.list(), []);
-  const { data: providerList } = useAPI(providersFetch);
+  const { data: providerList, refetch: refetchProviders } = useAPI(providersFetch);
+  const [showAddProvider, setShowAddProvider] = useState(false);
 
   // Extract system prompt from existing ingredients
   const existingSystemPrompt = agent.ingredients?.find(
@@ -1353,26 +1355,24 @@ function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => void }) 
             {/* Primary model */}
             <div className="p-3 rounded-lg border border-[var(--ao-border)] bg-[var(--ao-bg)]">
               <p className="text-xs font-semibold text-[var(--ao-text-muted)] uppercase tracking-wider mb-3">Primary Model</p>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Provider</label>
-                  <select value={form.model_provider} onChange={(e) => setForm({ ...form, model_provider: e.target.value, model_name: '' })} className={inputCls}>
-                    <option value="">Select provider...</option>
-                    {providerList?.map((p) => <option key={p.name} value={p.name}>{p.name} ({p.kind})</option>)}
-                  </select>
+              <ModelPicker
+                providers={providerList ?? []}
+                provider={form.model_provider}
+                model={form.model_name}
+                onChange={(provider, model) => setForm({ ...form, model_provider: provider, model_name: model })}
+                onAddProvider={() => setShowAddProvider(true)}
+              />
+              {selectedProvider && availableModels.length === 0 && (
+                <div className="mt-3">
+                  <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Model name</label>
+                  <input value={form.model_name} onChange={(e) => setForm({ ...form, model_name: e.target.value })} className={inputCls} placeholder="gpt-4o" />
                 </div>
-                <div>
-                  <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Model</label>
-                  {availableModels.length > 0 ? (
-                    <select value={form.model_name} onChange={(e) => setForm({ ...form, model_name: e.target.value })} className={inputCls}>
-                      <option value="">Select model...</option>
-                      {availableModels.map((m) => <option key={m} value={m}>{m}</option>)}
-                    </select>
-                  ) : (
-                    <input value={form.model_name} onChange={(e) => setForm({ ...form, model_name: e.target.value })} className={inputCls} placeholder="gpt-4o" />
-                  )}
-                </div>
-              </div>
+              )}
+              <AddProviderDrawer
+                open={showAddProvider}
+                onClose={() => setShowAddProvider(false)}
+                onCreated={(p) => { refetchProviders(); setForm({ ...form, model_provider: p.name, model_name: p.models?.[0] ?? '' }); }}
+              />
               {selectedProvider && form.model_name && (
                 <ModelCatalogInfo providerKind={selectedProvider.kind} modelName={form.model_name} />
               )}

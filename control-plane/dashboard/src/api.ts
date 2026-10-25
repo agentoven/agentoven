@@ -269,6 +269,8 @@ export interface ModelProvider {
   last_test_healthy?: boolean;
   last_test_error?: string;
   last_test_latency_ms?: number;
+  /** Computed by the server: what the provider can handle ("text" is always present). */
+  modalities?: string[];
 }
 
 export interface ProviderTestResult {
