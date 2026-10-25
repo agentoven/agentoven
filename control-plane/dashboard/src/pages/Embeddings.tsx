@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { TabLinks } from '../components/UI';
+import { KNOWLEDGE_TABS } from '../nav';
 
 const API = '/api/v1';
 
@@ -37,6 +39,8 @@ export function EmbeddingsPage() {
           </p>
         </div>
       </div>
+
+      <div className="mb-6 border-b border-[var(--ao-border)]"><TabLinks tabs={KNOWLEDGE_TABS} /></div>
 
       {loading ? (
         <div className="text-[var(--ao-text-muted)]">Loading...</div>

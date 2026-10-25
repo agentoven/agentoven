@@ -1,4 +1,6 @@
 import { useState } from 'react';
+import { TabLinks } from '../components/UI';
+import { KNOWLEDGE_TABS } from '../nav';
 
 const API = '/api/v1';
 
@@ -109,6 +111,8 @@ export function RAGPipelinesPage() {
           Retrieval-Augmented Generation with 5 retrieval strategies
         </p>
       </div>
+
+      <div className="mb-6 border-b border-[var(--ao-border)]"><TabLinks tabs={KNOWLEDGE_TABS} /></div>
 
       {/* Tabs */}
       <div className="flex gap-1 mb-6 border-b border-[var(--ao-border)]">

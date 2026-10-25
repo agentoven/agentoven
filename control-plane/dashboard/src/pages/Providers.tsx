@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { PROVIDER_TABS } from '../nav';
 import { Cpu, Plus, Trash2, Star, Pencil, HeartPulse, Eye, EyeOff, Library, X, ChevronLeft, ChevronRight } from 'lucide-react';
 import { providers, type ModelProvider, type ProviderTestResult, type ProviderTemplate, type ModelCapability } from '../api';
 import { useAPI } from '../hooks';
@@ -26,7 +27,7 @@ export function ProvidersPage() {
 
   return (
     <div>
-      <PageHeader
+      <PageHeader tabs={PROVIDER_TABS}
         title="Model Providers"
         description="Configure model providers for the Model Router"
         action={

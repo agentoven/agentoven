@@ -13,6 +13,8 @@
   --ao-success: #22c55e;
   --ao-warning: #eab308;
   --ao-error: #ef4444;
+  /* Native controls (select popups, scrollbars) follow the dark theme. */
+  color-scheme: dark;
 }
 
 body {
@@ -21,3 +23,23 @@ body {
   color: var(--ao-text);
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
 }
+
+/* Safari (and iOS) render a bare <select> with the system look and ignore its padding, border and
+   height, so every dropdown came out shorter than the inputs beside it. Drawing the control ourselves
+   gives all browsers the same box; the chevron stands in for the native arrow. */
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.6rem center;
+  background-size: 1rem;
+  padding-right: 2rem !important;
+  text-overflow: ellipsis;
+}
+select[multiple] { background-image: none; padding-right: 0.75rem !important; }
+
+/* Number inputs: drop the tiny stepper, which makes them taller than their neighbours in Safari. */
+input[type='number'] { -moz-appearance: textfield; appearance: textfield; }
+input[type='number']::-webkit-inner-spin-button,
+input[type='number']::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }

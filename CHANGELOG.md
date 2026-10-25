@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 🧭 Dashboard navigation
+
+- A rail of sections (Home, Build, Observe) with a panel for the selected one, in place of one long list of groups. Routes are unchanged.
+- Providers and Models, and Pipelines, Embedding models and Vector stores, now share tabs.
+- Agents are shown as a list by default, with cards one click away; page actions sit on the right and wrap on narrow screens.
+- Dropdowns and number fields look the same in Safari as in other browsers.
+
 ### 🤖 Agentic bots (computer-use agents)
 - **`agenticbot` runtime (seam)** — `Agent.Bot` (`BotConfig`), `contracts.BotControl` (Pro is the sole manager; the community edition refuses), `SandboxProfile` applied by the docker and Kubernetes executors (read-only rootfs, capabilities dropped, non-root, resource limits, runtime class, egress NetworkPolicy), no general control-plane token or provider key inside a bot, every run registered before it starts, a 30-minute invoke timeout for bots. A2A messages and `agentoven_delegate` calls that start a bot run are registered with the bot manager first; `contracts.ToolRunner` lets a bot gate run kitchen tools (and skill tools) in the control plane under the executor's guardrails; a bot's environment carries no tool JSON; `BotConfig` gains shell/files/persistence/takeover/tools settings. See ADR-0029
 

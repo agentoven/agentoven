@@ -1,3 +1,4 @@
+import { NavLink } from 'react-router-dom';
 import { useEffect, type ReactNode } from 'react';
 import { X as XIcon } from 'lucide-react';
 
@@ -84,22 +85,55 @@ export function StatCard({
 
 // ── Page Header ───────────────────────────────────────────────
 
+export interface HubTab { to: string; label: string }
+
+/** Tabs that move between the pages of one hub (Providers and Models, say); each tab is still its own address. */
+export function TabLinks({ tabs }: { tabs: HubTab[] }) {
+  return (
+    <nav aria-label="Sections" className="flex gap-1 overflow-x-auto">
+      {tabs.map((t) => (
+        <NavLink
+          key={t.to}
+          to={t.to}
+          end
+          className={({ isActive }) =>
+            `h-10 px-3.5 inline-flex items-center whitespace-nowrap text-sm font-medium -mb-px border-b-2 transition-colors ${
+              isActive
+                ? 'border-[var(--ao-brand)] text-[var(--ao-text)]'
+                : 'border-transparent text-[var(--ao-text-muted)] hover:text-[var(--ao-text)]'
+            }`
+          }
+        >
+          {t.label}
+        </NavLink>
+      ))}
+    </nav>
+  );
+}
+
 export function PageHeader({
   title,
   description,
   action,
+  tabs,
 }: {
   title: string;
   description?: string;
   action?: ReactNode;
+  tabs?: HubTab[];
 }) {
+  // Title left, actions right, but wrapping rather than a breakpoint: the actions drop under the title
+  // only when they no longer fit beside it, and then sit on the right of their own row.
   return (
-    <div className="flex items-center justify-between px-8 py-6 border-b border-[var(--ao-border)]">
-      <div>
-        <h1 className="text-xl font-bold">{title}</h1>
-        {description && <p className="text-sm text-[var(--ao-text-muted)] mt-1">{description}</p>}
+    <div className="px-4 sm:px-8 py-6 border-b border-[var(--ao-border)]">
+      <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
+        <div className="min-w-0 flex-1 basis-64">
+          <h1 className="text-xl font-bold">{title}</h1>
+          {description && <p className="text-sm text-[var(--ao-text-muted)] mt-1 max-w-2xl">{description}</p>}
+        </div>
+        {action && <div className="flex flex-wrap items-center justify-end gap-2 ml-auto">{action}</div>}
       </div>
-      {action}
+      {tabs && <div className="mt-5 -mb-6"><TabLinks tabs={tabs} /></div>}
     </div>
   );
 }

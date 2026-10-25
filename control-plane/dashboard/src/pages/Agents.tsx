@@ -2,12 +2,13 @@ import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Bot, Plus, Flame, Snowflake, Trash2, FlaskConical, AlertTriangle, Sun, RefreshCw, Code, Copy, Check, Shield, Terminal, BrainCircuit, Wrench, Eye, Zap, Braces } from 'lucide-react';
 import { agents, providers, catalog, type Agent, type Ingredient, type IngredientKind, type ModelCapability, APIError } from '../api';
-import { useAPI } from '../hooks';
+import { useAPI, useLocalStorageState } from '../hooks';
 import {
   PageHeader, Card, StatusBadge, EmptyState,
   Spinner, ErrorBanner, Button, Modal,
 } from '../components/UI';
 import { AgentLogViewer } from '../components/AgentLogViewer';
+import { ActionDropdown, type MenuItem } from '../components/ActionDropdown';
 
 // ── Catalog Info Helpers ─────────────────────────────────────
 
@@ -103,6 +104,16 @@ export function AgentsPage() {
   const [integrateAgent, setIntegrateAgent] = useState<Agent | null>(null);
   const [recookAgent, setRecookAgent] = useState<Agent | null>(null);
   const [logAgent, setLogAgent] = useState<string | null>(null);
+  const [savedLayout, setLayout] = useLocalStorageState<'list' | 'cards'>('ao-agents-layout', 'list');
+  // A list needs room for its columns, so a phone always gets cards.
+  const [phone, setPhone] = useState(() => window.matchMedia('(max-width: 719px)').matches);
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 719px)');
+    const on = () => setPhone(mq.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  }, []);
+  const layout = phone ? 'cards' : savedLayout;
 
   return (
     <div>
@@ -121,17 +132,42 @@ export function AgentsPage() {
       {loading ? (
         <Spinner />
       ) : data && data.length > 0 ? (
-        <div className="p-8 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {data.map((agent) => (
-            <AgentCard
-              key={agent.id}
-              agent={agent}
-              onAction={refetch}
-              onIntegrate={() => setIntegrateAgent(agent)}
-              onRecook={() => setRecookAgent(agent)}
-              onViewLogs={() => setLogAgent(agent.name)}
-            />
-          ))}
+        <div className="p-4 sm:p-8">
+          {!phone && (
+            <div className="mb-4 flex rounded-lg border border-[var(--ao-border)] overflow-hidden w-fit ml-auto" role="group" aria-label="Layout">
+              {(['list', 'cards'] as const).map((l) => (
+                <button
+                  key={l}
+                  type="button"
+                  onClick={() => setLayout(l)}
+                  aria-pressed={layout === l}
+                  className={`px-3 py-1.5 text-xs font-medium capitalize ${layout === l ? 'bg-[var(--ao-surface-hover)] text-[var(--ao-text)]' : 'text-[var(--ao-text-muted)] hover:text-[var(--ao-text)]'}`}
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className={layout === 'list' ? 'rounded-xl border border-[var(--ao-border)] bg-[var(--ao-surface)] overflow-x-auto' : 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4'}>
+            <div className={layout === 'list' ? 'min-w-[900px]' : 'contents'}>
+              {layout === 'list' && (
+                <div className="grid gap-4 px-5 h-10 items-center border-b border-[var(--ao-border)] text-xs font-semibold uppercase tracking-wider text-[var(--ao-text-muted)]" style={{ gridTemplateColumns: AGENT_LIST_COLS }}>
+                  <span>Agent</span><span>Model</span><span>Version</span><span />
+                </div>
+              )}
+              {data.map((agent) => (
+                <AgentCard
+                  key={agent.id}
+                  layout={layout}
+                  agent={agent}
+                  onAction={refetch}
+                  onIntegrate={() => setIntegrateAgent(agent)}
+                  onRecook={() => setRecookAgent(agent)}
+                  onViewLogs={() => setLogAgent(agent.name)}
+                />
+              ))}
+            </div>
+          </div>
         </div>
       ) : (
         <EmptyState
@@ -173,7 +209,9 @@ export function AgentsPage() {
   );
 }
 
-function AgentCard({ agent, onAction, onIntegrate, onRecook, onViewLogs }: { agent: Agent; onAction: () => void; onIntegrate: () => void; onRecook: () => void; onViewLogs: () => void }) {
+const AGENT_LIST_COLS = 'minmax(200px, 2fr) minmax(200px, 1.8fr) 110px minmax(200px, auto)';
+
+function AgentCard({ agent, onAction, onIntegrate, onRecook, onViewLogs, layout = 'cards' }: { agent: Agent; onAction: () => void; onIntegrate: () => void; onRecook: () => void; onViewLogs: () => void; layout?: 'cards' | 'list' }) {
   const [busy, setBusy] = useState(false);
   const [bakeError, setBakeError] = useState<string[] | null>(null);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -208,6 +246,66 @@ function AgentCard({ agent, onAction, onIntegrate, onRecook, onViewLogs }: { age
     }
     setBusy(false);
   };
+
+  if (layout === 'list') {
+    const ready = agent.status === 'ready';
+    const test = () => navigate(`/agents/${agent.name}/test`);
+    const bake = () => doAction(() => agents.bake(agent.name), `Agent '${agent.name}' baked successfully`);
+    const cool = () => doAction(() => agents.cool(agent.name), `Agent '${agent.name}' cooled`);
+    const menu: MenuItem[] = [];
+    if (ready) menu.push({ label: 'Logs', icon: <Terminal size={14} />, onClick: onViewLogs });
+    if (ready || agent.status === 'burnt' || agent.status === 'cooled') menu.push({ label: 'Re-cook', icon: <RefreshCw size={14} />, onClick: onRecook });
+    if (ready || agent.status === 'active' || agent.status === 'baked') menu.push({ label: 'Cool', icon: <Snowflake size={14} />, onClick: cool });
+    menu.push({ label: 'Delete', icon: <Trash2 size={14} />, onClick: () => doAction(() => agents.delete(agent.name), `Agent '${agent.name}' deleted`), danger: true });
+    const outline = 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-[var(--ao-brand)]/55 text-[var(--ao-brand-light)] hover:bg-[var(--ao-brand)]/10 disabled:opacity-50';
+    const solid = 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-[var(--ao-brand)] text-[#0f172a] hover:opacity-90 disabled:opacity-50';
+    const version = agent.version ? `v${agent.version.replace(/^v/, '')}` : 'unversioned';
+    return (
+      <div className="border-b border-[var(--ao-border)] last:border-b-0">
+        <div className="grid items-center gap-4 px-5 py-3.5" style={{ gridTemplateColumns: AGENT_LIST_COLS }}>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="font-semibold truncate" title={agent.name}>{agent.name}</span>
+              <StatusBadge status={agent.status} />
+            </div>
+            <p className={`mt-1 text-sm truncate ${agent.description ? 'text-[var(--ao-text-muted)]' : 'text-[var(--ao-text-muted)]/50 italic'}`}>{agent.description || 'No description'}</p>
+            {agent.status === 'burnt' && agent.tags?.error && <p className="mt-1 text-xs text-red-400 truncate" title={agent.tags.error}>{agent.tags.error}</p>}
+          </div>
+          <div className="min-w-0">
+            <span className="block truncate text-xs font-mono" title={agent.model_provider ? `${agent.model_provider} / ${agent.model_name}` : 'No model provider'}>
+              {agent.model_provider ? `${agent.model_provider} / ${agent.model_name}` : 'no model'}
+            </span>
+            <span className="mt-1 block text-xs text-[var(--ao-text-muted)] truncate">
+              {agent.mode || 'managed'}{agent.runtime && agent.runtime !== 'agentoven' ? ` · ${agent.runtime}` : ''}
+            </span>
+          </div>
+          <div className="text-xs font-mono text-[var(--ao-brand-light)]">{version}</div>
+          <div className="flex items-center justify-end gap-2">
+            {agent.status === 'draft' && <button type="button" className={solid} onClick={bake} disabled={busy}><Flame size={14} /> Bake</button>}
+            {agent.status === 'burnt' && <button type="button" className={solid} onClick={bake} disabled={busy}><Flame size={14} /> Retry bake</button>}
+            {agent.status === 'cooled' && <button type="button" className={solid} onClick={() => doAction(() => agents.rewarm(agent.name), `Agent '${agent.name}' rewarmed`)} disabled={busy}><Sun size={14} /> Rewarm</button>}
+            {(ready || agent.status === 'cooled') && <button type="button" className={outline} onClick={test}><FlaskConical size={14} /> Test</button>}
+            <ActionDropdown items={menu} disabled={busy} label={agent.name} main={ready ? { label: 'Integrate', icon: <Code size={14} />, onClick: onIntegrate } : undefined} />
+          </div>
+        </div>
+        {toast && (
+          <div className="px-5 pb-3">
+            <div className={`px-3 py-2 rounded-lg text-xs font-medium flex items-center justify-between ${
+              toast.type === 'success' ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' : 'bg-red-500/15 text-red-400 border border-red-500/30'
+            }`}>
+              <span>{toast.message}</span>
+              <button onClick={() => setToast(null)} aria-label="Dismiss" className="ml-2 opacity-60 hover:opacity-100">✕</button>
+            </div>
+          </div>
+        )}
+        {bakeError && (
+          <div className="mx-5 mb-3 p-2 rounded bg-red-500/10 border border-red-500/30 space-y-1">
+            {bakeError.map((err, i) => <p key={i} className="text-xs text-red-400">• {err}</p>)}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <Card>

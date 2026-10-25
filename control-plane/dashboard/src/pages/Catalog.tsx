@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { PROVIDER_TABS } from '../nav';
 import {
   Library,
   RefreshCw,
@@ -197,7 +198,7 @@ export function CatalogPage() {
 
   return (
     <div>
-      <PageHeader
+      <PageHeader tabs={PROVIDER_TABS}
         title="Model Catalog"
         description="Browse model capabilities, context windows, costs, and feature support"
         action={
