@@ -88,7 +88,7 @@ export interface Agent {
   guardrails: Guardrail[];
   tags: Record<string, string>;
   // Framework-native managed agent fields
-  runtime?: 'agentoven' | 'langchain' | 'langgraph' | 'crewai' | 'custom';
+  runtime?: 'agentoven' | 'langchain' | 'langgraph' | 'deepagents' | 'agenticbot' | 'crewai' | 'custom';
   entrypoint?: string;
   repo_url?: string;
   repo_branch?: string;

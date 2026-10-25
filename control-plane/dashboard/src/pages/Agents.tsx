@@ -546,7 +546,7 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
     context_budget: 16000,
     summary_model: '',
     reasoning_strategy: 'react' as 'react' | 'plan-and-execute' | 'reflexion',
-    runtime: 'agentoven' as 'agentoven' | 'langchain' | 'langgraph' | 'crewai' | 'custom',
+    runtime: 'agentoven' as 'agentoven' | 'langchain' | 'langgraph' | 'deepagents' | 'agenticbot' | 'crewai' | 'custom',
     entrypoint: '',
     repo_url: '',
     repo_branch: '',
@@ -622,7 +622,7 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
         reasoning_strategy: form.behavior === 'agentic' ? form.reasoning_strategy : undefined,
         runtime: form.mode === 'managed' ? form.runtime : undefined,
         entrypoint: form.mode === 'managed' && form.runtime !== 'agentoven' && form.entrypoint ? form.entrypoint : undefined,
-        repo_url: form.mode === 'managed' && ['langchain', 'langgraph', 'crewai'].includes(form.runtime) && form.repo_url ? form.repo_url : undefined,
+        repo_url: form.mode === 'managed' && ['langchain', 'langgraph', 'deepagents', 'crewai'].includes(form.runtime) && form.repo_url ? form.repo_url : undefined,
         repo_branch: form.mode === 'managed' && form.repo_url && form.repo_branch ? form.repo_branch : undefined,
       } as any);
       onCreated();
@@ -707,6 +707,8 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
                       <option value="agentoven">AgentOven (built-in)</option>
                       <option value="langchain">LangChain</option>
                       <option value="langgraph">LangGraph</option>
+                      <option value="deepagents">Deep Agents</option>
+                      <option value="agenticbot" disabled>Agentic Bot (computer use) - Pro</option>
                       <option value="crewai">CrewAI</option>
                       <option value="custom">Custom</option>
                     </select>
@@ -718,7 +720,7 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
                     </div>
                   )}
                 </div>
-                {form.runtime !== 'agentoven' && ['langchain', 'langgraph', 'crewai'].includes(form.runtime) && (
+                {form.runtime !== 'agentoven' && ['langchain', 'langgraph', 'deepagents', 'crewai'].includes(form.runtime) && (
                   <div className="grid grid-cols-2 gap-3 mt-3">
                     <div>
                       <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Repo URL <span className="font-normal opacity-60">(auto git clone/pull on bake)</span></label>
@@ -1011,7 +1013,7 @@ function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => void }) 
     context_budget: agent.context_budget || 16000,
     summary_model: agent.summary_model || '',
     reasoning_strategy: agent.reasoning_strategy || 'react' as 'react' | 'plan-and-execute' | 'reflexion',
-    runtime: (agent.runtime || 'agentoven') as 'agentoven' | 'langchain' | 'langgraph' | 'crewai' | 'custom',
+    runtime: (agent.runtime || 'agentoven') as 'agentoven' | 'langchain' | 'langgraph' | 'deepagents' | 'agenticbot' | 'crewai' | 'custom',
     entrypoint: agent.entrypoint || '',
     repo_url: agent.repo_url || '',
     repo_branch: agent.repo_branch || '',
@@ -1085,7 +1087,7 @@ function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => void }) 
         reasoning_strategy: form.mode === 'managed' && form.behavior === 'agentic' ? form.reasoning_strategy : undefined,
         runtime: form.mode === 'managed' ? form.runtime : undefined,
         entrypoint: form.mode === 'managed' && form.runtime !== 'agentoven' && form.entrypoint ? form.entrypoint : undefined,
-        repo_url: form.mode === 'managed' && ['langchain', 'langgraph', 'crewai'].includes(form.runtime) && form.repo_url ? form.repo_url : undefined,
+        repo_url: form.mode === 'managed' && ['langchain', 'langgraph', 'deepagents', 'crewai'].includes(form.runtime) && form.repo_url ? form.repo_url : undefined,
         repo_branch: form.mode === 'managed' && form.repo_url && form.repo_branch ? form.repo_branch : undefined,
       } as any);
       onDone();
@@ -1178,6 +1180,8 @@ function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => void }) 
                       <option value="agentoven">AgentOven (built-in)</option>
                       <option value="langchain">LangChain</option>
                       <option value="langgraph">LangGraph</option>
+                      <option value="deepagents">Deep Agents</option>
+                      <option value="agenticbot" disabled>Agentic Bot (computer use) - Pro</option>
                       <option value="crewai">CrewAI</option>
                       <option value="custom">Custom</option>
                     </select>
@@ -1189,7 +1193,7 @@ function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => void }) 
                     </div>
                   )}
                 </div>
-                {form.runtime !== 'agentoven' && ['langchain', 'langgraph', 'crewai'].includes(form.runtime) && (
+                {form.runtime !== 'agentoven' && ['langchain', 'langgraph', 'deepagents', 'crewai'].includes(form.runtime) && (
                   <div className="grid grid-cols-2 gap-3 mt-3">
                     <div>
                       <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Repo URL <span className="font-normal opacity-60">(auto git clone/pull on bake)</span></label>
