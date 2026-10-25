@@ -59,6 +59,8 @@ func (de *DockerExecutor) Start(ctx context.Context, agent *models.Agent, info *
 	// Always set AGENT_PORT to 9000 inside the container (mapped to host port)
 	env["AGENT_PORT"] = "9000"
 
+	args = append(args, sandboxDockerArgs(info.Sandbox)...)
+
 	// Add environment variables
 	for k, v := range env {
 		args = append(args, "-e", fmt.Sprintf("%s=%s", k, v))
@@ -70,6 +72,10 @@ func (de *DockerExecutor) Start(ctx context.Context, agent *models.Agent, info *
 		if customImage, ok := agent.Tags["docker_image"]; ok && customImage != "" {
 			image = customImage
 		}
+	}
+
+	if info.Sandbox != nil && info.Sandbox.Image != "" {
+		image = info.Sandbox.Image
 	}
 
 	args = append(args, image)

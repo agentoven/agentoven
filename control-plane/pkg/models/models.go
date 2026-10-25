@@ -144,10 +144,17 @@ const (
 	RuntimeLangChain AgentRuntime = "langchain"
 	// RuntimeLangGraph — user's process wraps a compiled LangGraph graph (atomic).
 	RuntimeLangGraph AgentRuntime = "langgraph"
+	// RuntimeDeepAgents — user's process wraps a Deep Agent (a compiled LangGraph graph that
+	// plans with a todo list, keeps a virtual filesystem and spawns subagents).
+	RuntimeDeepAgents AgentRuntime = "deepagents"
 	// RuntimeCrewAI — user's process wraps a CrewAI Crew.
 	RuntimeCrewAI AgentRuntime = "crewai"
 	// RuntimeCustom — user's process implements the /invoke protocol directly.
 	RuntimeCustom AgentRuntime = "custom"
+	// RuntimeAgenticBot — a computer-use agent (ao-bots): a sandboxed process that drives a
+	// browser or desktop. The Pro control plane spawns it, gates and journals every action it
+	// takes, and is the only thing that manages or tracks it. Pro only.
+	RuntimeAgenticBot AgentRuntime = "agenticbot"
 )
 
 // ProcessStatus describes the lifecycle of a spawned agent process.
@@ -171,8 +178,11 @@ type ProcessInfo struct {
 	PID         int           `json:"pid,omitempty"`          // local mode
 	ContainerID string        `json:"container_id,omitempty"` // docker mode
 	PodName     string        `json:"pod_name,omitempty"`     // k8s mode
-	StartedAt   time.Time     `json:"started_at"`
-	Error       string        `json:"error,omitempty"`
+	// Sandbox is how the process is confined (bots only). It is recorded so the confinement a
+	// bot actually ran under can be read back, not just what was intended.
+	Sandbox   *SandboxProfile `json:"sandbox,omitempty"`
+	StartedAt time.Time       `json:"started_at"`
+	Error     string          `json:"error,omitempty"`
 }
 
 type Agent struct {
@@ -199,7 +209,7 @@ type Agent struct {
 
 	// Runtime identifies which framework runs the LLM loop.
 	// "agentoven" (default) = built-in Go executor.
-	// "langchain" / "langgraph" / "crewai" / "custom" = user's process owns the loop.
+	// "langchain" / "langgraph" / "deepagents" / "crewai" / "custom" = user's process owns the loop.
 	// Only meaningful when Mode = "managed".
 	Runtime AgentRuntime `json:"runtime,omitempty" db:"runtime"`
 
@@ -210,7 +220,7 @@ type Agent struct {
 	Entrypoint string `json:"entrypoint,omitempty" db:"entrypoint"`
 
 	// RepoURL is an optional Git repository to clone/pull before starting the process
-	// (local execution mode only). Supported for langchain, langgraph, crewai runtimes.
+	// (local execution mode only). Supported for langchain, langgraph, deepagents, crewai runtimes.
 	// Example: "https://github.com/acme/my-langchain-agent.git"
 	RepoURL string `json:"repo_url,omitempty" db:"repo_url"`
 
@@ -251,6 +261,15 @@ type Agent struct {
 	// behavior: any ready agent in the same kitchen, offered only when this
 	// agent has no tools of its own — see executor.buildToolDefinitions.
 	Subagents []string `json:"subagents,omitempty" db:"subagents"`
+
+	// Bot configures a computer-use agent (Runtime = "agenticbot"): what it may reach, how much
+	// it may do, and when a person must approve. Ignored for every other runtime.
+	Bot *BotConfig `json:"bot,omitempty" db:"-"`
+
+	// Budget caps what one run of this agent may spend. At the cap the run
+	// checkpoints and pauses for a person to extend it or end it. A request can
+	// tighten this but never loosen it. See RunBudget.
+	Budget *RunBudget `json:"budget,omitempty" db:"budget"`
 
 	// A2A Configuration — A2AEndpoint is the stable control-plane URL
 	// (always /agents/{name}/a2a). BackendEndpoint is the actual backend
@@ -315,10 +334,17 @@ func (a *Agent) IsFrameworkNative() bool {
 	return a.Runtime != "" && a.Runtime != RuntimeAgentOven
 }
 
+// IsAgenticBot reports whether the agent is a computer-use bot (ao-bots). Such an agent is
+// framework-native (its own process owns the loop) but is spawned, gated and tracked by the Pro
+// control plane through contracts.BotControl, and never receives a general control-plane token.
+func (a *Agent) IsAgenticBot() bool {
+	return a.Runtime == RuntimeAgenticBot
+}
+
 // SupportedFrameworks returns the set of runtimes that support git-based auto-pull.
 // For these runtimes, a RepoURL on the agent triggers a git clone/pull before baking.
 func SupportedFrameworks() []AgentRuntime {
-	return []AgentRuntime{RuntimeLangChain, RuntimeLangGraph, RuntimeCrewAI}
+	return []AgentRuntime{RuntimeLangChain, RuntimeLangGraph, RuntimeDeepAgents, RuntimeCrewAI}
 }
 
 // NeedsGitPull returns true when the agent should have its source repo cloned/pulled
@@ -650,6 +676,9 @@ type ServerFeatures struct {
 	Guardrails      bool `json:"guardrails"`
 	Promotions      bool `json:"promotions"`
 	PhoneHome       bool `json:"phone_home"`
+	// DynamicSubagents is true when agents can spawn subagents they describe themselves
+	// (the task tool). Without it they delegate only to registered agents.
+	DynamicSubagents bool `json:"dynamic_subagents"`
 }
 
 // ServerAuth describes the authentication configuration.
@@ -1471,6 +1500,10 @@ type ResolvedTool struct {
 	Version    string                 `json:"version,omitempty"`     // pinned at bake time
 	SchemaHash string                 `json:"schema_hash,omitempty"` // SHA-256 of schema at bake time
 	BakedAt    time.Time              `json:"baked_at,omitempty"`    // when this tool was resolved
+	// Idempotent says repeating a call to this tool is harmless (a read, a lookup). A run
+	// that crashed while such a call was in flight re-runs it on resume; a call to any other
+	// tool is reported to the model as "outcome unknown" instead of being run twice.
+	Idempotent bool `json:"idempotent,omitempty"`
 }
 
 type ResolvedPrompt struct {

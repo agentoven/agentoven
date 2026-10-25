@@ -961,3 +961,115 @@ func TestAToolCallIsNotRunWhenItsWorkspaceGuardrailsCannotBeRead(t *testing.T) {
 		t.Fatalf("the tool must not run (ran=%d): %q err=%v", ran, out, isErr)
 	}
 }
+
+// ── delegation to an agentic bot and the tool runner seam ────
+
+func TestDelegationToABotInvokesItsProcessNotTheGoLoop(t *testing.T) {
+	d := &scriptedDriver{replies: []turnReply{
+		{toolCalls: []models.ToolCallResult{toolCall("1", "agentoven_delegate", map[string]interface{}{"agent": "shopper", "message": "buy a mug"})}},
+		{content: "parent done"},
+	}}
+	e, s := newTestExecutorWithStore(t, d, newFakeGateway())
+
+	bot := testAgent()
+	bot.Name = "shopper"
+	bot.Runtime = models.RuntimeAgenticBot
+	bot.Status = models.AgentStatusReady
+	bot.ResolvedConfig = resolvedWithTools()
+	if err := s.CreateAgent(context.Background(), bot); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	e.SetHostedInvoker(func(_ context.Context, a *models.Agent, msg string) (string, error) {
+		got = append(got, a.Name+"|"+msg)
+		return "mug bought", nil
+	})
+
+	parent := testAgent()
+	parent.Name = "parent"
+	parent.Subagents = []string{"shopper"}
+	_, trace, err := e.Execute(context.Background(), parent, "go", resolvedWithTools(), nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "shopper|buy a mug" {
+		t.Fatalf("the bot's process was not invoked: %v", got)
+	}
+	if d.n != 2 {
+		t.Fatalf("the Go loop must not run the bot's configuration: %d model calls, want 2 (the parent's)", d.n)
+	}
+	if r := trace.Turns[0].ToolResults[0]; r.IsError || r.Content != "mug bought" {
+		t.Fatalf("delegation result: %+v", r)
+	}
+
+	// Without a hosted invoker the delegation fails rather than quietly running the Go loop.
+	e.SetHostedInvoker(nil)
+	d2 := &scriptedDriver{replies: []turnReply{
+		{toolCalls: []models.ToolCallResult{toolCall("1", "agentoven_delegate", map[string]interface{}{"agent": "shopper", "message": "x"})}},
+		{content: "ok"},
+	}}
+	e2, s2 := newTestExecutorWithStore(t, d2, newFakeGateway())
+	_ = s2.CreateAgent(context.Background(), bot)
+	_, trace2, _ := e2.Execute(context.Background(), parent, "go", resolvedWithTools(), nil, false)
+	if r := trace2.Turns[0].ToolResults[0]; !r.IsError {
+		t.Fatalf("delegation to a bot without a hosted invoker must fail: %+v", r)
+	}
+}
+
+func TestToolRunnerEnforcesTheAgentsOwnToolList(t *testing.T) {
+	gw := newFakeGateway()
+	gw.register("lookup_order", func(args map[string]interface{}) (string, bool) { return "order " + args["order_id"].(string) + " shipped", false })
+	gw.register("secret_admin", func(map[string]interface{}) (string, bool) { return "should never run", false })
+	e := newTestExecutor(t, &scriptedDriver{}, gw)
+	agent := testAgent()
+	resolved := resolvedWithTools(orderTool())
+	resolved.Skills = []models.ResolvedSkill{{Name: "crm", Instructions: "Use the CRM.", Tools: []models.ResolvedTool{{Name: "crm_find", Schema: map[string]interface{}{"type": "object"}}}}}
+
+	sources := map[string]string{}
+	for _, ti := range e.ToolsFor(agent, resolved) {
+		sources[ti.Name] = ti.Source
+	}
+	if sources["lookup_order"] != "tool" || sources["crm_find"] != "skill:crm" || len(sources) != 2 {
+		t.Fatalf("tools and skill tools must be listed with their source, and nothing else: %v", sources)
+	}
+
+	res := e.RunToolCall(context.Background(), agent, resolved, "c0", "lookup_order", []byte(`{"order_id":"7"}`))
+	if res.IsError || res.Content != "order 7 shipped" {
+		t.Fatalf("a listed tool runs through the gateway: %+v", res)
+	}
+	// A tool that exists in the kitchen but not in this agent's list is refused without being run.
+	if res := e.RunToolCall(context.Background(), agent, resolved, "c1", "secret_admin", []byte(`{}`)); !res.Unknown || !res.IsError {
+		t.Fatalf("a tool outside the list must be refused unrun: %+v", res)
+	}
+	for _, c := range gw.calls {
+		if c == "secret_admin" {
+			t.Fatal("an unlisted tool reached the gateway")
+		}
+	}
+	// The schema is enforced as in a turn of the Go loop.
+	if res := e.RunToolCall(context.Background(), agent, resolved, "c2", "lookup_order", []byte(`{}`)); !res.IsError || !strings.Contains(res.Content, "invalid arguments") {
+		t.Fatalf("a call missing a required argument must be rejected: %+v", res)
+	}
+	if res := e.RunToolCall(context.Background(), agent, resolved, "c3", "lookup_order", []byte(`{not json`)); !res.IsError {
+		t.Fatalf("bad arguments JSON must be an error: %+v", res)
+	}
+	// An approval-gated tool is not refused here: the bot's gate owns approval.
+	agent.ApprovalTools = []string{"lookup_order"}
+	if res := e.RunToolCall(context.Background(), agent, resolved, "c4", "lookup_order", []byte(`{"order_id":"9"}`)); res.IsError {
+		t.Fatalf("approval is the caller's job: %+v", res)
+	}
+
+	for _, ti := range e.ToolsFor(agent, resolved) {
+		if ti.Name == "agentoven_delegate" {
+			t.Fatal("delegate is offered only to an agent that names Subagents")
+		}
+	}
+	agent.Subagents = []string{"helper"}
+	found := false
+	for _, ti := range e.ToolsFor(agent, resolved) {
+		found = found || ti.Name == "agentoven_delegate"
+	}
+	if !found {
+		t.Fatal("an agent that names Subagents is offered the delegate tool")
+	}
+}

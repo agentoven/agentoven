@@ -2,12 +2,14 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
 
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
 
@@ -140,10 +142,39 @@ func (b *bufferedResponse) replay(w http.ResponseWriter) {
 // guardrails are applied on top. If they cannot be established the call is refused and
 // nothing is sent to the agent.
 //
-// A response is checked only when it is returned whole (tasks/send). A streamed response
-// (message/stream, tasks/sendSubscribe) has its input checked but is passed through
-// unchecked: it cannot be held back without breaking the stream.
+// A response is checked before the caller sees any of it. A streamed response
+// (message/stream, tasks/sendSubscribe) is held back and checked too when the agent has
+// output rules, so such an agent does not stream token by token; with no output rules the
+// stream is relayed as it arrives.
 func (h *Handlers) proxyA2AGuarded(w http.ResponseWriter, r *http.Request, backendURL string, agent *models.Agent, own []models.Guardrail, envSlug string) {
+	// The call to the process is accounted to a run, so its model calls can be held to a budget.
+	hostedCtx, endRun := h.beginHostedRun(r.Context(), agent)
+	defer endRun()
+	r = r.WithContext(hostedCtx)
+
+	// Every run of a bot is registered with the bot manager before it starts. A message that starts
+	// work (send, stream) is registered here under the run ID the process will be sent; the other
+	// methods (get, cancel) start nothing and pass through.
+	if agent.IsAgenticBot() {
+		raw, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		if req := parseA2ARequest(raw); req.hasMsg {
+			runID := hostedRunFrom(r.Context())
+			if runID == "" {
+				runID = uuid.New().String()
+				r = r.WithContext(context.WithValue(r.Context(), hostedRunKey{}, runID))
+			}
+			text := req.text
+			if text == "" {
+				text = string(raw)
+			}
+			if err := h.admitBotInvoke(r.Context(), agent, runID, text); err != nil {
+				a2aRPCError(w, req.rpcID, -32007, "The bot could not be started: "+err.Error(), nil)
+				return
+			}
+		}
+	}
+
 	gr, err := h.guardrailsFor(r.Context(), agent, own)
 	if err != nil {
 		log.Error().Err(err).Str("agent", agent.Name).Msg("refusing A2A call: workspace guardrails could not be applied")
@@ -185,14 +216,21 @@ func (h *Handlers) proxyA2AGuarded(w http.ResponseWriter, r *http.Request, backe
 		return
 	}
 
-	if req.streaming {
+	if req.streaming && !outputStageEnabled(gr) {
+		// Nothing to check on the way out: relay the stream as it arrives.
 		h.proxyA2ARequest(w, r, backendURL, agent.Name, agent.Kitchen, agent.Mode == models.AgentModeManaged)
 		return
 	}
 
 	rec := newBufferedResponse()
 	h.proxyA2ARequest(rec, r, backendURL, agent.Name, agent.Kitchen, agent.Mode == models.AgentModeManaged)
-	if out := a2aResponseText(rec.body.Bytes()); out != "" {
+	out := a2aResponseText(rec.body.Bytes())
+	if req.streaming {
+		// An agent with output rules does not stream: the frames are held back, checked,
+		// then released (stream_guard.go).
+		out = a2aStreamText(rec.body.Bytes())
+	}
+	if out != "" {
 		if eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), gr, out); gErr != nil {
 			log.Warn().Err(gErr).Str("agent", agent.Name).Msg("Output guardrail evaluation error (A2A)")
 			audit("output", nil, gErr)

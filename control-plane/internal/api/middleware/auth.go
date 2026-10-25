@@ -216,5 +216,12 @@ func isAuthPublicPath(path string) bool {
 	if strings.HasPrefix(path, "/mcp") {
 		return true
 	}
+	// The OpenAI-compatible model endpoint authenticates itself: a hosted agent process calls
+	// it with a credential minted for that one process, which is not an identity anywhere else,
+	// so the endpoint checks it (or an ordinary API key) itself rather than giving that
+	// credential a place in the general auth chain.
+	if path == "/v1/chat/completions" {
+		return true
+	}
 	return false
 }

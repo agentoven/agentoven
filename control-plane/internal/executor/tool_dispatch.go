@@ -29,7 +29,10 @@ const DefaultToolTimeout = 120 * time.Second
 // are independent of each other by asking for them in the same turn; running
 // them one at a time only adds up every tool's latency instead of taking the
 // slowest one.
-func (e *Executor) executeToolCallsParallel(ctx context.Context, agent *models.Agent, calls []ToolCall, schemas map[string]map[string]interface{}, sink *eventSink) []ToolResult {
+//
+// onResult, if set, is called as each call finishes (from that call's goroutine), so the
+// caller can record it before the slower calls in the turn are done.
+func (e *Executor) executeToolCallsParallel(ctx context.Context, agent *models.Agent, calls []ToolCall, schemas map[string]map[string]interface{}, sink *eventSink, decorate func(ToolResult) ToolResult, onResult func(ToolResult)) []ToolResult {
 	results := make([]ToolResult, len(calls))
 	var wg sync.WaitGroup
 	for i, tc := range calls {
@@ -38,8 +41,14 @@ func (e *Executor) executeToolCallsParallel(ctx context.Context, agent *models.A
 			defer wg.Done()
 			sink.emit(Event{Type: EventToolCallStart, ToolCall: &tc})
 			result := e.dispatchToolCall(ctx, agent, tc, schemas[tc.Name])
+			if decorate != nil {
+				result = decorate(result)
+			}
 			sink.emit(Event{Type: EventToolCallEnd, ToolCall: &tc, ToolResult: &result})
 			results[i] = result
+			if onResult != nil {
+				onResult(result)
+			}
 		}(i, tc)
 	}
 	wg.Wait()
@@ -114,5 +123,6 @@ func (e *Executor) dispatchToolCall(ctx context.Context, agent *models.Agent, tc
 		toolSpan.SetStatus(codes.Ok, "")
 	}
 	toolSpan.SetAttributes(attribute.Bool("tool.is_error", result.IsError))
-	return result
+	// The guardrails above saw the whole result; what enters the conversation is capped.
+	return capResult(ctx, result)
 }

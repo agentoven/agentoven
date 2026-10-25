@@ -61,6 +61,10 @@ type ToolResult struct {
 	Name       string `json:"name"`
 	Content    string `json:"content"`
 	IsError    bool   `json:"is_error"`
+	// ChildUsage is what a subagent spent producing this result. It is already charged to
+	// the run's budget as it happened; carrying it here lets the journal record it so a
+	// resumed run still knows what the delegation cost.
+	ChildUsage models.TokenUsage `json:"child_usage,omitempty"`
 }
 
 // ExecutionTrace records the full execution history.
@@ -75,6 +79,13 @@ type ExecutionTrace struct {
 	// Pending is set when the run stopped for human approval of a tool call —
 	// see ErrPausedForApproval. Absent on every other trace.
 	Pending *PendingApproval `json:"pending,omitempty"`
+	// Outcome is "max_turns" when the loop ran out of turns and answered with what it had,
+	// "" otherwise. A caller recording the run should not call that a plain success.
+	Outcome string `json:"outcome,omitempty"`
+	// Budget is the run's budget as it stands, when it has one. BudgetPause is set
+	// when the run stopped at its cap — see PausedError.
+	Budget      *models.BudgetStatus `json:"budget,omitempty"`
+	BudgetPause *models.BudgetPause  `json:"budget_pause,omitempty"`
 }
 
 // Turn is one iteration of the agentic loop.
@@ -122,6 +133,28 @@ type Executor struct {
 	// guardrailPolicy, when set, adds the kitchen's workspace guardrails to the
 	// agent's own for those tool-call checks. See SetGuardrailPolicy.
 	guardrailPolicy contracts.WorkspaceGuardrailSource
+	// retry bounds how a budgeted run repeats a failed model call (see SetModelRetry).
+	retry modelRetry
+	// subagents, when set, offers agents the task and tasks tools (see subagent.go).
+	subagents contracts.SubagentRuntime
+	// hostedInvoke runs a message on a hosted agent's own process (see SetHostedInvoker).
+	hostedInvoke func(ctx context.Context, agent *models.Agent, message string) (string, error)
+	// audit, when set, is told about the events of a run that someone accountable for its
+	// spend would want on record: it paused at its budget, a person raised the budget, it
+	// stopped for repeating itself. See SetAudit.
+	audit func(ctx context.Context, kitchen, action string, details map[string]interface{})
+}
+
+// SetAudit sets where run events worth auditing are reported: "run.budget_paused",
+// "run.budget_extended" and "run.stalled". ctx carries the caller's identity when there is one.
+func (e *Executor) SetAudit(f func(ctx context.Context, kitchen, action string, details map[string]interface{})) {
+	e.audit = f
+}
+
+func (e *Executor) auditRun(ctx context.Context, kitchen, action string, details map[string]interface{}) {
+	if e.audit != nil {
+		e.audit(ctx, kitchen, action, details)
+	}
 }
 
 // RAGRegistry provides access to registered RAG services.
@@ -139,6 +172,7 @@ func NewExecutor(s store.Store, r *router.ModelRouter, gw ToolGateway, sess cont
 		gateway:     gw,
 		sessions:    sess,
 		toolTimeout: DefaultToolTimeout,
+		retry:       defaultModelRetry(),
 	}
 }
 
@@ -654,6 +688,15 @@ func (e *Executor) executeTool(ctx context.Context, agent *models.Agent, tc Tool
 	if tc.Name == "agentoven_delegate" {
 		return e.executeDelegation(ctx, agent, tc)
 	}
+	if tc.Name == notesToolName {
+		return e.executeNotes(ctx, tc)
+	}
+	if tc.Name == subagentToolName || tc.Name == subagentsToolName {
+		return e.executeSubagentTool(ctx, agent, tc)
+	}
+	if isSubagent(ctx) && tc.Name == "agentoven_delegate" {
+		return ToolResult{ToolCallID: tc.ID, Name: tc.Name, IsError: true, Content: "Error: a subagent cannot delegate"}
+	}
 
 	paramsJSON, _ := json.Marshal(models.MCPToolCallParams{
 		Name:      tc.Name,
@@ -812,13 +855,50 @@ func (e *Executor) executeDelegation(ctx context.Context, agent *models.Agent, t
 		}
 
 		delegateCtx := context.WithValue(ctx, delegationChainKey{}, append(append([]string{}, chain...), targetAgent))
-		response, _, delegateErr := e.Execute(delegateCtx, target, message, resolved, nil, false)
+		// The request's own allowance belongs to this run; the subagent gets a share of it.
+		delegateCtx = contracts.WithoutBudget(delegateCtx)
+		delegateCtx = context.WithValue(delegateCtx, taskModeKey{}, false) // a delegate is not itself a background task
+		if parent := runBudgetFrom(ctx); parent != nil {
+			g, gerr := parent.grantFor(models.RunBudget{})
+			if gerr != nil {
+				return ToolResult{
+					ToolCallID: tc.ID,
+					Name:       tc.Name,
+					Content:    fmt.Sprintf("Error delegating to '%s': %s", targetAgent, gerr.Error()),
+					IsError:    true,
+				}
+			}
+			defer parent.release(g)
+			delegateCtx = withGrant(delegateCtx, g)
+		}
+		var (
+			response    string
+			childTrace  *ExecutionTrace
+			delegateErr error
+		)
+		if target.IsAgenticBot() {
+			// A bot is its own process, not a configuration the Go loop can run: handing it work
+			// means invoking that process, through the same path (and so the same bot manager) as
+			// an invoke from outside.
+			if e.hostedInvoke == nil {
+				delegateErr = fmt.Errorf("agentic bots cannot be delegated to on this edition")
+			} else {
+				response, delegateErr = e.hostedInvoke(delegateCtx, target, message)
+			}
+		} else {
+			response, childTrace, delegateErr = e.Execute(delegateCtx, target, message, resolved, nil, false)
+		}
+		var childUsage models.TokenUsage
+		if childTrace != nil {
+			childUsage = childTrace.Usage
+		}
 		if delegateErr != nil {
 			return ToolResult{
 				ToolCallID: tc.ID,
 				Name:       tc.Name,
 				Content:    fmt.Sprintf("Error delegating to '%s': %s", targetAgent, delegateErr.Error()),
 				IsError:    true,
+				ChildUsage: childUsage,
 			}
 		}
 
@@ -831,6 +911,7 @@ func (e *Executor) executeDelegation(ctx context.Context, agent *models.Agent, t
 			ToolCallID: tc.ID,
 			Name:       tc.Name,
 			Content:    response,
+			ChildUsage: childUsage,
 		}
 	}
 

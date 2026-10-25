@@ -72,6 +72,21 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 
 	// API v1
 	r.Route("/api/v1", func(r chi.Router) {
+		// Background tasks — long-running agent work that outlives the request that started
+		// it. Every route needs an identity: starting one spends money, and the rest read or
+		// steer it.
+		r.Route("/tasks", func(r chi.Router) {
+			r.Use(middleware.RequireIdentity)
+			r.Post("/", h.CreateTask)
+			r.Get("/", h.ListTasks)
+			r.Route("/{taskID}", func(r chi.Router) {
+				r.Get("/", h.GetTask)
+				r.Get("/events", h.TaskEvents)
+				r.Post("/cancel", h.CancelTask)
+				r.Post("/resume", h.ResumeTask)
+			})
+		})
+
 		// Agents (the Menu)
 		r.Route("/agents", func(r chi.Router) {
 			r.Get("/", h.ListAgents)

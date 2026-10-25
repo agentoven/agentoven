@@ -180,8 +180,9 @@ func (ke *K8sExecutor) Start(ctx context.Context, agent *models.Agent, info *mod
 		envList = append(envList, map[string]interface{}{"name": k, "value": v})
 	}
 
-	deployment := buildDeploymentManifest(deployName, namespace, image, ke.pullSecret, envList)
+	deployment := buildDeploymentManifest(deployName, namespace, image, ke.pullSecret, agent.Entrypoint, envList)
 	service := buildServiceManifest(deployName, serviceName, namespace)
+	applySandboxToDeployment(deployment, info.Sandbox)
 
 	log.Info().
 		Str("agent", agent.Name).
@@ -207,6 +208,20 @@ func (ke *K8sExecutor) Start(ctx context.Context, agent *models.Agent, info *mod
 		}
 	} else if status >= 300 {
 		return fmt.Errorf("create k8s deployment returned HTTP %d", status)
+	}
+
+	// A confined bot also gets a NetworkPolicy closing its egress to the control plane's gate and proxy.
+	if sb := info.Sandbox; sb != nil && sb.Confined {
+		policy := buildBotNetworkPolicy(deployName, namespace, sb.AllowEgressTo)
+		npPath := fmt.Sprintf("/apis/networking.k8s.io/v1/namespaces/%s/networkpolicies", namespace)
+		npStatus, _, npErr := client.do(ctx, http.MethodPost, npPath, policy)
+		if npErr == nil && npStatus == http.StatusConflict {
+			npStatus, _, npErr = client.do(ctx, http.MethodPut, npPath+"/"+deployName+"-egress", policy)
+		}
+		if npErr != nil || npStatus >= 300 {
+			// Never run a bot whose network is not closed.
+			return fmt.Errorf("agentic bot sandbox: network policy could not be applied (HTTP %d, %v)", npStatus, npErr)
+		}
 	}
 
 	// Create Service; ignore conflict (already exists is fine).
@@ -290,6 +305,9 @@ func (ke *K8sExecutor) Stop(_ context.Context, info *models.ProcessInfo) error {
 	} else if status >= 300 && status != http.StatusNotFound {
 		log.Warn().Int("status", status).Str("deployment", deployName).Msg("delete k8s deployment returned unexpected status")
 	}
+
+	_, _, _ = client.do(stopCtx, http.MethodDelete,
+		fmt.Sprintf("/apis/networking.k8s.io/v1/namespaces/%s/networkpolicies/%s-egress", namespace, deployName), nil)
 
 	svcStatus, _, err := client.do(stopCtx, http.MethodDelete,
 		fmt.Sprintf("/api/v1/namespaces/%s/services/%s", namespace, serviceName), nil)
@@ -551,7 +569,32 @@ func toK8sName(s string) string {
 }
 
 // buildDeploymentManifest returns a Deployment map ready for JSON encoding.
-func buildDeploymentManifest(deployName, namespace, image, pullSecret string, envList []map[string]interface{}) map[string]interface{} {
+func buildDeploymentManifest(deployName, namespace, image, pullSecret, entrypoint string, envList []map[string]interface{}) map[string]interface{} {
+	container := map[string]interface{}{
+		"name":            "agent",
+		"image":           image,
+		"imagePullPolicy": "Always",
+		"ports":           []map[string]interface{}{{"containerPort": 9000}},
+		"env":             envList,
+		"readinessProbe": map[string]interface{}{
+			"httpGet":             map[string]interface{}{"path": "/health", "port": 9000},
+			"initialDelaySeconds": 5,
+			"periodSeconds":       10,
+		},
+		"livenessProbe": map[string]interface{}{
+			"httpGet":             map[string]interface{}{"path": "/health", "port": 9000},
+			"initialDelaySeconds": 10,
+			"periodSeconds":       30,
+		},
+		"resources": map[string]interface{}{
+			"requests": map[string]string{"memory": "128Mi", "cpu": "100m"},
+			"limits":   map[string]string{"memory": "512Mi", "cpu": "500m"},
+		},
+	}
+	// A user's own process (an entrypoint) replaces the image's command, as it does for docker.
+	if parts := strings.Fields(entrypoint); len(parts) > 0 {
+		container["command"] = parts
+	}
 	return map[string]interface{}{
 		"apiVersion": "apps/v1",
 		"kind":       "Deployment",
@@ -574,27 +617,7 @@ func buildDeploymentManifest(deployName, namespace, image, pullSecret string, en
 					"imagePullSecrets": []map[string]interface{}{
 						{"name": pullSecret},
 					},
-					"containers": []map[string]interface{}{{
-						"name":            "agent",
-						"image":           image,
-						"imagePullPolicy": "Always",
-						"ports":           []map[string]interface{}{{"containerPort": 9000}},
-						"env":             envList,
-						"readinessProbe": map[string]interface{}{
-							"httpGet":             map[string]interface{}{"path": "/health", "port": 9000},
-							"initialDelaySeconds": 5,
-							"periodSeconds":       10,
-						},
-						"livenessProbe": map[string]interface{}{
-							"httpGet":             map[string]interface{}{"path": "/health", "port": 9000},
-							"initialDelaySeconds": 10,
-							"periodSeconds":       30,
-						},
-						"resources": map[string]interface{}{
-							"requests": map[string]string{"memory": "128Mi", "cpu": "100m"},
-							"limits":   map[string]string{"memory": "512Mi", "cpu": "500m"},
-						},
-					}},
+					"containers": []map[string]interface{}{container},
 				},
 			},
 		},

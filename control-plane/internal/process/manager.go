@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/agentoven/agentoven/control-plane/pkg/a2aauth"
+	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	"os"
 	"sync"
 	"time"
@@ -76,9 +77,11 @@ type Manager struct {
 	docker          *DockerExecutor
 	k8s             *K8sExecutor
 	ports           *portAllocator
-	controlPlaneURL string // injected for AGENTOVEN_CONTROL_PLANE_URL env var
-	saSecret        string // AGENTOVEN_SA_SECRET — used to mint per-pod service-account tokens
-	a2aSecret       []byte // key each pod's own A2A token is derived from (pkg/a2aauth)
+	controlPlaneURL string       // injected for AGENTOVEN_CONTROL_PLANE_URL env var
+	saSecret        string       // AGENTOVEN_SA_SECRET — used to mint per-pod service-account tokens
+	a2aSecret       []byte       // key each pod's own A2A token is derived from (pkg/a2aauth)
+	gateway         ModelGateway // optional: fronts the model providers a pod calls
+	bots            contracts.BotControl
 }
 
 // NewManager creates a new ProcessManager with all executors initialized.
@@ -103,6 +106,28 @@ func (m *Manager) SetControlPlaneURL(u string) {
 // token for itself only, which it requires from whoever calls its A2A endpoint.
 func (m *Manager) SetA2ASecret(secret []byte) {
 	m.a2aSecret = secret
+}
+
+// ModelGateway fronts the model providers a hosted process calls. With one installed, a process
+// is given the gateway's address and a credential for it, and never the provider's own key; the
+// gateway, which sees each call, can meter it and refuse it when a budget is used up.
+type ModelGateway interface {
+	// EnvFor returns the OpenAI-compatible base URL and the bearer credential to give agent's
+	// process. ok=false means the gateway does not front this agent and its process gets its
+	// provider's key as before. An error means it should but cannot, and the process is then
+	// given no model credential at all rather than the provider's own.
+	EnvFor(agent *models.Agent) (endpoint, token string, ok bool, err error)
+}
+
+// SetModelGateway installs the model gateway (see ModelGateway). Pass nil to remove it.
+func (m *Manager) SetModelGateway(g ModelGateway) {
+	m.gateway = g
+}
+
+// SetBotControl installs the bot manager (see contracts.BotControl). Without one, an agent with
+// runtime "agenticbot" is refused at start, so the community edition cannot run a bot by accident.
+func (m *Manager) SetBotControl(b contracts.BotControl) {
+	m.bots = b
 }
 
 // SetSASecret stores the HMAC secret used to mint per-pod service-account tokens.
@@ -136,14 +161,32 @@ func (m *Manager) Start(ctx context.Context, agent *models.Agent) (*models.Proce
 	// rolling update. For local/docker, re-starting a live process would be
 	// destructive, so we keep the early-return guard.
 	if mode != models.ExecModeK8s {
-		m.mu.RLock()
+		m.mu.Lock()
+		m.reapDeadLocked(key)
 		if existing, ok := m.processes[key]; ok {
 			if existing.Status == models.ProcessRunning {
-				m.mu.RUnlock()
+				m.mu.Unlock()
 				return existing, nil // already running
 			}
 		}
-		m.mu.RUnlock()
+		m.mu.Unlock()
+	}
+
+	// A bot is spawned only through the bot manager, which decides how it is confined and what
+	// it is given. Doing this before a port is taken means a refusal costs nothing.
+	var launch *contracts.BotLaunch
+	if agent.IsAgenticBot() {
+		if m.bots == nil {
+			return nil, contracts.ErrBotsNotAvailable
+		}
+		if mode == models.ExecModeLocal && os.Getenv("AGENTOVEN_BOT_ALLOW_LOCAL") != "true" {
+			return nil, fmt.Errorf("an agentic bot must run in a confined sandbox: use execution mode docker or k8s " +
+				"(AGENTOVEN_BOT_ALLOW_LOCAL=true permits an unconfined local process for development only)")
+		}
+		var err error
+		if launch, err = m.bots.Prepare(ctx, agent); err != nil {
+			return nil, err
+		}
 	}
 
 	// Allocate a port
@@ -162,6 +205,21 @@ func (m *Manager) Start(ctx context.Context, agent *models.Agent) (*models.Proce
 
 	// Build environment from agent config
 	env := m.buildEnvironment(agent, port)
+	if launch != nil {
+		if err := applyBotLaunch(agent, env, launch, info); err != nil {
+			m.ports.Release(port)
+			m.bots.Stopped(ctx, agent.Kitchen, agent.Name)
+			return nil, err
+		}
+		if mode == models.ExecModeLocal {
+			// An unconfined local bot (development only) runs the ao-bot binary, not the Python runner.
+			local := *agent
+			if local.Entrypoint == "" {
+				local.Entrypoint = botBinary()
+			}
+			agent = &local
+		}
+	}
 
 	log.Info().
 		Str("agent", agent.Name).
@@ -186,6 +244,9 @@ func (m *Manager) Start(ctx context.Context, agent *models.Agent) (*models.Proce
 
 	if err != nil {
 		m.ports.Release(port)
+		if launch != nil {
+			m.bots.Stopped(ctx, agent.Kitchen, agent.Name)
+		}
 		info.Status = models.ProcessFailed
 		info.Error = err.Error()
 		m.mu.Lock()
@@ -242,6 +303,9 @@ func (m *Manager) Stop(ctx context.Context, kitchen, agentName string) error {
 	}
 
 	m.ports.Release(info.Port)
+	if m.bots != nil && info.Sandbox != nil {
+		m.bots.Stopped(ctx, kitchen, agentName)
+	}
 
 	m.mu.Lock()
 	info.Status = models.ProcessStopped
@@ -256,13 +320,31 @@ func (m *Manager) Stop(ctx context.Context, kitchen, agentName string) error {
 // Status returns the current process info for an agent.
 func (m *Manager) Status(_ context.Context, kitchen, agentName string) (*models.ProcessInfo, error) {
 	key := processKey(kitchen, agentName)
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reapDeadLocked(key)
 	info, ok := m.processes[key]
 	if !ok {
 		return nil, nil
 	}
 	return info, nil
+}
+
+// reapDeadLocked marks a local process stopped when its subprocess has exited on its own
+// (crash, OOM, killed). Without this a dead agent stays "running" forever and a re-bake returns
+// early with the corpse. Caller holds m.mu for writing.
+func (m *Manager) reapDeadLocked(key string) {
+	info, ok := m.processes[key]
+	if !ok || info.Status != models.ProcessRunning || info.Mode != models.ExecModeLocal || info.PID == 0 {
+		return
+	}
+	if m.local.Alive(info.Kitchen, info.AgentName, info.PID) {
+		return
+	}
+	info.Status = models.ProcessStopped
+	info.Error = "process exited"
+	m.ports.Release(info.Port)
+	log.Warn().Str("agent", info.AgentName).Int("pid", info.PID).Msg("Agent process is no longer running; marked stopped")
 }
 
 // StopAll terminates all running processes. Called on server shutdown.
@@ -293,10 +375,11 @@ func (m *Manager) StopAll(ctx context.Context) error {
 
 // ListRunning returns all currently running processes.
 func (m *Manager) ListRunning() []*models.ProcessInfo {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	var running []*models.ProcessInfo
-	for _, info := range m.processes {
+	for key, info := range m.processes {
+		m.reapDeadLocked(key)
 		if info.Status == models.ProcessRunning {
 			running = append(running, info)
 		}
@@ -396,6 +479,23 @@ func (m *Manager) buildEnvironment(agent *models.Agent, port int) map[string]str
 		}
 		if agent.ModelName != "" {
 			env["AGENT_MODEL_NAME"] = agent.ModelName
+		}
+	}
+
+	// Model gateway: the process calls the gateway with a credential that only opens the
+	// gateway, instead of calling the provider with the provider's own key.
+	if m.gateway != nil && agent.ResolvedConfig != nil && agent.ResolvedConfig.Model != nil {
+		endpoint, token, ok, err := m.gateway.EnvFor(agent)
+		switch {
+		case err != nil:
+			delete(env, "AGENT_API_KEY")
+			delete(env, "AGENT_API_ENDPOINT")
+			log.Error().Err(err).Str("agent", agent.Name).Msg("Model gateway credential could not be minted; the process is started without a model credential")
+		case ok:
+			env["AGENT_API_ENDPOINT"] = endpoint
+			env["AGENT_API_KEY"] = token
+			env["AGENT_MODEL_GATEWAY"] = "openai"
+			env["AGENT_GATEWAY_MODEL"] = agent.ResolvedConfig.Model.Provider + "/" + agent.ResolvedConfig.Model.Model
 		}
 	}
 

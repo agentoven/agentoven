@@ -31,6 +31,10 @@ type PendingApproval struct {
 	Turn       int        `json:"turn"`
 	ToolCalls  []ToolCall `json:"tool_calls"`
 	GatedNames []string   `json:"gated_names"`
+	// Usage and LatencyMs are the model call that asked for these tools. They are
+	// journaled with the pause so the call is not lost from the run's spend.
+	Usage     models.TokenUsage `json:"usage,omitempty"`
+	LatencyMs int64             `json:"latency_ms,omitempty"`
 }
 
 // ResumeDecision is a human's answer to a PendingApproval.
@@ -40,6 +44,10 @@ type ResumeDecision struct {
 	// sees in place of running — "Human denied this tool call: <note>" — so
 	// the agent can react to *why*, not just that it was refused.
 	Note string `json:"note,omitempty"`
+
+	// Extend, on a budget pause, is the budget a person grants so the run can continue.
+	// Approving a budget pause without one is an error: there is nothing to approve.
+	Extend *models.BudgetExtension `json:"extend,omitempty"`
 }
 
 // requiresApproval reports whether name is one of agent's approval-gated

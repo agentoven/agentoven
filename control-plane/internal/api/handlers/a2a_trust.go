@@ -16,6 +16,9 @@ func (h *Handlers) signPodRequest(req *http.Request, kitchen, agent string) {
 	if tok := a2aauth.PodToken(h.A2ASecret, kitchen, agent); tok != "" {
 		req.Header.Set(a2aauth.PodTokenHeader, tok)
 	}
+	if id := hostedRunFrom(req.Context()); id != "" {
+		req.Header.Set(RunIDHeader, id)
+	}
 }
 
 // providerOverrideAllowed reports whether a request may choose how the control plane or a

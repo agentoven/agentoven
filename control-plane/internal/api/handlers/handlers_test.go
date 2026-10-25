@@ -656,3 +656,39 @@ func TestResolveBackendEndpoint_EmptyMode(t *testing.T) {
 		t.Errorf("resolveBackend(empty mode, running) reason = %q, want managed_process_endpoint", reason)
 	}
 }
+
+// ── UpdateAgent guardrails ────────────────────────────────────
+
+func TestUpdateAgentCanRemoveGuardrailsAndLeavesThemAloneWhenOmitted(t *testing.T) {
+	h, s := newTestHandlers(t)
+	seedAgent(t, s, "default", "guarded")
+	a, _ := s.GetAgent(context.Background(), "default", "guarded")
+	a.Guardrails = []models.Guardrail{{ID: "g", Kind: models.GuardrailContentFilter, Stage: models.GuardrailStageInput, Enabled: true,
+		Config: map[string]interface{}{"blocked_words": []interface{}{"x"}}}}
+	if err := s.UpdateAgent(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+
+	put := func(body string) {
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/agents/guarded", strings.NewReader(body))
+		req = withChiParam(withKitchen(req, "default"), "agentName", "guarded")
+		rec := httptest.NewRecorder()
+		h.UpdateAgent(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%d %s", rec.Code, rec.Body.String())
+		}
+	}
+	count := func() int {
+		a, _ := s.GetAgent(context.Background(), "default", "guarded")
+		return len(a.Guardrails)
+	}
+
+	put(`{"description":"edited"}`)
+	if count() != 1 {
+		t.Fatal("an update that does not mention guardrails must not drop them")
+	}
+	put(`{"guardrails":[]}`)
+	if count() != 0 {
+		t.Fatal("an empty list removes the guardrails: there was no other way to take one off")
+	}
+}

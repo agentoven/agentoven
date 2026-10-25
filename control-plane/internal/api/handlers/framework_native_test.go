@@ -30,11 +30,8 @@ import (
 // is the real community one, so a pass means the real handler → real engine →
 // process chain held, not that two mocks agreed with each other.
 //
-// Routes that don't yet enforce a guardrail are reported through knownGap
-// rather than asserted as correct: the test checks for the *right* behavior
-// and skips with an explanation while it's missing, so the suite stays green,
-// the gap is visible under -v, and the same check starts passing the day the
-// handler is fixed.
+// Every route that can reach a hosted agent must enforce the same guardrails, so a
+// bypass fails the test rather than being reported and skipped.
 
 const (
 	blockedWord = "forbidden-topic"
@@ -43,10 +40,11 @@ const (
 
 // fakeProcess stands in for a baked LangChain/LangGraph process.
 type fakeProcess struct {
-	srv   *httptest.Server
-	mu    sync.Mutex
-	seen  []string
-	reply string
+	srv     *httptest.Server
+	mu      sync.Mutex
+	seen    []string
+	threads []string // thread_id of each call that carried one
+	reply   string
 }
 
 func newFakeProcess(t *testing.T, reply string) *fakeProcess {
@@ -62,10 +60,16 @@ func newFakeProcess(t *testing.T, reply string) *fakeProcess {
 
 	mux.HandleFunc("/invoke", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Message string `json:"message"`
+			Message  string `json:"message"`
+			ThreadID string `json:"thread_id"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		record(body.Message)
+		if body.ThreadID != "" {
+			p.mu.Lock()
+			p.threads = append(p.threads, body.ThreadID)
+			p.mu.Unlock()
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"response": p.reply,
@@ -75,10 +79,16 @@ func newFakeProcess(t *testing.T, reply string) *fakeProcess {
 
 	mux.HandleFunc("/invoke/stream", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Message string `json:"message"`
+			Message  string `json:"message"`
+			ThreadID string `json:"thread_id"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		record(body.Message)
+		if body.ThreadID != "" {
+			p.mu.Lock()
+			p.threads = append(p.threads, body.ThreadID)
+			p.mu.Unlock()
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprintf(w, "data: {\"type\":\"token\",\"content\":%q}\n\n", p.reply)
 		fmt.Fprint(w, "data: {\"type\":\"done\"}\n\n")
@@ -90,6 +100,7 @@ func newFakeProcess(t *testing.T, reply string) *fakeProcess {
 		raw, _ := io.ReadAll(r.Body)
 		var rpc struct {
 			ID     interface{} `json:"id"`
+			Method string      `json:"method"`
 			Params struct {
 				Message struct {
 					Parts []struct {
@@ -104,6 +115,17 @@ func newFakeProcess(t *testing.T, reply string) *fakeProcess {
 			text += part.Text
 		}
 		record(text)
+		if strings.Contains(strings.ToLower(rpc.Method), "stream") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			frame, _ := json.Marshal(map[string]interface{}{
+				"jsonrpc": "2.0", "id": rpc.ID,
+				"result": map[string]interface{}{
+					"artifact": map[string]interface{}{"parts": []map[string]string{{"type": "text", "text": p.reply}}},
+				},
+			})
+			fmt.Fprintf(w, "data: %s\n\n", frame)
+			return
+		}
 		w.Header().Set("Content-Type", "application/a2a+json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"jsonrpc": "2.0",
@@ -120,6 +142,12 @@ func newFakeProcess(t *testing.T, reply string) *fakeProcess {
 	p.srv = httptest.NewServer(mux)
 	t.Cleanup(p.srv.Close)
 	return p
+}
+
+func (p *fakeProcess) threadIDs() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.threads...)
 }
 
 func (p *fakeProcess) calls() int {
@@ -167,10 +195,11 @@ func newNativeHandlers(t *testing.T, agent *models.Agent) (*handlers.Handlers, s
 	return h, s
 }
 
-func knownGap(t *testing.T, behavedCorrectly bool, why string) {
+// mustHold fails the test when a guardrail was bypassed. why names the bypass.
+func mustHold(t *testing.T, held bool, why string) {
 	t.Helper()
-	if !behavedCorrectly {
-		t.Skipf("KNOWN GAP: %s", why)
+	if !held {
+		t.Fatalf("guardrail bypass: %s", why)
 	}
 }
 
@@ -204,7 +233,15 @@ func a2aBody(text string) string {
 	return string(b)
 }
 
-var nativeRuntimes = []models.AgentRuntime{models.RuntimeLangChain, models.RuntimeLangGraph}
+func a2aStreamBody(text string) string {
+	var m map[string]interface{}
+	_ = json.Unmarshal([]byte(a2aBody(text)), &m)
+	m["method"] = "message/stream"
+	b, _ := json.Marshal(m)
+	return string(b)
+}
+
+var nativeRuntimes = []models.AgentRuntime{models.RuntimeLangChain, models.RuntimeLangGraph, models.RuntimeDeepAgents}
 
 // ── InvokeAgent: the one route with full input + output coverage ─────────
 
@@ -296,7 +333,7 @@ func TestNativeStreamDoesNotRelayALeakyResponse(t *testing.T) {
 			h, _ := newNativeHandlers(t, nativeAgent(rt, p.srv.URL))
 
 			rec := call(h.StreamInvokeAgent, "/invoke/stream", msg("what is the id?"), map[string]string{"agentName": "native-agent"})
-			knownGap(t, !strings.Contains(rec.Body.String(), leakedSSN),
+			mustHold(t, !strings.Contains(rec.Body.String(), leakedSSN),
 				"StreamInvokeAgent relays a framework-native process's SSE stream verbatim; output guardrails only run on the Go-executor fallback path, so a PII-bearing stream reaches the caller")
 		})
 	}
@@ -328,7 +365,7 @@ func TestNativeTestAgentBlocksALeakyResponse(t *testing.T) {
 			h, _ := newNativeHandlers(t, nativeAgent(rt, p.srv.URL))
 
 			rec := call(h.TestAgent, "/test", msg("what is the id?"), map[string]string{"agentName": "native-agent"})
-			knownGap(t, rec.Code == http.StatusForbidden && !strings.Contains(rec.Body.String(), leakedSSN),
+			mustHold(t, rec.Code == http.StatusForbidden && !strings.Contains(rec.Body.String(), leakedSSN),
 				"TestAgent's framework-native branch returns the process's reply without running output guardrails (only its Go-executor branches do)")
 		})
 	}
@@ -362,7 +399,7 @@ func TestNativeA2AGatewayBlocksBadInput(t *testing.T) {
 			h, _ := newNativeHandlers(t, nativeAgent(rt, p.srv.URL))
 
 			call(h.A2AAgentEndpoint, "/agents/native-agent/a2a", a2aBody("about "+blockedWord), map[string]string{"agentName": "native-agent"})
-			knownGap(t, p.calls() == 0,
+			mustHold(t, p.calls() == 0,
 				"the per-agent A2A gateway only evaluates input guardrails on its X-AO-Environment branch; the default branch proxies straight to the process, so a blocked input still reaches LangChain/LangGraph")
 		})
 	}
@@ -375,42 +412,157 @@ func TestNativeA2AGatewayBlocksALeakyResponse(t *testing.T) {
 			h, _ := newNativeHandlers(t, nativeAgent(rt, p.srv.URL))
 
 			rec := call(h.A2AAgentEndpoint, "/agents/native-agent/a2a", a2aBody("what is the id?"), map[string]string{"agentName": "native-agent"})
-			knownGap(t, !strings.Contains(rec.Body.String(), leakedSSN),
+			mustHold(t, !strings.Contains(rec.Body.String(), leakedSSN),
 				"no A2A gateway branch evaluates output guardrails — proxyA2ARequest copies the process's body back verbatim")
+		})
+	}
+}
+
+// ── Streams ──────────────────────────────────────────────────────────────
+
+func TestNativeStreamReleasesACleanReplyIntact(t *testing.T) {
+	for _, rt := range nativeRuntimes {
+		t.Run(string(rt), func(t *testing.T) {
+			p := newFakeProcess(t, "a perfectly clean streamed answer")
+			h, _ := newNativeHandlers(t, nativeAgent(rt, p.srv.URL))
+
+			rec := call(h.StreamInvokeAgent, "/invoke/stream", msg("hello"), map[string]string{"agentName": "native-agent"})
+			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "perfectly clean streamed answer") {
+				t.Fatalf("a clean reply must be released after the check, got %d: %s", rec.Code, rec.Body.String())
+			}
+			if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+				t.Fatalf("the released reply must still be an SSE stream, got Content-Type %q", ct)
+			}
+		})
+	}
+}
+
+func TestNativeStreamIsNotHeldBackWhenThereAreNoOutputRules(t *testing.T) {
+	p := newFakeProcess(t, "their SSN is "+leakedSSN)
+	agent := nativeAgent(models.RuntimeLangGraph, p.srv.URL)
+	agent.Guardrails = agent.Guardrails[:1] // the input rule only
+	h, _ := newNativeHandlers(t, agent)
+
+	rec := call(h.StreamInvokeAgent, "/invoke/stream", msg("hello"), map[string]string{"agentName": "native-agent"})
+	// With no output rule there is nothing to check, so the stream is relayed unchanged.
+	// This pins the contract: only agents that asked for output checks pay the latency.
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), leakedSSN) {
+		t.Fatalf("an agent without output rules should stream through untouched, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNativeA2AStreamingIsHeldBackAndChecked(t *testing.T) {
+	for _, rt := range nativeRuntimes {
+		t.Run(string(rt)+"/leaky", func(t *testing.T) {
+			p := newFakeProcess(t, "their SSN is "+leakedSSN)
+			h, _ := newNativeHandlers(t, nativeAgent(rt, p.srv.URL))
+
+			rec := call(h.A2AAgentEndpoint, "/agents/native-agent/a2a", a2aStreamBody("what is the id?"), map[string]string{"agentName": "native-agent"})
+			mustHold(t, !strings.Contains(rec.Body.String(), leakedSSN),
+				"a streamed A2A reply with an SSN reached the caller: "+rec.Body.String())
+			mustHold(t, strings.Contains(rec.Body.String(), "Output blocked by guardrails"),
+				"expected a JSON-RPC output-blocked error, got: "+rec.Body.String())
+		})
+		t.Run(string(rt)+"/clean", func(t *testing.T) {
+			p := newFakeProcess(t, "clean streamed a2a answer")
+			h, _ := newNativeHandlers(t, nativeAgent(rt, p.srv.URL))
+
+			rec := call(h.A2AAgentEndpoint, "/agents/native-agent/a2a", a2aStreamBody("hello"), map[string]string{"agentName": "native-agent"})
+			if !strings.Contains(rec.Body.String(), "clean streamed a2a answer") {
+				t.Fatalf("a clean streamed reply must be released, got %d: %s", rec.Code, rec.Body.String())
+			}
 		})
 	}
 }
 
 // ── Sessions ─────────────────────────────────────────────────────────────
 
+// nativeSession builds handlers with a live session for a hosted agent. The router answers
+// with a distinct text, so a reply that came from the model instead of the process shows.
+func nativeSession(t *testing.T, rt models.AgentRuntime, processReply string) (*handlers.Handlers, *fakeProcess) {
+	t.Helper()
+	p := newFakeProcess(t, processReply)
+	h, s := newNativeHandlers(t, nativeAgent(rt, p.srv.URL))
+
+	mr := router.NewModelRouter(s)
+	mr.RegisterDriver(&scriptedSkillDriver{content: "answer straight from the model"})
+	if err := s.CreateProvider(context.Background(), &models.ModelProvider{
+		Name: "p", Kitchen: "default", Kind: "scripted", Models: []string{"m"}, IsDefault: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.Router = mr
+	h.Sessions = sessions.NewMemorySessionStore()
+	if err := h.Sessions.CreateSession(context.Background(), &models.Session{
+		ID: "s1", AgentName: "native-agent", Kitchen: "default", Status: models.SessionActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return h, p
+}
+
+func sendSession(h *handlers.Handlers, text string) *httptest.ResponseRecorder {
+	body, _ := json.Marshal(map[string]string{"content": text})
+	return call(h.SendSessionMessage, "/sessions/s1/messages", string(body),
+		map[string]string{"agentName": "native-agent", "sessionID": "s1"})
+}
+
 func TestNativeAgentSessionMessagesReachTheFrameworkProcess(t *testing.T) {
 	for _, rt := range nativeRuntimes {
 		t.Run(string(rt), func(t *testing.T) {
-			p := newFakeProcess(t, "answer from the langchain process")
-			h, s := newNativeHandlers(t, nativeAgent(rt, p.srv.URL))
+			h, p := nativeSession(t, rt, "answer from the framework process")
 
-			d := &scriptedSkillDriver{content: "answer straight from the model"}
-			mr := router.NewModelRouter(s)
-			mr.RegisterDriver(d)
-			if err := s.CreateProvider(context.Background(), &models.ModelProvider{
-				Name: "p", Kitchen: "default", Kind: "scripted", Models: []string{"m"}, IsDefault: true,
-			}); err != nil {
-				t.Fatal(err)
+			rec := sendSession(h, "hello")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 			}
-			h.Router = mr
-			h.Sessions = sessions.NewMemorySessionStore()
-			if err := h.Sessions.CreateSession(context.Background(), &models.Session{
-				ID: "s1", AgentName: "native-agent", Kitchen: "default", Status: models.SessionActive,
-			}); err != nil {
-				t.Fatal(err)
+			mustHold(t, p.calls() == 1, "a hosted agent's session message never reached its process")
+			mustHold(t, strings.Contains(rec.Body.String(), "answer from the framework process"),
+				"the reply must come from the agent's process, not the raw model: "+rec.Body.String())
+			mustHold(t, !strings.Contains(rec.Body.String(), "straight from the model"),
+				"the raw model answered a hosted agent's session")
+			// The framework's checkpointer keys its memory on the thread, so every turn of
+			// one session must carry the same one.
+			if got := p.threadIDs(); len(got) != 1 || got[0] != "s1" {
+				t.Fatalf("expected the session ID as thread_id, got %v", got)
 			}
 
-			body, _ := json.Marshal(map[string]string{"content": "hello"})
-			rec := call(h.SendSessionMessage, "/sessions/s1/messages", string(body),
-				map[string]string{"agentName": "native-agent", "sessionID": "s1"})
-			t.Logf("session reply: %s", rec.Body.String())
-			knownGap(t, p.calls() > 0,
-				"SendSessionMessage never checks IsFrameworkNative: a LangChain/LangGraph agent's session messages bypass its process entirely and are answered by the raw model router (status "+fmt.Sprint(rec.Code)+")")
+			sess, err := h.Sessions.GetSession(context.Background(), "s1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sess.TurnCount != 1 || len(sess.Messages) != 2 || sess.Messages[1].Content != "answer from the framework process" {
+				t.Fatalf("the control plane should keep the transcript for audit, got %+v", sess)
+			}
+		})
+	}
+}
+
+func TestNativeAgentSessionBlocksBadInputBeforeTheProcess(t *testing.T) {
+	for _, rt := range nativeRuntimes {
+		t.Run(string(rt), func(t *testing.T) {
+			h, p := nativeSession(t, rt, "never asked")
+			rec := sendSession(h, "about "+blockedWord)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+			}
+			mustHold(t, p.calls() == 0, "blocked session input reached the process")
+		})
+	}
+}
+
+func TestNativeAgentSessionBlocksALeakyReplyAndKeepsItOutOfTheTranscript(t *testing.T) {
+	for _, rt := range nativeRuntimes {
+		t.Run(string(rt), func(t *testing.T) {
+			h, _ := nativeSession(t, rt, "their SSN is "+leakedSSN)
+			rec := sendSession(h, "what is the id?")
+			if rec.Code != http.StatusForbidden || strings.Contains(rec.Body.String(), leakedSSN) {
+				t.Fatalf("expected a 403 with no SSN, got %d: %s", rec.Code, rec.Body.String())
+			}
+			sess, _ := h.Sessions.GetSession(context.Background(), "s1")
+			for _, m := range sess.Messages {
+				mustHold(t, !strings.Contains(m.Content, leakedSSN), "the blocked reply was stored in the session transcript")
+			}
 		})
 	}
 }

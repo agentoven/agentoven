@@ -40,7 +40,25 @@ type (
 	ModelRouter = router.ModelRouter
 	// Store is the control plane's persistence interface.
 	Store = store.Store
+	// PausedError is returned when a run stopped for a person's decision at its budget.
+	PausedError = executor.PausedError
 )
+
+// Errors a caller may need to tell apart from an ordinary failure.
+var (
+	// ErrBudgetExhausted ends a run that hit its budget and has no journal to pause into
+	// (as with a Runner from New, which keeps none) or was ended by a person.
+	ErrBudgetExhausted = executor.ErrBudgetExhausted
+	// ErrUnpricedModel refuses a dollar cap on a model with no known price.
+	ErrUnpricedModel = executor.ErrUnpricedModel
+)
+
+// WithBudget caps one Execute call. The agent's own Budget still applies: the two are
+// merged by taking the stricter limit of each kind, so a caller can tighten a run but never
+// loosen it.
+func WithBudget(ctx context.Context, b models.RunBudget) context.Context {
+	return contracts.WithBudget(ctx, b)
+}
 
 // Runner runs a managed agent through its agentic loop: prompt, model, tool,
 // repeat, until a text response or the turn cap.

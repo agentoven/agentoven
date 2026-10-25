@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -49,13 +50,26 @@ var recipeNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,62}$`)
 
 // Handlers holds all handler dependencies.
 type Handlers struct {
-	Store           store.Store
-	Router          *router.ModelRouter
-	MCPGateway      *mcpgw.Gateway
-	Workflow        *workflow.Engine
-	Resolver        *resolver.Resolver
-	Executor        *executor.Executor
+	Store      store.Store
+	Router     *router.ModelRouter
+	MCPGateway *mcpgw.Gateway
+	Workflow   *workflow.Engine
+	Resolver   *resolver.Resolver
+	Executor   *executor.Executor
+	// Tasks runs agents in the background (nil when the execution journal is off).
+	Tasks *executor.TaskManager
+	// AuthorizeBudgetExtension, when set, decides whether the caller may raise a run's budget
+	// (a resume that carries an extension). Raising a cap is spending someone else's money, so
+	// an edition with roles can keep it to the roles that own that decision. An error refuses
+	// the resume with a 403. Nil allows any caller who may resume the run.
+	AuthorizeBudgetExtension func(r *http.Request) error
+	// RunScopes accounts for the model calls hosted processes make while handling a call, so a
+	// budget can cap them. Nil (the community edition) leaves their spend reported but uncapped.
+	RunScopes       contracts.RunScopes
 	ProcessManager  *process.Manager
+	// Bots is the sole manager and tracker of agentic bots (Pro). Nil in the community edition,
+	// where such an agent cannot be baked and so is never invoked.
+	Bots contracts.BotControl
 	PromptValidator contracts.PromptValidatorService
 	Catalog         *catalog.Catalog
 	Sessions        contracts.SessionStore
@@ -152,32 +166,46 @@ func New(s store.Store, mr *router.ModelRouter, gw *mcpgw.Gateway, wf *workflow.
 	// the default ~/.agentoven/journal path; set AGENTOVEN_JOURNAL_DISABLE=true
 	// to turn it off entirely.
 	//
-	// Nothing here prunes old journals yet — unlike traces/audit events, which
-	// have a retention janitor (internal/retention), a finished run's journal
-	// file is left on disk until something calls Journal.Discard. That is a
-	// known gap, not an oversight: worth a janitor of its own once this sees
-	// real use, not before.
 	if os.Getenv("AGENTOVEN_JOURNAL_DISABLE") != "true" {
 		if j, err := executor.NewFileJournal(os.Getenv("AGENTOVEN_JOURNAL_DIR")); err != nil {
 			log.Warn().Err(err).Msg("Failed to initialize execution journal, runs will not be resumable")
 		} else {
 			exec.SetJournal(j)
+			// Finished runs' journals are removed after a week and runs nothing has
+			// touched for two weeks are ended as abandoned (a run waiting for a person is
+			// never stale). AGENTOVEN_JOURNAL_RETENTION_DAYS / _STALE_DAYS change this; 0
+			// turns that half off.
+			j.StartJanitor(context.Background(), time.Hour,
+				envDays("AGENTOVEN_JOURNAL_RETENTION_DAYS", 7), envDays("AGENTOVEN_JOURNAL_STALE_DAYS", 14))
 		}
 	}
 
-	return &Handlers{
+	var tasks *executor.TaskManager
+	if exec.Journal() != nil {
+		tasks = executor.NewTaskManager(exec, executor.TaskManagerOptions{
+			PerKitchen: envInt("AGENTOVEN_TASKS_PER_KITCHEN", 4),
+			Global:     envInt("AGENTOVEN_TASKS_GLOBAL", 16),
+			QueueMax:   envInt("AGENTOVEN_TASKS_QUEUE", 64),
+		})
+	}
+
+	h := &Handlers{
 		Store:           s,
 		Router:          mr,
 		MCPGateway:      gw,
 		Workflow:        wf,
 		Resolver:        res,
 		Executor:        exec,
+		Tasks:           tasks,
 		ProcessManager:  pm,
 		PromptValidator: &contracts.CommunityPromptValidator{},
 		Catalog:         cat,
 		Sessions:        sess,
 		SkillUploads:    skills.NewUploadStore(),
 	}
+	exec.SetAudit(h.auditRun)
+	h.startTaskRecovery()
+	return h
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -259,6 +287,10 @@ func (h *Handlers) RegisterAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.MaxTurns <= 0 {
 		req.MaxTurns = 10
+	}
+	if status, err := h.checkBotAgent(&req); err != nil {
+		respondError(w, status, err.Error())
+		return
 	}
 
 	if err := h.Store.CreateAgent(r.Context(), &req); err != nil {
@@ -345,6 +377,16 @@ func (h *Handlers) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if req.Runtime != "" {
 		agent.Runtime = req.Runtime
 	}
+	if req.Bot != nil {
+		agent.Bot = req.Bot
+	}
+	if agent.IsAgenticBot() && req.ExecutionMode != "" {
+		agent.ExecutionMode = req.ExecutionMode // a bot must be able to move into a confined mode
+	}
+	if status, err := h.checkBotAgent(agent); err != nil {
+		respondError(w, status, err.Error())
+		return
+	}
 	// R9 fields: backup provider and guardrails
 	if req.BackupProvider != "" {
 		agent.BackupProvider = req.BackupProvider
@@ -352,7 +394,8 @@ func (h *Handlers) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if req.BackupModel != "" {
 		agent.BackupModel = req.BackupModel
 	}
-	if len(req.Guardrails) > 0 {
+	// nil means the field was left out (keep them); an empty list removes them all.
+	if req.Guardrails != nil {
 		agent.Guardrails = req.Guardrails
 	}
 	agent.UpdatedAt = time.Now().UTC()
@@ -745,6 +788,9 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 		}
 
 		response, trace, err := h.Executor.Execute(r.Context(), agent, req.Message, resolved, nil, req.ThinkingEnabled)
+		if h.respondRunStopped(w, agentName, trace, err) {
+			return
+		}
 		if err != nil {
 			respondError(w, http.StatusBadGateway, "Execution failed: "+err.Error())
 			return
@@ -770,7 +816,7 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 			ID:          trace.TraceID,
 			AgentName:   agentName,
 			Kitchen:     kitchen,
-			Status:      "completed",
+			Status:      traceStatus(trace),
 			DurationMs:  trace.TotalMs,
 			TotalTokens: trace.Usage.TotalTokens,
 			CostUSD:     trace.Usage.EstimatedCost,
@@ -2504,6 +2550,8 @@ func (h *Handlers) A2AEndpoint(w http.ResponseWriter, r *http.Request) {
 		h.handleA2ATaskSend(w, r, rpcReq.Params, rpcReq.ID)
 	case "tasks/get":
 		h.handleA2ATaskGet(w, r, rpcReq.Params, rpcReq.ID)
+	case "tasks/cancel":
+		h.handleA2ATaskCancel(w, r, rpcReq.Params, rpcReq.ID)
 	default:
 		w.Header().Set("Content-Type", "application/a2a+json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2540,6 +2588,10 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 		Metadata struct {
 			AgentName string `json:"agent_name"`
 		} `json:"metadata"`
+		// configuration.blocking=false asks for the task back at once, not its answer.
+		Configuration struct {
+			Blocking *bool `json:"blocking"`
+		} `json:"configuration"`
 	}
 	if err := json.Unmarshal(params, &taskReq); err != nil {
 		w.Header().Set("Content-Type", "application/a2a+json")
@@ -2661,8 +2713,12 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 			return
 		}
 
-		// Resolve agent ingredients before async execution
-		resolved, err := h.Resolver.Resolve(r.Context(), agent)
+		// Use the config pinned at bake time, as invoke does, and resolve live only for an
+		// agent that was never baked.
+		resolved := agent.ResolvedConfig
+		if resolved == nil {
+			resolved, err = h.Resolver.Resolve(r.Context(), agent)
+		}
 		if err != nil {
 			w.Header().Set("Content-Type", "application/a2a+json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2715,6 +2771,11 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 				a2aRPCError(w, rpcID, -32001, "Input blocked by guardrails", eval.Results)
 				return
 			}
+		}
+
+		if taskReq.Configuration.Blocking != nil && !*taskReq.Configuration.Blocking {
+			h.a2aSendAsync(w, r, rpcID, agent, resolved, gr, userMessage, userParts, kitchen)
+			return
 		}
 
 		// Create initial trace immediately so tasks/get can find it
@@ -2930,8 +2991,17 @@ func (h *Handlers) handleA2ATaskGet(w http.ResponseWriter, r *http.Request, para
 		return
 	}
 
-	// Look up actual task state from the trace store
+	// A background task is read from the task manager (which checks the kitchen).
+	if h.a2aTaskFromManager(w, r, req.ID, rpcID) {
+		return
+	}
+
+	// Look up actual task state from the trace store. A task is only visible to the kitchen
+	// it was created in: a task ID is not a credential.
 	trace, err := h.Store.GetTrace(r.Context(), req.ID)
+	if err == nil && trace != nil && trace.Kitchen != middleware.GetKitchen(r.Context()) {
+		trace = nil
+	}
 	if err != nil || trace == nil {
 		w.Header().Set("Content-Type", "application/a2a+json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -4047,6 +4117,9 @@ func (h *Handlers) proxyToProcess(
 	}
 
 	traceID := uuid.New().String()
+	if id := hostedRunFrom(ctx); id != "" {
+		traceID = id // the run the process's model calls will be accounted to
+	}
 	start := time.Now()
 
 	// Build the invoke request body
@@ -4054,8 +4127,25 @@ func (h *Handlers) proxyToProcess(
 		"message":  message,
 		"trace_id": traceID,
 	}
+	if id := hostedRunFrom(ctx); id != "" {
+		body["run_id"] = id
+	}
+	callTimeout := 30 * time.Second
+	if agent.IsAgenticBot() {
+		// A bot's run is tracked by the bot manager under this ID, whether or not the agent has a budget.
+		if err := h.admitBotInvoke(ctx, agent, traceID, message); err != nil {
+			return "", nil, err
+		}
+		body["run_id"] = traceID
+		callTimeout = botInvokeTimeout()
+	}
 	if len(variables) > 0 {
 		body["variables"] = variables
+	}
+	if sid := proxySessionFrom(ctx); sid != "" {
+		// A hosted framework keeps its own memory, keyed on a thread ID.
+		body["session_id"] = sid
+		body["thread_id"] = sid
 	}
 	if providerTLS != nil && strings.TrimSpace(providerTLS.ProviderName) != "" {
 		body["provider_config"] = map[string]interface{}{
@@ -4078,7 +4168,7 @@ func (h *Handlers) proxyToProcess(
 	httpReq.Header.Set("Content-Type", "application/json")
 	h.signPodRequest(httpReq, agent.Kitchen, agent.Name)
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: callTimeout}
 	httpResp, err := client.Do(httpReq)
 	if err != nil {
 		return "", nil, fmt.Errorf("proxy request to agent process failed: %w", err)
@@ -4144,14 +4234,30 @@ func (h *Handlers) proxyToProcessStream(
 	}
 
 	traceID := uuid.New().String()
+	if id := hostedRunFrom(ctx); id != "" {
+		traceID = id
+	}
 	streamURL := strings.TrimRight(agent.Process.Endpoint, "/") + "/invoke/stream"
 
 	body := map[string]interface{}{
 		"message":  message,
 		"trace_id": traceID,
 	}
+	if id := hostedRunFrom(ctx); id != "" {
+		body["run_id"] = id
+	}
+	if agent.IsAgenticBot() {
+		if err := h.admitBotInvoke(ctx, agent, traceID, message); err != nil {
+			return err
+		}
+		body["run_id"] = traceID
+	}
 	if len(variables) > 0 {
 		body["variables"] = variables
+	}
+	if sid := proxySessionFrom(ctx); sid != "" {
+		body["session_id"] = sid
+		body["thread_id"] = sid
 	}
 	reqBody, err := json.Marshal(body)
 	if err != nil {
@@ -4353,10 +4459,22 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	// Framework-native agents without a running process are an error; agentoven-
 	// native agents without a process fall back to the in-process Go executor.
 	if agent.Process != nil && agent.Process.Status == models.ProcessRunning {
-		response, traceRecord, err := h.proxyToProcess(r.Context(), agent, req.Message, sanitizedVars, nil, kitchen)
+		hostedCtx, endRun := h.beginHostedRun(withCallerSession(r.Context(), req.SessionID), agent)
+		response, traceRecord, err := h.proxyToProcess(hostedCtx, agent, req.Message, sanitizedVars, nil, kitchen)
+		outcome := endRun()
+		if outcome != nil && outcome.Stopped != nil {
+			// The agent's model calls were refused at its budget: report that, with what it spent.
+			h.respondHostedStopped(w, agentName, hostedRunFrom(hostedCtx), outcome)
+			return
+		}
 		if err != nil {
 			respondError(w, http.StatusBadGateway, "Agent pod execution failed: "+err.Error())
 			return
+		}
+		if outcome != nil && traceRecord != nil {
+			// The gateway saw every model call, so its count is the authoritative one.
+			u := outcome.Usage
+			traceRecord.Usage, traceRecord.TotalTokens, traceRecord.CostUSD = &u, u.TotalTokens, u.EstimatedCost
 		}
 
 		// ── Output Guardrails ─────────────────────────────────
@@ -4390,6 +4508,9 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Execute the agentic loop
 	response, trace, err := h.Executor.Execute(r.Context(), agent, req.Message, resolved, sanitizedVars, req.ThinkingEnabled, req.SessionID)
+	if h.respondRunStopped(w, agentName, trace, err) {
+		return
+	}
 	if err != nil {
 		respondError(w, http.StatusBadGateway, "Execution failed: "+err.Error())
 		return
@@ -4417,7 +4538,7 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		ID:          trace.TraceID,
 		AgentName:   agentName,
 		Kitchen:     kitchen,
-		Status:      "completed",
+		Status:      traceStatus(trace),
 		DurationMs:  trace.TotalMs,
 		TotalTokens: trace.Usage.TotalTokens,
 		CostUSD:     trace.Usage.EstimatedCost,
@@ -4542,11 +4663,9 @@ func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 		if sanitizedVars == nil {
 			sanitizedVars = map[string]string{}
 		}
-		if err := h.proxyToProcessStream(r.Context(), w, agent, req.Message, sanitizedVars); err != nil {
-			// proxyToProcessStream writes headers only on success; on early
-			// error we can still return a JSON error response.
-			respondError(w, http.StatusBadGateway, err.Error())
-		}
+		// Relays the process's stream as it arrives, or, when the agent has output
+		// guardrails, holds it back until the whole reply has been checked.
+		h.streamProcess(w, r, agent, gr, req.Message, sanitizedVars, req.SessionID)
 		return
 	}
 
@@ -4582,14 +4701,26 @@ func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-	flusher, canFlush := w.(http.Flusher)
+	// With output guardrails the frames are held back and released only once the reply
+	// has been checked (see stream_guard.go); without them they go out as they arrive.
+	var held *heldEvents
+	var flusher http.Flusher
+	canFlush := false
+	if h.holdBackNeeded(gr) {
+		held = &heldEvents{}
+	} else {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		flusher, canFlush = w.(http.Flusher)
+	}
 
 	writeEvent := func(ev executor.Event) error {
+		if held != nil {
+			return held.add(ev)
+		}
 		payload, merr := json.Marshal(ev)
 		if merr != nil {
 			return merr
@@ -4604,9 +4735,13 @@ func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response, trace, err := h.Executor.ExecuteStream(r.Context(), agent, req.Message, resolved, sanitizedVars, req.ThinkingEnabled, writeEvent, req.SessionID)
-	if err == executor.ErrPausedForApproval {
-		// The EventPaused frame already told the client what's pending —
-		// there is no final response to persist until Resume runs the turn.
+	if held != nil && !h.releaseHeld(w, r, agent, gr, held, response) {
+		return // blocked: the caller got a 403 and none of the reply
+	}
+	var pausedErr *executor.PausedError
+	if err == executor.ErrPausedForApproval || errors.As(err, &pausedErr) {
+		// The EventPaused / EventBudgetPaused frame already told the client what is
+		// pending; there is no final response to persist until Resume runs.
 		return
 	}
 	if err != nil {
@@ -4614,23 +4749,12 @@ func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 		return // the failure already went out over the stream as an EventError frame
 	}
 
-	// Output guardrails run after the fact here, unlike the synchronous path:
-	// tokens are already on the wire by the time the full response is known,
-	// so this can only flag/audit a violation, not retract what was sent.
-	if h.Guardrails != nil && len(gr) > 0 {
-		if eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), gr, response); gErr != nil {
-			log.Warn().Err(gErr).Str("agent", agentName).Msg("Output guardrail evaluation error")
-		} else if !eval.Passed {
-			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "output", eval, nil)
-		}
-	}
-
 	traceUsage := trace.Usage
 	traceRecord := &models.Trace{
 		ID:          trace.TraceID,
 		AgentName:   agentName,
 		Kitchen:     kitchen,
-		Status:      "completed",
+		Status:      traceStatus(trace),
 		DurationMs:  trace.TotalMs,
 		TotalTokens: trace.Usage.TotalTokens,
 		CostUSD:     trace.Usage.EstimatedCost,
@@ -4682,6 +4806,9 @@ func (h *Handlers) ResumeRun(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Approved bool   `json:"approved"`
 		Note     string `json:"note,omitempty"`
+		// Extend raises the run's caps when it is paused at its budget. Approving a
+		// budget pause without one is refused: a person has to say how much more.
+		Extend *models.BudgetExtension `json:"extend,omitempty"`
 	}
 	var decision *executor.ResumeDecision
 	if r.ContentLength != 0 {
@@ -4689,29 +4816,48 @@ func (h *Handlers) ResumeRun(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
-		decision = &executor.ResumeDecision{Approved: body.Approved, Note: body.Note}
+		decision = &executor.ResumeDecision{Approved: body.Approved, Note: body.Note, Extend: body.Extend}
+		if decision.Extend != nil {
+			if !h.authorizeExtension(w, r, decision.Extend) {
+				return
+			}
+			if id := pkgmw.GetIdentity(r.Context()); id != nil {
+				decision.Extend.By = id.Subject
+			}
+		}
 	}
 
-	response, trace, err := h.Executor.Resume(r.Context(), kitchen, traceID, decision)
+	// A resumed run is an agent's output reaching a caller like any other, so the same
+	// guardrails stand in front of it. They are established before anything runs.
+	agent, aerr := h.Store.GetAgent(r.Context(), kitchen, agentName)
+	if aerr != nil || agent == nil {
+		agent = &models.Agent{Name: agentName, Kitchen: kitchen}
+	}
+	gr, ok := h.requireGuardrails(w, r, agent, agent.Guardrails)
+	if !ok {
+		return
+	}
+
+	response, trace, err := h.Executor.ResumeFor(r.Context(), kitchen, agentName, traceID, decision)
 	if err != nil {
 		switch {
-		case err == executor.ErrPausedForApproval:
-			// Paused again on a later approval-gated call — not a failure.
-			respondJSON(w, http.StatusOK, map[string]interface{}{
-				"agent":    agentName,
-				"trace_id": traceID,
-				"status":   "paused",
-				"pending":  trace.Pending,
-			})
+		case h.respondRunStopped(w, agentName, trace, err):
+			// paused again (approval or budget), ended at its budget, or unpriced
 		case strings.Contains(err.Error(), "no journal configured"):
 			respondError(w, http.StatusServiceUnavailable, err.Error())
 		case strings.Contains(err.Error(), "not found"):
 			respondError(w, http.StatusNotFound, err.Error())
-		case strings.Contains(err.Error(), "already finished"), strings.Contains(err.Error(), "ResumeDecision is required"):
+		case strings.Contains(err.Error(), "already finished"), strings.Contains(err.Error(), "ResumeDecision is required"),
+			strings.Contains(err.Error(), "needs an extension"), strings.Contains(err.Error(), "already being resumed"):
 			respondError(w, http.StatusBadRequest, err.Error())
 		default:
 			respondError(w, http.StatusBadGateway, "Resume failed: "+err.Error())
 		}
+		return
+	}
+
+	if pass, eval := h.outputVerdict(r.Context(), agent, gr, response); !pass {
+		respondOutputBlocked(w, eval)
 		return
 	}
 
@@ -4720,7 +4866,7 @@ func (h *Handlers) ResumeRun(w http.ResponseWriter, r *http.Request) {
 		ID:          trace.TraceID,
 		AgentName:   agentName,
 		Kitchen:     kitchen,
-		Status:      "completed",
+		Status:      traceStatus(trace),
 		DurationMs:  trace.TotalMs,
 		TotalTokens: trace.Usage.TotalTokens,
 		CostUSD:     trace.Usage.EstimatedCost,
@@ -5812,6 +5958,13 @@ func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A hosted framework agent (LangChain, LangGraph, Deep Agents, ...) answers with its
+	// own code. Never fall through to the raw model router for one.
+	if agent.IsFrameworkNative() {
+		h.sendNativeSessionMessage(w, r, agent, session, content, gr)
+		return
+	}
+
 	// Route through model router with sliding context window
 	startTime := time.Now()
 
@@ -6543,6 +6696,15 @@ func (h *Handlers) requireGuardrails(w http.ResponseWriter, r *http.Request, age
 		return nil, false
 	}
 	return gr, true
+}
+
+// SetSubagentRuntime installs the runtime that lets agents spawn subagents they describe
+// themselves (the task and tasks tools). Without one, agents can only delegate to registered
+// agents. Pass nil to remove it.
+func (h *Handlers) SetSubagentRuntime(rt contracts.SubagentRuntime) {
+	if h.Executor != nil {
+		h.Executor.SetSubagentRuntime(rt)
+	}
 }
 
 // SetGuardrailPolicy makes workspace guardrails apply to every request this handler

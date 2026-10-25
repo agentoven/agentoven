@@ -123,6 +123,9 @@ type ModelRouter struct {
 	// circuit tracks per-provider failure streaks so a provider that is
 	// clearly down stops eating the retry budget on every subsequent call.
 	circuit *circuitBreaker
+
+	// spendGate, when set, is consulted before every model call (see spendgate.go).
+	spendGate atomic.Pointer[gateBox]
 }
 
 // CatalogLookup is the interface the router needs from the model catalog.
@@ -818,10 +821,14 @@ func (mr *ModelRouter) callProvider(ctx context.Context, provider *models.ModelP
 	driverReq := *req
 	driverReq.Model = model
 
+	if err := mr.spendAllow(ctx, provider, &driverReq); err != nil {
+		return nil, err
+	}
 	resp, err := driver.Call(ctx, provider, &driverReq)
 	if err != nil {
 		return nil, err
 	}
+	mr.spendRecord(ctx, provider, &driverReq, resp)
 
 	latencyMs := time.Since(start).Milliseconds()
 	resp.LatencyMs = latencyMs

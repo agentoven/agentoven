@@ -26,7 +26,19 @@ type localProcess struct {
 	cancel context.CancelFunc
 	pid    int
 	logs   *LogBuffer
+	// exited is closed once the process has been reaped. Exactly one goroutine (started with the
+	// process) calls cmd.Wait; everything else waits on this channel, because Wait must not be
+	// called twice on one Cmd.
+	exited chan struct{}
+	reap   sync.Once
+	// reaper is what reap runs; set when the process is registered.
+	reaper func()
 }
+
+// startReaper begins reaping the process (once). It is called when startup is done, or earlier by
+// Stop if startup failed, but never before the output readers have had their chance at the
+// pipes: Wait closes them.
+func (p *localProcess) startReaper() { p.reap.Do(func() { go p.reaper() }) }
 
 // LocalExecutor spawns agent processes as Python subprocesses.
 type LocalExecutor struct {
@@ -40,6 +52,23 @@ type LocalExecutor struct {
 func NewLocalExecutor() *LocalExecutor {
 	return &LocalExecutor{
 		processes: make(map[string]*localProcess),
+	}
+}
+
+// Alive reports whether the subprocess started as pid for this agent is still running. The
+// reaper forgets a process when it exits, so absence from the map means it is gone.
+func (le *LocalExecutor) Alive(kitchen, agentName string, pid int) bool {
+	le.mu.Lock()
+	proc := le.processes[processKey(kitchen, agentName)]
+	le.mu.Unlock()
+	if proc == nil || proc.pid != pid {
+		return false
+	}
+	select {
+	case <-proc.exited:
+		return false
+	default:
+		return true
 	}
 }
 
@@ -60,7 +89,7 @@ func (le *LocalExecutor) Start(ctx context.Context, agent *models.Agent, info *m
 
 	// Find Python executable
 	pythonBin := findPython()
-	if pythonBin == "" {
+	if pythonBin == "" && agent.Entrypoint == "" {
 		return fmt.Errorf("python3 not found in PATH — install Python 3.10+ to use local execution mode")
 	}
 
@@ -121,13 +150,29 @@ func (le *LocalExecutor) Start(ctx context.Context, agent *models.Agent, info *m
 	info.PID = cmd.Process.Pid
 
 	key := processKey(agent.Kitchen, agent.Name)
-	le.mu.Lock()
-	le.processes[key] = &localProcess{
+	proc := &localProcess{
 		cmd:    cmd,
 		cancel: cancel,
 		pid:    cmd.Process.Pid,
 		logs:   logBuf,
+		exited: make(chan struct{}),
 	}
+	// Reaping starts once startup has read what it needs from the pipes (below), or when Stop
+	// asks for it. Whichever comes first starts it; it runs once.
+	proc.reaper = func() {
+		_ = cmd.Wait()
+		close(proc.exited)
+		le.mu.Lock()
+		// Only forget this process: a later Start under the same key may have replaced it.
+		if le.processes[key] == proc {
+			delete(le.processes, key)
+		}
+		le.mu.Unlock()
+		log.Info().Str("agent", agent.Name).Int("pid", info.PID).Msg("Agent process exited")
+	}
+
+	le.mu.Lock()
+	le.processes[key] = proc
 	le.mu.Unlock()
 
 	// Stream stderr to log buffer in the background
@@ -185,15 +230,7 @@ func (le *LocalExecutor) Start(ctx context.Context, agent *models.Agent, info *m
 		log.Warn().Err(err).Str("agent", agent.Name).Msg("Agent health check failed, process may still be starting")
 	}
 
-	// Monitor the process in the background
-	go func() {
-		_ = cmd.Wait()
-		le.mu.Lock()
-		delete(le.processes, key)
-		le.mu.Unlock()
-		log.Info().Str("agent", agent.Name).Int("pid", info.PID).Msg("Agent process exited")
-	}()
-
+	proc.startReaper()
 	return nil
 }
 
@@ -273,18 +310,15 @@ func (le *LocalExecutor) Stop(_ context.Context, info *models.ProcessInfo) error
 	// Try graceful kill first
 	if proc.cmd.Process != nil {
 		_ = proc.cmd.Process.Signal(os.Interrupt) // SIGINT
+		proc.startReaper()
 		// Give it 3 seconds to shut down gracefully
-		done := make(chan struct{})
-		go func() {
-			_ = proc.cmd.Wait()
-			close(done)
-		}()
 		select {
-		case <-done:
+		case <-proc.exited:
 			// Clean exit
 		case <-time.After(3 * time.Second):
-			// Force kill
+			// Force kill, then wait for it to be reaped
 			_ = proc.cmd.Process.Kill()
+			<-proc.exited
 		}
 	}
 

@@ -1,0 +1,38 @@
+---
+title: "Provider Capabilities"
+description: "Which model provider kinds support images, PDFs, video, speech, realtime calls and built-in web search, generated from the driver code."
+section: "Models & Capabilities"
+order: 6
+icon: "compare"
+---
+
+{{.Note}}
+
+What an agent can do with media depends on the provider it runs on: an agent has exactly the modalities of its provider. This matrix is computed from the provider drivers shipped in AgentOven {{.Version}}, so it cannot drift from the code. For how to switch a modality on or off, see [Provider modalities](/modalities).
+
+## Matrix
+
+{{.Table}}
+
+Yes means the driver and the sample model support it by default. No means it is not available without an override, or not at all.
+
+## How to read it
+
+- **Image, PDF and video** are decided per model, using the model catalog and the driver's defaults. The sample model shown is the one this matrix was computed with; another model of the same kind can differ. Set `config.modalities` on the provider to turn a modality on for a gateway whose models the catalog does not know, or off for one you do not want used.
+- **PDF** is "yes" for any model that is not switched off: a model without native PDF input gets the extracted text instead.
+- **Speech** means the driver has a speech-to-text and text-to-speech API. Cascaded voice calls use the agent's own provider only; voice never borrows another provider's speech.
+- **Realtime** means the driver can open a live speech-to-speech session. Calling it from the control plane is an AgentOven Pro feature.
+- **Web search** is the provider's own built-in search. It is the one modality that is off until you switch it on (`config.modalities.web.enabled: true`), and with Gemini it cannot be combined with function tools.
+
+<Callout type="note">
+
+Pro adds more provider drivers (for example cloud-hosted model services); they are not in this matrix, which covers the open-source drivers.
+
+</Callout>
+
+## Next steps
+
+<Cards>
+<Card title="Provider modalities" href="/modalities">Switch image, PDF, video, audio, realtime and web on or off per provider.</Card>
+<Card title="Model providers" href="/model-providers">Register and manage providers.</Card>
+</Cards>
