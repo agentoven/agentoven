@@ -74,7 +74,8 @@ if state["status"] == "paused":
     client.reject_gate(run["run_id"], state["pending_gates"][0], "The tone is too casual")
 ```
 
-Builders: `agent`, `check`, `lookup`, `decide`, `ask`, `together`, `each`, `sub_recipe`, and `mentions` for a condition.
+Builders: `agent`, `check`, `lookup`, `decide`, `ask`, `together`, `wait`, `notify`, `sub_recipe`, `each`, and `mentions` for a condition.
+A `notify` step pushes to a live-feed channel that `client.listen("channel")` reads (`pip install "agentoven[realtime]"`).
 Also `Flow.add`, `Flow.validate`, `Flow.to_wire`, `update_recipe`, `delete_recipe`, `list_recipe_runs` and `approve_gate`.
 
 ## Realtime voice (Pro)

@@ -37,7 +37,8 @@ const state = await pro.waitForRecipeRun('refund-review', run.run_id as string);
 if (state.status === 'paused') await pro.rejectGate(run.run_id as string, state.pending_gates![0], 'The tone is too casual');
 ```
 
-Builders: `agent`, `check`, `lookup`, `decide`, `ask`, `together`, `each`, `subRecipe`, and `mentions` for a condition.
+Builders: `agent`, `check`, `lookup`, `decide`, `ask`, `together`, `wait`, `notify`, `subRecipe`, `each`, and `mentions` for a condition.
+A `notify` step pushes to a live-feed channel that `listenToChannel({ url, channel, apiKey })` reads.
 Also `Flow.add`, `Flow.validate`, `Flow.toWire`, `updateRecipe`, `deleteRecipe`, `listRecipeRuns` and `approveGate`.
 
 ## Modalities

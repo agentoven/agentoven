@@ -185,6 +185,10 @@ pub enum StepKind {
     Map,
     /// Run another recipe as a step.
     SubRecipe,
+    /// Pause for a length of time, or until a time.
+    Wait,
+    /// Push a message to channels and tools, then carry on.
+    Notify,
 }
 
 /// Retry policy for a step.
@@ -203,7 +207,7 @@ pub struct RetryPolicy {
 
 /// The kinds of step the engine runs, as it spells them.
 pub const ENGINE_KINDS: &[&str] = &[
-    "agent", "evaluator", "rag", "human_gate", "condition", "router", "map", "sub_recipe", "fan_out", "fan_in",
+    "agent", "evaluator", "rag", "human_gate", "condition", "router", "map", "sub_recipe", "fan_out", "fan_in", "wait", "notify",
 ];
 
 /// A step kind as written in a recipe document, spelled the way the engine spells it. Hyphens and
@@ -339,7 +343,7 @@ mod document_tests {
     #[test]
     fn kinds_are_spelled_the_way_the_engine_spells_them() {
         for (written, want) in [("human-gate", "human_gate"), ("gate", "human_gate"), ("human_gate", "human_gate"), ("fan-out", "fan_out"),
-            ("parallel", "fan_out"), ("join", "fan_in"), ("branch", "condition"), ("sub-recipe", "sub_recipe"), ("map", "map"), ("router", "router"), ("rag", "rag")] {
+            ("parallel", "fan_out"), ("join", "fan_in"), ("branch", "condition"), ("sub-recipe", "sub_recipe"), ("map", "map"), ("router", "router"), ("rag", "rag"), ("wait", "wait"), ("notify", "notify")] {
             assert_eq!(engine_kind(written), Some(want), "{written}");
         }
         assert_eq!(engine_kind("nonsense"), None);
@@ -381,6 +385,18 @@ mod document_tests {
         assert_eq!(s["notify_tools"], json!(["slack"]));
         assert_eq!(s["approver_domain"], "corp.com");
         assert_eq!(s["config"], json!({"max_wait_minutes": 60, "on_reject": "branch"}));
+    }
+
+    #[test]
+    fn wait_and_notify_steps_keep_their_settings() {
+        let s = one(json!({"name": "pause", "kind": "wait", "config": {"duration": "5m"}}));
+        assert_eq!(s["kind"], "wait");
+        assert_eq!(s["config"], json!({"duration": "5m"}));
+        let n = one(json!({"name": "tell", "kind": "notify", "notify": ["pager"],
+            "config": {"message": "Run {{run_id}} needs you", "channels": ["ops"], "on_failure": "carry_on"}}));
+        assert_eq!(n["kind"], "notify");
+        assert_eq!(n["notify_tools"], json!(["pager"]));
+        assert_eq!(n["config"]["channels"], json!(["ops"]));
     }
 
     #[test]
