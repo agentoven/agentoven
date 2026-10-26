@@ -27,7 +27,7 @@ export interface FlowNode {
   lanes?: FlowNode[][];
 }
 
-export type StepType = 'agent' | 'lookup' | 'person' | 'check' | 'decide' | 'parallel';
+export type StepType = 'agent' | 'lookup' | 'person' | 'check' | 'decide' | 'parallel' | 'recipe';
 
 export const isDecide = (n: FlowNode): boolean => n.step.kind === 'condition';
 export const isParallel = (n: FlowNode): boolean => n.step.kind === 'parallel';
@@ -38,7 +38,7 @@ export const hasPaths = (n: FlowNode): boolean => isDecide(n) || isApproval(n);
 export const MAX_LANES = 4;
 
 /** The kinds the builder can draw. Anything else makes a recipe read-only here. */
-const SUPPORTED_KINDS = new Set(['agent', 'evaluator', 'rag', 'human_gate', 'condition']);
+const SUPPORTED_KINDS = new Set(['agent', 'evaluator', 'rag', 'human_gate', 'condition', 'sub_recipe']);
 
 /** What a decide step tests: the condition step's own result says whether its expression held. */
 export const YES_CONDITION = 'condition_met == true';
@@ -115,6 +115,7 @@ export function newStep(type: StepType, flow: FlowNode[], agent = ''): FlowNode 
     case 'lookup': return make('Look something up', 'rag', {}, { top_k: 3 });
     case 'person': return make('Ask a person', 'human_gate', {}, { max_wait_minutes: 1440 });
     case 'decide': return make('Decide', 'condition', {}, { expression: '' });
+    case 'recipe': return make('Run a recipe', 'sub_recipe', { recipe_ref: '' });
   }
 }
 
@@ -443,8 +444,11 @@ export function sameWire(a: WireStep[], b: WireStep[]): boolean {
 
 export interface Problem { id: string; message: string }
 
-/** What would stop this recipe from running. `agents` are the names that exist. */
-export function validate(flow: FlowNode[], agents: Set<string>): Problem[] {
+/** The recipes a "run a recipe" step may name: the ones that exist, and this one (which it may not name). */
+export interface RecipeContext { names: Set<string>; self: string }
+
+/** What would stop this recipe from running. `agents` are the names that exist; `recipes` are the recipes, when known. */
+export function validate(flow: FlowNode[], agents: Set<string>, recipes?: RecipeContext): Problem[] {
   const out: Problem[] = [];
   const nodes = realNodes(flow);
   if (nodes.length === 0) return [{ id: '', message: 'Add at least one step.' }];
@@ -466,6 +470,12 @@ export function validate(flow: FlowNode[], agents: Set<string>): Problem[] {
     const t = titleOf(s);
     if ((s.kind === 'agent' || s.kind === 'evaluator') && !s.agent_ref) out.push({ id: n.id, message: `"${t}" needs an agent.` });
     else if ((s.kind === 'agent' || s.kind === 'evaluator') && !agents.has(s.agent_ref!)) out.push({ id: n.id, message: `"${t}" uses ${s.agent_ref}, which no longer exists.` });
+    if (s.kind === 'sub_recipe') {
+      const ref = String(s.recipe_ref ?? '');
+      if (!ref) out.push({ id: n.id, message: `"${t}" needs a recipe to run.` });
+      else if (recipes && ref === recipes.self) out.push({ id: n.id, message: `"${t}" cannot run this recipe itself.` });
+      else if (recipes && !recipes.names.has(ref)) out.push({ id: n.id, message: `"${t}" runs ${ref}, which no longer exists.` });
+    }
     if (s.kind === 'condition' && !String(s.config?.expression ?? '').trim()) out.push({ id: n.id, message: `"${t}" needs a condition to test.` });
   }
   return out;

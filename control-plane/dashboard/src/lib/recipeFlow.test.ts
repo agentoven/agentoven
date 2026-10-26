@@ -346,3 +346,51 @@ test('a hand-written approval whose branches the builder would change is read-on
   const back = rewrap(wire);
   assert.equal(back.ok, false);
 });
+
+// ── Run a recipe ─────────────────────────────────────────────
+
+const together = (...lanes: FlowNode[][]): FlowNode => ({ id: `together-${lanes.length}`, step: { name: '', kind: 'parallel' }, lanes });
+const runRecipe = (title: string, ref: string, extra: Partial<WireStep> = {}): FlowNode =>
+  step(title, 'sub_recipe', { recipe_ref: ref, ...extra });
+
+test('a "run a recipe" step starts without one chosen and says so', () => {
+  const n = newStep('recipe', []);
+  assert.equal(n.step.kind, 'sub_recipe');
+  assert.equal(n.step.recipe_ref, '');
+  assert.equal(titleOf(n.step), 'Run a recipe');
+  const problems = validate([n], agents);
+  assert.match(problems[0].message, /needs a recipe to run/);
+});
+
+test('a "run a recipe" step is checked against the recipes that exist, and may not run its own recipe', () => {
+  const ctx = { names: new Set(['reply-writer', 'this-one']), self: 'this-one' };
+  assert.deepEqual(validate([runRecipe('Write', 'reply-writer')], agents, ctx), []);
+  assert.match(validate([runRecipe('Write', 'this-one')], agents, ctx)[0].message, /cannot run this recipe itself/);
+  assert.match(validate([runRecipe('Write', 'gone')], agents, ctx)[0].message, /runs gone, which no longer exists/);
+  assert.deepEqual(validate([runRecipe('Write', 'gone')], agents), [], 'without the list of recipes only a missing name is a problem');
+});
+
+test('a "run a recipe" step keeps its mappings through writing and reading, wherever it sits', () => {
+  const mapped = runRecipe('Draft reply', 'reply-writer', { input_mapping: { ticket: 'parent_input.ticket' }, output_mapping: { reply: 'write.text' } });
+  const flows: FlowNode[][] = [
+    [agent('Triage'), mapped, agent('Log it', 'writer')],
+    [agent('Triage'), decide('Big?', [runRecipe('Escalate', 'escalation')], [mapped])],
+    [together([mapped], [agent('Other')])],
+  ];
+  for (const flow of flows) {
+    const wire = compile(flow);
+    const back = rewrap(wire);
+    assert.ok(back.ok, back.ok ? '' : back.reason);
+    if (back.ok) assert.ok(sameWire(compile(back.flow), wire));
+  }
+  const wire = compile([mapped]);
+  assert.deepEqual(wire[0].input_mapping, { ticket: 'parent_input.ticket' });
+  assert.deepEqual(wire[0].output_mapping, { reply: 'write.text' });
+  assert.equal(wire[0].recipe_ref, 'reply-writer');
+});
+
+test('clearing a mapping removes it from the recipe', () => {
+  const flow = [runRecipe('Draft', 'reply-writer', { input_mapping: { a: 'b' } })];
+  const cleared = updateStep(flow, 'Draft', { input_mapping: undefined });
+  assert.equal('input_mapping' in JSON.parse(JSON.stringify(compile(cleared)))[0], false);
+});

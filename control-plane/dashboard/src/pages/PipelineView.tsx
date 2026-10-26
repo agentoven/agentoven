@@ -580,7 +580,13 @@ export function PipelineViewPage() {
         title={detailStep ? `Step: ${detailStep.step_name}` : ''}
         width="max-w-3xl"
       >
-        {detailStep && <StepDetailPanel step={detailStep} />}
+        {detailStep && (
+          <StepDetailPanel
+            step={detailStep}
+            subRecipe={String(selectedRecipe.steps.find((s) => s.name === detailStep.step_name)?.recipe_ref ?? '') || undefined}
+            onOpenSubRun={(recipe, id) => { setDetailStep(null); navigate(`/dishshelf/${encodeURIComponent(recipe)}/runs/${id}`); }}
+          />
+        )}
       </Modal>
     </div>
   );
@@ -588,7 +594,7 @@ export function PipelineViewPage() {
 
 // ── Step Detail Panel ────────────────────────────────────────
 
-function StepDetailPanel({ step }: { step: StepResult }) {
+function StepDetailPanel({ step, subRecipe, onOpenSubRun }: { step: StepResult; subRecipe?: string; onOpenSubRun: (recipe: string, runId: string) => void }) {
   const [expanded, setExpanded] = useState(true);
 
   return (
@@ -602,6 +608,14 @@ function StepDetailPanel({ step }: { step: StepResult }) {
         <InfoItem label="Tokens" value={step.tokens > 0 ? step.tokens.toLocaleString() : '–'} />
         <InfoItem label="Cost" value={step.cost_usd > 0 ? `$${step.cost_usd.toFixed(4)}` : '–'} />
         {step.gate_status && <InfoItem label="Gate" value={step.gate_status} />}
+        {step.sub_run_id && subRecipe && (
+          <div className="col-span-2">
+            <p className="text-xs text-[var(--ao-text-muted)] mb-1">Ran another recipe</p>
+            <button type="button" onClick={() => onOpenSubRun(subRecipe, step.sub_run_id!)} className="text-sm text-[var(--ao-brand-light)] hover:underline">
+              Open its run of {subRecipe}
+            </button>
+          </div>
+        )}
         {step.branch_taken && <InfoItem label="Branch" value={step.branch_taken} />}
       </div>
 

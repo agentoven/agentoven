@@ -1409,6 +1409,11 @@ func (h *Handlers) CreateRecipe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if err := h.checkSubRecipeRefs(r.Context(), kitchen, req.Name, req.Steps); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	if err := h.Store.CreateRecipe(r.Context(), &req); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1466,6 +1471,10 @@ func (h *Handlers) UpdateRecipe(w http.ResponseWriter, r *http.Request) {
 			if req.Steps[i].Agent == "" && req.Steps[i].AgentRef != "" {
 				req.Steps[i].Agent = req.Steps[i].AgentRef
 			}
+		}
+		if err := h.checkSubRecipeRefs(r.Context(), kitchen, recipe.Name, req.Steps); err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
 		}
 		recipe.Steps = req.Steps
 	}

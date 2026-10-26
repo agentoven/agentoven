@@ -463,6 +463,8 @@ export interface RecipeRun {
   error?: string;
   total_tokens?: number;
   total_cost_usd?: number;
+  /** Set when this run was started by a step of another run. */
+  parent_run_id?: string;
 }
 
 export interface StepResult {
@@ -478,6 +480,8 @@ export interface StepResult {
   cost_usd: number;
   gate_status?: string;
   branch_taken?: string;
+  /** On a step that ran another recipe: the run it started. */
+  sub_run_id?: string;
 }
 
 export const recipeRuns = {

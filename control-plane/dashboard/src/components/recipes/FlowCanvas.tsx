@@ -59,6 +59,7 @@ function subtitle(step: WireStep): string {
   switch (step.kind) {
     case 'agent': case 'evaluator': return step.agent_ref ? step.agent_ref : 'Choose an agent';
     case 'rag': return 'Searches your knowledge';
+    case 'sub_recipe': return step.recipe_ref ? `Runs ${step.recipe_ref}` : 'Choose a recipe';
     case 'human_gate': {
       const mins = Number(step.config?.max_wait_minutes ?? 0);
       const wait = `${mins > 0 ? `within ${mins >= 1440 && mins % 1440 === 0 ? `${mins / 1440} day${mins === 1440 ? '' : 's'}` : mins >= 60 && mins % 60 === 0 ? `${mins / 60} hours` : `${mins} minutes`}` : 'no time limit'}`;

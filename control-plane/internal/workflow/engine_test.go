@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1313,5 +1314,134 @@ func TestGateTimeoutStopsUnlessAskedToFollowAPath(t *testing.T) {
 	run, _ := runGateShape(t, steps, nil)
 	if run.Status != models.RecipeRunFailed {
 		t.Errorf("run status = %s, want failed on a timeout nobody asked to route", run.Status)
+	}
+}
+
+// ── Sub-recipes ──────────────────────────────────────────────
+
+func subRecipeEngine(t *testing.T, outputs map[string]map[string]interface{}) (*Engine, func()) {
+	t.Helper()
+	srv := fakeAgentServer(outputs)
+	eng := setupTestEngine(t, srv)
+	ctx := context.Background()
+	for name := range outputs {
+		eng.store.CreateAgent(ctx, &models.Agent{
+			Name: name, Kitchen: "default", Status: models.AgentStatusReady,
+			A2AEndpoint: fmt.Sprintf("%s/api/v1/agents/%s/invoke", srv.URL, name),
+		})
+	}
+	return eng, srv.Close
+}
+
+func subStep(name, recipe string, deps ...string) models.Step {
+	return models.Step{Name: name, Kind: models.StepSubRecipe, RecipeRef: recipe, DependsOn: deps}
+}
+
+func TestSubRecipePassesInputInAndOutputOut(t *testing.T) {
+	eng, done := subRecipeEngine(t, map[string]map[string]interface{}{
+		"prep":  {"topic": "cats"},
+		"inner": {"answer": "42"},
+	})
+	defer done()
+	ctx := context.Background()
+	eng.store.CreateRecipe(ctx, &models.Recipe{ID: "child", Name: "child", Kitchen: "default",
+		Steps: []models.Step{{Name: "child-step", Kind: models.StepAgent, AgentRef: "inner"}}})
+	inner := subStep("inner-run", "child", "prep")
+	inner.InputMapping = map[string]string{"subject": "prep.topic"}
+	inner.OutputMapping = map[string]string{"final": "child-step.answer"}
+	parent := &models.Recipe{ID: "parent", Name: "parent", Kitchen: "default", Steps: []models.Step{
+		{Name: "prep", Kind: models.StepAgent, AgentRef: "prep"}, inner,
+	}}
+	eng.store.CreateRecipe(ctx, parent)
+
+	runID, err := eng.ExecuteRecipe(ctx, parent, "default", map[string]interface{}{"x": 1}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := waitForRun(t, eng, runID, 15)
+	if run.Status != models.RecipeRunCompleted {
+		t.Fatalf("status %s: %s", run.Status, run.Error)
+	}
+	var step *models.StepResult
+	for i := range run.StepResults {
+		if run.StepResults[i].StepName == "inner-run" {
+			step = &run.StepResults[i]
+		}
+	}
+	if step == nil || step.Output["final"] != "42" {
+		t.Fatalf("the sub-recipe's answer should come out through the output mapping: %+v", step)
+	}
+	sub, err := eng.store.GetRecipeRun(ctx, step.SubRunID)
+	if err != nil {
+		t.Fatalf("the step should name its sub-run: %v", err)
+	}
+	if sub.ParentRunID != runID || sub.Input["subject"] != "cats" || len(sub.Input) != 1 {
+		t.Errorf("the sub-run should know its parent and have only the mapped input: parent=%q input=%v", sub.ParentRunID, sub.Input)
+	}
+}
+
+func TestWithoutMappingsTheSubRecipeGetsTheParentInputAndReturnsEverything(t *testing.T) {
+	eng, done := subRecipeEngine(t, map[string]map[string]interface{}{"inner": {"answer": "42"}})
+	defer done()
+	ctx := context.Background()
+	eng.store.CreateRecipe(ctx, &models.Recipe{ID: "child", Name: "child", Kitchen: "default",
+		Steps: []models.Step{{Name: "child-step", Kind: models.StepAgent, AgentRef: "inner"}}})
+	parent := &models.Recipe{ID: "parent", Name: "parent", Kitchen: "default", Steps: []models.Step{subStep("inner-run", "child")}}
+	eng.store.CreateRecipe(ctx, parent)
+	runID, _ := eng.ExecuteRecipe(ctx, parent, "default", map[string]interface{}{"x": 1}, "")
+	run := waitForRun(t, eng, runID, 15)
+	if run.Status != models.RecipeRunCompleted {
+		t.Fatalf("status %s: %s", run.Status, run.Error)
+	}
+	step := run.StepResults[0]
+	out, _ := step.Output["child-step"].(map[string]interface{})
+	if out["answer"] != "42" {
+		t.Errorf("everything the sub-recipe produced is the output: %v", step.Output)
+	}
+	sub, _ := eng.store.GetRecipeRun(ctx, step.SubRunID)
+	if in, _ := sub.Input["parent_input"].(map[string]interface{}); in["x"] != float64(1) && in["x"] != 1 {
+		t.Errorf("the sub-run gets the parent's input as parent_input: %v", sub.Input)
+	}
+}
+
+func TestAFailingSubRecipeFailsTheStepThatRanIt(t *testing.T) {
+	eng, done := subRecipeEngine(t, map[string]map[string]interface{}{})
+	defer done()
+	ctx := context.Background()
+	eng.store.CreateRecipe(ctx, &models.Recipe{ID: "child", Name: "child", Kitchen: "default",
+		Steps: []models.Step{{Name: "boom", Kind: models.StepAgent, AgentRef: "no-such-agent"}}})
+	parent := &models.Recipe{ID: "parent", Name: "parent", Kitchen: "default", Steps: []models.Step{subStep("inner-run", "child")}}
+	eng.store.CreateRecipe(ctx, parent)
+	runID, _ := eng.ExecuteRecipe(ctx, parent, "default", nil, "")
+	run := waitForRun(t, eng, runID, 15)
+	if run.Status != models.RecipeRunFailed || !strings.Contains(run.Error, "sub-recipe 'child' failed") {
+		t.Errorf("status %s, error %q", run.Status, run.Error)
+	}
+}
+
+func TestASubRecipeThatDoesNotExistFailsWhenItRuns(t *testing.T) {
+	eng, done := subRecipeEngine(t, map[string]map[string]interface{}{})
+	defer done()
+	ctx := context.Background()
+	parent := &models.Recipe{ID: "parent", Name: "parent", Kitchen: "default", Steps: []models.Step{subStep("inner-run", "nowhere")}}
+	eng.store.CreateRecipe(ctx, parent)
+	runID, _ := eng.ExecuteRecipe(ctx, parent, "default", nil, "")
+	run := waitForRun(t, eng, runID, 15)
+	if run.Status != models.RecipeRunFailed || !strings.Contains(run.Error, "lookup failed") {
+		t.Errorf("status %s, error %q", run.Status, run.Error)
+	}
+}
+
+func TestARecipeThatCallsItselfStopsAtTheNestingLimit(t *testing.T) {
+	eng, done := subRecipeEngine(t, map[string]map[string]interface{}{})
+	defer done()
+	ctx := context.Background()
+	// The API refuses this recipe; written straight to the store it shows what the engine does alone.
+	loop := &models.Recipe{ID: "loop", Name: "loop", Kitchen: "default", Steps: []models.Step{subStep("again", "loop")}}
+	eng.store.CreateRecipe(ctx, loop)
+	runID, _ := eng.ExecuteRecipe(ctx, loop, "default", nil, "")
+	run := waitForRun(t, eng, runID, 30)
+	if run.Status != models.RecipeRunFailed || !strings.Contains(run.Error, "sub-recipe 'loop' failed") {
+		t.Errorf("status %s, error %q", run.Status, run.Error)
 	}
 }

@@ -126,6 +126,27 @@
         {"name":"review-2","kind":"agent","config":{"title":"Review"},"agent_ref":"reviewer","agent":"reviewer","depends_on":["review"]},
         {"name":"review-3","kind":"agent","config":{"title":"Review!"},"agent_ref":"reviewer","agent":"reviewer","depends_on":["review-2"]}
       ]
+    },
+    {
+      "name": "sub-recipe",
+      "description": "Another recipe used as a step, with what goes in and what comes back chosen",
+      "spec": [{"type":"agent","title":"Triage","agent":"triage"},{"type":"sub_recipe","title":"Draft the reply","recipe":"reply-writer","input":{"ticket":"parent_input.ticket","category":"triage.category"},"output":{"reply":"write.text"}},{"type":"agent","title":"Log it","agent":"logger"}],
+      "wire": [
+        {"name":"triage","kind":"agent","config":{"title":"Triage"},"agent_ref":"triage","agent":"triage","depends_on":[]},
+        {"name":"draft-the-reply","kind":"sub_recipe","config":{"title":"Draft the reply"},"recipe_ref":"reply-writer","input_mapping":{"ticket":"parent_input.ticket","category":"triage.category"},"output_mapping":{"reply":"write.text"},"depends_on":["triage"]},
+        {"name":"log-it","kind":"agent","config":{"title":"Log it"},"agent_ref":"logger","agent":"logger","depends_on":["draft-the-reply"]}
+      ]
+    },
+    {
+      "name": "sub-recipe-in-a-decision",
+      "description": "A recipe with no mappings on one path, and used first on the other",
+      "spec": [{"type":"agent","title":"Triage","agent":"triage"},{"type":"decide","title":"Needs escalation?","mentions":["urgent"],"yes":[{"type":"sub_recipe","title":"Escalate","recipe":"escalation"}],"no":[{"type":"sub_recipe","title":"Standard reply","recipe":"reply-writer","input":{"ticket":"parent_input.ticket"}}]}],
+      "wire": [
+        {"name":"triage","kind":"agent","config":{"title":"Triage"},"agent_ref":"triage","agent":"triage","depends_on":[]},
+        {"name":"needs-escalation","kind":"condition","config":{"title":"Needs escalation?","expression":"lower(text) contains \"urgent\""},"depends_on":["triage"],"branches":[{"condition":"condition_met == true","next_step":"escalate"}],"default_next":"standard-reply"},
+        {"name":"escalate","kind":"sub_recipe","config":{"title":"Escalate"},"recipe_ref":"escalation","depends_on":["needs-escalation"]},
+        {"name":"standard-reply","kind":"sub_recipe","config":{"title":"Standard reply"},"recipe_ref":"reply-writer","input_mapping":{"ticket":"parent_input.ticket"},"depends_on":["needs-escalation"]}
+      ]
     }
   ],
   "invalid": [
@@ -133,6 +154,7 @@
     {"name":"agent step without an agent","spec":[{"type":"agent","title":"Triage","agent":""}],"expect":"needs an agent"},
     {"name":"decision without a condition","spec":[{"type":"agent","title":"A","agent":"a"},{"type":"decide","title":"Pick","yes":[],"no":[]}],"expect":"needs a condition"},
     {"name":"a group with a single step","spec":[{"type":"together","lanes":[[{"type":"agent","title":"Only","agent":"a"}],[]]}],"expect":"at least two steps"},
-    {"name":"steps left after an approval that does nothing on a rejection","spec":[{"type":"agent","title":"Draft","agent":"writer"},{"type":"ask","title":"Sign off","approved":[{"type":"agent","title":"Send it","agent":"sender"}],"rejected":[]},{"type":"agent","title":"Log it","agent":"logger"}],"expect":"after a rejection"}
+    {"name":"steps left after an approval that does nothing on a rejection","spec":[{"type":"agent","title":"Draft","agent":"writer"},{"type":"ask","title":"Sign off","approved":[{"type":"agent","title":"Send it","agent":"sender"}],"rejected":[]},{"type":"agent","title":"Log it","agent":"logger"}],"expect":"after a rejection"},
+    {"name":"a recipe step without a recipe","spec":[{"type":"sub_recipe","title":"Run it","recipe":""}],"expect":"needs a recipe to run"}
   ]
 }

@@ -35,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The run page can approve or reject a paused run. Before, the community dashboard had no way to answer a waiting step. A rejection can say why; the reason is recorded and passed on.
 
 
+### 🧩 More recipe steps
+
+- **Run a recipe as a step** — the builder has "Run a recipe": pick one of your recipes (not the one you are editing), and optionally choose what it receives and what comes back (`input_mapping`, `output_mapping`). The step finishes when that recipe does and fails if it fails; a run page step links to the run it started, and DishShelf marks runs that were started by another recipe. The Python and TypeScript SDKs build it with `sub_recipe(...)` / `subRecipe(...)`, pinned to the dashboard by the shared fixtures
+- **A recipe cannot run itself** — saving a recipe whose "run a recipe" steps lead back to it, directly or through other recipes, is refused with the path (`a → b → a`). Before, the run failed after five levels of nesting
+
 ### 🧰 Recipes from the SDKs and the CLI
 
 - **Build a recipe in code, the way the dashboard builds it** — Python (`agentoven.flow`: `Flow`, `agent`, `check`, `lookup`, `decide`, `mentions`, `ask`, `together`, `each`, `sub_recipe`) and TypeScript (`Flow` and the builders under `flow`). A recipe is steps in order, with Yes and No paths, an approval with its own Approved and Rejected paths, and steps at the same time. It is written step for step as the dashboard builder writes it, so it opens there. Both SDKs are tested against `sdk/fixtures/recipe-flows.json`, which is generated from the dashboard builder and checked by its tests, so the three cannot drift. A flow is checked before it is sent and a `FlowError` lists every problem; `check_agents` (`checkAgents`) also requires the agents to exist

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { ShieldCheck, Trash2 } from 'lucide-react';
 import { MAX_LANES, canRemovePaths, isApproval, isParallel, mentionsExpression, titleOf, wordsFromExpression, type FlowNode, type WireStep } from '../../lib/recipeFlow';
 import { metaOfStep } from './stepMeta';
+import RecipeStepSettings, { type RecipeOption } from './RecipeStepSettings';
 
 const field = 'w-full h-10 px-3 rounded-[10px] bg-[var(--ao-bg)] border border-[var(--ao-border)] text-sm outline-none focus:border-[var(--ao-brand)]';
 const label = 'flex flex-col gap-1.5 text-[13px] font-medium text-slate-300';
@@ -11,12 +12,16 @@ const WAITS: { minutes: number; text: string }[] = [
 ];
 
 export interface AgentOption { name: string; status: string }
+export type { RecipeOption };
 
 interface Props {
   node: FlowNode;
   agents: AgentOption[];
   /** Names of tools that can send a message, for "Tell them through". */
   notifyTools: string[];
+  /** The recipes a "run a recipe" step may pick, and the name of the one being edited. */
+  recipes?: RecipeOption[];
+  self?: string;
   onChange: (id: string, patch: Partial<WireStep>, config?: Record<string, unknown>) => void;
   onDelete: (id: string) => void;
   /** Gives an approval an Approved and a Rejected path, or takes them away. */
@@ -32,7 +37,7 @@ function Select({ value, onChange, children, label: aria }: { value: string; onC
 }
 
 /** Settings for the selected step, in plain words. */
-export default function StepInspector({ node, agents, notifyTools, onChange, onDelete, onLanes, onApprovalPaths }: Props) {
+export default function StepInspector({ node, agents, notifyTools, recipes = [], self = '', onChange, onDelete, onLanes, onApprovalPaths }: Props) {
   const s = node.step;
   const meta = metaOfStep(s);
   const Icon = meta.icon;
@@ -101,6 +106,8 @@ export default function StepInspector({ node, agents, notifyTools, onChange, onD
           </div>
         </>
       )}
+
+      {s.kind === 'sub_recipe' && <RecipeStepSettings step={s} recipes={recipes} self={self} onChange={(patch) => set(patch)} />}
 
       {s.kind === 'rag' && (
         <label className={label}>How many results

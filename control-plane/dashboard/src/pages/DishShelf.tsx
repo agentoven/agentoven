@@ -124,6 +124,7 @@ export default function DishShelf() {
                           <span className="font-mono text-[11.5px] text-[var(--ao-text-muted)]">{r.id.slice(0, 4)}</span>
                         </div>
                         <div className="mt-1.5 text-[13px] [overflow-wrap:anywhere]" style={{ color: n.color }}>{n.text}</div>
+                        {r.parent_run_id && <div className="mt-1 text-[11.5px] text-[var(--ao-text-muted)]">Part of another recipe&apos;s run</div>}
                         {bars.length > 0 && <div className="flex gap-1 mt-3" aria-hidden="true">{bars.map((b, i) => <span key={i} className="flex-1 h-[5px] rounded-sm" style={{ background: b }} />)}</div>}
                         <div className="flex items-center justify-between mt-2.5 text-xs text-[var(--ao-text-muted)]">
                           <span>{ago(r.started_at)}</span>

@@ -7,11 +7,12 @@ import { FakeControlPlane } from './fake-server.js';
 const { agent, ask, check, decide, each, lookup, mentions, subRecipe, together } = flow;
 
 interface Spec {
-  type: 'agent' | 'check' | 'lookup' | 'decide' | 'ask' | 'together';
+  type: 'agent' | 'check' | 'lookup' | 'decide' | 'ask' | 'together' | 'sub_recipe';
   title?: string; agent?: string; retries?: number; timeout_secs?: number; top_k?: number;
   mentions?: string[]; when?: string; yes?: Spec[]; no?: Spec[];
   within?: '1 hour' | '4 hours' | '1 day' | '3 days' | 'no limit'; notify?: string; domain?: string; emails?: string[];
   approved?: Spec[]; rejected?: Spec[]; if_nobody_answers?: 'stop' | 'reject'; lanes?: Spec[][];
+  recipe?: string; input?: Record<string, string>; output?: Record<string, string>;
 }
 const FIXTURES = JSON.parse(readFileSync(new URL('../../fixtures/recipe-flows.json', import.meta.url), 'utf8')) as {
   flows: { name: string; description: string; spec: Spec[]; wire: unknown[] }[];
@@ -34,6 +35,7 @@ function build(t: Spec): FlowNode {
         ifNobodyAnswers: t.if_nobody_answers,
       });
     case 'together': return together(...(t.lanes ?? []).map(list));
+    case 'sub_recipe': return subRecipe(t.title!, t.recipe!, { inputMapping: t.input, outputMapping: t.output });
   }
 }
 
