@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A provider's `secret_ref` (and each key in its rotation pool) can now be `vault://<credential-name>`, a credential in the kitchen's vault, next to `env://` and `k8s://`. It is read on every model call and never cached, so rotating the credential takes effect on the very next call and deleting it stops the provider at once. A reference only reaches the credentials of its own kitchen.
 - The vault itself is part of Pro. In the community edition `vault://` is refused with a message saying so, and a key pasted into a provider is stored as before.
-- With a vault, a key pasted into a provider is moved there and only the reference is stored, so it is no longer in the provider record, a backup of the database, or an export. Sending a new key rotates that credential in place; deleting the provider deletes the credentials it made (never one it only pointed at). `POST /api/v1/providers/seal-keys` moves providers made earlier.
+- With a vault, a key pasted into a provider is moved there and only the reference is stored, so it is no longer in the provider record, a backup of the database, or an export. Sending a new key rotates that credential in place; deleting the provider deletes the credentials it made (never one it only pointed at). `POST /api/v1/models/providers/seal-keys` moves providers made earlier.
 
 ### 🧭 Dashboard navigation
 

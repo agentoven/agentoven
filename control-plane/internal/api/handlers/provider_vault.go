@@ -157,7 +157,7 @@ func hasEnabledKey(keys []models.APIKeyEntry) bool {
 
 // SealProviderKeys moves every provider key in the kitchen that is still stored in plain text into the
 // vault. It is how providers made before the vault existed are brought across, and it is safe to run
-// again. POST /api/v1/providers/seal-keys
+// again. POST /api/v1/models/providers/seal-keys
 func (h *Handlers) SealProviderKeys(w http.ResponseWriter, r *http.Request) {
 	if h.keyVault() == nil {
 		respondError(w, http.StatusConflict, "there is no credential vault to move keys into; it is part of Pro")
