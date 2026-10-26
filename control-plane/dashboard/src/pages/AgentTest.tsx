@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, Link, useOutletContext } from 'react-router-dom';
 import {
-  ArrowLeft, Send, Bot, User, Clock, Coins, Hash, Brain, Wrench,
+  Send, Bot, User, Clock, Brain, Wrench,
   ChevronDown, ChevronRight, Zap, AlertCircle, CheckCircle2,
 } from 'lucide-react';
 import {
@@ -12,9 +12,9 @@ import {
   type ThinkingBlock,
   type TokenUsage,
 } from '../api';
-import { useAPI } from '../hooks';
+import type { WorkspaceContext } from './agent/AgentWorkspace';
 import {
-  Card, Spinner, ErrorBanner, Button, StatusBadge,
+  Card, ErrorBanner, Button,
 } from '../components/UI';
 
 // ── Types ─────────────────────────────────────────────────────
@@ -42,8 +42,7 @@ interface ChatMessage {
 
 export function AgentTestPage() {
   const { name } = useParams<{ name: string }>();
-  const navigate = useNavigate();
-  const { data: agent, loading, error } = useAPI(() => agents.get(name!));
+  const { agent } = useOutletContext<WorkspaceContext>();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -118,39 +117,26 @@ export function AgentTestPage() {
   const totalTokens = messages.reduce((sum, m) => sum + (m.meta?.usage.total_tokens ?? 0), 0);
   const totalCost = messages.reduce((sum, m) => sum + (m.meta?.usage.estimated_cost_usd ?? 0), 0);
 
-  if (loading) return <Spinner />;
-  if (error) return <ErrorBanner message={error} />;
-  if (!agent) return <ErrorBanner message="Agent not found" />;
-
+  const assistantCount = messages.filter((m) => m.role === 'assistant').length;
   return (
-    <div className="flex flex-col h-full">
-      {/* Header */}
-      <div className="flex items-center justify-between px-8 py-4 border-b border-[var(--ao-border)]">
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => navigate('/agents')}
-            className="text-[var(--ao-text-muted)] hover:text-[var(--ao-text)]"
-          >
-            <ArrowLeft size={18} />
-          </button>
-          <Bot size={20} className="text-[var(--ao-brand-light)]" />
-          <div>
-            <h1 className="text-lg font-bold">Test: {agent.name}</h1>
-            <p className="text-xs text-[var(--ao-text-muted)]">
-              {agent.model_provider} / {agent.model_name}
-            </p>
-          </div>
-          <StatusBadge status={agent.status} />
-        </div>
-        <div className="flex items-center gap-4 text-xs text-[var(--ao-text-muted)]">
-          <span className="flex items-center gap-1"><Hash size={12} /> {totalTokens} tokens</span>
-          <span className="flex items-center gap-1"><Coins size={12} /> ${totalCost.toFixed(6)}</span>
-          <span>{messages.filter((m) => m.role === 'assistant').length} responses</span>
-        </div>
+    <div className="flex flex-wrap gap-5 items-start px-4 sm:px-8 py-5">
+    <section
+      aria-label="Conversation"
+      className="flex-[999_1_460px] min-w-0 flex flex-col rounded-2xl border border-[var(--ao-border)] bg-[var(--ao-surface)] overflow-hidden h-[calc(100vh-14rem)] min-h-[520px]"
+    >
+      <div className="flex items-center justify-between h-12 px-4 sm:px-6 border-b border-[var(--ao-border)] shrink-0 text-sm text-[var(--ao-text-muted)]">
+        <span>{assistantCount === 0 ? 'No messages yet' : `${assistantCount} response${assistantCount === 1 ? '' : 's'} in this session`}</span>
+        <button
+          type="button"
+          onClick={() => { setMessages([]); setSendError(null); }}
+          disabled={messages.length === 0}
+          className="h-8 px-3 rounded-lg border border-[var(--ao-border)] text-[var(--ao-text)] text-[13px] hover:bg-[var(--ao-surface-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          New session
+        </button>
       </div>
-
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-8 space-y-4">
+      <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6 space-y-4">
         {messages.length === 0 && (
           <div className="text-center text-[var(--ao-text-muted)] py-16">
             <Bot size={48} className="mx-auto mb-3 opacity-40" />
@@ -198,7 +184,7 @@ export function AgentTestPage() {
       </div>
 
       {/* Input */}
-      <div className="border-t border-[var(--ao-border)] px-8 py-4">
+      <div className="border-t border-[var(--ao-border)] px-4 sm:px-6 py-4">
         {/* Controls */}
         <div className="flex items-center gap-3 mb-3">
           {/* Mode toggle */}
@@ -270,7 +256,63 @@ export function AgentTestPage() {
           <p className="text-xs text-amber-400 mt-2">Agent must be in "ready" status to test. Current: {agent.status}</p>
         )}
       </div>
+    </section>
+    <RunDetails last={[...messages].reverse().find((m) => m.role === 'assistant')} totals={{ tokens: totalTokens, cost: totalCost }} />
     </div>
+  );
+}
+
+// ── Run details ───────────────────────────────────────────────
+
+/** What happened in the latest run. */
+function RunDetails({ last, totals }: { last?: ChatMessage; totals: { tokens: number; cost: number } }) {
+  const meta = last?.meta;
+  const steps = meta?.turns ?? [];
+  const label = 'text-xs font-semibold uppercase tracking-wider text-[var(--ao-text-muted)]';
+  return (
+    <aside aria-label="Run details" className="flex-1 basis-72 max-w-sm min-w-0 space-y-4">
+      <Card>
+        <h2 className={label}>Latest run</h2>
+        {meta ? (
+          <>
+            <div className="grid grid-cols-3 gap-3 mt-3">
+              <div><div className="text-lg font-semibold">{(meta.latency_ms / 1000).toFixed(1)} s</div><div className="text-xs text-[var(--ao-text-muted)] mt-0.5">Latency</div></div>
+              <div><div className="text-lg font-semibold">{meta.usage.total_tokens.toLocaleString()}</div><div className="text-xs text-[var(--ao-text-muted)] mt-0.5">Tokens</div></div>
+              <div><div className="text-lg font-semibold">${meta.usage.estimated_cost_usd.toFixed(4)}</div><div className="text-xs text-[var(--ao-text-muted)] mt-0.5">Cost</div></div>
+            </div>
+            <div className="flex items-center justify-between mt-3 text-xs text-[var(--ao-text-muted)]">
+              <span>{meta.provider && meta.model ? `${meta.provider} / ${meta.model}` : ''}</span>
+              {meta.trace_id && <Link to={`/traces/${meta.trace_id}`} className="font-semibold text-[var(--ao-brand-light)] hover:underline">Open trace</Link>}
+            </div>
+            {totals.tokens > meta.usage.total_tokens && (
+              <p className="mt-2 pt-2 border-t border-[var(--ao-border)] text-xs text-[var(--ao-text-muted)]">This session: {totals.tokens.toLocaleString()} tokens, ${totals.cost.toFixed(4)}</p>
+            )}
+          </>
+        ) : (
+          <p className="mt-2 text-sm text-[var(--ao-text-muted)]">Send a message to see how the run went.</p>
+        )}
+      </Card>
+      {steps.length > 0 && (
+        <Card>
+          <h2 className={label}>Steps</h2>
+          <ol className="mt-3 space-y-3">
+            {steps.map((t) => {
+              const tools = (t.tool_calls ?? []).map((c) => c.name);
+              const max = Math.max(...steps.map((x) => x.latency_ms), 1);
+              return (
+                <li key={t.number}>
+                  <div className="flex items-center justify-between text-sm gap-2">
+                    <span className="min-w-0 truncate">{tools.length ? `Turn ${t.number}: ${tools.join(', ')}` : `Turn ${t.number}: model reply`}</span>
+                    <span className="font-mono text-xs text-[var(--ao-text-muted)] shrink-0">{(t.latency_ms / 1000).toFixed(1)} s</span>
+                  </div>
+                  <div className="h-1.5 rounded bg-[var(--ao-bg)] mt-1.5"><div className="h-1.5 rounded bg-[var(--ao-brand-light)]" style={{ width: `${Math.max(6, (t.latency_ms / max) * 100)}%` }} /></div>
+                </li>
+              );
+            })}
+          </ol>
+        </Card>
+      )}
+    </aside>
   );
 }
 

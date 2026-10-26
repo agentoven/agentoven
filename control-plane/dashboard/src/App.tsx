@@ -2,6 +2,12 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { AgentsPage } from './pages/Agents';
 import { AgentTestPage } from './pages/AgentTest';
+import AgentWorkspace from './pages/agent/AgentWorkspace';
+import AgentOverview from './pages/agent/Overview';
+import AgentConfiguration from './pages/agent/Configuration';
+import AgentIngredients from './pages/agent/Ingredients';
+import AgentGuardrails from './pages/agent/Guardrails';
+import AgentTraces from './pages/agent/AgentTraces';
 import { RecipesPage } from './pages/Recipes';
 import { PromptsPage } from './pages/Prompts';
 import { ProvidersPage } from './pages/Providers';
@@ -24,7 +30,14 @@ function App() {
         <Route element={<Layout />}>
           <Route path="/" element={<OverviewPage />} />
           <Route path="/agents" element={<AgentsPage />} />
-          <Route path="/agents/:name/test" element={<AgentTestPage />} />
+          <Route path="/agents/:name" element={<AgentWorkspace />}>
+            <Route index element={<AgentOverview />} />
+            <Route path="test" element={<AgentTestPage />} />
+            <Route path="configuration" element={<AgentConfiguration />} />
+            <Route path="ingredients" element={<AgentIngredients />} />
+            <Route path="guardrails" element={<AgentGuardrails />} />
+            <Route path="traces" element={<AgentTraces />} />
+          </Route>
           <Route path="/recipes" element={<RecipesPage />} />
           <Route path="/dishshelf" element={<PipelineViewPage />} />
           <Route path="/dishshelf/:recipeName" element={<PipelineViewPage />} />

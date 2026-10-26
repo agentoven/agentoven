@@ -252,6 +252,7 @@ function AgentCard({ agent, onAction, onIntegrate, onRecook, onViewLogs, layout 
   if (layout === 'list') {
     const ready = agent.status === 'ready';
     const test = () => navigate(`/agents/${agent.name}/test`);
+    const open = () => navigate(`/agents/${agent.name}`);
     const bake = () => doAction(() => agents.bake(agent.name), `Agent '${agent.name}' baked successfully`);
     const cool = () => doAction(() => agents.cool(agent.name), `Agent '${agent.name}' cooled`);
     const menu: MenuItem[] = [];
@@ -267,7 +268,7 @@ function AgentCard({ agent, onAction, onIntegrate, onRecook, onViewLogs, layout 
         <div className="grid items-center gap-4 px-5 py-3.5" style={{ gridTemplateColumns: AGENT_LIST_COLS }}>
           <div className="min-w-0">
             <div className="flex items-center gap-2 min-w-0">
-              <span className="font-semibold truncate" title={agent.name}>{agent.name}</span>
+              <button type="button" onClick={open} className="font-semibold truncate text-left hover:text-[var(--ao-brand-light)]" title={agent.name}>{agent.name}</button>
               <StatusBadge status={agent.status} />
             </div>
             <p className={`mt-1 text-sm truncate ${agent.description ? 'text-[var(--ao-text-muted)]' : 'text-[var(--ao-text-muted)]/50 italic'}`}>{agent.description || 'No description'}</p>
@@ -314,7 +315,7 @@ function AgentCard({ agent, onAction, onIntegrate, onRecook, onViewLogs, layout 
       <div className="flex items-start justify-between mb-3">
         <div className="flex items-center gap-2">
           <Bot size={18} className="text-[var(--ao-brand-light)]" />
-          <span className="font-medium">{agent.name}</span>
+          <button type="button" onClick={() => navigate(`/agents/${agent.name}`)} className="font-medium text-left hover:text-[var(--ao-brand-light)]">{agent.name}</button>
         </div>
         <StatusBadge status={agent.status} />
       </div>
@@ -454,7 +455,7 @@ function AgentCard({ agent, onAction, onIntegrate, onRecook, onViewLogs, layout 
 
 type IntegrationTab = 'invoke' | 'session' | 'test' | 'card';
 
-function IntegrationPanel({ agent }: { agent: Agent }) {
+export function IntegrationPanel({ agent }: { agent: Agent }) {
   const [tab, setTab] = useState<IntegrationTab>('invoke');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const host = window.location.origin;
@@ -609,6 +610,9 @@ const emptyIngredient = (): IngredientRow => ({
 // ── Guardrail row helper ──────────────────────────────────────
 
 interface GuardrailRow {
+  id?: string;
+  /** Attaching a rule enables it; a rule must be switched off on purpose. */
+  enabled: boolean;
   kind: string;
   stage: 'input' | 'output' | 'both';
   config: string;
@@ -625,8 +629,11 @@ const GUARDRAIL_KINDS = [
 ];
 
 const emptyGuardrail = (): GuardrailRow => ({
-  kind: 'content_filter', stage: 'both', config: '{}',
+  enabled: true, kind: 'content_filter', stage: 'both', config: '{}',
 });
+
+const newGuardrailId = (): string =>
+  typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `gr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 // ── Create Agent Form (inside modal) ──────────────────────────
 
@@ -700,7 +707,7 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
     const builtGuardrails = guardrails.map((g) => {
       let config: Record<string, unknown> = {};
       try { config = JSON.parse(g.config); } catch { /* ignore */ }
-      return { kind: g.kind, stage: g.stage, config };
+      return { id: g.id ?? newGuardrailId(), enabled: g.enabled, kind: g.kind, stage: g.stage, config };
     });
 
     try {
@@ -993,6 +1000,10 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
                           </div>
                         </div>
                         {kindInfo && <p className="text-[10px] text-[var(--ao-text-muted)]">{kindInfo.desc}</p>}
+                        <label className="flex items-center gap-2 text-xs cursor-pointer">
+                          <input type="checkbox" checked={g.enabled} onChange={(e) => updateGuardrail(i, { enabled: e.target.checked })} />
+                          <span className={g.enabled ? 'text-emerald-400' : 'text-[var(--ao-text-muted)]'}>{g.enabled ? 'Enforced' : 'Not enforced'}</span>
+                        </label>
                         <div>
                           <label className="block text-[10px] text-[var(--ao-text-muted)] uppercase mb-1">Config (JSON)</label>
                           <input value={g.config} onChange={(e) => updateGuardrail(i, { config: e.target.value })}
@@ -1070,7 +1081,7 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
 
 // ── Re-cook Edit Form (pre-filled from existing agent) ────────
 
-function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => void }) {
+export function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => void }) {
   const providersFetch = useCallback(() => providers.list(), []);
   const { data: providerList, refetch: refetchProviders } = useAPI(providersFetch);
   const [showAddProvider, setShowAddProvider] = useState(false);
@@ -1093,6 +1104,8 @@ function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => void }) 
 
   // Extract guardrails
   const existingGuardrails: GuardrailRow[] = (agent.guardrails ?? []).map((g) => ({
+    id: g.id,
+    enabled: g.enabled === true,
     kind: g.kind,
     stage: g.stage,
     config: JSON.stringify(g.config ?? {}),
@@ -1165,7 +1178,7 @@ function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => void }) 
     const builtGuardrails = guardrails.map((g) => {
       let config: Record<string, unknown> = {};
       try { config = JSON.parse(g.config); } catch { /* ignore */ }
-      return { kind: g.kind, stage: g.stage, config };
+      return { id: g.id ?? newGuardrailId(), enabled: g.enabled, kind: g.kind, stage: g.stage, config };
     });
 
     try {
@@ -1465,6 +1478,10 @@ function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => void }) 
                           </div>
                         </div>
                         {kindInfo && <p className="text-[10px] text-[var(--ao-text-muted)]">{kindInfo.desc}</p>}
+                        <label className="flex items-center gap-2 text-xs cursor-pointer">
+                          <input type="checkbox" checked={g.enabled} onChange={(e) => updateGuardrail(i, { enabled: e.target.checked })} />
+                          <span className={g.enabled ? 'text-emerald-400' : 'text-[var(--ao-text-muted)]'}>{g.enabled ? 'Enforced' : 'Not enforced'}</span>
+                        </label>
                         <div>
                           <label className="block text-[10px] text-[var(--ao-text-muted)] uppercase mb-1">Config (JSON)</label>
                           <input value={g.config} onChange={(e) => updateGuardrail(i, { config: e.target.value })}

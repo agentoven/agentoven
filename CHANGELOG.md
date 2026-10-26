@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Providers and Models, and Pipelines, Embedding models and Vector stores, now share tabs.
 - Agents are shown as a list by default, with cards one click away; page actions sit on the right and wrap on narrow screens.
 - Dropdowns and number fields look the same in Safari as in other browsers.
+- Each agent has one page with tabs: Overview, Test, Configuration, Ingredients, Guardrails and Traces. The Test tab shows latency, tokens, cost and steps beside the conversation.
+- The agent form now saves guardrails as on or off. Before, a guardrail added from the dashboard had no enabled flag and so was never enforced.
 - Choosing a model is one searchable list grouped by provider, with what each provider can handle beside it. "Add a provider" opens a side panel, so a half-filled agent form is kept.
 
 ### 🤖 Agentic bots (computer-use agents)

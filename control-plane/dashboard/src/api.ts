@@ -58,6 +58,9 @@ export interface Ingredient {
 // ── Agents ────────────────────────────────────────────────────
 
 export interface Guardrail {
+  id?: string;
+  /** Only an enabled guardrail is enforced. Missing means off: nothing is enabled implicitly. */
+  enabled?: boolean;
   kind: string;
   stage: 'input' | 'output' | 'both';
   config: Record<string, unknown>;
