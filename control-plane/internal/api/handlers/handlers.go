@@ -70,11 +70,11 @@ type Handlers struct {
 	AuthorizeBudgetExtension func(r *http.Request) error
 	// RunScopes accounts for the model calls hosted processes make while handling a call, so a
 	// budget can cap them. Nil (the community edition) leaves their spend reported but uncapped.
-	RunScopes       contracts.RunScopes
-	ProcessManager  *process.Manager
+	RunScopes      contracts.RunScopes
+	ProcessManager *process.Manager
 	// Bots is the sole manager and tracker of agentic bots (Pro). Nil in the community edition,
 	// where such an agent cannot be baked and so is never invoked.
-	Bots contracts.BotControl
+	Bots            contracts.BotControl
 	PromptValidator contracts.PromptValidatorService
 	Catalog         *catalog.Catalog
 	Sessions        contracts.SessionStore
