@@ -32,7 +32,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Union
 
 __all__ = [
     "Flow",
@@ -48,6 +49,7 @@ __all__ = [
     "mentions",
     "sub_recipe",
     "together",
+    "wait",
 ]
 
 #: What a decision tests: the condition step's own result says whether its expression held.
@@ -56,6 +58,11 @@ YES_CONDITION = "condition_met == true"
 APPROVED_CONDITION = "approved == true"
 #: Marks the step standing in for an empty path, so the engine still skips the other path.
 CARRY_ON = "carry_on"
+
+#: The longest a wait may last, in seconds.
+WAIT_MAX_SECONDS = 30 * 24 * 3600
+_WAIT_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+_WAIT_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$", re.IGNORECASE)
 
 #: How long an approval waits, in the words the dashboard uses.
 WITHIN = {"1 hour": 60, "4 hours": 240, "1 day": 1440, "3 days": 4320, "no limit": 0}
@@ -228,6 +235,57 @@ def together(*lanes: Sequence[Node]) -> Node:
     return Node("parallel", lanes=[_nodes(lane, "a lane") for lane in lanes])
 
 
+def _wait_seconds(text: str) -> Optional[float]:
+    m = _WAIT_RE.match(text)
+    return float(m.group(1)) * _WAIT_UNITS[(m.group(2) or "s").lower()] if m else None
+
+
+def _wait_text(duration: Union[str, int, float, timedelta]) -> str:
+    """A length of time as the engine reads it: "30s", "5m", "2h" or "3d"."""
+    if isinstance(duration, timedelta):
+        seconds: float = duration.total_seconds()
+    elif isinstance(duration, (int, float)) and not isinstance(duration, bool):
+        seconds = float(duration)
+    else:
+        m = _WAIT_RE.match(str(duration))
+        if not m:
+            raise ValueError(f'a wait must be a length of time like "30s", "5m", "2h" or "3d", got {duration!r}')
+        return f"{m.group(1)}{(m.group(2) or 's').lower()}"
+    if seconds < 0:
+        raise ValueError("a wait cannot be negative")
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size and seconds % size == 0:
+            return f"{int(seconds // size)}{unit}"
+    return f"{seconds:g}s"
+
+
+def wait(title: str, duration: Union[str, int, float, timedelta, None] = None, *, until: Union[str, datetime, None] = None) -> Node:
+    """Pause the recipe for a length of time, or until a time, then carry on.
+
+    ``duration`` is ``"30s"``, ``"5m"``, ``"2h"``, ``"3d"``, a number of seconds, or a ``timedelta``. ``until`` is a
+    timezone-aware ``datetime`` or an ISO 8601 text such as ``"2026-11-02T09:00:00Z"``; if that time has
+    passed when the step starts, the recipe carries on at once. A wait lasts at most 30 days, can be ended
+    early with ``client.release_wait``, and is held in the control plane's memory, so it does not survive a restart.
+    """
+    if duration is not None and until is not None:
+        raise ValueError("give a duration or an until time, not both")
+    config: Dict[str, Any] = {}
+    if duration is not None:
+        config["duration"] = _wait_text(duration)
+    if until is not None:
+        if isinstance(until, datetime):
+            if until.tzinfo is None:
+                raise ValueError("until needs a time zone: pass an aware datetime, such as datetime(..., tzinfo=timezone.utc)")
+            until = until.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        else:
+            try:
+                datetime.fromisoformat(str(until).replace("Z", "+00:00"))
+            except ValueError:
+                raise ValueError(f'until must be an ISO 8601 time like "2026-11-02T09:00:00Z", got {until!r}') from None
+        config["until"] = until
+    return Node("wait", title, config=config)
+
+
 def each(title: str, agent: str, over: str, *, max_concurrency: int = 0) -> Node:
     """Run an agent once for each item of a list an earlier step produced. ``over`` is the path to the
     list, such as ``"extract.items"``. Not drawn by the dashboard builder yet: a recipe with one opens read-only there."""
@@ -316,6 +374,12 @@ class Flow:
                     out.append(Problem(n.title, f'"{t}" needs an agent.'))
                 elif known is not None and ref not in known:
                     out.append(Problem(n.title, f'"{t}" uses {ref}, which does not exist.'))
+            if n.kind == "wait":
+                text = str(n.config.get("duration", ""))
+                if not text and not n.config.get("until"):
+                    out.append(Problem(n.title, f'"{t}" needs a time to wait.'))
+                elif text and (_wait_seconds(text) or 0) > WAIT_MAX_SECONDS:
+                    out.append(Problem(n.title, f'"{t}" would wait longer than 30 days.'))
             if n.kind == "map" and not n.fields.get("source_path"):
                 out.append(Problem(n.title, f'"{t}" needs the list to go over.'))
             if n.kind == "sub_recipe" and not n.fields.get("recipe_ref"):

@@ -362,6 +362,15 @@ export class ProClient {
     }
   }
 
+  /** End a `wait` step early, so the run carries on now. Rejects with a 404 if it is not waiting. */
+  releaseWait(name: string, runId: string, step: string, opts?: { kitchen?: string }): Promise<unknown> {
+    return this.post(
+      `/api/v1/recipes/${encodeURIComponent(name)}/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(step)}/release`,
+      {},
+      opts?.kitchen,
+    );
+  }
+
   /** Approve a step that is waiting for a person. The decision is recorded with who made it. */
   approveGate(runId: string, step: string, comments?: string): Promise<unknown> {
     return this.decideGate(runId, step, true, comments);

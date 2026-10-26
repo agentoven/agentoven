@@ -1413,6 +1413,10 @@ func (h *Handlers) CreateRecipe(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if err := checkWaitSteps(req.Steps); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	if err := h.Store.CreateRecipe(r.Context(), &req); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
@@ -1473,6 +1477,10 @@ func (h *Handlers) UpdateRecipe(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if err := h.checkSubRecipeRefs(r.Context(), kitchen, recipe.Name, req.Steps); err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := checkWaitSteps(req.Steps); err != nil {
 			respondError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -1623,6 +1631,18 @@ func (h *Handlers) GetRecipeRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusOK, resp)
+}
+
+// ReleaseWait ends a wait step early.
+// POST /api/v1/recipes/{recipeName}/runs/{runId}/steps/{stepName}/release
+func (h *Handlers) ReleaseWait(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "runId")
+	stepName := chi.URLParam(r, "stepName")
+	if !h.Workflow.ReleaseWait(runID, stepName) {
+		respondError(w, http.StatusNotFound, fmt.Sprintf("Step '%s' of run '%s' is not waiting", stepName, runID))
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]interface{}{"run_id": runID, "step": stepName, "released": true})
 }
 
 // CancelRecipeRun cancels a running recipe execution.

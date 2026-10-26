@@ -4,15 +4,16 @@ import { Flow, FlowError, flow, type FlowNode } from '../src/index.js';
 import { ProClient, AgentOvenAPIError } from '../src/pro-client.js';
 import { FakeControlPlane } from './fake-server.js';
 
-const { agent, ask, check, decide, each, lookup, mentions, subRecipe, together } = flow;
+const { agent, ask, check, decide, each, lookup, mentions, subRecipe, together, wait } = flow;
 
 interface Spec {
-  type: 'agent' | 'check' | 'lookup' | 'decide' | 'ask' | 'together' | 'sub_recipe';
+  type: 'agent' | 'check' | 'lookup' | 'decide' | 'ask' | 'together' | 'sub_recipe' | 'wait';
   title?: string; agent?: string; retries?: number; timeout_secs?: number; top_k?: number;
   mentions?: string[]; when?: string; yes?: Spec[]; no?: Spec[];
   within?: '1 hour' | '4 hours' | '1 day' | '3 days' | 'no limit'; notify?: string; domain?: string; emails?: string[];
   approved?: Spec[]; rejected?: Spec[]; if_nobody_answers?: 'stop' | 'reject'; lanes?: Spec[][];
   recipe?: string; input?: Record<string, string>; output?: Record<string, string>;
+  duration?: string; until?: string;
 }
 const FIXTURES = JSON.parse(readFileSync(new URL('../../fixtures/recipe-flows.json', import.meta.url), 'utf8')) as {
   flows: { name: string; description: string; spec: Spec[]; wire: unknown[] }[];
@@ -35,6 +36,7 @@ function build(t: Spec): FlowNode {
         ifNobodyAnswers: t.if_nobody_answers,
       });
     case 'together': return together(...(t.lanes ?? []).map(list));
+    case 'wait': return wait(t.title!, { duration: t.duration, until: t.until });
     case 'sub_recipe': return subRecipe(t.title!, t.recipe!, { inputMapping: t.input, outputMapping: t.output });
   }
 }
@@ -112,6 +114,30 @@ describe('writing a flow', () => {
     expect(() => ask('x', { ifNobodyAnswers: 'wait' as never, approved: [] })).toThrow('stop');
     expect(ask('x').config).not.toHaveProperty('on_reject');
     expect(ask('x', { rejected: [] }).config.on_reject).toBe('branch');
+  });
+});
+
+describe('wait', () => {
+  it('is written as the engine reads it', () => {
+    const cases: [string | number, string][] = [['30s', '30s'], ['5M', '5m'], ['1.5h', '1.5h'], [90, '90s'], [3600, '1h'], [86400, '1d'], [120, '2m'], [0.5, '0.5s'], ['90', '90s']];
+    for (const [given, written] of cases) expect(wait('w', { duration: given }).config).toEqual({ duration: written });
+  });
+
+  it('until takes a Date or ISO text', () => {
+    expect(wait('w', { until: new Date('2026-11-02T09:30:15.999Z') }).config).toEqual({ until: '2026-11-02T09:30:15Z' });
+    expect(wait('w', { until: '2026-11-02T09:00:00Z' }).config).toEqual({ until: '2026-11-02T09:00:00Z' });
+    expect(() => wait('w', { until: 'tomorrow' })).toThrow('ISO 8601');
+  });
+
+  it('refuses what cannot be read', () => {
+    for (const bad of ['soon', '5 minutes', '-3m', '1w', '', -5]) expect(() => wait('w', { duration: bad })).toThrow(RangeError);
+    expect(() => wait('w', { duration: '5m', until: '2026-11-02T09:00:00Z' })).toThrow('not both');
+  });
+
+  it('is checked before it is sent', () => {
+    expect(new Flow('f', '', [wait('Pause')]).validate().map((p) => p.message)).toEqual(['"Pause" needs a time to wait.']);
+    expect(new Flow('f', '', [wait('Pause', { duration: '31d' })]).validate().map((p) => p.message)).toEqual(['"Pause" would wait longer than 30 days.']);
+    expect(new Flow('f', '', [wait('Pause', { duration: '30d' })]).validate()).toEqual([]);
   });
 });
 
@@ -221,6 +247,14 @@ describe('the client', () => {
     await expect(pro.waitForRecipeRun('r', 'slow', { timeoutMs: 50, pollMs: 10 })).rejects.toThrow("still 'running'");
     api.reply('GET', '/api/v1/recipes/r/runs/gate', { run: { id: 'gate', status: 'paused' }, pending_gates: ['g'] });
     await expect(pro.waitForRecipeRun('r', 'gate', { timeoutMs: 50, pollMs: 10, stopAtGate: false })).rejects.toThrow('still');
+  });
+
+  it('releaseWait ends a wait early', async () => {
+    api.reply('POST', '/api/v1/recipes/r/runs/run1/steps/pause/release', { released: true });
+    await pro.releaseWait('r', 'run1', 'pause');
+    expect(api.last.method).toBe('POST');
+    api.reply('POST', '/api/v1/recipes/r/runs/run2/steps/pause/release', { error: 'not waiting' }, 404);
+    await expect(pro.releaseWait('r', 'run2', 'pause')).rejects.toBeInstanceOf(AgentOvenAPIError);
   });
 
   it('approving and rejecting record the decision', async () => {

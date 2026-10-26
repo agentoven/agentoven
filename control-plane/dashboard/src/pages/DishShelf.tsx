@@ -46,6 +46,8 @@ function note(r: Run): { text: string; color: string } {
   }
   if (r.status === 'completed') return { text: `${done} step${done === 1 ? '' : 's'} done${r.duration_ms ? ` in ${(r.duration_ms / 1000).toFixed(1)} s` : ''}`, color: '#94a3b8' };
   if (r.status === 'canceled') return { text: 'Canceled', color: '#94a3b8' };
+  const waiting = steps.find((s) => s.status === 'waiting' && s.wake_at);
+  if (waiting) return { text: `Waiting at "${waiting.step_name}" until ${new Date(waiting.wake_at!).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}`, color: '#fda4af' };
   return { text: `${done} step${done === 1 ? '' : 's'} done so far`, color: '#cbd5e1' };
 }
 

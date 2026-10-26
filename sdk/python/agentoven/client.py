@@ -268,6 +268,11 @@ class AgentOvenClient:
                 raise TimeoutError(f"run {run_id} of {name} is still {status!r} after {timeout:g}s")
             time.sleep(poll)
 
+    def release_wait(self, name: str, run_id: str, step: str, kitchen: Optional[str] = None) -> dict[str, Any]:
+        """End a ``wait`` step early, so the run carries on now. Raises ``AgentOvenAPIError`` (404) if it is not waiting."""
+        client = self if kitchen is None else self.with_kitchen(kitchen)
+        return client._post(f"/api/v1/recipes/{_seg(name)}/runs/{_seg(run_id)}/steps/{_seg(step)}/release", {})
+
     def approve_gate(self, run_id: str, step: str, comments: Optional[str] = None) -> dict[str, Any]:
         """Approve a step that is waiting for a person. The decision is recorded with who made it."""
         return self._decide_gate(run_id, step, True, comments)

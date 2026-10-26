@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   APPROVED_CONDITION, CARRY_ON, TEMPLATES, YES_CONDITION, canRemovePaths, setApprovalPaths, mentionsExpression, resizeLanes, wordsFromExpression, allNodes, compile, decompile, findNode, insertNode, newStep, removeNode, sameWire,
-  slug, stepCount, titleOf, uniqueName, updateStep, validate, whereAfter, type FlowNode, type WireStep,
+  slug, splitWait, stepCount, titleOf, uniqueName, updateStep, validate, waitSeconds, waitWords, whereAfter, type FlowNode, type WireStep,
 } from './recipeFlow.ts';
 
 const agents = new Set(['triage', 'writer']);
@@ -393,4 +393,64 @@ test('clearing a mapping removes it from the recipe', () => {
   const flow = [runRecipe('Draft', 'reply-writer', { input_mapping: { a: 'b' } })];
   const cleared = updateStep(flow, 'Draft', { input_mapping: undefined });
   assert.equal('input_mapping' in JSON.parse(JSON.stringify(compile(cleared)))[0], false);
+});
+
+// ── Wait ─────────────────────────────────────────────────────
+
+const wait = (title: string, config: Record<string, unknown>): FlowNode => step(title, 'wait', { config });
+
+test('a wait step starts as five minutes', () => {
+  const n = newStep('wait', []);
+  assert.equal(n.step.kind, 'wait');
+  assert.equal(n.step.config?.duration, '5m');
+  assert.deepEqual(validate([n], agents), []);
+});
+
+test('a length of time is read, split and said the way it is written', () => {
+  assert.equal(waitSeconds('30s'), 30);
+  assert.equal(waitSeconds('5m'), 300);
+  assert.equal(waitSeconds('2H'), 7200);
+  assert.equal(waitSeconds('3d'), 259200);
+  assert.equal(waitSeconds('90'), 90);
+  assert.equal(waitSeconds('1.5h'), 5400);
+  for (const bad of ['', 'soon', '5 minutes', '-3m', 'm', '1w', undefined, null]) assert.equal(waitSeconds(bad), null, String(bad));
+  assert.deepEqual(splitWait('15m'), { value: 15, unit: 'm' });
+  assert.equal(splitWait('90'), null, 'a bare number has no unit to show');
+  assert.equal(waitWords('1d'), '1 day');
+  assert.equal(waitWords('15m'), '15 minutes');
+  assert.equal(waitWords('1h'), '1 hour');
+  assert.equal(waitWords('whenever'), 'whenever');
+});
+
+test('a wait is checked the way the control plane checks it when the recipe is saved', () => {
+  assert.deepEqual(validate([wait('A', { duration: '15m' })], agents), []);
+  assert.deepEqual(validate([wait('A', { until: '2026-11-02T09:00:00Z' })], agents), []);
+  assert.match(validate([wait('A', {})], agents)[0].message, /needs a time to wait/);
+  assert.match(validate([wait('A', { duration: '5 minutes' })], agents)[0].message, /not a length of time like 30s, 5m, 2h or 3d/);
+  assert.match(validate([wait('A', { duration: '31d' })], agents)[0].message, /longer than 30 days/);
+  assert.match(validate([wait('A', { until: 'tomorrow' })], agents)[0].message, /cannot be read/);
+  assert.deepEqual(validate([wait('A', { duration: '30d' })], agents), [], '30 days exactly is allowed');
+});
+
+test('a wait is written and read back wherever it sits', () => {
+  const flows: FlowNode[][] = [
+    [agent('A'), wait('Pause', { duration: '2h' }), agent('B', 'writer')],
+    [agent('A'), decide('Later?', [wait('Until', { until: '2026-11-02T09:00:00Z' }), agent('B', 'writer')], [agent('C')])],
+    [together([wait('Pause', { duration: '1d' })], [agent('Other')])],
+    [wait('First', { duration: '10s' })],
+  ];
+  for (const flow of flows) {
+    const wire = compile(flow);
+    const back = rewrap(wire);
+    assert.ok(back.ok, back.ok ? '' : back.reason);
+    if (back.ok) assert.ok(sameWire(compile(back.flow), wire));
+  }
+});
+
+test('switching a wait from a length to a time drops the length', () => {
+  const flow = [wait('Pause', { duration: '5m' })];
+  const switched = updateStep(flow, 'Pause', {}, { duration: undefined, until: '2026-11-02T09:00:00Z' });
+  const out = JSON.parse(JSON.stringify(compile(switched)))[0];
+  assert.equal(out.config.until, '2026-11-02T09:00:00Z');
+  assert.equal('duration' in out.config, false);
 });

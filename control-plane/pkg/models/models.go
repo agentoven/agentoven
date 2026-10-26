@@ -408,6 +408,7 @@ const (
 	StepRouter    StepKind = "router"     // R8: route to exactly one of N branches
 	StepMap       StepKind = "map"        // R8: iterate over array, run agent per item
 	StepSubRecipe StepKind = "sub_recipe" // R8: invoke another recipe as a sub-workflow
+	StepWait      StepKind = "wait"       // pause for a length of time, or until a time
 )
 
 type Branch struct {
@@ -936,6 +937,9 @@ type StepResult struct {
 
 	// R8: Sub-recipe run ID for traceability.
 	SubRunID string `json:"sub_run_id,omitempty"`
+
+	// WakeAt is when a wait step that is waiting ends (Status "waiting").
+	WakeAt *time.Time `json:"wake_at,omitempty"`
 }
 
 type NotifyResult struct {

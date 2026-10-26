@@ -482,6 +482,8 @@ export interface StepResult {
   branch_taken?: string;
   /** On a step that ran another recipe: the run it started. */
   sub_run_id?: string;
+  /** On a wait step that is waiting (`status` is `waiting`): when it ends. */
+  wake_at?: string;
 }
 
 export const recipeRuns = {
@@ -491,6 +493,9 @@ export const recipeRuns = {
     request<RecipeRun>(`/recipes/${recipeName}/runs/${runId}`),
   cancel: (recipeName: string, runId: string) =>
     request<void>(`/recipes/${recipeName}/runs/${runId}/cancel`, { method: 'POST' }),
+  /** Ends a wait step early. */
+  release: (recipeName: string, runId: string, stepName: string) =>
+    request<unknown>(`/recipes/${encodeURIComponent(recipeName)}/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(stepName)}/release`, { method: 'POST' }),
   approveGate: (recipeName: string, runId: string, stepName: string, approved = true) =>
     request<void>(`/recipes/${recipeName}/runs/${runId}/gates/${stepName}/approve`, {
       method: 'POST',

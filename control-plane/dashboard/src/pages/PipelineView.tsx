@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
   GitBranch, Play, Clock, CheckCircle, XCircle, Pause,
   ArrowRight, ChevronDown, ChevronRight, RefreshCw, AlertTriangle,
-  Bot, Search, Shield, Zap, Users, Layers,
+  Bot, Boxes, Hourglass, Search, Shield, Zap, Users, Layers,
 } from 'lucide-react';
 import {
   recipes, recipeRuns,
@@ -24,6 +24,8 @@ const stepMeta: Record<string, { icon: typeof Bot; color: string; bg: string }> 
   condition:  { icon: GitBranch,    color: 'text-teal-400',    bg: 'bg-teal-500/20 border-teal-500/40' },
   fan_out:    { icon: Zap,          color: 'text-orange-400',  bg: 'bg-orange-500/20 border-orange-500/40' },
   fan_in:     { icon: Layers,       color: 'text-orange-400',  bg: 'bg-orange-500/20 border-orange-500/40' },
+  wait:       { icon: Hourglass,    color: 'text-rose-300',    bg: 'bg-rose-500/20 border-rose-500/40' },
+  sub_recipe: { icon: Boxes,        color: 'text-fuchsia-300', bg: 'bg-fuchsia-500/20 border-fuchsia-500/40' },
 };
 
 const statusIcon: Record<string, { Icon: typeof CheckCircle; cls: string }> = {
@@ -361,6 +363,14 @@ export function PipelineViewPage() {
                     <AlertTriangle size={12} /> {selectedRun.error.slice(0, 80)}
                   </span>
                 )}
+                {selectedRun.status === 'running' && (selectedRun.step_results ?? []).filter((s) => s.status === 'waiting' && s.wake_at).map((s) => (
+                  <div key={s.step_name} className="flex flex-wrap items-center gap-2 ml-auto">
+                    <span className="text-xs text-rose-300">Waiting at &ldquo;{s.step_name}&rdquo; until {new Date(s.wake_at!).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</span>
+                    <Button size="sm" variant="secondary" onClick={() => { setError(null); recipeRuns.release(selectedRecipe.name, selectedRun.id, s.step_name).then(() => reloadRun(selectedRecipe.name, selectedRun.id)).catch((e) => setError(e instanceof Error ? e.message : 'Could not end the wait')); }}>
+                      End the wait now
+                    </Button>
+                  </div>
+                ))}
                 {selectedRun.status === 'paused' && pendingGates.length > 0 && (
                   <div className="flex flex-wrap items-center gap-2 ml-auto">
                     <span className="text-xs text-amber-300">Waiting at &ldquo;{pendingGates[0]}&rdquo;</span>

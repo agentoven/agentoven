@@ -57,6 +57,9 @@ type Engine struct {
 	gatesMu sync.RWMutex
 	gates   map[string]chan bool
 
+	// Wait steps that are waiting: runID:stepName → channel that ends the wait early.
+	waits waiters
+
 	// Parent trace IDs: runID → parentTraceID (for linking step traces to recipe trace)
 	parentTraceIDs sync.Map
 
@@ -798,6 +801,9 @@ func (e *Engine) executeStepOnce(ctx context.Context, run *models.RecipeRun, ste
 
 	case models.StepMap:
 		return e.executeMap(ctx, run, step, result, completed, mu)
+
+	case models.StepWait:
+		return e.executeWait(ctx, run, step, result, mu)
 
 	case models.StepSubRecipe:
 		return e.executeSubRecipe(ctx, run, step, result, completed, mu)

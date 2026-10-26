@@ -172,6 +172,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 						r.Get("/", h.GetRecipeRun)
 						r.Post("/cancel", h.CancelRecipeRun)
 						r.Post("/gates/{stepName}/approve", h.ApproveGate)
+						r.Post("/steps/{stepName}/release", h.ReleaseWait)
 					})
 				})
 			})

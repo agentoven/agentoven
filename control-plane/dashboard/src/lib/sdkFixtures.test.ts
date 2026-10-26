@@ -14,12 +14,13 @@ import {
 const FIXTURES = new URL('../../../../sdk/fixtures/recipe-flows.json', import.meta.url);
 
 interface Spec {
-  type: 'agent' | 'check' | 'lookup' | 'decide' | 'ask' | 'together' | 'sub_recipe';
+  type: 'agent' | 'check' | 'lookup' | 'decide' | 'ask' | 'together' | 'sub_recipe' | 'wait';
   title?: string; agent?: string; retries?: number; timeout_secs?: number; top_k?: number;
   mentions?: string[]; when?: string; yes?: Spec[]; no?: Spec[];
   within?: string; notify?: string; domain?: string; emails?: string[]; approved?: Spec[]; rejected?: Spec[]; if_nobody_answers?: string;
   lanes?: Spec[][];
   recipe?: string; input?: Record<string, string>; output?: Record<string, string>;
+  duration?: string; until?: string;
 }
 interface Flow { name: string; description: string; spec: Spec[]; wire: WireStep[] }
 interface Invalid { name: string; spec: Spec[]; expect: string }
@@ -45,6 +46,10 @@ function toFlow(specs: Spec[]): FlowNode[] {
       case 'lookup':
         step.kind = 'rag';
         step.config = { title, top_k: t.top_k ?? 3 };
+        return { id: newId(), step };
+      case 'wait':
+        step.kind = 'wait';
+        step.config = { title, ...(t.duration ? { duration: t.duration } : {}), ...(t.until ? { until: t.until } : {}) };
         return { id: newId(), step };
       case 'sub_recipe':
         step.kind = 'sub_recipe';

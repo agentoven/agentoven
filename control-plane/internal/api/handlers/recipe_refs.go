@@ -5,8 +5,21 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/agentoven/agentoven/control-plane/internal/workflow"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 )
+
+// checkWaitSteps refuses a recipe with a wait step whose time cannot be read.
+func checkWaitSteps(steps []models.Step) error {
+	for i := range steps {
+		if steps[i].Kind == models.StepWait {
+			if err := workflow.ValidateWaitStep(&steps[i]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
 
 // checkSubRecipeRefs refuses a recipe whose sub_recipe steps would lead back to itself, directly or
 // through other recipes. The engine stops such a run at a nesting depth of five, but only after it has

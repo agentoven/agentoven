@@ -147,6 +147,28 @@
         {"name":"escalate","kind":"sub_recipe","config":{"title":"Escalate"},"recipe_ref":"escalation","depends_on":["needs-escalation"]},
         {"name":"standard-reply","kind":"sub_recipe","config":{"title":"Standard reply"},"recipe_ref":"reply-writer","input_mapping":{"ticket":"parent_input.ticket"},"depends_on":["needs-escalation"]}
       ]
+    },
+    {
+      "name": "wait",
+      "description": "Wait a length of time, then carry on",
+      "spec": [{"type":"agent","title":"Send the offer","agent":"sender"},{"type":"wait","title":"Give them a day","duration":"1d"},{"type":"agent","title":"Follow up","agent":"sender"}],
+      "wire": [
+        {"name":"send-the-offer","kind":"agent","config":{"title":"Send the offer"},"agent_ref":"sender","agent":"sender","depends_on":[]},
+        {"name":"give-them-a-day","kind":"wait","config":{"title":"Give them a day","duration":"1d"},"depends_on":["send-the-offer"]},
+        {"name":"follow-up","kind":"agent","config":{"title":"Follow up"},"agent_ref":"sender","agent":"sender","depends_on":["give-them-a-day"]}
+      ]
+    },
+    {
+      "name": "wait-until",
+      "description": "Wait until a time, on one path of a decision",
+      "spec": [{"type":"agent","title":"Triage","agent":"triage"},{"type":"decide","title":"Not urgent?","mentions":["later"],"yes":[{"type":"wait","title":"Until morning","until":"2026-11-02T09:00:00Z"},{"type":"agent","title":"Reply","agent":"writer"}],"no":[{"type":"agent","title":"Reply now","agent":"writer"}]}],
+      "wire": [
+        {"name":"triage","kind":"agent","config":{"title":"Triage"},"agent_ref":"triage","agent":"triage","depends_on":[]},
+        {"name":"not-urgent","kind":"condition","config":{"title":"Not urgent?","expression":"lower(text) contains \"later\""},"depends_on":["triage"],"branches":[{"condition":"condition_met == true","next_step":"until-morning"}],"default_next":"reply-now"},
+        {"name":"until-morning","kind":"wait","config":{"title":"Until morning","until":"2026-11-02T09:00:00Z"},"depends_on":["not-urgent"]},
+        {"name":"reply","kind":"agent","config":{"title":"Reply"},"agent_ref":"writer","agent":"writer","depends_on":["until-morning"]},
+        {"name":"reply-now","kind":"agent","config":{"title":"Reply now"},"agent_ref":"writer","agent":"writer","depends_on":["not-urgent"]}
+      ]
     }
   ],
   "invalid": [
@@ -155,6 +177,7 @@
     {"name":"decision without a condition","spec":[{"type":"agent","title":"A","agent":"a"},{"type":"decide","title":"Pick","yes":[],"no":[]}],"expect":"needs a condition"},
     {"name":"a group with a single step","spec":[{"type":"together","lanes":[[{"type":"agent","title":"Only","agent":"a"}],[]]}],"expect":"at least two steps"},
     {"name":"steps left after an approval that does nothing on a rejection","spec":[{"type":"agent","title":"Draft","agent":"writer"},{"type":"ask","title":"Sign off","approved":[{"type":"agent","title":"Send it","agent":"sender"}],"rejected":[]},{"type":"agent","title":"Log it","agent":"logger"}],"expect":"after a rejection"},
-    {"name":"a recipe step without a recipe","spec":[{"type":"sub_recipe","title":"Run it","recipe":""}],"expect":"needs a recipe to run"}
+    {"name":"a recipe step without a recipe","spec":[{"type":"sub_recipe","title":"Run it","recipe":""}],"expect":"needs a recipe to run"},
+    {"name":"a wait with nothing to wait for","spec":[{"type":"wait","title":"Pause"}],"expect":"needs a time to wait"}
   ]
 }

@@ -3,6 +3,7 @@ import { ShieldCheck, Trash2 } from 'lucide-react';
 import { MAX_LANES, canRemovePaths, isApproval, isParallel, mentionsExpression, titleOf, wordsFromExpression, type FlowNode, type WireStep } from '../../lib/recipeFlow';
 import { metaOfStep } from './stepMeta';
 import RecipeStepSettings, { type RecipeOption } from './RecipeStepSettings';
+import WaitStepSettings from './WaitStepSettings';
 
 const field = 'w-full h-10 px-3 rounded-[10px] bg-[var(--ao-bg)] border border-[var(--ao-border)] text-sm outline-none focus:border-[var(--ao-brand)]';
 const label = 'flex flex-col gap-1.5 text-[13px] font-medium text-slate-300';
@@ -106,6 +107,8 @@ export default function StepInspector({ node, agents, notifyTools, recipes = [],
           </div>
         </>
       )}
+
+      {s.kind === 'wait' && <WaitStepSettings step={s} onConfig={(config) => set({}, config)} />}
 
       {s.kind === 'sub_recipe' && <RecipeStepSettings step={s} recipes={recipes} self={self} onChange={(patch) => set(patch)} />}
 

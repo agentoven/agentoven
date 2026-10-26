@@ -213,6 +213,43 @@ export function together(...lanes: (readonly Node[])[]): Node {
   return node('parallel', '', { lanes: lanes.map((l) => nodes(l, 'a lane')) });
 }
 
+/** The longest a wait may last, in seconds. */
+export const WAIT_MAX_SECONDS = 30 * 24 * 3600;
+const WAIT_RE = /^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$/i;
+const WAIT_UNITS: Record<string, number> = { s: 1, m: 60, h: 3600, d: 86400 };
+
+/** A length of time as the engine reads it: "30s", "5m", "2h" or "3d". */
+function waitText(duration: string | number): string {
+  if (typeof duration === 'string') {
+    const m = WAIT_RE.exec(duration);
+    if (!m) throw new RangeError(`a wait must be a length of time like "30s", "5m", "2h" or "3d", got ${JSON.stringify(duration)}`);
+    return `${m[1]}${(m[2] || 's').toLowerCase()}`;
+  }
+  if (!(duration >= 0)) throw new RangeError('a wait cannot be negative');
+  for (const [unit, size] of [['d', 86400], ['h', 3600], ['m', 60]] as const) {
+    if (duration >= size && duration % size === 0) return `${duration / size}${unit}`;
+  }
+  return `${duration}s`;
+}
+
+/**
+ * Pause the recipe for a length of time, or until a time, then carry on. `duration` is `'30s'`, `'5m'`, `'2h'`,
+ * `'3d'`, or a number of seconds. `until` is a `Date` or ISO 8601 text such as `'2026-11-02T09:00:00Z'`; if that
+ * time has passed when the step starts, the recipe carries on at once. A wait lasts at most 30 days, can be
+ * ended early with `pro.releaseWait`, and is held in the control plane's memory, so it does not survive a restart.
+ */
+export function wait(title: string, options: { duration?: string | number; until?: string | Date } = {}): Node {
+  if (options.duration !== undefined && options.until !== undefined) throw new RangeError('give a duration or an until time, not both');
+  const config: Record<string, unknown> = {};
+  if (options.duration !== undefined) config.duration = waitText(options.duration);
+  if (options.until !== undefined) {
+    const at = options.until instanceof Date ? options.until : new Date(options.until);
+    if (Number.isNaN(at.getTime())) throw new RangeError(`until must be an ISO 8601 time like "2026-11-02T09:00:00Z", got ${JSON.stringify(options.until)}`);
+    config.until = options.until instanceof Date ? at.toISOString().replace(/\.\d{3}Z$/, 'Z') : options.until;
+  }
+  return node('wait', title, { config });
+}
+
 /**
  * Run an agent once for each item of a list an earlier step produced. `over` is the path to the list, such as
  * `extract.items`. Not drawn by the dashboard builder yet: a recipe with one opens read-only there.
@@ -296,6 +333,14 @@ export class Flow {
         const ref = String(n.fields.agent_ref ?? '');
         if (!ref) out.push({ title: n.title, message: `"${t}" needs an agent.` });
         else if (known && !known.has(ref)) out.push({ title: n.title, message: `"${t}" uses ${ref}, which does not exist.` });
+      }
+      if (n.kind === 'wait') {
+        const text = String(n.config.duration ?? '');
+        if (!text && !n.config.until) out.push({ title: n.title, message: `"${t}" needs a time to wait.` });
+        else if (text) {
+          const m = WAIT_RE.exec(text);
+          if (m && Number(m[1]) * WAIT_UNITS[(m[2] || 's').toLowerCase()] > WAIT_MAX_SECONDS) out.push({ title: n.title, message: `"${t}" would wait longer than 30 days.` });
+        }
       }
       if (n.kind === 'map' && !n.fields.source_path) out.push({ title: n.title, message: `"${t}" needs the list to go over.` });
       if (n.kind === 'sub_recipe' && !n.fields.recipe_ref) out.push({ title: n.title, message: `"${t}" needs a recipe to run.` });

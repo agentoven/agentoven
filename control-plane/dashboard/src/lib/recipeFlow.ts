@@ -27,7 +27,7 @@ export interface FlowNode {
   lanes?: FlowNode[][];
 }
 
-export type StepType = 'agent' | 'lookup' | 'person' | 'check' | 'decide' | 'parallel' | 'recipe';
+export type StepType = 'agent' | 'lookup' | 'person' | 'check' | 'decide' | 'parallel' | 'recipe' | 'wait';
 
 export const isDecide = (n: FlowNode): boolean => n.step.kind === 'condition';
 export const isParallel = (n: FlowNode): boolean => n.step.kind === 'parallel';
@@ -38,7 +38,7 @@ export const hasPaths = (n: FlowNode): boolean => isDecide(n) || isApproval(n);
 export const MAX_LANES = 4;
 
 /** The kinds the builder can draw. Anything else makes a recipe read-only here. */
-const SUPPORTED_KINDS = new Set(['agent', 'evaluator', 'rag', 'human_gate', 'condition', 'sub_recipe']);
+const SUPPORTED_KINDS = new Set(['agent', 'evaluator', 'rag', 'human_gate', 'condition', 'sub_recipe', 'wait']);
 
 /** What a decide step tests: the condition step's own result says whether its expression held. */
 export const YES_CONDITION = 'condition_met == true';
@@ -116,6 +116,7 @@ export function newStep(type: StepType, flow: FlowNode[], agent = ''): FlowNode 
     case 'person': return make('Ask a person', 'human_gate', {}, { max_wait_minutes: 1440 });
     case 'decide': return make('Decide', 'condition', {}, { expression: '' });
     case 'recipe': return make('Run a recipe', 'sub_recipe', { recipe_ref: '' });
+    case 'wait': return make('Wait', 'wait', {}, { duration: '5m' });
   }
 }
 
@@ -470,6 +471,16 @@ export function validate(flow: FlowNode[], agents: Set<string>, recipes?: Recipe
     const t = titleOf(s);
     if ((s.kind === 'agent' || s.kind === 'evaluator') && !s.agent_ref) out.push({ id: n.id, message: `"${t}" needs an agent.` });
     else if ((s.kind === 'agent' || s.kind === 'evaluator') && !agents.has(s.agent_ref!)) out.push({ id: n.id, message: `"${t}" uses ${s.agent_ref}, which no longer exists.` });
+    if (s.kind === 'wait') {
+      const duration = String(s.config?.duration ?? '').trim();
+      const until = String(s.config?.until ?? '').trim();
+      if (!duration && !until) out.push({ id: n.id, message: `"${t}" needs a time to wait.` });
+      else if (duration) {
+        const secs = waitSeconds(duration);
+        if (secs === null) out.push({ id: n.id, message: `"${t}" waits for "${duration}", which is not a length of time like 30s, 5m, 2h or 3d.` });
+        else if (secs > WAIT_MAX_SECONDS) out.push({ id: n.id, message: `"${t}" would wait longer than 30 days.` });
+      } else if (Number.isNaN(Date.parse(until))) out.push({ id: n.id, message: `"${t}" has a time that cannot be read.` });
+    }
     if (s.kind === 'sub_recipe') {
       const ref = String(s.recipe_ref ?? '');
       if (!ref) out.push({ id: n.id, message: `"${t}" needs a recipe to run.` });
@@ -483,6 +494,34 @@ export function validate(flow: FlowNode[], agents: Set<string>, recipes?: Recipe
 
 /** How many steps a flow has, counting the ones inside decisions. */
 export const stepCount = (flow: FlowNode[]): number => realNodes(flow).length;
+
+// ── How long a wait lasts ─────────────────────────────────────
+
+/** The longest a wait may last, in seconds. */
+export const WAIT_MAX_SECONDS = 30 * 24 * 3600;
+const UNIT_SECONDS = { s: 1, m: 60, h: 3600, d: 86400 } as const;
+export type WaitUnit = keyof typeof UNIT_SECONDS;
+
+/** Seconds in a length of time written "30s", "5m", "2h" or "3d" (or a bare number of seconds); null when it is not one. */
+export function waitSeconds(text: unknown): number | null {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$/i.exec(String(text ?? ''));
+  if (!m) return null;
+  return Number(m[1]) * UNIT_SECONDS[(m[2].toLowerCase() || 's') as WaitUnit];
+}
+
+/** A length of time as a number and a unit, for showing in two boxes; null when it was written some other way. */
+export function splitWait(text: unknown): { value: number; unit: WaitUnit } | null {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*([smhd])\s*$/i.exec(String(text ?? ''));
+  return m ? { value: Number(m[1]), unit: m[2].toLowerCase() as WaitUnit } : null;
+}
+
+/** "5 minutes", "1 hour", "2 days": a wait said in words. */
+export function waitWords(text: unknown): string {
+  const parts = splitWait(text);
+  if (!parts) return String(text ?? '');
+  const names: Record<WaitUnit, string> = { s: 'second', m: 'minute', h: 'hour', d: 'day' };
+  return `${parts.value} ${names[parts.unit]}${parts.value === 1 ? '' : 's'}`;
+}
 
 // ── What a decision tests ─────────────────────────────────────
 
