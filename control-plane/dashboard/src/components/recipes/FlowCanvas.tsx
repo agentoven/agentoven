@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Flag, Play, Plus } from 'lucide-react';
-import { isDecide, isParallel, realNodes, titleOf, wordsFromExpression, type FlowNode, type StepType, type WireStep, type Where } from '../../lib/recipeFlow';
+import { hasPaths, isApproval, isParallel, realNodes, titleOf, wordsFromExpression, type FlowNode, type StepType, type WireStep, type Where } from '../../lib/recipeFlow';
 import { PALETTE, metaOfStep } from './stepMeta';
 
 const LINE = 'bg-slate-600';
@@ -61,7 +61,8 @@ function subtitle(step: WireStep): string {
     case 'rag': return 'Searches your knowledge';
     case 'human_gate': {
       const mins = Number(step.config?.max_wait_minutes ?? 0);
-      return `${mins > 0 ? `within ${mins >= 1440 && mins % 1440 === 0 ? `${mins / 1440} day${mins === 1440 ? '' : 's'}` : mins >= 60 && mins % 60 === 0 ? `${mins / 60} hours` : `${mins} minutes`}` : 'no time limit'}`;
+      const wait = `${mins > 0 ? `within ${mins >= 1440 && mins % 1440 === 0 ? `${mins / 1440} day${mins === 1440 ? '' : 's'}` : mins >= 60 && mins % 60 === 0 ? `${mins / 60} hours` : `${mins} minutes`}` : 'no time limit'}`;
+      return step.config?.on_reject === 'branch' ? `Approved or rejected, ${wait}` : wait;
     }
     case 'condition': {
       const expr = String(step.config?.expression ?? '');
@@ -81,7 +82,7 @@ interface Props {
   onAdd: (where: Where, type: StepType) => void;
 }
 
-/** The recipe as a top-to-bottom flow. A decision shows its Yes and No paths side by side. */
+/** The recipe as a top-to-bottom flow. A decision shows its Yes and No paths side by side, an approval its Approved and Rejected paths. */
 export default function FlowCanvas({ flow, selectedId, problems, onSelect, onAdd }: Props) {
   const numbers = new Map(realNodes(flow).map((n, i) => [n.id, i + 1]));
 
@@ -164,7 +165,8 @@ export default function FlowCanvas({ flow, selectedId, problems, onSelect, onAdd
 
   const renderNode = (node: FlowNode): React.ReactNode => {
     if (isParallel(node)) return renderParallel(node);
-    if (!isDecide(node)) return card(node);
+    if (!hasPaths(node)) return card(node);
+    const approval = isApproval(node);
     return (
       <div className="w-full flex flex-col items-center">
         {card(node)}
@@ -176,13 +178,13 @@ export default function FlowCanvas({ flow, selectedId, problems, onSelect, onAdd
             return (
               <div key={side} className="flex flex-col items-center pt-0.5 min-w-0">
                 <Connector />
-                <span className={`text-xs font-semibold px-3 py-0.5 rounded-full mb-2.5 ${side === 'yes' ? 'bg-teal-400/15 text-teal-300' : 'bg-slate-400/15 text-slate-300'}`}>{side === 'yes' ? 'Yes' : 'No'}</span>
+                <span className={`text-xs font-semibold px-3 py-0.5 rounded-full mb-2.5 ${side === 'yes' ? 'bg-teal-400/15 text-teal-300' : approval ? 'bg-rose-400/15 text-rose-300' : 'bg-slate-400/15 text-slate-300'}`}>{side === 'yes' ? (approval ? 'Approved' : 'Yes') : approval ? 'Rejected' : 'No'}</span>
                 {list.length === 0 ? (
                   <div className="w-full flex flex-col items-center">
                     <div className="w-full h-[84px] grid place-items-center rounded-2xl border-[1.5px] border-dashed border-slate-600 text-[13px] text-[var(--ao-text-muted)]">
                       <div className="flex flex-col items-center gap-1.5">
-                        <AddButton where={{ parent: node.id, path: side, index: 0 }} onAdd={onAdd} label={`Add a step to the ${side} path`} />
-                        <span>{side === 'yes' ? 'Add a step' : 'Add a step, or carry on'}</span>
+                        <AddButton where={{ parent: node.id, path: side, index: 0 }} onAdd={onAdd} label={`Add a step to the ${approval ? (side === 'yes' ? 'approved' : 'rejected') : side} path`} />
+                        <span>{side === 'yes' ? 'Add a step' : approval ? 'Add a step, or end here' : 'Add a step, or carry on'}</span>
                       </div>
                     </div>
                   </div>

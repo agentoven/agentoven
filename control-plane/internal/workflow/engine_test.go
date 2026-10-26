@@ -1186,3 +1186,132 @@ func TestBuilderSideBySideStepsMeetAgain(t *testing.T) {
 		}
 	}
 }
+
+// ── Human gate answers that lead somewhere ───────────────────
+
+// runGateShape runs steps, then calls answer once the run waits at the gate (answer may be nil when the
+// gate is expected to time out). It returns the run and each step's status.
+func runGateShape(t *testing.T, steps []models.Step, answer func(eng *Engine, runID string)) (*models.RecipeRun, map[string]string) {
+	t.Helper()
+	outputs := map[string]map[string]interface{}{
+		"triage": a2aText("hello"), "approve": a2aText("approved"), "auto": a2aText("rejected path"), "reply": a2aText("sent"),
+	}
+	srv := fakeAgentServer(outputs)
+	defer srv.Close()
+	eng := setupTestEngine(t, srv)
+	ctx := context.Background()
+	for name := range outputs {
+		eng.store.CreateAgent(ctx, &models.Agent{
+			Name: name, Kitchen: "default", Status: models.AgentStatusReady,
+			A2AEndpoint: fmt.Sprintf("%s/api/v1/agents/%s/invoke", srv.URL, name),
+		})
+	}
+	recipe := &models.Recipe{ID: "gate-shape", Name: "gate-shape", Kitchen: "default", Steps: steps}
+	eng.store.CreateRecipe(ctx, recipe)
+	runID, err := eng.ExecuteRecipe(ctx, recipe, "default", map[string]interface{}{"ticket": "t"}, "")
+	if err != nil {
+		t.Fatalf("ExecuteRecipe: %v", err)
+	}
+	if answer != nil {
+		waitForPaused(t, eng, runID)
+		answer(eng, runID)
+	}
+	run := waitForRun(t, eng, runID, 20)
+	got := map[string]string{}
+	for _, sr := range run.StepResults {
+		got[sr.StepName] = sr.Status
+	}
+	return run, got
+}
+
+func gateWithPaths(config map[string]interface{}, yes, no string) models.Step {
+	return models.Step{
+		Name: "gate", Kind: models.StepHumanGate, DependsOn: []string{"triage"}, Config: config,
+		Branches:    []models.Branch{{Condition: "approved == true", NextStep: yes}},
+		DefaultNext: no,
+	}
+}
+
+func gatePathSteps(config map[string]interface{}) []models.Step {
+	return []models.Step{
+		agentStep("triage", "triage"),
+		gateWithPaths(config, "approve", "auto"),
+		agentStep("approve", "approve", "gate"),
+		agentStep("auto", "auto", "gate"),
+		agentStep("reply", "reply", "approve", "auto"),
+	}
+}
+
+func TestGateApprovedFollowsApprovedPath(t *testing.T) {
+	run, got := runGateShape(t, gatePathSteps(map[string]interface{}{"on_reject": "branch"}), func(eng *Engine, id string) {
+		eng.ApproveGateWithMetadata(id, "gate", true, "u1", "a@corp.com", "", "dashboard", "ok")
+	})
+	if run.Status != models.RecipeRunCompleted || got["approve"] != "completed" || got["auto"] != "skipped" || got["reply"] != "completed" {
+		t.Errorf("status %s, steps %v", run.Status, got)
+	}
+}
+
+func TestGateRejectedFollowsRejectedPath(t *testing.T) {
+	run, got := runGateShape(t, gatePathSteps(map[string]interface{}{"on_reject": "branch"}), func(eng *Engine, id string) {
+		eng.ApproveGateWithMetadata(id, "gate", false, "u1", "a@corp.com", "", "dashboard", "needs a different tone")
+	})
+	if run.Status != models.RecipeRunCompleted {
+		t.Fatalf("a rejection with a path should not fail the run: %s (%s)", run.Status, run.Error)
+	}
+	if got["approve"] != "skipped" || got["auto"] != "completed" || got["reply"] != "completed" {
+		t.Errorf("steps %v", got)
+	}
+	for _, sr := range run.StepResults {
+		if sr.StepName == "gate" {
+			if sr.GateStatus != "rejected" || sr.Output["decision"] != "rejected" || sr.Output["comments"] != "needs a different tone" {
+				t.Errorf("gate result lost what was decided: %s %v", sr.GateStatus, sr.Output)
+			}
+		}
+	}
+}
+
+// A "no" must stop the run unless the recipe both asks to follow a path and gives it one.
+func TestGateRejectStillStopsWithoutAPath(t *testing.T) {
+	cases := map[string][]models.Step{
+		"branches but no on_reject": gatePathSteps(nil),
+		"on_reject but no branches": {
+			agentStep("triage", "triage"),
+			{Name: "gate", Kind: models.StepHumanGate, DependsOn: []string{"triage"}, Config: map[string]interface{}{"on_reject": "branch"}},
+			agentStep("reply", "reply", "gate"),
+		},
+	}
+	for name, steps := range cases {
+		t.Run(name, func(t *testing.T) {
+			run, got := runGateShape(t, steps, func(eng *Engine, id string) {
+				eng.ApproveGateWithMetadata(id, "gate", false, "u1", "a@corp.com", "", "dashboard", "no")
+			})
+			if run.Status != models.RecipeRunFailed {
+				t.Errorf("run status = %s, want failed", run.Status)
+			}
+			if got["reply"] == "completed" {
+				t.Errorf("a rejection fell through to the next step: %v", got)
+			}
+		})
+	}
+}
+
+func TestGateTimeoutFollowsRejectedPath(t *testing.T) {
+	steps := gatePathSteps(map[string]interface{}{"on_reject": "branch", "on_timeout": "branch", "max_wait_minutes": 0.001})
+	run, got := runGateShape(t, steps, nil)
+	if run.Status != models.RecipeRunCompleted || got["auto"] != "completed" || got["approve"] != "skipped" {
+		t.Errorf("status %s, steps %v", run.Status, got)
+	}
+	for _, sr := range run.StepResults {
+		if sr.StepName == "gate" && (sr.GateStatus != "timed_out" || sr.Output["decision"] != "timed_out") {
+			t.Errorf("gate result: %s %v", sr.GateStatus, sr.Output)
+		}
+	}
+}
+
+func TestGateTimeoutStopsUnlessAskedToFollowAPath(t *testing.T) {
+	steps := gatePathSteps(map[string]interface{}{"on_reject": "branch", "max_wait_minutes": 0.001})
+	run, _ := runGateShape(t, steps, nil)
+	if run.Status != models.RecipeRunFailed {
+		t.Errorf("run status = %s, want failed on a timeout nobody asked to route", run.Status)
+	}
+}

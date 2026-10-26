@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  CARRY_ON, TEMPLATES, YES_CONDITION, mentionsExpression, resizeLanes, wordsFromExpression, allNodes, compile, decompile, findNode, insertNode, newStep, removeNode, sameWire,
+  APPROVED_CONDITION, CARRY_ON, TEMPLATES, YES_CONDITION, canRemovePaths, setApprovalPaths, mentionsExpression, resizeLanes, wordsFromExpression, allNodes, compile, decompile, findNode, insertNode, newStep, removeNode, sameWire,
   slug, stepCount, titleOf, uniqueName, updateStep, validate, whereAfter, type FlowNode, type WireStep,
 } from './recipeFlow.ts';
 
@@ -254,4 +254,95 @@ test('lanes can be added, removed and filled, and a group needs two steps', () =
   assert.equal(stepCount(flow), 3, 'the group is not a step');
   const steps = compile(flow);
   assert.deepEqual(steps.map((s) => s.name), ['a', 'b', 'c']);
+});
+
+// ── Approvals with an Approved and a Rejected path ────────────
+
+const person = (title: string): FlowNode => step(title, 'human_gate', { config: { max_wait_minutes: 1440 } });
+const approval = (title: string, yes: FlowNode[], no: FlowNode[]): FlowNode => {
+  const n = person(title);
+  n.step.config = { ...n.step.config, on_reject: 'branch' };
+  return { ...n, yes, no };
+};
+
+test('an approval with paths writes an approved branch and routes a rejection to the other path', () => {
+  const steps = compile([agent('Draft'), approval('Sign off', [agent('Send', 'writer')], [agent('Revise')])]);
+  const gate = byName(steps, 'sign-off');
+  assert.equal(gate.config?.on_reject, 'branch');
+  assert.deepEqual(gate.branches, [{ condition: APPROVED_CONDITION, next_step: 'send' }]);
+  assert.equal(gate.default_next, 'revise');
+  assert.deepEqual(byName(steps, 'send').depends_on, ['sign-off']);
+  assert.deepEqual(byName(steps, 'revise').depends_on, ['sign-off']);
+});
+
+test('an approval with paths is read back as the same flow, including empty and nested paths', () => {
+  const shapes: FlowNode[][] = [
+    [agent('Draft'), approval('Sign off', [agent('Send', 'writer')], [agent('Revise')])],
+    [agent('Draft'), approval('Sign off', [agent('Send', 'writer')], [])],
+    [agent('Draft'), approval('Sign off', [], [agent('Revise')]), agent('Log it')],
+    [agent('Draft'), approval('First look', [approval('Second look', [agent('Send', 'writer')], [agent('Fix')])], [agent('Revise')])],
+    [agent('Draft'), decide('Big?', [approval('Sign off', [agent('Send', 'writer')], [agent('Revise')])], [agent('Auto', 'writer')])],
+  ];
+  for (const flow of shapes) {
+    const wire = compile(flow);
+    const back = rewrap(wire);
+    assert.ok(back.ok, back.ok ? '' : back.reason);
+    if (back.ok) assert.ok(sameWire(compile(back.flow), wire));
+  }
+});
+
+test('an empty Rejected path still gives the engine a step to route to, so the approved steps do not run', () => {
+  const steps = compile([agent('Draft'), approval('Sign off', [agent('Send', 'writer')], [])]);
+  const gate = byName(steps, 'sign-off');
+  const carry = byName(steps, gate.default_next!);
+  assert.equal(carry.config?.ui, CARRY_ON);
+  assert.deepEqual(carry.depends_on, ['sign-off']);
+});
+
+test('switching paths on moves the following steps under Approved, and off puts them back', () => {
+  const flow = [agent('Draft'), person('Sign off'), agent('Send', 'writer')];
+  const on = setApprovalPaths(flow, 'Sign off', true);
+  const gate = findNode(on, 'Sign off')!;
+  assert.equal(on.length, 2, 'the step that followed moved inside');
+  assert.deepEqual(gate.yes?.map((n) => n.id), ['Send']);
+  assert.deepEqual(gate.no, []);
+  assert.deepEqual(validate(on, agents), []);
+  assert.ok(canRemovePaths(gate));
+  const off = setApprovalPaths(on, 'Sign off', false);
+  assert.deepEqual(off.map((n) => n.id), ['Draft', 'Sign off', 'Send']);
+  assert.equal(findNode(off, 'Sign off')!.step.config?.on_reject, undefined);
+  assert.ok(sameWire(compile(off), compile(flow)));
+});
+
+test('paths cannot be switched off while the Rejected path has steps', () => {
+  const flow = [approval('Sign off', [], [agent('Revise')])];
+  assert.equal(canRemovePaths(flow[0]), false);
+  assert.equal(setApprovalPaths(flow, 'Sign off', false), flow);
+});
+
+test('steps left after an approval whose Rejected path is empty are flagged, because a rejection would run them', () => {
+  const flow = [agent('Draft'), approval('Sign off', [agent('Send', 'writer')], []), agent('Log it')];
+  const problems = validate(flow, agents);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0].message, /after a rejection/);
+  assert.deepEqual(validate([agent('Draft'), approval('Sign off', [agent('Send', 'writer')], [agent('Revise')]), agent('Log it')], agents), []);
+});
+
+test('an approval that stops the recipe on a no is left as it was', () => {
+  const flow = [agent('Draft'), person('Sign off'), agent('Send', 'writer')];
+  const steps = compile(flow);
+  assert.equal(byName(steps, 'sign-off').config?.on_reject, undefined);
+  assert.equal(byName(steps, 'sign-off').branches, undefined);
+  assert.ok(rewrap(steps).ok);
+});
+
+test('a hand-written approval whose branches the builder would change is read-only', () => {
+  const wire: WireStep[] = [
+    { name: 'draft', kind: 'agent', agent_ref: 'triage', agent: 'triage' },
+    { name: 'gate', kind: 'human_gate', depends_on: ['draft'], config: { on_reject: 'branch' }, branches: [{ condition: 'decision == "approved"', next_step: 'a' }], default_next: 'b' },
+    { name: 'a', kind: 'agent', agent_ref: 'writer', agent: 'writer', depends_on: ['gate'] },
+    { name: 'b', kind: 'agent', agent_ref: 'writer', agent: 'writer', depends_on: ['gate'] },
+  ];
+  const back = rewrap(wire);
+  assert.equal(back.ok, false);
 });

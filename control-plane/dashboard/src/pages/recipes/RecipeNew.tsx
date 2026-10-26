@@ -5,7 +5,7 @@ import { agents, recipes, type Recipe } from '../../api';
 import { useAPI } from '../../hooks';
 import { ErrorBanner, PageHeader } from '../../components/UI';
 import { metaOfStep } from '../../components/recipes/stepMeta';
-import { BLANK, TEMPLATES, allNodes, compile, type FlowNode } from '../../lib/recipeFlow';
+import { BLANK, TEMPLATES, allNodes, compile, stepCount, type FlowNode } from '../../lib/recipeFlow';
 
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/;
 const nameError = (n: string): string | null => {
@@ -109,7 +109,7 @@ export default function RecipeNew() {
                     <span className="block text-[15px] font-semibold">{t.name}</span>
                     <span className="block mt-1 text-[13px] leading-relaxed text-[var(--ao-text-muted)]">{t.body}</span>
                   </span>
-                  <span className="text-[12.5px] text-[var(--ao-text-muted)]">{flow.length} step{flow.length === 1 ? '' : 's'}, then change anything you like</span>
+                  <span className="text-[12.5px] text-[var(--ao-text-muted)]">{stepCount(flow)} step{stepCount(flow) === 1 ? '' : 's'}, then change anything you like</span>
                 </button>
               );
             })}

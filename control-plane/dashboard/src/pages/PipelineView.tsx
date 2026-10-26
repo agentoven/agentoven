@@ -12,6 +12,7 @@ import {
 import {
   PageHeader, Card, Spinner, ErrorBanner, Button, StatusBadge, Modal,
 } from '../components/UI';
+import GateDecision from '../components/recipes/GateDecision';
 
 // ── Step kind → icon + colour mapping ─────────────────────────
 
@@ -123,6 +124,7 @@ export function PipelineViewPage() {
   const [error, setError] = useState<string | null>(null);
   const [polling, setPolling] = useState(false);
   const [detailStep, setDetailStep] = useState<StepResult | null>(null);
+  const [pendingGates, setPendingGates] = useState<string[]>([]);
 
   // Load recipe list
   useEffect(() => {
@@ -158,18 +160,32 @@ export function PipelineViewPage() {
     if (recipeName) loadRecipe(recipeName);
   }, [recipeName, loadRecipe]);
 
-  // Poll running executions
+  // Read the run again, with the steps that are waiting for a person.
+  const reloadRun = useCallback(async (recipe: string, id: string) => {
+    const data = await recipeRuns.get(recipe, id) as RecipeRun | { run?: RecipeRun; pending_gates?: string[] | null };
+    const run = (data as { run?: RecipeRun }).run ?? data as RecipeRun;
+    setSelectedRun(run);
+    setPendingGates((data as { pending_gates?: string[] | null }).pending_gates ?? []);
+    setRunList((current) => current.map((entry) => (entry.id === run.id ? { ...entry, ...run } : entry)));
+    return run;
+  }, []);
+
+  // Which steps wait for a person, when a paused run is opened.
   useEffect(() => {
     if (!selectedRun || !selectedRecipe) return;
-    if (selectedRun.status !== 'running') return;
+    reloadRun(selectedRecipe.name, selectedRun.id).catch(() => undefined);
+  }, [selectedRecipe?.name, selectedRun?.id, reloadRun]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Poll a run that is still going, including one paused for a person to answer.
+  useEffect(() => {
+    if (!selectedRun || !selectedRecipe) return;
+    if (selectedRun.status !== 'running' && selectedRun.status !== 'paused' && selectedRun.status !== 'submitted') return;
 
     setPolling(true);
     const timer = setInterval(async () => {
       try {
-        const data = await recipeRuns.get(selectedRecipe.name, selectedRun.id);
-        const run = (data as { run?: RecipeRun }).run ?? data as RecipeRun;
-        setSelectedRun(run);
-        if (run.status !== 'running') {
+        const run = await reloadRun(selectedRecipe.name, selectedRun.id);
+        if (run.status !== 'running' && run.status !== 'paused' && run.status !== 'submitted') {
           setPolling(false);
           clearInterval(timer);
         }
@@ -177,7 +193,7 @@ export function PipelineViewPage() {
     }, 2000);
 
     return () => { clearInterval(timer); setPolling(false); };
-  }, [selectedRun?.id, selectedRun?.status, selectedRecipe?.name]);
+  }, [selectedRun?.id, selectedRun?.status, selectedRecipe?.name, reloadRun]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Layout nodes from recipe steps
   const nodes = useMemo(
@@ -344,6 +360,13 @@ export function PipelineViewPage() {
                   <span className="text-xs text-red-400 flex items-center gap-1">
                     <AlertTriangle size={12} /> {selectedRun.error.slice(0, 80)}
                   </span>
+                )}
+                {selectedRun.status === 'paused' && pendingGates.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2 ml-auto">
+                    <span className="text-xs text-amber-300">Waiting at &ldquo;{pendingGates[0]}&rdquo;</span>
+                    <GateDecision runId={selectedRun.id} stepName={pendingGates[0]} onError={setError}
+                      onDecided={() => { setError(null); void reloadRun(selectedRecipe.name, selectedRun.id); }} />
+                  </div>
                 )}
               </div>
 

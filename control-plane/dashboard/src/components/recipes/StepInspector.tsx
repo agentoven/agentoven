@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { ShieldCheck, Trash2 } from 'lucide-react';
-import { MAX_LANES, isParallel, mentionsExpression, titleOf, wordsFromExpression, type FlowNode, type WireStep } from '../../lib/recipeFlow';
+import { MAX_LANES, canRemovePaths, isApproval, isParallel, mentionsExpression, titleOf, wordsFromExpression, type FlowNode, type WireStep } from '../../lib/recipeFlow';
 import { metaOfStep } from './stepMeta';
 
 const field = 'w-full h-10 px-3 rounded-[10px] bg-[var(--ao-bg)] border border-[var(--ao-border)] text-sm outline-none focus:border-[var(--ao-brand)]';
@@ -19,6 +19,8 @@ interface Props {
   notifyTools: string[];
   onChange: (id: string, patch: Partial<WireStep>, config?: Record<string, unknown>) => void;
   onDelete: (id: string) => void;
+  /** Gives an approval an Approved and a Rejected path, or takes them away. */
+  onApprovalPaths?: (id: string, on: boolean) => void;
   /** Sets how many paths a "do at the same time" group has. */
   onLanes?: (id: string, count: number) => void;
 }
@@ -30,7 +32,7 @@ function Select({ value, onChange, children, label: aria }: { value: string; onC
 }
 
 /** Settings for the selected step, in plain words. */
-export default function StepInspector({ node, agents, notifyTools, onChange, onDelete, onLanes }: Props) {
+export default function StepInspector({ node, agents, notifyTools, onChange, onDelete, onLanes, onApprovalPaths }: Props) {
   const s = node.step;
   const meta = metaOfStep(s);
   const Icon = meta.icon;
@@ -43,6 +45,8 @@ export default function StepInspector({ node, agents, notifyTools, onChange, onD
   const [wordsText, setWordsText] = useState((words ?? []).join(', '));
 
   const minutes = Number(cfg.max_wait_minutes ?? 0);
+  const paths = isApproval(node);
+  const removable = canRemovePaths(node);
 
   return (
     <aside aria-label="Step settings" className="flex flex-col gap-4">
@@ -115,8 +119,28 @@ export default function StepInspector({ node, agents, notifyTools, onChange, onD
               {WAITS.map((w) => <option key={w.minutes} value={w.minutes}>{w.text}</option>)}
               {!WAITS.some((w) => w.minutes === minutes) && <option value={minutes}>{minutes} minutes</option>}
             </Select>
-            <span className="text-xs font-normal text-[var(--ao-text-muted)]">If nobody answers in time, the run stops here.</span>
+            <span className="text-xs font-normal text-[var(--ao-text-muted)]">{paths ? 'If nobody answers in time, the Rejected path runs or the recipe stops, as you choose below.' : 'If nobody answers in time, the run stops here.'}</span>
           </label>
+          <fieldset className="border-0 m-0 p-0 min-w-0 flex flex-col gap-2">
+            <legend className="p-0 mb-2 text-[13px] font-medium text-slate-300">If the answer is no</legend>
+            {([[false, 'Stop the recipe', 'The run ends as failed and nothing after this step runs.'], [true, 'Follow the Rejected path', 'Choose what happens next, for example send it back to be revised.']] as const).map(([on, title, hint]) => (
+              <label key={title} className={`flex gap-2.5 p-2.5 rounded-[10px] border cursor-pointer ${paths === on ? 'border-[var(--ao-brand)] bg-[var(--ao-brand)]/10' : 'border-[var(--ao-border)] hover:border-slate-500'} ${!on && paths && !removable ? 'opacity-50 cursor-not-allowed' : ''}`}>
+                <input type="radio" name={`on-reject-${node.id}`} className="mt-0.5 accent-[var(--ao-brand)]" checked={paths === on}
+                  disabled={!onApprovalPaths || (!on && paths && !removable)}
+                  onChange={() => onApprovalPaths?.(node.id, on)} />
+                <span><span className="block text-[13.5px] font-semibold">{title}</span><span className="block text-xs font-normal text-[var(--ao-text-muted)] mt-0.5">{hint}</span></span>
+              </label>
+            ))}
+            {paths && !removable && <span className="text-xs text-[var(--ao-text-muted)]">Remove the steps under Rejected to go back to stopping the recipe.</span>}
+            {paths && (
+              <label className={`${label} mt-1`}>If nobody answers in time
+                <Select label="If nobody answers in time" value={String(cfg.on_timeout ?? 'stop')} onChange={(v) => set({}, { on_timeout: v === 'branch' ? 'branch' : undefined })}>
+                  <option value="stop">Stop the recipe</option>
+                  <option value="branch">Follow the Rejected path</option>
+                </Select>
+              </label>
+            )}
+          </fieldset>
           <label className={label}>Tell them through
             <Select label="Tell them through" value={(s.notify_tools as string[] | undefined)?.[0] ?? ''} onChange={(v) => set({ notify_tools: v ? [v] : undefined })}>
               <option value="">No message</option>

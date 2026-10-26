@@ -487,8 +487,20 @@ export const recipeRuns = {
     request<RecipeRun>(`/recipes/${recipeName}/runs/${runId}`),
   cancel: (recipeName: string, runId: string) =>
     request<void>(`/recipes/${recipeName}/runs/${runId}/cancel`, { method: 'POST' }),
-  approveGate: (recipeName: string, runId: string, stepName: string) =>
-    request<void>(`/recipes/${recipeName}/runs/${runId}/gates/${stepName}/approve`, { method: 'POST' }),
+  approveGate: (recipeName: string, runId: string, stepName: string, approved = true) =>
+    request<void>(`/recipes/${recipeName}/runs/${runId}/gates/${stepName}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ approved }),
+    }),
+};
+
+/** Answers for a step that is waiting for a person. The decision is recorded with who made it. */
+export const approvals = {
+  decide: (runId: string, stepName: string, approved: boolean, comments?: string) =>
+    request<unknown>(`/approvals/${encodeURIComponent(runId)}/${encodeURIComponent(stepName)}`, {
+      method: 'POST',
+      body: JSON.stringify({ approved, comments: comments || undefined }),
+    }),
 };
 
 // ── Embeddings ────────────────────────────────────────────────

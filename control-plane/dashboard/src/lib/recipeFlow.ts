@@ -1,5 +1,5 @@
 // The recipe builder works on a simple shape: a list of steps in order, where a "decide" step has a Yes list
-// and a No list. The engine runs a graph (each step names the steps it waits for). This module converts
+// and a No list, and so does a person's approval that has its own Approved and Rejected paths. The engine runs a graph (each step names the steps it waits for). This module converts
 // between the two and checks a flow before it is saved. Everything here is pure, so it is tested without a DOM.
 
 export interface WireBranch { condition: string; next_step: string }
@@ -17,7 +17,7 @@ export interface WireStep {
   [extra: string]: unknown;
 }
 
-/** A node of the flow. A node whose step is a condition is a "decide" and carries both paths. */
+/** A node of the flow. A decide, or an approval with paths, carries both: `yes` is Yes or Approved, `no` is No or Rejected. */
 export interface FlowNode {
   id: string;
   step: WireStep;
@@ -31,6 +31,10 @@ export type StepType = 'agent' | 'lookup' | 'person' | 'check' | 'decide' | 'par
 
 export const isDecide = (n: FlowNode): boolean => n.step.kind === 'condition';
 export const isParallel = (n: FlowNode): boolean => n.step.kind === 'parallel';
+/** An approval that follows a path when the answer is no, instead of stopping the recipe. */
+export const isApproval = (n: FlowNode): boolean => n.step.kind === 'human_gate' && n.step.config?.on_reject === 'branch';
+/** Whether a node splits into two paths: a decide, or an approval with paths. */
+export const hasPaths = (n: FlowNode): boolean => isDecide(n) || isApproval(n);
 export const MAX_LANES = 4;
 
 /** The kinds the builder can draw. Anything else makes a recipe read-only here. */
@@ -38,6 +42,10 @@ const SUPPORTED_KINDS = new Set(['agent', 'evaluator', 'rag', 'human_gate', 'con
 
 /** What a decide step tests: the condition step's own result says whether its expression held. */
 export const YES_CONDITION = 'condition_met == true';
+
+/** What an approval's first path tests: the gate's own result says whether it was approved. */
+export const APPROVED_CONDITION = 'approved == true';
+const winning = (step: WireStep): string => (step.kind === 'human_gate' ? APPROVED_CONDITION : YES_CONDITION);
 
 /** Marks the step standing in for an empty path, so the engine still skips the other path. */
 export const CARRY_ON = 'carry_on';
@@ -175,6 +183,50 @@ export function resizeLanes(flow: FlowNode[], id: string, count: number): FlowNo
   return next;
 }
 
+/** The list a node sits in, and where in it. */
+function listOf(flow: FlowNode[], id: string): { list: FlowNode[]; index: number } | undefined {
+  const search = (list: FlowNode[]): { list: FlowNode[]; index: number } | undefined => {
+    const i = list.findIndex((n) => n.id === id);
+    if (i >= 0) return { list, index: i };
+    for (const n of list) {
+      const hit = search(n.yes ?? []) ?? search(n.no ?? []) ?? (n.lanes ?? []).map((lane) => search(lane)).find(Boolean);
+      if (hit) return hit;
+    }
+    return undefined;
+  };
+  return search(flow);
+}
+
+/** Whether an approval's paths can be switched off without losing steps: nothing may sit on its Rejected path. */
+export const canRemovePaths = (n: FlowNode): boolean => (n.no ?? []).length === 0;
+
+/**
+ * Gives an approval an Approved and a Rejected path, or takes them away. Turning them on moves the steps
+ * that followed it under Approved, so a rejection does not run them. Turning them off puts those steps back.
+ */
+export function setApprovalPaths(flow: FlowNode[], id: string, on: boolean): FlowNode[] {
+  const next = clone(flow);
+  const node = findNode(next, id);
+  const at = listOf(next, id);
+  if (!node || !at || node.step.kind !== 'human_gate') return flow;
+  if (on) {
+    if (isApproval(node)) return flow;
+    node.step.config = { ...(node.step.config ?? {}), on_reject: 'branch' };
+    node.yes = at.list.splice(at.index + 1);
+    node.no = [];
+  } else {
+    if (!isApproval(node) || !canRemovePaths(node)) return flow;
+    const config = { ...(node.step.config ?? {}) };
+    delete config.on_reject;
+    delete config.on_timeout;
+    node.step.config = config;
+    at.list.splice(at.index + 1, 0, ...(node.yes ?? []));
+    delete node.yes;
+    delete node.no;
+  }
+  return next;
+}
+
 // ── Flow to steps ─────────────────────────────────────────────
 
 const MANAGED = ['depends_on', 'branches', 'default_next'] as const;
@@ -212,19 +264,19 @@ function build(nodes: FlowNode[], deps: string[], taken: Set<string>): { steps: 
     const head = base(node.step);
     head.depends_on = [...tails];
     steps.push(head);
-    if (!isDecide(node)) { tails = [head.name]; continue; }
+    if (!hasPaths(node)) { tails = [head.name]; continue; }
 
     const paths: { first: string; steps: WireStep[]; tails: string[] }[] = [];
     for (const [label, list] of [['yes', node.yes ?? []], ['no', node.no ?? []]] as const) {
       // A path must open with one step: the decision's branch names it, and the engine skips its siblings.
       // So a path that is empty, or opens with steps side by side, starts with a carry-on step.
       const needsOpener = list.length === 0 || isParallel(list[0]);
-      const opener = needsOpener ? carryOn(head.name, label === 'yes' ? 'then' : 'otherwise', [head.name], taken) : null;
+      const opener = needsOpener ? carryOn(head.name, isApproval(node) ? (label === 'yes' ? 'approved' : 'rejected') : (label === 'yes' ? 'then' : 'otherwise'), [head.name], taken) : null;
       const built = build(list, [opener ? opener.name : head.name], taken);
       const all = opener ? [opener, ...built.steps] : built.steps;
       paths.push({ first: all[0].name, steps: all, tails: built.steps.length === 0 && opener ? [opener.name] : built.tails });
     }
-    head.branches = [{ condition: YES_CONDITION, next_step: paths[0].first }];
+    head.branches = [{ condition: winning(head), next_step: paths[0].first }];
     head.default_next = paths[1].first;
     steps.push(...paths[0].steps, ...paths[1].steps);
     tails = [...paths[0].tails, ...paths[1].tails];
@@ -296,10 +348,10 @@ export function decompile(wire: WireStep[]): Decompiled {
       if (used.has(cur.name)) fail('Steps loop back on each other.');
       used.add(cur.name);
       const kids = dependents.get(cur.name) ?? [];
-      if (cur.kind === 'condition') {
+      if (cur.kind === 'condition' || (cur.kind === 'human_gate' && cur.config?.on_reject === 'branch')) {
         const yesName = cur.branches?.[0]?.next_step;
         const noName = cur.default_next;
-        if (cur.branches?.length !== 1 || cur.branches[0].condition !== YES_CONDITION || !yesName || !noName) fail(`The decision "${cur.name}" is written in a way the builder cannot draw yet.`);
+        if (cur.branches?.length !== 1 || cur.branches[0].condition !== winning(cur) || !yesName || !noName) fail(`${cur.kind === 'condition' ? 'The decision' : 'The approval'} "${cur.name}" is written in a way the builder cannot draw yet.`);
         const yesFirst = byName.get(yesName!), noFirst = byName.get(noName!);
         if (!yesFirst || !noFirst || !sameSet(kids.map((k) => k.name), [yesName!, noName!])) fail(`The decision "${cur.name}" leads to more than its two paths.`);
         const y = readPath(yesFirst!), n = readPath(noFirst!);
@@ -400,6 +452,15 @@ export function validate(flow: FlowNode[], agents: Set<string>): Problem[] {
     const inside = (g.lanes ?? []).reduce((n, lane) => n + realNodes(lane).length, 0);
     if (inside < 2) out.push({ id: g.id, message: 'Add at least two steps to run side by side.' });
   }
+  // A rejection with nothing under Rejected still carries on to whatever comes after the approval.
+  const lists = (list: FlowNode[]): FlowNode[][] => [list, ...list.flatMap((n) => [...lists(n.yes ?? []), ...lists(n.no ?? []), ...(n.lanes ?? []).flatMap(lists)])];
+  for (const list of lists(flow)) {
+    list.forEach((n, i) => {
+      if (isApproval(n) && (n.no ?? []).length === 0 && i < list.length - 1) {
+        out.push({ id: n.id, message: `Steps after "${titleOf(n.step)}" would also run after a rejection. Move them under Approved.` });
+      }
+    });
+  }
   for (const n of nodes) {
     const s = n.step;
     const t = titleOf(s);
@@ -452,8 +513,24 @@ function chainOf(types: StepType[], agent: string, titles: string[]): FlowNode[]
 export const TEMPLATES: Template[] = [
   {
     id: 'review', name: 'Review and approve',
-    body: 'An agent drafts something, a quality check reads it, then a person approves before it goes out.',
-    build: (agent) => chainOf(['agent', 'check', 'person'], agent, ['Draft', 'Check the draft', 'Ask a person to approve']),
+    body: 'An agent drafts something and a quality check reads it. A person approves it before it goes out, or sends it back to be revised.',
+    build: (agent) => {
+      const flow = chainOf(['agent', 'check', 'person'], agent, ['Draft', 'Check the draft', 'Ask a person to approve']);
+      const withPaths = setApprovalPaths(flow, flow[2].id, true);
+      const gate = withPaths[2];
+      const named = (type: StepType, title: string): FlowNode => {
+        const n = newStep(type, withPaths, agent);
+        n.step.config = { ...(n.step.config ?? {}), title };
+        n.step.name = uniqueName(title, stepNames([...withPaths, ...(gate.yes ?? []), ...(gate.no ?? [])]));
+        return n;
+      };
+      const send = named('agent', 'Send it');
+      const revise = named('agent', 'Revise the draft');
+      revise.step.name = uniqueName('Revise the draft', new Set([...stepNames(withPaths), send.step.name]));
+      gate.yes = [send];
+      gate.no = [revise];
+      return withPaths;
+    },
   },
   {
     id: 'research', name: 'Research, then write',

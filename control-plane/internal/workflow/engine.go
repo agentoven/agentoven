@@ -1597,6 +1597,13 @@ func (e *Engine) executeHumanGate(ctx context.Context, run *models.RecipeRun, st
 					e.store.UpdateApproval(ctx, record)
 				}
 				result.GateStatus = "timed_out"
+				if ctx.Err() == nil && gateFollowsPath(step, "on_timeout") {
+					// The recipe says what happens when nobody answers: carry on along the rejected path.
+					result.Output = map[string]interface{}{"approved": false, "decision": "timed_out"}
+					run.Status = models.RecipeRunRunning
+					e.store.UpdateRecipeRun(ctx, run)
+					return nil
+				}
 				return fmt.Errorf("human gate '%s' exceeded SLA of %.2f minutes", step.Name, maxWaitMinutes)
 			}
 			return fmt.Errorf("human gate '%s' was canceled", step.Name)
@@ -1604,26 +1611,45 @@ func (e *Engine) executeHumanGate(ctx context.Context, run *models.RecipeRun, st
 	}
 }
 
-// resolveGate handles the approval/rejection outcome of a human gate.
-func (e *Engine) resolveGate(ctx context.Context, run *models.RecipeRun, step *models.Step, result *models.StepResult, gateKey string, approved bool) error {
-	if !approved {
-		result.GateStatus = "rejected"
-		result.Output = map[string]interface{}{"approved": false}
-		return fmt.Errorf("human gate '%s' was rejected", step.Name)
+// gateFollowsPath says whether a gate carries on along a path instead of failing the run when it
+// is answered "no" (config key on_reject) or nobody answers in time (on_timeout). A gate only does so
+// when the recipe gives it a path to follow: with no branches, a "no" must stop the run, never fall
+// through as if the step had been approved.
+func gateFollowsPath(step *models.Step, key string) bool {
+	if step.Config == nil {
+		return false
 	}
+	v, _ := step.Config[key].(string)
+	return v == "branch" && (len(step.Branches) > 0 || step.DefaultNext != "")
+}
+
+// resolveGate handles the approval/rejection outcome of a human gate.
+// The output always says what was decided, so a later step or a branch can use it:
+// approved (bool), decision ("approved" or "rejected"), and who decided and why when known.
+func (e *Engine) resolveGate(ctx context.Context, run *models.RecipeRun, step *models.Step, result *models.StepResult, gateKey string, approved bool) error {
+	decision := "approved"
 	result.GateStatus = "approved"
-	result.Output = map[string]interface{}{"approved": true}
+	if !approved {
+		decision = "rejected"
+		result.GateStatus = "rejected"
+	}
+	result.Output = map[string]interface{}{"approved": approved, "decision": decision}
 
 	// Attach approver info to result if available
-	if record, err := e.store.GetApproval(ctx, gateKey); err == nil {
+	if record, err := e.store.GetApproval(ctx, gateKey); err == nil && (approved || record.ApproverEmail != "" || record.Comments != "") {
 		result.Output = map[string]interface{}{
-			"approved":       true,
+			"approved":       approved,
+			"decision":       decision,
 			"approver_id":    record.ApproverID,
 			"approver_email": record.ApproverEmail,
 			"channel":        record.ApproverChannel,
 			"comments":       record.Comments,
 			"resolved_at":    record.ResolvedAt,
 		}
+	}
+
+	if !approved && !gateFollowsPath(step, "on_reject") {
+		return fmt.Errorf("human gate '%s' was rejected", step.Name)
 	}
 
 	// Resume run

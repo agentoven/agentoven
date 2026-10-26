@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Starting a recipe from the dashboard now sends its input as the API expects (`{"input": …}`); before, the input was dropped.
 - Engine tests no longer read or write the developer's `~/.agentoven` data.
 
+### 🙋 Approvals that lead somewhere
+
+- A person's approval can follow its own paths. With `on_reject: branch` in a human gate's config, a "no" no longer stops the run: it follows the step's `default_next`, and a "yes" follows the branch on `approved == true`. `on_timeout: branch` does the same when nobody answers in time. The gate's result now always says `decision` (`approved`, `rejected` or `timed_out`), and carries the approver and the reason, so a later step or branch can use them.
+- A gate that asks for paths but has none to follow still stops on a "no", so a rejection can never fall through as an approval.
+- In the recipe builder, "Ask a person" has "If the answer is no": stop the recipe, or follow a Rejected path (for example send the draft back to be revised). "Review and approve" starts with Approved and Rejected paths.
+- The run page can approve or reject a paused run. Before, the community dashboard had no way to answer a waiting step. A rejection can say why; the reason is recorded and passed on.
+
 ### 🤖 Agentic bots (computer-use agents)
 - **`agenticbot` runtime (seam)** — `Agent.Bot` (`BotConfig`), `contracts.BotControl` (Pro is the sole manager; the community edition refuses), `SandboxProfile` applied by the docker and Kubernetes executors (read-only rootfs, capabilities dropped, non-root, resource limits, runtime class, egress NetworkPolicy), no general control-plane token or provider key inside a bot, every run registered before it starts, a 30-minute invoke timeout for bots. A2A messages and `agentoven_delegate` calls that start a bot run are registered with the bot manager first; `contracts.ToolRunner` lets a bot gate run kitchen tools (and skill tools) in the control plane under the executor's guardrails; a bot's environment carries no tool JSON; `BotConfig` gains shell/files/persistence/takeover/tools settings. See ADR-0029
 

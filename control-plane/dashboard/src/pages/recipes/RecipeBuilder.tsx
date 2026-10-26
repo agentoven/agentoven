@@ -9,7 +9,7 @@ import StepInspector from '../../components/recipes/StepInspector';
 import RunRecipeModal from '../../components/recipes/RunRecipeModal';
 import { PALETTE } from '../../components/recipes/stepMeta';
 import {
-  compile, decompile, findNode, insertNode, newStep, removeNode, resizeLanes, sameWire, updateStep, validate, whereAfter,
+  compile, decompile, findNode, insertNode, newStep, removeNode, resizeLanes, sameWire, setApprovalPaths, updateStep, validate, whereAfter,
   type FlowNode, type StepType, type WireStep, type Where,
 } from '../../lib/recipeFlow';
 
@@ -151,7 +151,7 @@ export default function RecipeBuilder() {
           </section>
           <aside aria-label="Step settings" className="flex-[0_0_340px] max-w-full box-border p-5 border-l border-[var(--ao-border)] bg-[var(--ao-surface)]">
             {sel ? (
-              <StepInspector node={sel} agents={(agentList.data ?? []).map((a) => ({ name: a.name, status: a.status }))} notifyTools={notifyTools} onChange={update} onDelete={remove} onLanes={(id, n) => change(resizeLanes(flow, id, n))} />
+              <StepInspector node={sel} agents={(agentList.data ?? []).map((a) => ({ name: a.name, status: a.status }))} notifyTools={notifyTools} onChange={update} onDelete={remove} onLanes={(id, n) => change(resizeLanes(flow, id, n))} onApprovalPaths={(id, on) => change(setApprovalPaths(flow, id, on))} />
             ) : (
               <div className="text-sm text-[var(--ao-text-muted)]">
                 <div className="text-base font-semibold text-[var(--ao-text)] mb-1">{flow.length === 0 ? 'Start here' : 'Select a step'}</div>
