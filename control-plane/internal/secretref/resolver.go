@@ -4,6 +4,7 @@
 //
 //	k8s://namespace/secret-name/key  → Kubernetes Secret data field (requires K8sReader)
 //	env://ENV_VAR_NAME               → Environment variable
+//	vault://credential-name          → A named credential in the kitchen's vault (requires a Vault)
 //
 // This allows provider API keys to be stored as references rather than
 // plaintext values in the database. When keys rotate in the external
@@ -29,9 +30,49 @@ type K8sSecretReader interface {
 	ReadSecret(ctx context.Context, namespace, name, key string) (string, error)
 }
 
+// Vault is a kitchen's store of named credentials. The community edition has none (a vault:// ref
+// there is an error); Pro installs one backed by its encrypted credential vault. Every call is for
+// one kitchen: a reference can only ever reach the credentials of the kitchen that holds it.
+type Vault interface {
+	// Read returns the current value of a credential.
+	Read(ctx context.Context, kitchen, name string) (string, error)
+	// Write creates the credential, or gives an existing one a new value.
+	Write(ctx context.Context, kitchen, name, value, label string) error
+	// Delete removes a credential. Deleting one that is not there is not an error.
+	Delete(ctx context.Context, kitchen, name string) error
+}
+
+// VaultScheme is the prefix of a reference into the vault.
+const VaultScheme = "vault://"
+
+// VaultRef is the reference to a vault credential.
+func VaultRef(name string) string { return VaultScheme + name }
+
+// VaultName returns the credential a vault:// reference names.
+func VaultName(ref string) (string, bool) {
+	name, ok := strings.CutPrefix(ref, VaultScheme)
+	return name, ok && name != ""
+}
+
+type kitchenKey struct{}
+
+// WithKitchen says which kitchen a reference is being resolved for. A vault:// reference is looked up
+// in that kitchen only.
+func WithKitchen(ctx context.Context, kitchen string) context.Context {
+	return context.WithValue(ctx, kitchenKey{}, kitchen)
+}
+
+func kitchenFrom(ctx context.Context) string {
+	if k, ok := ctx.Value(kitchenKey{}).(string); ok && k != "" {
+		return k
+	}
+	return "default"
+}
+
 // Resolver resolves secret references to their actual values.
 type Resolver struct {
 	k8s   K8sSecretReader
+	vault Vault
 	cache sync.Map // map[string]cacheEntry
 	ttl   time.Duration
 }
@@ -56,11 +97,35 @@ func (r *Resolver) SetK8sReader(reader K8sSecretReader) {
 	log.Info().Msg("secretref: K8s secret reader enabled")
 }
 
+// SetVault enables vault:// references and lets the provider handlers keep keys there. Called by
+// Pro server init.
+func (r *Resolver) SetVault(v Vault) {
+	r.vault = v
+	log.Info().Msg("secretref: vault enabled")
+}
+
+// Vault returns the installed vault, or nil in the community edition.
+func (r *Resolver) Vault() Vault {
+	if r == nil {
+		return nil
+	}
+	return r.vault
+}
+
 // Resolve resolves a secret reference URI to its current value.
 // Returns empty string if the ref is empty or resolution fails.
 func (r *Resolver) Resolve(ctx context.Context, ref string) (string, error) {
 	if ref == "" {
 		return "", nil
+	}
+
+	// A vault credential is read every time and never cached, here or in the tool-auth path: rotating
+	// it takes effect on the very next call, and a deleted one stops working at once.
+	if name, ok := VaultName(ref); ok {
+		return r.resolveVault(ctx, name)
+	}
+	if strings.HasPrefix(ref, VaultScheme) {
+		return "", fmt.Errorf("empty credential name in ref: %s", ref)
 	}
 
 	// Check cache first
@@ -107,6 +172,21 @@ func (r *Resolver) resolveEnv(ref string) (string, error) {
 	value := os.Getenv(varName)
 	if value == "" {
 		return "", fmt.Errorf("env var %s is not set or empty", varName)
+	}
+	return value, nil
+}
+
+// resolveVault resolves vault://credential-name references in the kitchen on the context.
+func (r *Resolver) resolveVault(ctx context.Context, name string) (string, error) {
+	if r.vault == nil {
+		return "", fmt.Errorf("vault:// refs need a credential vault (available in Pro); %q cannot be resolved", VaultScheme+name)
+	}
+	value, err := r.vault.Read(ctx, kitchenFrom(ctx), name)
+	if err != nil {
+		return "", fmt.Errorf("vault credential %q: %w", name, err)
+	}
+	if value == "" {
+		return "", fmt.Errorf("vault credential %q is empty", name)
 	}
 	return value, nil
 }

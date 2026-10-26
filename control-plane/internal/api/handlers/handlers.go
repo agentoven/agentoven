@@ -34,6 +34,7 @@ import (
 	"github.com/agentoven/agentoven/control-plane/internal/process"
 	"github.com/agentoven/agentoven/control-plane/internal/resolver"
 	"github.com/agentoven/agentoven/control-plane/internal/router"
+	"github.com/agentoven/agentoven/control-plane/internal/secretref"
 	"github.com/agentoven/agentoven/control-plane/internal/store"
 	inttelemetry "github.com/agentoven/agentoven/control-plane/internal/telemetry"
 	"github.com/agentoven/agentoven/control-plane/internal/workflow"
@@ -59,6 +60,9 @@ type Handlers struct {
 	Executor   *executor.Executor
 	// Tasks runs agents in the background (nil when the execution journal is off).
 	Tasks *executor.TaskManager
+	// SecretResolver resolves secret references and, when a vault is installed (Pro), is where
+	// provider keys are kept instead of in the provider record. Nil-safe: no vault means none.
+	SecretResolver *secretref.Resolver
 	// AuthorizeBudgetExtension, when set, decides whether the caller may raise a run's budget
 	// (a resume that carries an extension). Raising a cap is spending someone else's money, so
 	// an edition with roles can keep it to the roles that own that decision. An error refuses
@@ -1804,7 +1808,20 @@ func (h *Handlers) CreateProvider(w http.ResponseWriter, r *http.Request) {
 	req.Kitchen = middleware.GetKitchen(r.Context())
 	req.CreatedAt = time.Now().UTC()
 
+	if err := h.checkVaultRef(r.Context(), req.Kitchen, req.SecretRef); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// A key pasted into the form goes to the vault (when there is one) and only a reference is stored.
+	sealed, err := h.sealProviderKeys(r.Context(), &req)
+	if err != nil {
+		h.dropProviderKeys(r.Context(), &req, sealed...)
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
 	if err := h.Store.CreateProvider(r.Context(), &req); err != nil {
+		h.dropProviderKeys(r.Context(), &req, sealed...)
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1860,9 +1877,14 @@ func (h *Handlers) providerModalities(p *models.ModelProvider) []string {
 func (h *Handlers) DeleteProvider(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "providerName")
 	kitchen := middleware.GetKitchen(r.Context())
+	existing, _ := h.Store.GetProvider(r.Context(), kitchen, name)
 	if err := h.Store.DeleteProvider(r.Context(), kitchen, name); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// The provider's own keys go with it. A credential it only pointed at is left alone.
+	if existing != nil {
+		h.dropProviderKeys(r.Context(), existing, ownedKeyNames(existing)...)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1932,10 +1954,30 @@ func (h *Handlers) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	// Point the provider at an external secret (k8s:// or env://) instead of keeping a key in the
 	// database. Sending nothing leaves it as it is.
+	oldOwned := ownedKeyNames(provider)
 	if req.SecretRef != "" {
+		if err := h.checkVaultRef(r.Context(), kitchen, req.SecretRef); err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		provider.SecretRef = req.SecretRef
+		if strings.HasPrefix(req.SecretRef, secretref.VaultScheme) {
+			delete(provider.Config, "api_key") // the reference wins; a stale key is not left behind
+		}
+	}
+	// A new key goes to the vault (when there is one); so does one this provider still holds in plain
+	// text from before, the first time it is saved.
+	sealedAll, sealErr := h.sealProviderKeys(r.Context(), provider)
+	// A credential the provider already owned was rotated in place and stays whatever happens next;
+	// only the ones made just now are cleaned up if this save fails.
+	sealed := without(sealedAll, oldOwned)
+	if sealErr != nil {
+		h.dropProviderKeys(r.Context(), provider, sealed...)
+		respondError(w, http.StatusBadRequest, sealErr.Error())
+		return
 	}
 	if err := h.Router.CheckModalities(provider); err != nil {
+		h.dropProviderKeys(r.Context(), provider, sealed...)
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -1956,8 +1998,19 @@ func (h *Handlers) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.Store.UpdateProvider(r.Context(), provider); err != nil {
+		h.dropProviderKeys(r.Context(), provider, sealed...)
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// Pointing the provider away from a credential it made leaves that credential unused: remove it.
+	kept := map[string]bool{}
+	for _, n := range ownedKeyNames(provider) {
+		kept[n] = true
+	}
+	for _, n := range oldOwned {
+		if !kept[n] {
+			h.dropProviderKeys(r.Context(), provider, n)
+		}
 	}
 
 	// If the model list shrank, burn any ready/active agents whose model was removed.
