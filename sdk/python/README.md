@@ -47,6 +47,36 @@ client.cool("my-assistant")
 MIT
 
 
+## Recipes
+
+Build a recipe the way the dashboard's recipe builder does, check it, create it, run it and answer its approvals.
+The steps written are the same as the dashboard writes, so the recipe opens there too. Plain Python: no native module is needed to build one.
+
+```python
+from agentoven import AgentOvenClient, Flow
+from agentoven.flow import agent, ask, check, decide, mentions, together
+
+flow = Flow("refund-review", "Triage a ticket, ask a person about refunds", [
+    agent("Triage", "triage-agent"),
+    decide("Needs a person?", mentions("refund", "chargeback"),
+        yes=[ask("Approve the refund", within="1 day",
+                 approved=[agent("Issue the refund", "refunder")],
+                 rejected=[agent("Explain the decision", "writer")])],
+        no=[together([agent("Reply", "writer")], [check("Tone check", "reviewer")])]),
+    agent("Log the outcome", "logger"),
+])
+
+client = AgentOvenClient("http://localhost:8080", api_key="...")
+client.create_recipe(flow, check_agents=True)          # a FlowError lists every problem first
+run = client.run_recipe("refund-review", {"text": "I want a refund"})
+state = client.wait_for_recipe_run("refund-review", run["run_id"])   # returns at a gate, or when finished
+if state["status"] == "paused":
+    client.reject_gate(run["run_id"], state["pending_gates"][0], "The tone is too casual")
+```
+
+Builders: `agent`, `check`, `lookup`, `decide`, `ask`, `together`, `each`, `sub_recipe`, and `mentions` for a condition.
+Also `Flow.add`, `Flow.validate`, `Flow.to_wire`, `update_recipe`, `delete_recipe`, `list_recipe_runs` and `approve_gate`.
+
 ## Realtime voice (Pro)
 
 ```python

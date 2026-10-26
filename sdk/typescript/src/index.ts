@@ -39,6 +39,11 @@ export {
   createAgent,
 } from '../index.js';
 
+// Recipes built the way the dashboard builds them: new Flow(...) with the builders in `flow`
+export { Flow, FlowError } from './flow.js';
+export type { AgentOptions, AskOptions, Node as FlowNode, Problem as FlowProblem, WireRecipe, WireStep, Within } from './flow.js';
+export * as flow from './flow.js';
+
 // Realtime voice (Pro)
 export {
   connectRealtime,
@@ -127,6 +132,7 @@ export type {
   Session,
   SessionMessageResponse,
   Step,
+  StepResult,
   TestCase,
   TestResult,
   TestRun,

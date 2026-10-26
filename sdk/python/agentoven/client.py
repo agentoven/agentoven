@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -50,6 +51,7 @@ from agentoven._native import (
     Step,
 )
 
+from agentoven.flow import Flow
 from agentoven.media import Attachment, AudioInput, InvokeResult
 from agentoven.modalities import (
     AgentCard,
@@ -187,9 +189,98 @@ class AgentOvenClient:
                 raise
         return None
 
-    def create_recipe(self, recipe: Recipe, kitchen: Optional[str] = None) -> str:
-        native = self._native if kitchen is None else self.with_kitchen(kitchen)._native
-        return native.create_recipe(recipe)
+    def create_recipe(
+        self,
+        recipe: Union[Flow, Recipe],
+        kitchen: Optional[str] = None,
+        check_agents: bool = False,
+    ) -> Any:
+        """Create a recipe.
+
+        Pass a :class:`agentoven.flow.Flow` (see that module) to build one the way the dashboard does. The flow is
+        checked first and a ``FlowError`` lists what is wrong; with ``check_agents=True`` every agent it names must
+        also exist in the kitchen. Returns the created recipe as a dict. The older ``Recipe``/``Step`` classes
+        are still accepted, and return a confirmation string as they always have.
+        """
+        client = self if kitchen is None else self.with_kitchen(kitchen)
+        if isinstance(recipe, Flow):
+            agents = [a["name"] for a in client._get("/api/v1/agents")] if check_agents else None
+            return client._post("/api/v1/recipes", recipe.to_wire(agents=agents))
+        return client._native.create_recipe(recipe)
+
+    def update_recipe(self, recipe: Flow, kitchen: Optional[str] = None, check_agents: bool = False) -> dict[str, Any]:
+        """Replace a recipe's description and steps with those of ``recipe`` (a Flow with the same name)."""
+        client = self if kitchen is None else self.with_kitchen(kitchen)
+        agents = [a["name"] for a in client._get("/api/v1/agents")] if check_agents else None
+        body = recipe.to_wire(agents=agents)
+        return client._put(f"/api/v1/recipes/{_seg(recipe.name)}", {"description": body["description"], "steps": body["steps"]})
+
+    def delete_recipe(self, name: str, kitchen: Optional[str] = None) -> dict[str, Any]:
+        """Delete a recipe. The control plane refuses while it still has runs."""
+        client = self if kitchen is None else self.with_kitchen(kitchen)
+        return client._delete(f"/api/v1/recipes/{_seg(name)}")
+
+    def run_recipe(
+        self,
+        name: str,
+        input: Optional[Mapping[str, Any]] = None,
+        environment: Optional[str] = None,
+        kitchen: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Start a run. Returns at once with ``run_id`` and ``status``; see :meth:`wait_for_recipe_run`."""
+        client = self if kitchen is None else self.with_kitchen(kitchen)
+        body: dict[str, Any] = {"input": dict(input or {})}
+        if environment:
+            body["environment"] = environment
+        return client._post(f"/api/v1/recipes/{_seg(name)}/bake", body)
+
+    def list_recipe_runs(self, name: str, kitchen: Optional[str] = None) -> list[dict[str, Any]]:
+        """The runs of a recipe, as dicts."""
+        client = self if kitchen is None else self.with_kitchen(kitchen)
+        return client._get(f"/api/v1/recipes/{_seg(name)}/runs")
+
+    def wait_for_recipe_run(
+        self,
+        name: str,
+        run_id: str,
+        timeout: float = 300.0,
+        poll: float = 1.0,
+        stop_at_gate: bool = True,
+        kitchen: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Wait for a run to finish and return it (``status``, ``step_results``, ``output``...).
+
+        A run waiting for a person to approve a step is ``paused``. With ``stop_at_gate=True`` (the default) this
+        returns then, with ``pending_gates`` naming the steps, so you can :meth:`approve_gate` or
+        :meth:`reject_gate`; with ``False`` it keeps waiting. Raises ``TimeoutError`` after ``timeout`` seconds.
+        """
+        client = self if kitchen is None else self.with_kitchen(kitchen)
+        deadline = time.monotonic() + timeout
+        while True:
+            body = client._get(f"/api/v1/recipes/{_seg(name)}/runs/{_seg(run_id)}")
+            run = dict(body.get("run", body))
+            if "pending_gates" in body:
+                run["pending_gates"] = body["pending_gates"] or []
+            status = run.get("status")
+            if status in ("completed", "failed", "canceled") or (stop_at_gate and status == "paused"):
+                return run
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"run {run_id} of {name} is still {status!r} after {timeout:g}s")
+            time.sleep(poll)
+
+    def approve_gate(self, run_id: str, step: str, comments: Optional[str] = None) -> dict[str, Any]:
+        """Approve a step that is waiting for a person. The decision is recorded with who made it."""
+        return self._decide_gate(run_id, step, True, comments)
+
+    def reject_gate(self, run_id: str, step: str, reason: Optional[str] = None) -> dict[str, Any]:
+        """Reject a waiting step. ``reason`` is recorded and passed to the step that follows the Rejected path."""
+        return self._decide_gate(run_id, step, False, reason)
+
+    def _decide_gate(self, run_id: str, step: str, approved: bool, comments: Optional[str]) -> dict[str, Any]:
+        body: dict[str, Any] = {"approved": approved}
+        if comments:
+            body["comments"] = comments
+        return self._post(f"/api/v1/approvals/{_seg(run_id)}/{_seg(step)}", body)
 
     def bake_recipe(self, name: str, input: Optional[Any] = None, kitchen: Optional[str] = None) -> str:
         native = self._native if kitchen is None else self.with_kitchen(kitchen)._native

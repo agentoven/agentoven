@@ -199,23 +199,28 @@ client.bake(agent, environment="production")
 ### Multi-Agent Recipes
 
 ```python
-from agentoven import Recipe, Step, AgentOvenClient
+from agentoven import AgentOvenClient, Flow
+from agentoven.flow import agent, ask, together
 
-# A Recipe is a multi-agent workflow
-recipe = Recipe("document-review",
-    steps=[
-        Step("planner", agent="task-planner", timeout="30s"),
-        Step("researcher", agent="doc-researcher", parallel=True),
-        Step("summarizer", agent="summarizer"),
-        Step("reviewer", agent="quality-reviewer"),
-        Step("approval", human_gate=True, notify=["team-leads"]),
-    ],
-)
+# A recipe is a multi-agent workflow: steps in order, a person's approval, steps at the same time.
+# It is written exactly as the dashboard's recipe builder writes it, so it opens there too.
+flow = Flow("document-review", "Plan, research in parallel, summarize, then ask a person", [
+    agent("Planner", "task-planner", timeout_secs=30),
+    together([agent("Researcher", "doc-researcher")], [agent("Fact check", "fact-checker")]),
+    agent("Summarizer", "summarizer"),
+    agent("Reviewer", "quality-reviewer"),
+    ask("Approval", notify="team-leads",
+        approved=[agent("Publish", "publisher")],
+        rejected=[agent("Revise", "summarizer")]),
+])
 
-# Bake the recipe via the client
 client = AgentOvenClient()
-client.bake(recipe, input='{"document_url": "https://..."}')
+client.create_recipe(flow, check_agents=True)
+run = client.run_recipe("document-review", {"document_url": "https://..."})
+state = client.wait_for_recipe_run("document-review", run["run_id"])  # returns at the approval
 ```
+
+TypeScript has the same builders (`Flow`, `flow.agent`, `flow.ask`, ...); see the [Recipes guide](https://docs.agentoven.dev/recipes).
 
 ---
 

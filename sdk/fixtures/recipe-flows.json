@@ -1,0 +1,138 @@
+{
+  "_about": "Shared expected output for the recipe flow builders. Each flow has a `spec` (the same flow written in a neutral shape) and the `wire` steps the control plane stores. The dashboard builder's compile() is the reference: control-plane/dashboard/src/lib/sdkFixtures.test.ts checks every `wire` against it and rewrites them with UPDATE_FIXTURES=1. The Python and TypeScript SDK tests build each `spec` with their own builder and require exactly this `wire`, so the three cannot drift apart.",
+  "flows": [
+    {
+      "name": "chain",
+      "description": "Steps one after another, with the options an agent step takes",
+      "spec": [{"type":"agent","title":"Triage","agent":"triage","retries":2,"timeout_secs":30},{"type":"lookup","title":"Look up the policy","top_k":5},{"type":"check","title":"Check quality","agent":"reviewer"},{"type":"agent","title":"Write the reply","agent":"writer"}],
+      "wire": [
+        {"name":"triage","kind":"agent","config":{"title":"Triage"},"agent_ref":"triage","max_retries":2,"timeout_secs":30,"agent":"triage","depends_on":[]},
+        {"name":"look-up-the-policy","kind":"rag","config":{"title":"Look up the policy","top_k":5},"depends_on":["triage"]},
+        {"name":"check-quality","kind":"evaluator","config":{"title":"Check quality"},"agent_ref":"reviewer","agent":"reviewer","depends_on":["look-up-the-policy"]},
+        {"name":"write-the-reply","kind":"agent","config":{"title":"Write the reply"},"agent_ref":"writer","agent":"writer","depends_on":["check-quality"]}
+      ]
+    },
+    {
+      "name": "decide",
+      "description": "A decision with a path each way, then a step both paths meet at",
+      "spec": [{"type":"agent","title":"Triage","agent":"triage"},{"type":"decide","title":"Needs a person?","mentions":["refund","Chargeback"],"yes":[{"type":"agent","title":"Escalate","agent":"escalator"}],"no":[{"type":"agent","title":"Auto reply","agent":"writer"}]},{"type":"agent","title":"Log it","agent":"logger"}],
+      "wire": [
+        {"name":"triage","kind":"agent","config":{"title":"Triage"},"agent_ref":"triage","agent":"triage","depends_on":[]},
+        {"name":"needs-a-person","kind":"condition","config":{"title":"Needs a person?","expression":"lower(text) contains \"refund\" or lower(text) contains \"chargeback\""},"depends_on":["triage"],"branches":[{"condition":"condition_met == true","next_step":"escalate"}],"default_next":"auto-reply"},
+        {"name":"escalate","kind":"agent","config":{"title":"Escalate"},"agent_ref":"escalator","agent":"escalator","depends_on":["needs-a-person"]},
+        {"name":"auto-reply","kind":"agent","config":{"title":"Auto reply"},"agent_ref":"writer","agent":"writer","depends_on":["needs-a-person"]},
+        {"name":"log-it","kind":"agent","config":{"title":"Log it"},"agent_ref":"logger","agent":"logger","depends_on":["escalate","auto-reply"]}
+      ]
+    },
+    {
+      "name": "decide-expression",
+      "description": "A decision written as an expression, with an empty No path",
+      "spec": [{"type":"agent","title":"Score","agent":"scorer"},{"type":"decide","title":"High risk","when":"output.score >= 4","yes":[{"type":"agent","title":"Review","agent":"reviewer"}],"no":[]}],
+      "wire": [
+        {"name":"score","kind":"agent","config":{"title":"Score"},"agent_ref":"scorer","agent":"scorer","depends_on":[]},
+        {"name":"high-risk","kind":"condition","config":{"title":"High risk","expression":"output.score >= 4"},"depends_on":["score"],"branches":[{"condition":"condition_met == true","next_step":"review"}],"default_next":"high-risk-otherwise"},
+        {"name":"review","kind":"agent","config":{"title":"Review"},"agent_ref":"reviewer","agent":"reviewer","depends_on":["high-risk"]},
+        {"name":"high-risk-otherwise","kind":"fan_out","depends_on":["high-risk"],"config":{"title":"Carry on","ui":"carry_on"}}
+      ]
+    },
+    {
+      "name": "approval-stops",
+      "description": "A person approves; a no stops the recipe",
+      "spec": [{"type":"agent","title":"Draft","agent":"writer"},{"type":"ask","title":"Ask a person to approve","within":"4 hours","notify":"slack","domain":"corp.com","emails":["lead@corp.com"]},{"type":"agent","title":"Send it","agent":"sender"}],
+      "wire": [
+        {"name":"draft","kind":"agent","config":{"title":"Draft"},"agent_ref":"writer","agent":"writer","depends_on":[]},
+        {"name":"ask-a-person-to-approve","kind":"human_gate","config":{"title":"Ask a person to approve","max_wait_minutes":240},"notify_tools":["slack"],"approver_domain":"corp.com","approver_emails":["lead@corp.com"],"depends_on":["draft"]},
+        {"name":"send-it","kind":"agent","config":{"title":"Send it"},"agent_ref":"sender","agent":"sender","depends_on":["ask-a-person-to-approve"]}
+      ]
+    },
+    {
+      "name": "approval-paths",
+      "description": "A person approves or rejects; each answer has its own path",
+      "spec": [{"type":"agent","title":"Draft","agent":"writer"},{"type":"ask","title":"Sign off","within":"1 day","approved":[{"type":"agent","title":"Send it","agent":"sender"}],"rejected":[{"type":"agent","title":"Revise the draft","agent":"writer"}]}],
+      "wire": [
+        {"name":"draft","kind":"agent","config":{"title":"Draft"},"agent_ref":"writer","agent":"writer","depends_on":[]},
+        {"name":"sign-off","kind":"human_gate","config":{"title":"Sign off","max_wait_minutes":1440,"on_reject":"branch"},"depends_on":["draft"],"branches":[{"condition":"approved == true","next_step":"send-it"}],"default_next":"revise-the-draft"},
+        {"name":"send-it","kind":"agent","config":{"title":"Send it"},"agent_ref":"sender","agent":"sender","depends_on":["sign-off"]},
+        {"name":"revise-the-draft","kind":"agent","config":{"title":"Revise the draft"},"agent_ref":"writer","agent":"writer","depends_on":["sign-off"]}
+      ]
+    },
+    {
+      "name": "approval-rejection-ends",
+      "description": "Nothing under Rejected: a rejection ends the recipe as finished",
+      "spec": [{"type":"agent","title":"Draft","agent":"writer"},{"type":"ask","title":"Sign off","within":"3 days","approved":[{"type":"agent","title":"Send it","agent":"sender"}],"rejected":[]}],
+      "wire": [
+        {"name":"draft","kind":"agent","config":{"title":"Draft"},"agent_ref":"writer","agent":"writer","depends_on":[]},
+        {"name":"sign-off","kind":"human_gate","config":{"title":"Sign off","max_wait_minutes":4320,"on_reject":"branch"},"depends_on":["draft"],"branches":[{"condition":"approved == true","next_step":"send-it"}],"default_next":"sign-off-rejected"},
+        {"name":"send-it","kind":"agent","config":{"title":"Send it"},"agent_ref":"sender","agent":"sender","depends_on":["sign-off"]},
+        {"name":"sign-off-rejected","kind":"fan_out","depends_on":["sign-off"],"config":{"title":"Carry on","ui":"carry_on"}}
+      ]
+    },
+    {
+      "name": "approval-timeout-follows-rejected",
+      "description": "If nobody answers in time, the Rejected path runs",
+      "spec": [{"type":"agent","title":"Draft","agent":"writer"},{"type":"ask","title":"Sign off","within":"1 hour","if_nobody_answers":"reject","approved":[{"type":"agent","title":"Send it","agent":"sender"}],"rejected":[{"type":"agent","title":"Escalate","agent":"escalator"}]}],
+      "wire": [
+        {"name":"draft","kind":"agent","config":{"title":"Draft"},"agent_ref":"writer","agent":"writer","depends_on":[]},
+        {"name":"sign-off","kind":"human_gate","config":{"title":"Sign off","max_wait_minutes":60,"on_reject":"branch","on_timeout":"branch"},"depends_on":["draft"],"branches":[{"condition":"approved == true","next_step":"send-it"}],"default_next":"escalate"},
+        {"name":"send-it","kind":"agent","config":{"title":"Send it"},"agent_ref":"sender","agent":"sender","depends_on":["sign-off"]},
+        {"name":"escalate","kind":"agent","config":{"title":"Escalate"},"agent_ref":"escalator","agent":"escalator","depends_on":["sign-off"]}
+      ]
+    },
+    {
+      "name": "together",
+      "description": "Steps at the same time, then one that waits for all of them",
+      "spec": [{"type":"agent","title":"Plan","agent":"planner"},{"type":"together","lanes":[[{"type":"agent","title":"Research","agent":"researcher"}],[{"type":"lookup","title":"Search the wiki"},{"type":"agent","title":"Summarize","agent":"summarizer"}],[{"type":"agent","title":"Check prices","agent":"pricer"}]]},{"type":"agent","title":"Write the report","agent":"writer"}],
+      "wire": [
+        {"name":"plan","kind":"agent","config":{"title":"Plan"},"agent_ref":"planner","agent":"planner","depends_on":[]},
+        {"name":"research","kind":"agent","config":{"title":"Research"},"agent_ref":"researcher","agent":"researcher","depends_on":["plan"]},
+        {"name":"search-the-wiki","kind":"rag","config":{"title":"Search the wiki","top_k":3},"depends_on":["plan"]},
+        {"name":"summarize","kind":"agent","config":{"title":"Summarize"},"agent_ref":"summarizer","agent":"summarizer","depends_on":["search-the-wiki"]},
+        {"name":"check-prices","kind":"agent","config":{"title":"Check prices"},"agent_ref":"pricer","agent":"pricer","depends_on":["plan"]},
+        {"name":"write-the-report","kind":"agent","config":{"title":"Write the report"},"agent_ref":"writer","agent":"writer","depends_on":["research","summarize","check-prices"]}
+      ]
+    },
+    {
+      "name": "together-first",
+      "description": "Steps at the same time right at the start",
+      "spec": [{"type":"together","lanes":[[{"type":"agent","title":"Fetch A","agent":"fetcher"}],[{"type":"agent","title":"Fetch B","agent":"fetcher"}]]},{"type":"agent","title":"Merge","agent":"merger"}],
+      "wire": [
+        {"name":"fetch-a","kind":"agent","config":{"title":"Fetch A"},"agent_ref":"fetcher","agent":"fetcher","depends_on":[]},
+        {"name":"fetch-b","kind":"agent","config":{"title":"Fetch B"},"agent_ref":"fetcher","agent":"fetcher","depends_on":[]},
+        {"name":"merge","kind":"agent","config":{"title":"Merge"},"agent_ref":"merger","agent":"merger","depends_on":["fetch-a","fetch-b"]}
+      ]
+    },
+    {
+      "name": "nested",
+      "description": "An approval with paths inside a decision, and steps at the same time on the other path",
+      "spec": [{"type":"agent","title":"Triage","agent":"triage"},{"type":"decide","title":"Big refund","mentions":["refund"],"yes":[{"type":"ask","title":"Approve the refund","within":"1 day","approved":[{"type":"agent","title":"Issue the refund","agent":"refunder"}],"rejected":[{"type":"agent","title":"Explain the decision","agent":"writer"}]}],"no":[{"type":"together","lanes":[[{"type":"agent","title":"Reply","agent":"writer"}],[{"type":"check","title":"Tone check","agent":"reviewer"}]]}]},{"type":"agent","title":"Log the outcome","agent":"logger"}],
+      "wire": [
+        {"name":"triage","kind":"agent","config":{"title":"Triage"},"agent_ref":"triage","agent":"triage","depends_on":[]},
+        {"name":"big-refund","kind":"condition","config":{"title":"Big refund","expression":"lower(text) contains \"refund\""},"depends_on":["triage"],"branches":[{"condition":"condition_met == true","next_step":"approve-the-refund"}],"default_next":"big-refund-otherwise"},
+        {"name":"approve-the-refund","kind":"human_gate","config":{"title":"Approve the refund","max_wait_minutes":1440,"on_reject":"branch"},"depends_on":["big-refund"],"branches":[{"condition":"approved == true","next_step":"issue-the-refund"}],"default_next":"explain-the-decision"},
+        {"name":"issue-the-refund","kind":"agent","config":{"title":"Issue the refund"},"agent_ref":"refunder","agent":"refunder","depends_on":["approve-the-refund"]},
+        {"name":"explain-the-decision","kind":"agent","config":{"title":"Explain the decision"},"agent_ref":"writer","agent":"writer","depends_on":["approve-the-refund"]},
+        {"name":"big-refund-otherwise","kind":"fan_out","depends_on":["big-refund"],"config":{"title":"Carry on","ui":"carry_on"}},
+        {"name":"reply","kind":"agent","config":{"title":"Reply"},"agent_ref":"writer","agent":"writer","depends_on":["big-refund-otherwise"]},
+        {"name":"tone-check","kind":"evaluator","config":{"title":"Tone check"},"agent_ref":"reviewer","agent":"reviewer","depends_on":["big-refund-otherwise"]},
+        {"name":"log-the-outcome","kind":"agent","config":{"title":"Log the outcome"},"agent_ref":"logger","agent":"logger","depends_on":["issue-the-refund","explain-the-decision","reply","tone-check"]}
+      ]
+    },
+    {
+      "name": "repeated-titles",
+      "description": "Two steps with the same title get distinct names",
+      "spec": [{"type":"agent","title":"Review","agent":"reviewer"},{"type":"agent","title":"Review","agent":"reviewer"},{"type":"agent","title":"Review!","agent":"reviewer"}],
+      "wire": [
+        {"name":"review","kind":"agent","config":{"title":"Review"},"agent_ref":"reviewer","agent":"reviewer","depends_on":[]},
+        {"name":"review-2","kind":"agent","config":{"title":"Review"},"agent_ref":"reviewer","agent":"reviewer","depends_on":["review"]},
+        {"name":"review-3","kind":"agent","config":{"title":"Review!"},"agent_ref":"reviewer","agent":"reviewer","depends_on":["review-2"]}
+      ]
+    }
+  ],
+  "invalid": [
+    {"name":"no steps","spec":[],"expect":"Add at least one step"},
+    {"name":"agent step without an agent","spec":[{"type":"agent","title":"Triage","agent":""}],"expect":"needs an agent"},
+    {"name":"decision without a condition","spec":[{"type":"agent","title":"A","agent":"a"},{"type":"decide","title":"Pick","yes":[],"no":[]}],"expect":"needs a condition"},
+    {"name":"a group with a single step","spec":[{"type":"together","lanes":[[{"type":"agent","title":"Only","agent":"a"}],[]]}],"expect":"at least two steps"},
+    {"name":"steps left after an approval that does nothing on a rejection","spec":[{"type":"agent","title":"Draft","agent":"writer"},{"type":"ask","title":"Sign off","approved":[{"type":"agent","title":"Send it","agent":"sender"}],"rejected":[]},{"type":"agent","title":"Log it","agent":"logger"}],"expect":"after a rejection"}
+  ]
+}

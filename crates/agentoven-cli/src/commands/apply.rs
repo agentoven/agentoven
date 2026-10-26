@@ -33,8 +33,7 @@ use serde_json::Value as JsonValue;
 
 use agentoven_core::agent::{Agent, AgentFramework, AgentMode};
 use agentoven_core::ingredient::Ingredient;
-use agentoven_core::recipe::{Recipe, Step, StepKind};
-use uuid::Uuid;
+use agentoven_core::recipe::steps_from_documents;
 
 // ── Manifest Types ──────────────────────────────────────────
 
@@ -106,47 +105,15 @@ pub struct ToolIngredient {
     pub protocol: Option<String>,
 }
 
-/// Recipe manifest — maps to recipe creation.
+/// Recipe manifest — maps to recipe creation. Steps stay as written so every setting reaches
+/// `agentoven_core::recipe::steps_from_documents`, which knows what the engine reads.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RecipeManifest {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
-    pub steps: Vec<StepManifest>,
-}
-
-/// A step within a recipe manifest.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct StepManifest {
-    pub name: String,
-    #[serde(default)]
-    pub agent: Option<String>,
-    #[serde(default, rename = "kind")]
-    pub step_kind: Option<String>,
-    #[serde(default)]
-    pub input: Option<String>,
-    #[serde(default)]
-    pub depends_on: Option<Vec<String>>,
-    #[serde(default)]
-    pub condition: Option<String>,
-    #[serde(default)]
-    pub retries: Option<u32>,
-    #[serde(default)]
-    pub timeout_secs: Option<u64>,
-    #[serde(default)]
-    pub parallel_inputs: Option<Vec<String>>,
-    #[serde(default)]
-    pub routes: Option<Vec<RouteManifest>>,
-    #[serde(default)]
-    pub sub_recipe: Option<String>,
-}
-
-/// A route within a router step.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct RouteManifest {
-    pub condition: String,
-    pub target: String,
+    pub steps: Vec<JsonValue>,
 }
 
 /// ToolSet manifest — bulk tool registration.
@@ -461,38 +428,14 @@ async fn apply_recipe(
     client: &agentoven_core::AgentOvenClient,
     manifest: RecipeManifest,
 ) -> anyhow::Result<String> {
-    let name = manifest.name.clone();
-
-    let steps: Vec<Step> = manifest
-        .steps
-        .into_iter()
-        .map(|s| {
-            let kind = match s.step_kind.as_deref() {
-                Some("human-gate") | Some("gate") => StepKind::HumanGate,
-                Some("evaluator") => StepKind::Evaluator,
-                Some("condition") | Some("branch") => StepKind::Condition,
-                Some("fan-out") | Some("parallel") | Some("map") => StepKind::FanOut,
-                Some("fan-in") | Some("join") => StepKind::FanIn,
-                _ => StepKind::Agent,
-            };
-            Step {
-                id: Uuid::new_v4().to_string(),
-                name: s.name,
-                agent: s.agent,
-                kind,
-                parallel: false,
-                timeout: s.timeout_secs.map(|s| format!("{}s", s)),
-                depends_on: s.depends_on.unwrap_or_default(),
-                retry: None,
-                notify: Vec::new(),
-                config: None,
-            }
-        })
-        .collect();
-
-    let recipe = Recipe::new(&manifest.name, steps);
-    client.create_recipe(&recipe).await?;
-    Ok(name)
+    let (steps, warnings) = steps_from_documents(&manifest.steps)?;
+    for w in warnings {
+        println!("  {} {}", "⚠".yellow().bold(), w.dimmed());
+    }
+    client
+        .create_recipe_steps(&manifest.name, manifest.description.as_deref().unwrap_or(""), steps)
+        .await?;
+    Ok(manifest.name)
 }
 
 async fn apply_toolset(

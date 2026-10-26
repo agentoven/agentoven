@@ -4,7 +4,7 @@ use clap::{Args, Subcommand};
 use colored::Colorize;
 use serde_json;
 
-use agentoven_core::recipe::{Step, StepKind};
+use agentoven_core::recipe::steps_from_documents;
 
 #[derive(Subcommand)]
 pub enum RecipeCommands {
@@ -104,7 +104,7 @@ async fn create(args: CreateArgs) -> anyhow::Result<()> {
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
 
-    let steps = if let Some(ref from_path) = args.from {
+    let (description, steps, warnings) = if let Some(ref from_path) = args.from {
         let content = tokio::fs::read_to_string(from_path).await?;
         let parsed: serde_json::Value = if from_path.ends_with(".toml") {
             let toml_val: toml::Value = content.parse()?;
@@ -120,80 +120,36 @@ async fn create(args: CreateArgs) -> anyhow::Result<()> {
             .get("steps")
             .and_then(|v| v.as_array())
             .ok_or_else(|| anyhow::anyhow!("Missing 'steps' array in {}", from_path))?;
-
-        steps_arr
-            .iter()
-            .map(|s| {
-                let name = s["name"].as_str().unwrap_or("step").to_string();
-                let agent = s.get("agent").and_then(|v| v.as_str()).map(String::from);
-                let kind_str = s.get("kind").and_then(|v| v.as_str()).unwrap_or("agent");
-                let kind = match kind_str {
-                    "human-gate" | "gate" => StepKind::HumanGate,
-                    "evaluator" => StepKind::Evaluator,
-                    "condition" | "branch" => StepKind::Condition,
-                    "fan-out" | "parallel" => StepKind::FanOut,
-                    "fan-in" | "join" => StepKind::FanIn,
-                    _ => StepKind::Agent,
-                };
-                let depends_on = s
-                    .get("depends_on")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let timeout = s.get("timeout").and_then(|v| v.as_str()).map(String::from);
-                let parallel = s.get("parallel").and_then(|v| v.as_bool()).unwrap_or(false);
-
-                Step {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    name,
-                    kind,
-                    agent,
-                    parallel,
-                    timeout,
-                    depends_on,
-                    retry: None,
-                    notify: Vec::new(),
-                    config: None,
-                }
-            })
-            .collect()
+        let description = parsed.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let (steps, warnings) = steps_from_documents(steps_arr)?;
+        (description, steps, warnings)
     } else {
-        Vec::new()
+        (String::new(), Vec::new(), Vec::new())
     };
+    for w in warnings {
+        println!("  {} {}", "⚠".yellow().bold(), w.dimmed());
+    }
 
-    let recipe = agentoven_core::Recipe::new(&args.name, steps);
-    match client.create_recipe(&recipe).await {
+    match client.create_recipe_steps(&args.name, &description, steps).await {
         Ok(created) => {
             println!(
                 "  {} Recipe '{}' created (ID: {}).",
                 "✓".green().bold(),
                 args.name,
-                created.id.dimmed()
+                created.get("id").and_then(|v| v.as_str()).unwrap_or("-").dimmed()
             );
             println!(
                 "  {} Execute with: {}",
                 "→".dimmed(),
                 format!("agentoven recipe bake {}", args.name).green()
             );
+            Ok(())
         }
         Err(e) => {
-            println!(
-                "  {} Could not create recipe: {}",
-                "⚠".yellow().bold(),
-                e.to_string().dimmed()
-            );
-            println!(
-                "  {} Recipe validated locally. ID: {}",
-                "✓".green().bold(),
-                recipe.id.dimmed()
-            );
+            println!("  {} Could not create recipe: {}", "✗".red().bold(), e.to_string().dimmed());
+            Err(e)
         }
     }
-    Ok(())
 }
 
 async fn list() -> anyhow::Result<()> {

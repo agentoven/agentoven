@@ -8,6 +8,38 @@ import { ProClient } from '@agentoven/sdk';
 const pro = new ProClient({ url: 'http://localhost:8080', apiKey: process.env.AGENTOVEN_API_KEY, kitchen: 'default' });
 ```
 
+## Recipes
+
+Build a recipe the way the dashboard's recipe builder does, check it, create it, run it and answer its approvals.
+The steps written are the same as the dashboard writes, so the recipe opens there too. Plain TypeScript: no native module is needed to build one.
+
+```ts
+import { Flow, flow, ProClient } from '@agentoven/sdk';
+const { agent, ask, check, decide, mentions, together } = flow;
+
+const refunds = new Flow('refund-review', 'Triage a ticket, ask a person about refunds', [
+  agent('Triage', 'triage-agent'),
+  decide('Needs a person?', mentions('refund', 'chargeback'), {
+    yes: [ask('Approve the refund', {
+      within: '1 day',
+      approved: [agent('Issue the refund', 'refunder')],
+      rejected: [agent('Explain the decision', 'writer')],
+    })],
+    no: [together([agent('Reply', 'writer')], [check('Tone check', 'reviewer')])],
+  }),
+  agent('Log the outcome', 'logger'),
+]);
+
+const pro = new ProClient({ url: 'http://localhost:8080', apiKey: '...' });
+await pro.createRecipe(refunds, { checkAgents: true });      // a FlowError lists every problem first
+const run = await pro.runRecipe('refund-review', { text: 'I want a refund' });
+const state = await pro.waitForRecipeRun('refund-review', run.run_id as string); // returns at a gate, or when finished
+if (state.status === 'paused') await pro.rejectGate(run.run_id as string, state.pending_gates![0], 'The tone is too casual');
+```
+
+Builders: `agent`, `check`, `lookup`, `decide`, `ask`, `together`, `each`, `subRecipe`, and `mentions` for a condition.
+Also `Flow.add`, `Flow.validate`, `Flow.toWire`, `updateRecipe`, `deleteRecipe`, `listRecipeRuns` and `approveGate`.
+
 ## Modalities
 
 A *modality* is something an agent can take in or give out beyond text: `image`,

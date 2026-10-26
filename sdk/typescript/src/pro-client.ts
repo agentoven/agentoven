@@ -25,6 +25,7 @@
  * ```
  */
 
+import { Flow } from './flow.js';
 import { audioClipFromWire, audioFromBytes } from './media.js';
 import { resolveModalities, supportsModality, type AnyModality } from './modalities.js';
 import { connectRealtime, type RealtimeSession, type WebSocketFactory } from './realtime.js';
@@ -286,8 +287,28 @@ export class ProClient {
     return this.get(`/api/v1/recipes/${encodeURIComponent(name)}`, opts?.kitchen);
   }
 
-  async createRecipe(recipe: Partial<Recipe>, opts?: { kitchen?: string }): Promise<Recipe> {
+  /**
+   * Create a recipe. Pass a `Flow` to build one the way the dashboard does: it is checked first and a `FlowError`
+   * lists what is wrong. With `checkAgents: true` every agent it names must also exist in the kitchen.
+   */
+  async createRecipe(recipe: Partial<Recipe> | Flow, opts?: { kitchen?: string; checkAgents?: boolean }): Promise<Recipe> {
+    if (recipe instanceof Flow) {
+      const agents = opts?.checkAgents ? await this.agentNames(opts.kitchen) : undefined;
+      return this.post('/api/v1/recipes', recipe.toWire({ agents }), opts?.kitchen);
+    }
     return this.post('/api/v1/recipes', recipe, opts?.kitchen);
+  }
+
+  /** Replace a recipe's description and steps with those of `flow` (a Flow with the same name). */
+  async updateRecipe(flow: Flow, opts?: { kitchen?: string; checkAgents?: boolean }): Promise<Recipe> {
+    const agents = opts?.checkAgents ? await this.agentNames(opts.kitchen) : undefined;
+    const { description, steps } = flow.toWire({ agents });
+    return this.put(`/api/v1/recipes/${encodeURIComponent(flow.name)}`, { description, steps }, opts?.kitchen);
+  }
+
+  private async agentNames(kitchen?: string): Promise<string[]> {
+    const agents = await this.get<{ name: string }[]>('/api/v1/agents', kitchen);
+    return agents.map((a) => a.name);
   }
 
   async deleteRecipe(name: string, opts?: { kitchen?: string }): Promise<void> {
@@ -305,6 +326,57 @@ export class ProClient {
       { input, ...(environment ? { environment } : {}) },
       opts?.kitchen,
     );
+  }
+
+  /** Start a run. Returns at once with `run_id` and `status`; see `waitForRecipeRun`. */
+  async runRecipe(
+    name: string,
+    input: Record<string, unknown> = {},
+    opts?: { environment?: string; kitchen?: string },
+  ): Promise<Record<string, unknown>> {
+    return this.bakeRecipe(name, input, opts?.environment, { kitchen: opts?.kitchen });
+  }
+
+  /**
+   * Wait for a run to finish and return it (`status`, `step_results`, `output`...). A run waiting for a person to
+   * approve a step is `paused`. With `stopAtGate` (the default) this returns then, with `pending_gates` naming the
+   * steps, so you can `approveGate` or `rejectGate`; with `false` it keeps waiting. Rejects after `timeoutMs`.
+   */
+  async waitForRecipeRun(
+    name: string,
+    runId: string,
+    opts: { timeoutMs?: number; pollMs?: number; stopAtGate?: boolean; kitchen?: string } = {},
+  ): Promise<RecipeRun> {
+    const { timeoutMs = 300_000, pollMs = 1_000, stopAtGate = true } = opts;
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const body = await this.get<{ run?: RecipeRun; pending_gates?: string[] | null } & RecipeRun>(
+        `/api/v1/recipes/${encodeURIComponent(name)}/runs/${encodeURIComponent(runId)}`,
+        opts.kitchen,
+      );
+      const run: RecipeRun = { ...(body.run ?? body) };
+      if ('pending_gates' in body) run.pending_gates = body.pending_gates ?? [];
+      if (['completed', 'failed', 'canceled'].includes(run.status) || (stopAtGate && run.status === 'paused')) return run;
+      if (Date.now() >= deadline) throw new Error(`run ${runId} of ${name} is still '${run.status}' after ${timeoutMs / 1000}s`);
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+  }
+
+  /** Approve a step that is waiting for a person. The decision is recorded with who made it. */
+  approveGate(runId: string, step: string, comments?: string): Promise<unknown> {
+    return this.decideGate(runId, step, true, comments);
+  }
+
+  /** Reject a waiting step. `reason` is recorded and passed to the step that follows the Rejected path. */
+  rejectGate(runId: string, step: string, reason?: string): Promise<unknown> {
+    return this.decideGate(runId, step, false, reason);
+  }
+
+  private decideGate(runId: string, step: string, approved: boolean, comments?: string): Promise<unknown> {
+    return this.post(`/api/v1/approvals/${encodeURIComponent(runId)}/${encodeURIComponent(step)}`, {
+      approved,
+      ...(comments ? { comments } : {}),
+    });
   }
 
   async listRecipeRuns(recipeName: string, opts?: { kitchen?: string }): Promise<RecipeRun[]> {

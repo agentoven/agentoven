@@ -186,7 +186,28 @@ impl AgentOvenClient {
 
     // ── Recipe Operations ────────────────────────────────────
 
-    /// Create a new recipe (workflow).
+    /// Create a recipe from steps already in the shape the control plane runs (see
+    /// [`crate::recipe::steps_from_documents`]). Returns the created recipe as the server sent it.
+    pub async fn create_recipe_steps(
+        &self,
+        name: &str,
+        description: &str,
+        steps: Vec<serde_json::Value>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let url = self.url("/api/v1/recipes");
+        let body = serde_json::json!({"name": name, "description": description, "steps": steps});
+        let resp = self.authed_request(self.http.post(url)).json(&body).send().await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("{status}: {text}");
+        }
+        Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null))
+    }
+
+    /// Create a new recipe (workflow) from the typed model. The typed [`Step`](crate::recipe::Step) does not
+    /// carry every setting the engine reads (conditions, branches, retries, a timeout in seconds): prefer
+    /// [`Self::create_recipe_steps`].
     pub async fn create_recipe(&self, recipe: &Recipe) -> anyhow::Result<Recipe> {
         let url = self.url("/api/v1/recipes");
         let resp = self

@@ -26,6 +26,8 @@ from agentoven._native import (
     Recipe,
     Step,
 )
+from agentoven import flow
+from agentoven.flow import Flow, FlowError
 from agentoven.client import AgentOvenClient, AgentOvenAPIError, AudioModalityError, RealtimeToken
 from agentoven.media import Attachment, AudioClip, AudioInput, InvokeResult
 from agentoven.modalities import (
@@ -51,6 +53,10 @@ __all__ = [
     "RealtimeError",
     "RealtimeEvent",
     "RealtimeSession",
+    # Recipes built the way the dashboard builds them (see agentoven.flow)
+    "Flow",
+    "FlowError",
+    "flow",
     # Modalities, media and voice
     "AgentCard",
     "Attachment",

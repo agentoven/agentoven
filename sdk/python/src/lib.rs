@@ -214,6 +214,16 @@ fn pyobj_to_json_string(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Strin
 }
 
 /// Convert a Python object to a serde_json::Value, handling nested dicts and lists.
+use agentoven_core::recipe::parse_timeout_secs;
+
+/// A recipe's input must be an object. Text that is a JSON object is sent as one, other text as {"text": ...}.
+fn recipe_input(text: &str) -> serde_json::Value {
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(v) if v.is_object() => v,
+        _ => serde_json::json!({ "text": text }),
+    }
+}
+
 fn pyany_to_json(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
     // Check bool before i64 because Python bool is a subclass of int
     if let Ok(b) = obj.extract::<bool>() {
@@ -671,12 +681,14 @@ impl AgentOvenClient {
         body
     }
 
-    /// Serialize a Recipe into the control-plane JSON shape.
-    fn recipe_to_json(&self, recipe: &Recipe) -> serde_json::Value {
+    /// Serialize a Recipe into the control-plane JSON shape: the field names the engine reads
+    /// (`timeout_secs`, `notify_tools`, a branch's `next_step`, `agent_ref` with its `agent` alias).
+    /// A timeout it cannot read is an error, not a step that silently runs without one.
+    fn recipe_to_json(&self, recipe: &Recipe) -> PyResult<serde_json::Value> {
         let steps: Vec<serde_json::Value> = recipe
             .steps
             .iter()
-            .map(|s| {
+            .map(|s| -> PyResult<serde_json::Value> {
                 let kind = if s.human_gate { "human_gate" } else { s.kind.as_str() };
                 let mut step = serde_json::json!({
                     "name": s.name,
@@ -684,20 +696,27 @@ impl AgentOvenClient {
                 });
                 if let Some(ref a) = s.agent {
                     step["agent_ref"] = serde_json::json!(a);
+                    step["agent"] = serde_json::json!(a);
                 }
                 if let Some(ref t) = s.timeout {
-                    step["timeout"] = serde_json::json!(t);
+                    let secs = parse_timeout_secs(t).ok_or_else(|| {
+                        PyRuntimeError::new_err(format!(
+                            "Step '{}': timeout {t:?} is not like \"30s\", \"5m\" or \"2h\"",
+                            s.name
+                        ))
+                    })?;
+                    step["timeout_secs"] = serde_json::json!(secs);
                 }
                 if !s.depends_on.is_empty() {
                     step["depends_on"] = serde_json::json!(s.depends_on);
                 }
                 if !s.notify.is_empty() {
-                    step["notify"] = serde_json::json!(s.notify);
+                    step["notify_tools"] = serde_json::json!(s.notify);
                 }
                 // Routing fields
                 if !s.branches.is_empty() {
                     let branches: Vec<serde_json::Value> = s.branches.iter().map(|b| {
-                        serde_json::json!({ "condition": b.condition, "next": b.next })
+                        serde_json::json!({ "condition": b.condition, "next_step": b.next })
                     }).collect();
                     step["branches"] = serde_json::json!(branches);
                 }
@@ -728,16 +747,16 @@ impl AgentOvenClient {
                 if let Some(ref om) = s.output_mapping {
                     step["output_mapping"] = serde_json::json!(om);
                 }
-                step
+                Ok(step)
             })
-            .collect();
+            .collect::<PyResult<Vec<_>>>()?;
 
-        serde_json::json!({
+        Ok(serde_json::json!({
             "name": recipe.name,
             "description": recipe.description,
             "version": recipe.version,
             "steps": steps,
-        })
+        }))
     }
 }
 
@@ -857,7 +876,7 @@ impl AgentOvenClient {
     fn create_recipe(&self, recipe: &Recipe) -> PyResult<String> {
         let http = reqwest::blocking::Client::new();
         let url = self.api_url("/recipes");
-        let body = self.recipe_to_json(recipe);
+        let body = self.recipe_to_json(recipe)?;
         let req = self.authed_request(&http, reqwest::Method::POST, &url).json(&body);
         let (status, text) = self.send(req)?;
         if (200..300).contains(&status) || status == 409 {
@@ -1016,7 +1035,7 @@ impl AgentOvenClient {
         if let Ok(recipe) = target.extract::<Recipe>() {
             // Create recipe first
             let create_url = self.api_url("/recipes");
-            let recipe_body = self.recipe_to_json(&recipe);
+            let recipe_body = self.recipe_to_json(&recipe)?;
             let create_req = self.authed_request(&http, reqwest::Method::POST, &create_url)
                 .json(&recipe_body);
             let (cs, ct) = self.send(create_req)?;
@@ -1026,7 +1045,7 @@ impl AgentOvenClient {
             // Then bake
             let bake_url = self.api_url(&format!("/recipes/{}/bake", recipe.name));
             let mut body = serde_json::Map::new();
-            if let Some(inp) = input { body.insert("input".into(), serde_json::json!(inp)); }
+            if let Some(inp) = input { body.insert("input".into(), recipe_input(&inp)); }
             let req = self.authed_request(&http, reqwest::Method::POST, &bake_url)
                 .json(&serde_json::Value::Object(body));
             let (status, text) = self.send(req)?;
@@ -1154,4 +1173,30 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Recipe>()?;
     m.add_class::<AgentOvenClient>()?;
     Ok(())
+}
+
+
+#[cfg(test)]
+mod recipe_tests {
+    use super::recipe_input;
+    use agentoven_core::recipe::parse_timeout_secs;
+
+    #[test]
+    fn timeouts_are_read_the_way_they_are_written() {
+        assert_eq!(parse_timeout_secs("30s"), Some(30));
+        assert_eq!(parse_timeout_secs("5m"), Some(300));
+        assert_eq!(parse_timeout_secs("2h"), Some(7200));
+        assert_eq!(parse_timeout_secs("90"), Some(90));
+        assert_eq!(parse_timeout_secs(" 10 s"), Some(10));
+        assert_eq!(parse_timeout_secs("30 seconds"), None);
+        assert_eq!(parse_timeout_secs(""), None);
+        assert_eq!(parse_timeout_secs("s"), None);
+    }
+
+    #[test]
+    fn a_recipe_input_is_always_an_object() {
+        assert_eq!(recipe_input(r#"{"a": 1}"#), serde_json::json!({"a": 1}));
+        assert_eq!(recipe_input("refund please"), serde_json::json!({"text": "refund please"}));
+        assert_eq!(recipe_input("[1, 2]"), serde_json::json!({"text": "[1, 2]"}));
+    }
 }

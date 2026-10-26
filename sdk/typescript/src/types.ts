@@ -42,15 +42,24 @@ export interface Ingredient {
   config?: unknown;
 }
 
+/**
+ * A recipe step as the control plane stores it. Each step names the steps it waits for (`depends_on`), and a
+ * step with `branches` (and `default_next`) picks which of the steps that wait for it runs. Build recipes with
+ * `Flow` rather than by hand; it writes these.
+ */
 export interface Step {
   name: string;
   kind: string;
+  agent_ref?: string;
   agent?: string;
-  parallel: boolean;
-  timeout?: string;
-  human_gate: boolean;
-  notify: string[];
-  depends_on: string[];
+  depends_on?: string[];
+  config?: Record<string, unknown>;
+  branches?: { condition: string; next_step: string }[];
+  default_next?: string;
+  max_retries?: number;
+  timeout_secs?: number;
+  notify_tools?: string[];
+  [extra: string]: unknown;
 }
 
 export interface Branch {
@@ -66,13 +75,35 @@ export interface Recipe {
   steps: Step[];
 }
 
+export interface StepResult {
+  step_name: string;
+  step_kind: string;
+  status: string;
+  output?: Record<string, unknown>;
+  agent_ref?: string;
+  started_at?: string;
+  duration_ms?: number;
+  error?: string;
+  tokens?: number;
+  cost_usd?: number;
+  /** `waiting`, `approved`, `rejected` or `timed_out` for an approval step. */
+  gate_status?: string;
+  branch_taken?: string;
+}
+
 export interface RecipeRun {
   id: string;
-  recipe_name: string;
+  recipe_id?: string;
   status: string;
   started_at: string;
-  finished_at?: string;
+  completed_at?: string;
+  duration_ms?: number;
+  input?: Record<string, unknown>;
   output?: unknown;
+  error?: string;
+  step_results?: StepResult[];
+  /** Steps waiting for a person, on a `paused` run, when read with `waitForRecipeRun`. */
+  pending_gates?: string[];
 }
 
 // ── Kitchen (Pro) ─────────────────────────────────────────────────────────────
