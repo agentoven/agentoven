@@ -237,15 +237,12 @@ func (r *Resolver) resolveModel(ctx context.Context, kitchen string, ing models.
 		}
 	}
 
-	// Extract API key from provider config
-	apiKey, _ := provider.Config["api_key"].(string)
-
+	// The provider's key is not copied onto the agent: it is read from the provider when it is used.
 	return &models.ResolvedModel{
 		Provider: provider.Name,
 		Kind:     provider.Kind,
 		Model:    modelName,
 		Endpoint: provider.Endpoint,
-		APIKey:   apiKey,
 		Config:   ing.Config,
 	}, nil
 }
@@ -447,7 +444,6 @@ func (r *Resolver) resolveEmbedding(ctx context.Context, kitchen string, ing mod
 		return nil, fmt.Errorf("provider %q not found — register it first", providerName)
 	}
 
-	apiKey, _ := provider.Config["api_key"].(string)
 	dims := 0
 	if d, ok := ing.Config["dimensions"].(float64); ok {
 		dims = int(d)
@@ -487,7 +483,6 @@ func (r *Resolver) resolveEmbedding(ctx context.Context, kitchen string, ing mod
 		BatchSize:      batchSize,
 		DistanceMetric: distanceMetric,
 		Endpoint:       provider.Endpoint,
-		APIKey:         apiKey,
 		Config:         ing.Config,
 	}, nil
 }

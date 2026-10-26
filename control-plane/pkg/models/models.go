@@ -1483,12 +1483,14 @@ type ResolvedScenario struct {
 	MinPassRate float64 `json:"min_pass_rate,omitempty"`
 }
 
+// ResolvedModel names the provider and model an agent runs on. It carries no credential: the provider's
+// key is read from the provider each time it is needed (a call, or a hosted process starting), so it
+// is never stored on the agent, and a rotated or revoked key takes effect without baking again.
 type ResolvedModel struct {
 	Provider string                 `json:"provider"`
 	Kind     string                 `json:"kind"`
 	Model    string                 `json:"model"`
 	Endpoint string                 `json:"endpoint"`
-	APIKey   string                 `json:"api_key"`
 	Config   map[string]interface{} `json:"config,omitempty"`
 }
 
@@ -1528,7 +1530,6 @@ type ResolvedEmbedding struct {
 	BatchSize      int                    `json:"batch_size"`      // max texts per embed call
 	DistanceMetric string                 `json:"distance_metric"` // "cosine", "euclidean", "dot"
 	Endpoint       string                 `json:"endpoint,omitempty"`
-	APIKey         string                 `json:"api_key,omitempty"`
 	Config         map[string]interface{} `json:"config,omitempty"`
 }
 

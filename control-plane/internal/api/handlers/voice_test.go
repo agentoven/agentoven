@@ -93,7 +93,7 @@ func TestInvokeAgentVoiceInAndVoiceOut(t *testing.T) {
 	if err := s.CreateAgent(ctx, &models.Agent{
 		Name: "voice-agent", Kitchen: "default", Mode: models.AgentModeManaged,
 		Status: models.AgentStatusReady, MaxTurns: 3,
-		ResolvedConfig: &models.ResolvedIngredients{Model: &models.ResolvedModel{Provider: "oai", Kind: "openai", Model: "gpt-4o", Endpoint: oai.URL, APIKey: "sk-test"}},
+		ResolvedConfig: &models.ResolvedIngredients{Model: &models.ResolvedModel{Provider: "oai", Kind: "openai", Model: "gpt-4o", Endpoint: oai.URL}},
 	}); err != nil {
 		t.Fatal(err)
 	}

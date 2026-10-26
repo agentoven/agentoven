@@ -81,6 +81,7 @@ type Manager struct {
 	saSecret        string       // AGENTOVEN_SA_SECRET — used to mint per-pod service-account tokens
 	a2aSecret       []byte       // key each pod's own A2A token is derived from (pkg/a2aauth)
 	gateway         ModelGateway // optional: fronts the model providers a pod calls
+	keys            ProviderKeys // reads a provider's key when a process starts
 	bots            contracts.BotControl
 }
 
@@ -117,6 +118,19 @@ type ModelGateway interface {
 	// provider's key as before. An error means it should but cannot, and the process is then
 	// given no model credential at all rather than the provider's own.
 	EnvFor(agent *models.Agent) (endpoint, token string, ok bool, err error)
+}
+
+// ProviderKeys reads a model provider's key at the moment a hosted process starts. The key is not
+// kept on the agent, so a key that was rotated or revoked is picked up the next time the process
+// starts, and nothing stored with the agent can leak it.
+type ProviderKeys interface {
+	ProviderKey(ctx context.Context, kitchen, provider string) (string, error)
+}
+
+// SetProviderKeys installs the source of provider keys (see ProviderKeys). Without one a hosted
+// process is started without a model credential, and says so in the log.
+func (m *Manager) SetProviderKeys(k ProviderKeys) {
+	m.keys = k
 }
 
 // SetModelGateway installs the model gateway (see ModelGateway). Pass nil to remove it.
@@ -445,6 +459,23 @@ func (m *Manager) SubscribeK8sLogs(ctx context.Context, kitchen, agentName strin
 	return m.k8s.StreamLogs(ctx, podName, tailLines)
 }
 
+// providerKey reads the key of the provider agent runs on, from the provider, now.
+func (m *Manager) providerKey(agent *models.Agent) string {
+	provider := agent.ResolvedConfig.Model.Provider
+	if m.keys == nil {
+		log.Warn().Str("agent", agent.Name).Str("provider", provider).Msg("No source of provider keys is installed: the process is started without a model credential")
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	key, err := m.keys.ProviderKey(ctx, agent.Kitchen, provider)
+	if err != nil {
+		log.Warn().Err(err).Str("agent", agent.Name).Str("provider", provider).Msg("Provider key could not be read: the process is started without a model credential")
+		return ""
+	}
+	return key
+}
+
 // buildEnvironment creates the env vars map for the agent process.
 func (m *Manager) buildEnvironment(agent *models.Agent, port int) map[string]string {
 	env := map[string]string{
@@ -467,8 +498,8 @@ func (m *Manager) buildEnvironment(agent *models.Agent, port int) map[string]str
 	if agent.ResolvedConfig != nil && agent.ResolvedConfig.Model != nil {
 		env["AGENT_MODEL_PROVIDER"] = agent.ResolvedConfig.Model.Provider
 		env["AGENT_MODEL_NAME"] = agent.ResolvedConfig.Model.Model
-		if agent.ResolvedConfig.Model.APIKey != "" {
-			env["AGENT_API_KEY"] = agent.ResolvedConfig.Model.APIKey
+		if key := m.providerKey(agent); key != "" {
+			env["AGENT_API_KEY"] = key
 		}
 		if agent.ResolvedConfig.Model.Endpoint != "" {
 			env["AGENT_API_ENDPOINT"] = agent.ResolvedConfig.Model.Endpoint

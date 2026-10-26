@@ -1,7 +1,8 @@
 // Package router — Gemini (Google AI) provider driver.
 //
 // Talks to the Gemini API at generativelanguage.googleapis.com.
-// Auth: API key passed as query param (?key=...).
+// Auth: API key sent in the x-goog-api-key header. It is never put in the URL: a transport error
+// repeats the URL, and the error is returned to API callers and kept in logs.
 // Supports: chat completions, tool calling, model discovery, embeddings.
 package router
 
@@ -126,11 +127,11 @@ func (d *GeminiDriver) HealthCheck(ctx context.Context, provider *models.ModelPr
 	}
 
 	endpoint := geminiEndpoint(provider)
-	url := endpoint + "/models?key=" + apiKey
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", endpoint+"/models", nil)
 	if err != nil {
 		return err
 	}
+	httpReq.Header.Set("x-goog-api-key", apiKey)
 
 	resp, err := d.router.clientFor(provider).Do(httpReq)
 	if err != nil {
@@ -153,11 +154,11 @@ func (d *GeminiDriver) DiscoverModels(ctx context.Context, provider *models.Mode
 	}
 
 	endpoint := geminiEndpoint(provider)
-	url := endpoint + "/models?key=" + apiKey
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", endpoint+"/models", nil)
 	if err != nil {
 		return nil, err
 	}
+	httpReq.Header.Set("x-goog-api-key", apiKey)
 
 	resp, err := d.router.clientFor(provider).Do(httpReq)
 	if err != nil {
@@ -259,13 +260,14 @@ func (d *GeminiDriver) Embed(ctx context.Context, provider *models.ModelProvider
 	}
 
 	body, _ := json.Marshal(batchReq)
-	url := fmt.Sprintf("%s/models/%s:batchEmbedContents?key=%s", endpoint, model, apiKey)
+	url := fmt.Sprintf("%s/models/%s:batchEmbedContents", endpoint, model)
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("gemini embed: create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-goog-api-key", apiKey)
 
 	httpResp, err := d.router.clientFor(provider).Do(httpReq)
 	if err != nil {
@@ -389,12 +391,13 @@ func (mr *ModelRouter) callGemini(ctx context.Context, provider *models.ModelPro
 
 	body, _ := json.Marshal(gemReq)
 
-	url := fmt.Sprintf("%s/models/%s:generateContent?key=%s", endpoint, model, apiKey)
+	url := fmt.Sprintf("%s/models/%s:generateContent", endpoint, model)
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("gemini: create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-goog-api-key", apiKey)
 
 	start := time.Now()
 	httpResp, err := mr.clientFor(provider).Do(httpReq)

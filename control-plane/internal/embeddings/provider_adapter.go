@@ -25,6 +25,25 @@ type ProviderEmbeddingAdapter struct {
 	driver   router.EmbeddingCapableDriver
 	provider *models.ModelProvider
 	model    router.EmbeddingModelInfo
+	// fresh, when set, reads the provider as it is now (with its key) for each call, so a rotated key
+	// or a changed secret reference is used at once instead of the copy captured at startup.
+	fresh func(ctx context.Context) (*models.ModelProvider, error)
+}
+
+// WithFresh makes the adapter read its provider anew for every call. The provider it was created
+// with is then only used for its name and kind.
+func (a *ProviderEmbeddingAdapter) WithFresh(f func(ctx context.Context) (*models.ModelProvider, error)) *ProviderEmbeddingAdapter {
+	a.fresh = f
+	return a
+}
+
+// current is the provider to call: the stored one as it is now when the adapter can read it, else the
+// copy it was created with.
+func (a *ProviderEmbeddingAdapter) current(ctx context.Context) (*models.ModelProvider, error) {
+	if a.fresh == nil {
+		return a.provider, nil
+	}
+	return a.fresh(ctx)
 }
 
 // NewProviderEmbeddingAdapter creates an adapter that derives embedding capabilities
@@ -60,11 +79,19 @@ func (a *ProviderEmbeddingAdapter) Embed(ctx context.Context, texts []string) ([
 	if len(texts) > a.model.MaxBatch {
 		return nil, fmt.Errorf("batch size %d exceeds max %d for %s", len(texts), a.model.MaxBatch, a.model.Model)
 	}
-	return a.driver.Embed(ctx, a.provider, a.model.Model, texts)
+	p, err := a.current(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return a.driver.Embed(ctx, p, a.model.Model, texts)
 }
 
 func (a *ProviderEmbeddingAdapter) HealthCheck(ctx context.Context) error {
-	_, err := a.driver.Embed(ctx, a.provider, a.model.Model, []string{"health check"})
+	p, err := a.current(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = a.driver.Embed(ctx, p, a.model.Model, []string{"health check"})
 	return err
 }
 

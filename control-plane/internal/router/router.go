@@ -365,7 +365,9 @@ func (mr *ModelRouter) DiscoverModelsForProvider(ctx context.Context, provider *
 	if !ok {
 		return nil, fmt.Errorf("driver %q does not support model discovery", provider.Kind)
 	}
-	return mdd.DiscoverModels(ctx, provider)
+	p := *provider
+	mr.applyKey(&p)
+	return mdd.DiscoverModels(ctx, &p)
 }
 
 // ListDiscoveryCapableDrivers returns all registered drivers that implement
@@ -396,6 +398,7 @@ func (mr *ModelRouter) HealthCheck(ctx context.Context) map[string]string {
 			result[p.Name] = "no driver registered for kind: " + p.Kind
 			continue
 		}
+		mr.applyKey(&p)
 		if err := driver.HealthCheck(ctx, &p); err != nil {
 			result[p.Name] = "unhealthy: " + err.Error()
 		} else {
@@ -403,6 +406,54 @@ func (mr *ModelRouter) HealthCheck(ctx context.Context) map[string]string {
 		}
 	}
 	return result
+}
+
+// applyKey selects the key to use for provider (see SelectAPIKey) and puts it in provider.Config, which
+// is where every driver reads it. A provider that keeps its key in an external secret, or only in its
+// rotation pool, has no config api_key of its own, so a driver handed the provider as stored would find
+// no key. Every path that hands a stored provider to a driver (a call, a stream, a health check, a test,
+// model discovery) goes through here.
+//
+// Config is replaced with a fresh map rather than mutated in place. The store hands out providers as a
+// shallow copy of its internal struct: the struct is new, but Config is a map, a reference type, so
+// that copy still points at the exact map the store's own background snapshot goroutine reads. Writing
+// into it raced that goroutine under -race; writing into a new map and only then pointing
+// provider.Config at it never touches the store's map at all. Callers pass a copy they own.
+func (mr *ModelRouter) applyKey(provider *models.ModelProvider) {
+	selectedKey := mr.SelectAPIKey(provider)
+	if selectedKey == "" {
+		return
+	}
+	withKey := make(map[string]interface{}, len(provider.Config)+1)
+	for k, v := range provider.Config {
+		withKey[k] = v
+	}
+	withKey["api_key"] = selectedKey
+	provider.Config = withKey
+}
+
+// FreshProvider reads a provider from the store as it is now, with the key to use already applied.
+// Long-lived holders of a provider (an embedding adapter) call this on each use instead of keeping the
+// copy they were created with, so a rotated key or a changed secret reference takes effect at once.
+func (mr *ModelRouter) FreshProvider(ctx context.Context, kitchen, name string) (*models.ModelProvider, error) {
+	p, err := mr.store.GetProvider(ctx, kitchen, name)
+	if err != nil {
+		return nil, fmt.Errorf("provider %q not found", name)
+	}
+	mr.applyKey(p)
+	return p, nil
+}
+
+// ProviderKey reads the key to use for a provider, now: from the provider as it is stored, through the
+// same selection a model call uses (an external secret, a key from the rotation pool, or the single
+// stored key). Callers that need a key (a hosted process starting) read it here instead of keeping a
+// copy, so a rotated or revoked key takes effect at once and no copy can leak.
+func (mr *ModelRouter) ProviderKey(ctx context.Context, kitchen, name string) (string, error) {
+	p, err := mr.store.GetProvider(ctx, kitchen, name)
+	if err != nil {
+		return "", fmt.Errorf("provider %q not found", name)
+	}
+	return mr.SelectAPIKey(p), nil
 }
 
 // SelectAPIKey picks an API key from a provider's key pool using the configured
@@ -672,6 +723,7 @@ func (mr *ModelRouter) RouteStream(ctx context.Context, req *models.RouteRequest
 			lastErr = fmt.Errorf("no driver for kind %q", provider.Kind)
 			continue
 		}
+		mr.applyKey(&provider)
 
 		// Check if driver supports streaming
 		if sd, ok := driver.(StreamingProviderDriver); ok {
@@ -786,26 +838,7 @@ func (mr *ModelRouter) callProvider(ctx context.Context, provider *models.ModelP
 		model = provider.Models[0]
 	}
 
-	// Apply API key rotation: select the active key and inject it into the
-	// provider's Config map so downstream drivers always read the right key.
-	//
-	// Config is replaced with a fresh map rather than mutated in place. The
-	// store hands out providers as a shallow copy of its internal struct
-	// (store.MemoryStore.ListProviders/GetProvider): the struct is new, but
-	// Config is a map, a reference type, so that copy still points at the
-	// exact map the store's own background snapshot goroutine reads. Writing
-	// into it here raced that goroutine under -race; writing into a new map
-	// and only then pointing provider.Config at it never touches the store's
-	// map at all.
-	selectedKey := mr.SelectAPIKey(provider)
-	if selectedKey != "" {
-		withKey := make(map[string]interface{}, len(provider.Config)+1)
-		for k, v := range provider.Config {
-			withKey[k] = v
-		}
-		withKey["api_key"] = selectedKey
-		provider.Config = withKey
-	}
+	mr.applyKey(provider)
 
 	// Look up registered driver
 	driver := mr.GetDriver(provider.Kind)
@@ -1506,6 +1539,9 @@ func (mr *ModelRouter) GetCostSummary(kitchen string) *models.CostSummary {
 // For ollama it calls /api/tags to list available models.
 // Returns a structured result with latency and error info.
 func (mr *ModelRouter) TestProvider(ctx context.Context, provider *models.ModelProvider) *models.ProviderTestResult {
+	tested := *provider // a copy: the key applied for the test is not left on the caller's provider
+	mr.applyKey(&tested)
+	provider = &tested
 	result := &models.ProviderTestResult{
 		Provider: provider.Name,
 		Kind:     provider.Kind,

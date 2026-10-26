@@ -1881,11 +1881,12 @@ func (h *Handlers) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Config != nil {
-		// Merge config — don't overwrite existing keys that aren't in the update
+		// Merge config — don't overwrite existing keys that aren't in the update. A key sent back
+		// still masked (a client that read the provider and wrote it back) keeps its stored value.
 		if provider.Config == nil {
 			provider.Config = map[string]interface{}{}
 		}
-		for k, v := range req.Config {
+		for k, v := range models.RestoreRedactedConfig(req.Config, provider.Config) {
 			if k == "modalities" {
 				provider.Config[k] = models.MergeModalities(provider.Config[k], v)
 				continue
@@ -1895,6 +1896,11 @@ func (h *Handlers) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	if sent.IsDefault != nil {
 		provider.IsDefault = *sent.IsDefault
+	}
+	// Point the provider at an external secret (k8s:// or env://) instead of keeping a key in the
+	// database. Sending nothing leaves it as it is.
+	if req.SecretRef != "" {
+		provider.SecretRef = req.SecretRef
 	}
 	if err := h.Router.CheckModalities(provider); err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
@@ -5638,24 +5644,11 @@ func (h *Handlers) ServerInfoHandler(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, h.ServerInfo)
 }
 
-// maskProviderKeys redacts sensitive fields (api_key, api_secret) in provider
-// config before returning to API consumers.
+// maskProviderKeys returns a copy of the provider that is safe to return to API consumers: its keys
+// (config api_key, api_secret and other secret-looking settings, and every key in its rotation pool)
+// are masked. See models.ModelProvider.Redacted.
 func maskProviderKeys(p *models.ModelProvider) *models.ModelProvider {
-	if p.Config == nil {
-		return p
-	}
-	cp := *p
-	cp.Config = make(map[string]interface{}, len(p.Config))
-	for k, v := range p.Config {
-		cp.Config[k] = v
-	}
-	for _, key := range []string{"api_key", "api_secret"} {
-		if val, ok := cp.Config[key].(string); ok && len(val) > 4 {
-			cp.Config[key] = val[:4] + "****"
-		} else if ok {
-			cp.Config[key] = "****"
-		}
-	}
+	cp := p.Redacted()
 	return &cp
 }
 

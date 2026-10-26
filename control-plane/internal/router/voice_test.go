@@ -347,7 +347,7 @@ func TestProviderTestUsesTheDriversHealthCheckForNonOpenAIKinds(t *testing.T) {
 	mr := voiceRouter(t)
 	var gotPath, gotKey string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath, gotKey = r.URL.Path, r.URL.Query().Get("key")
+		gotPath, gotKey = r.URL.Path, r.Header.Get("x-goog-api-key")
 		if gotKey != "good-key" {
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte(`{"error":{"message":"API key not valid","status":"INVALID_ARGUMENT"}}`))

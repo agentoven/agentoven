@@ -297,6 +297,7 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 	// Manages agent runtime processes (local Python / Docker / K8s).
 	// Agents are spawned at bake time and stopped at cool/retire/delete.
 	pm := process.NewManager()
+	pm.SetProviderKeys(mr) // a hosted process gets its provider's key when it starts, never one saved on the agent
 	log.Info().Msg("✅ Process manager initialized (local/docker/k8s)")
 
 	// Build handlers + API router
@@ -372,7 +373,9 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 		// Register the first (default) embedding model from each provider.
 		// All models remain discoverable via the API for explicit selection.
 		if len(embModels) > 0 {
-			adapter := embeddings.NewProviderEmbeddingAdapter(ecd, p, embModels[0])
+			kitchen, name := p.Kitchen, p.Name
+			adapter := embeddings.NewProviderEmbeddingAdapter(ecd, p, embModels[0]).
+				WithFresh(func(ctx context.Context) (*models.ModelProvider, error) { return mr.FreshProvider(ctx, kitchen, name) })
 			regName := fmt.Sprintf("%s:%s", p.Kind, p.Name)
 			embReg.Register(regName, adapter)
 			log.Info().

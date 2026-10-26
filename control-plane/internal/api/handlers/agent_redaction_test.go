@@ -2,6 +2,7 @@ package handlers_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,7 +16,8 @@ import (
 const providerSecret = "sk-live-NEVER-RETURN-ME-123456"
 const ingredientSecret = "tok-ingredient-NEVER-RETURN-ME"
 
-// An agent that has been baked against a provider that has a key, as it is after a real bake.
+// An agent that has been baked against a provider that has a key, as it is after a real bake. The agent
+// keeps the provider's name; the key stays with the provider.
 func seedBakedAgent(t *testing.T) (*handlers.Handlers, context.Context) {
 	t.Helper()
 	h, s := newTestHandlers(t)
@@ -40,9 +42,6 @@ func seedBakedAgent(t *testing.T) (*handlers.Handlers, context.Context) {
 	agent.ResolvedConfig = resolved
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatal(err)
-	}
-	if got := agent.ResolvedConfig.Model.APIKey; got != providerSecret {
-		t.Fatalf("setup: the stored agent should hold the key, got %q", got)
 	}
 	return h, ctx
 }
@@ -81,9 +80,9 @@ func TestAgentEndpointsNeverReturnTheProviderKey(t *testing.T) {
 			}
 		})
 	}
-	// The mask tells a caller a key is set, which is all it needs.
-	if body := cases["get"].Body.String(); !strings.Contains(body, `"api_key":"****"`) {
-		t.Errorf("expected the key to be masked, not removed: %s", body)
+	// The agent no longer has a key field at all; the provider holds it.
+	if body := cases["get"].Body.String(); strings.Contains(body, `"api_key"`) {
+		t.Errorf("an agent should carry no api_key field: %s", body)
 	}
 }
 
@@ -102,7 +101,10 @@ func TestReadingTheMaskedAgentAndWritingItBackKeepsTheSecrets(t *testing.T) {
 	if v := stored.Ingredients[0].Config["api_token"]; v != ingredientSecret {
 		t.Errorf("writing the masked agent back replaced the stored secret with %v", v)
 	}
-	if stored.ResolvedConfig == nil || stored.ResolvedConfig.Model.APIKey != providerSecret {
-		t.Error("the stored agent lost the key the executor runs on")
+	if raw, _ := json.Marshal(stored); strings.Contains(string(raw), providerSecret) {
+		t.Errorf("the stored agent holds the provider's key: %s", raw)
+	}
+	if stored.ResolvedConfig == nil || stored.ResolvedConfig.Model == nil || stored.ResolvedConfig.Model.Provider != "openai" {
+		t.Error("the stored agent should still name its provider")
 	}
 }
