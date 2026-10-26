@@ -1,4 +1,4 @@
-import { Bot, Boxes, GitBranch, GitFork, Hourglass, Search, ShieldCheck, UserCheck, Workflow, type LucideIcon } from 'lucide-react';
+import { Bell, Bot, Boxes, GitBranch, GitFork, Hourglass, Search, ShieldCheck, UserCheck, Workflow, type LucideIcon } from 'lucide-react';
 import type { StepType, WireStep } from '../../lib/recipeFlow';
 import { CARRY_ON } from '../../lib/recipeFlow';
 
@@ -20,16 +20,17 @@ const DECIDE: StepMeta = { type: 'decide', label: 'Decide', hint: 'Take one way 
 const PARALLEL: StepMeta = { type: 'parallel', label: 'Do at the same time', hint: 'Start several steps together', icon: GitFork, color: '#fdba74', bg: 'rgba(251,146,60,0.18)' };
 const RECIPE: StepMeta = { type: 'recipe', label: 'Run a recipe', hint: 'Use another recipe as one step', icon: Boxes, color: '#f0abfc', bg: 'rgba(232,121,249,0.16)' };
 const WAIT: StepMeta = { type: 'wait', label: 'Wait', hint: 'Pause for a while, or until a time', icon: Hourglass, color: '#fda4af', bg: 'rgba(251,113,133,0.15)' };
+const NOTIFY: StepMeta = { type: 'notify', label: 'Notify', hint: 'Tell people or systems something', icon: Bell, color: '#86efac', bg: 'rgba(74,222,128,0.15)' };
 const CARRY: StepMeta = { type: 'carry', label: 'Carry on', hint: 'Nothing to do on this path', icon: Workflow, color: '#cbd5e1', bg: 'rgba(148,163,184,0.18)' };
 
 export const PALETTE: { title: string; items: StepMeta[] }[] = [
   { title: 'Do the work', items: [AGENT, LOOKUP, RECIPE] },
   { title: 'Choose a path', items: [DECIDE, PARALLEL] },
   { title: 'Keep it safe', items: [PERSON, CHECK] },
-  { title: 'Timing', items: [WAIT] },
+  { title: 'Timing and messages', items: [WAIT, NOTIFY] },
 ];
 
-export const META_BY_TYPE: Record<StepType, StepMeta> = { agent: AGENT, lookup: LOOKUP, person: PERSON, check: CHECK, decide: DECIDE, parallel: PARALLEL, recipe: RECIPE, wait: WAIT };
+export const META_BY_TYPE: Record<StepType, StepMeta> = { agent: AGENT, lookup: LOOKUP, person: PERSON, check: CHECK, decide: DECIDE, parallel: PARALLEL, recipe: RECIPE, wait: WAIT, notify: NOTIFY };
 
 export function metaOfStep(step: WireStep): StepMeta {
   switch (step.kind) {
@@ -40,6 +41,7 @@ export function metaOfStep(step: WireStep): StepMeta {
     case 'condition': return DECIDE;
     case 'sub_recipe': return RECIPE;
     case 'wait': return WAIT;
+    case 'notify': return NOTIFY;
     case 'parallel': return PARALLEL;
     case 'fan_out': return step.config?.ui === CARRY_ON ? CARRY : { ...CARRY, type: 'other', label: step.kind };
     default: return { ...CARRY, type: 'other', label: step.kind };

@@ -232,6 +232,35 @@ function waitText(duration: string | number): string {
   return `${duration}s`;
 }
 
+export interface NotifyOptions {
+  /** Names of notification channels. A `websocket` channel is a live feed that listeners connect to (see `listenToChannel`). */
+  channels?: readonly string[];
+  /** Tools that can send a message. */
+  tools?: readonly string[];
+  subject?: string;
+  /** Extra fields for what listeners receive. */
+  payload?: Record<string, unknown>;
+  /** `'carry_on'` keeps the recipe going if a target cannot be reached. Default `'stop'`. */
+  onFailure?: 'stop' | 'carry_on';
+}
+
+/**
+ * Push a message out when the recipe reaches this step, then carry on. It is how a recipe tells someone
+ * something at a chosen point: that a person is needed just before an `ask(...)` approval, that a stage is done,
+ * that something went the unusual way. `message` and `subject` may use `{{run_id}}`, `{{recipe}}`, `{{step}}`,
+ * `{{text}}` (what the steps before said), `{{input.field}}` and `{{step-name.field}}`. The step fails if a
+ * target cannot be reached, unless `onFailure: 'carry_on'`; a live feed with nobody connected is not a failure.
+ */
+export function notify(title: string, message: string, options: NotifyOptions = {}): Node {
+  if (options.onFailure !== undefined && options.onFailure !== 'stop' && options.onFailure !== 'carry_on') throw new RangeError('onFailure must be "stop" or "carry_on"');
+  const config: Record<string, unknown> = { message };
+  if (options.subject) config.subject = options.subject;
+  if (options.channels?.length) config.channels = [...options.channels];
+  if (options.onFailure) config.on_failure = options.onFailure;
+  if (options.payload && Object.keys(options.payload).length) config.payload = { ...options.payload };
+  return node('notify', title, { config, fields: options.tools?.length ? { notify_tools: [...options.tools] } : {} });
+}
+
 /**
  * Pause the recipe for a length of time, or until a time, then carry on. `duration` is `'30s'`, `'5m'`, `'2h'`,
  * `'3d'`, or a number of seconds. `until` is a `Date` or ISO 8601 text such as `'2026-11-02T09:00:00Z'`; if that
@@ -341,6 +370,11 @@ export class Flow {
           const m = WAIT_RE.exec(text);
           if (m && Number(m[1]) * WAIT_UNITS[(m[2] || 's').toLowerCase()] > WAIT_MAX_SECONDS) out.push({ title: n.title, message: `"${t}" would wait longer than 30 days.` });
         }
+      }
+      if (n.kind === 'notify') {
+        if (!String(n.config.message ?? '').trim()) out.push({ title: n.title, message: `"${t}" needs a message.` });
+        const channels = (n.config.channels as unknown[] | undefined) ?? [];
+        if (channels.length === 0 && !(n.fields.notify_tools as unknown[] | undefined)?.length) out.push({ title: n.title, message: `"${t}" needs a channel or a tool to send to.` });
       }
       if (n.kind === 'map' && !n.fields.source_path) out.push({ title: n.title, message: `"${t}" needs the list to go over.` });
       if (n.kind === 'sub_recipe' && !n.fields.recipe_ref) out.push({ title: n.title, message: `"${t}" needs a recipe to run.` });

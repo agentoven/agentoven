@@ -308,6 +308,8 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 				r.Get("/", h.GetChannel)
 				r.Put("/", h.UpdateChannel)
 				r.Delete("/", h.DeleteChannel)
+				r.Get("/ws", h.ChannelListen)
+				r.Post("/ws-ticket", h.ChannelTicket)
 			})
 		})
 

@@ -14,13 +14,14 @@ import {
 const FIXTURES = new URL('../../../../sdk/fixtures/recipe-flows.json', import.meta.url);
 
 interface Spec {
-  type: 'agent' | 'check' | 'lookup' | 'decide' | 'ask' | 'together' | 'sub_recipe' | 'wait';
+  type: 'agent' | 'check' | 'lookup' | 'decide' | 'ask' | 'together' | 'sub_recipe' | 'wait' | 'notify';
   title?: string; agent?: string; retries?: number; timeout_secs?: number; top_k?: number;
   mentions?: string[]; when?: string; yes?: Spec[]; no?: Spec[];
   within?: string; notify?: string; domain?: string; emails?: string[]; approved?: Spec[]; rejected?: Spec[]; if_nobody_answers?: string;
   lanes?: Spec[][];
   recipe?: string; input?: Record<string, string>; output?: Record<string, string>;
   duration?: string; until?: string;
+  message?: string; subject?: string; channels?: string[]; tools?: string[]; on_failure?: string; payload?: Record<string, unknown>;
 }
 interface Flow { name: string; description: string; spec: Spec[]; wire: WireStep[] }
 interface Invalid { name: string; spec: Spec[]; expect: string }
@@ -46,6 +47,15 @@ function toFlow(specs: Spec[]): FlowNode[] {
       case 'lookup':
         step.kind = 'rag';
         step.config = { title, top_k: t.top_k ?? 3 };
+        return { id: newId(), step };
+      case 'notify':
+        step.kind = 'notify';
+        step.config = {
+          title, message: t.message ?? '',
+          ...(t.subject ? { subject: t.subject } : {}), ...(t.channels?.length ? { channels: t.channels } : {}),
+          ...(t.on_failure ? { on_failure: t.on_failure } : {}), ...(t.payload ? { payload: t.payload } : {}),
+        };
+        if (t.tools?.length) step.notify_tools = t.tools;
         return { id: newId(), step };
       case 'wait':
         step.kind = 'wait';

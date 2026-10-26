@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Check, Play } from 'lucide-react';
-import { agents, recipes, tools, type Recipe } from '../../api';
+import { agents, notificationChannels, recipes, tools, type Recipe } from '../../api';
 import { useAPI } from '../../hooks';
 import { Button, ErrorBanner, Spinner } from '../../components/UI';
 import FlowCanvas from '../../components/recipes/FlowCanvas';
@@ -22,6 +22,7 @@ export default function RecipeBuilder() {
   const agentList = useAPI(() => agents.list());
   const toolList = useAPI(() => tools.list());
   const recipeList = useAPI(() => recipes.list());
+  const channelList = useAPI(() => notificationChannels.list());
 
   // What was saved, read back into a flow. Edits live apart from it until they are saved.
   const decoded = useMemo(() => (recipe.data ? decompile((recipe.data.steps ?? []) as WireStep[]) : null), [recipe.data]);
@@ -153,7 +154,7 @@ export default function RecipeBuilder() {
           </section>
           <aside aria-label="Step settings" className="flex-[0_0_340px] max-w-full box-border p-5 border-l border-[var(--ao-border)] bg-[var(--ao-surface)]">
             {sel ? (
-              <StepInspector key={sel.id} node={sel} agents={(agentList.data ?? []).map((a) => ({ name: a.name, status: a.status }))} notifyTools={notifyTools} recipes={(recipeList.data ?? []).map((r) => ({ name: r.name, description: r.description, steps: (r.steps ?? []).length }))} self={data.name} onChange={update} onDelete={remove} onLanes={(id, n) => change(resizeLanes(flow, id, n))} onApprovalPaths={(id, on) => change(setApprovalPaths(flow, id, on))} />
+              <StepInspector key={sel.id} node={sel} agents={(agentList.data ?? []).map((a) => ({ name: a.name, status: a.status }))} notifyTools={notifyTools} recipes={(recipeList.data ?? []).map((r) => ({ name: r.name, description: r.description, steps: (r.steps ?? []).length }))} self={data.name} channels={channelList.data ?? []} onChannelsChanged={channelList.refetch} onChange={update} onDelete={remove} onLanes={(id, n) => change(resizeLanes(flow, id, n))} onApprovalPaths={(id, on) => change(setApprovalPaths(flow, id, on))} />
             ) : (
               <div className="text-sm text-[var(--ao-text-muted)]">
                 <div className="text-base font-semibold text-[var(--ao-text)] mb-1">{flow.length === 0 ? 'Start here' : 'Select a step'}</div>

@@ -138,6 +138,12 @@ func RequireIdentity(next http.Handler) http.Handler {
 // advertise what an agent can do and are how another agent finds it. Running a task is not
 // discovery, so `POST /a2a` is authenticated like every other way of running an agent.
 func isAuthPublic(r *http.Request) bool {
+	// A browser cannot set headers on a WebSocket, so a listener on a notification channel may offer a
+	// short-lived ticket as a subprotocol instead; the endpoint checks the ticket itself.
+	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/channels/") && strings.HasSuffix(r.URL.Path, "/ws") &&
+		strings.Contains(r.Header.Get("Sec-WebSocket-Protocol"), "agentoven-token.") {
+		return true
+	}
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
 		switch r.URL.Path {
 		case "/.well-known/agent.json", "/a2a/.well-known/agent-card.json":

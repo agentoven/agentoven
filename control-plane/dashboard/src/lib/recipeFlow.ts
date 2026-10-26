@@ -27,7 +27,7 @@ export interface FlowNode {
   lanes?: FlowNode[][];
 }
 
-export type StepType = 'agent' | 'lookup' | 'person' | 'check' | 'decide' | 'parallel' | 'recipe' | 'wait';
+export type StepType = 'agent' | 'lookup' | 'person' | 'check' | 'decide' | 'parallel' | 'recipe' | 'wait' | 'notify';
 
 export const isDecide = (n: FlowNode): boolean => n.step.kind === 'condition';
 export const isParallel = (n: FlowNode): boolean => n.step.kind === 'parallel';
@@ -38,7 +38,7 @@ export const hasPaths = (n: FlowNode): boolean => isDecide(n) || isApproval(n);
 export const MAX_LANES = 4;
 
 /** The kinds the builder can draw. Anything else makes a recipe read-only here. */
-const SUPPORTED_KINDS = new Set(['agent', 'evaluator', 'rag', 'human_gate', 'condition', 'sub_recipe', 'wait']);
+const SUPPORTED_KINDS = new Set(['agent', 'evaluator', 'rag', 'human_gate', 'condition', 'sub_recipe', 'wait', 'notify']);
 
 /** What a decide step tests: the condition step's own result says whether its expression held. */
 export const YES_CONDITION = 'condition_met == true';
@@ -46,6 +46,18 @@ export const YES_CONDITION = 'condition_met == true';
 /** What an approval's first path tests: the gate's own result says whether it was approved. */
 export const APPROVED_CONDITION = 'approved == true';
 const winning = (step: WireStep): string => (step.kind === 'human_gate' ? APPROVED_CONDITION : YES_CONDITION);
+
+/** What a new notify step says until it is changed. {{...}} is filled in with what the run knows when the step runs. */
+export const DEFAULT_NOTIFY_MESSAGE = 'Run {{run_id}} of {{recipe}} reached "{{step}}".';
+
+/** The names a notify step's message may use, and what each one is. */
+export const NOTIFY_PLACEHOLDERS: { name: string; means: string }[] = [
+  { name: 'run_id', means: 'the id of this run' },
+  { name: 'recipe', means: 'the name of this recipe' },
+  { name: 'step', means: 'the name of this step' },
+  { name: 'text', means: 'what the steps before it said' },
+  { name: 'input.', means: 'a field of what the recipe started with, such as {{input.ticket}}' },
+];
 
 /** Marks the step standing in for an empty path, so the engine still skips the other path. */
 export const CARRY_ON = 'carry_on';
@@ -117,6 +129,7 @@ export function newStep(type: StepType, flow: FlowNode[], agent = ''): FlowNode 
     case 'decide': return make('Decide', 'condition', {}, { expression: '' });
     case 'recipe': return make('Run a recipe', 'sub_recipe', { recipe_ref: '' });
     case 'wait': return make('Wait', 'wait', {}, { duration: '5m' });
+    case 'notify': return make('Notify', 'notify', {}, { message: DEFAULT_NOTIFY_MESSAGE, channels: [] });
   }
 }
 
@@ -471,6 +484,11 @@ export function validate(flow: FlowNode[], agents: Set<string>, recipes?: Recipe
     const t = titleOf(s);
     if ((s.kind === 'agent' || s.kind === 'evaluator') && !s.agent_ref) out.push({ id: n.id, message: `"${t}" needs an agent.` });
     else if ((s.kind === 'agent' || s.kind === 'evaluator') && !agents.has(s.agent_ref!)) out.push({ id: n.id, message: `"${t}" uses ${s.agent_ref}, which no longer exists.` });
+    if (s.kind === 'notify') {
+      if (!String(s.config?.message ?? '').trim()) out.push({ id: n.id, message: `"${t}" needs a message.` });
+      const channels = (s.config?.channels as unknown[] | undefined) ?? [];
+      if (channels.length === 0 && ((s.notify_tools as unknown[] | undefined) ?? []).length === 0) out.push({ id: n.id, message: `"${t}" needs a channel or a tool to send to.` });
+    }
     if (s.kind === 'wait') {
       const duration = String(s.config?.duration ?? '').trim();
       const until = String(s.config?.until ?? '').trim();

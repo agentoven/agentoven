@@ -484,7 +484,25 @@ export interface StepResult {
   sub_run_id?: string;
   /** On a wait step that is waiting (`status` is `waiting`): when it ends. */
   wake_at?: string;
+  /** On a notify step: who it was sent to and whether it arrived. */
+  notify_results?: { tool: string; success: boolean; error?: string; recipients?: number }[];
 }
+
+/** A place notifications go. A `websocket` channel is a live feed: whatever listens at its address receives each message. */
+export interface NotificationChannel {
+  id: string;
+  name: string;
+  kind: string;
+  active: boolean;
+  url?: string;
+  events?: string[];
+}
+
+export const notificationChannels = {
+  list: () => request<NotificationChannel[]>('/channels'),
+  create: (c: { name: string; kind: string; events?: string[] }) =>
+    request<NotificationChannel>('/channels', { method: 'POST', body: JSON.stringify({ events: [], ...c }) }),
+};
 
 export const recipeRuns = {
   list: (recipeName: string) =>

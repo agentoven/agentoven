@@ -91,6 +91,16 @@ export interface StepResult {
   branch_taken?: string;
 }
 
+/** A place notifications go. A `websocket` channel is a live feed. */
+export interface NotificationChannel {
+  id: string;
+  name: string;
+  kind: string;
+  active: boolean;
+  url?: string;
+  events?: string[];
+}
+
 export interface RecipeRun {
   id: string;
   recipe_id?: string;

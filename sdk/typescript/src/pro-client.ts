@@ -47,6 +47,7 @@ import type {
   InvokeResult,
   Kitchen,
   KitchenMember,
+  NotificationChannel,
   Promotion,
   Provider,
   RealtimeToken,
@@ -360,6 +361,38 @@ export class ProClient {
       if (Date.now() >= deadline) throw new Error(`run ${runId} of ${name} is still '${run.status}' after ${timeoutMs / 1000}s`);
       await new Promise((resolve) => setTimeout(resolve, pollMs));
     }
+  }
+
+  // ── Notification channels ─────────────────────────────────────────────────
+
+  /** The notification channels of the kitchen. */
+  async listChannels(opts?: { kitchen?: string }): Promise<NotificationChannel[]> {
+    return this.get('/api/v1/channels', opts?.kitchen);
+  }
+
+  /**
+   * Create a channel. `kind: 'websocket'` (the default) is a live feed: listeners connect to it with
+   * `listenToChannel`, and a recipe's `notify` step names it. A `webhook` channel needs `url` (and may sign with
+   * `secret`). `events` limits which platform events (`gate_waiting`, `step_failed`...) it also receives on their
+   * own; a `notify` step reaches a channel it names whatever it subscribes to.
+   */
+  async createChannel(
+    channel: { name: string; kind?: string; events?: string[]; url?: string; secret?: string; config?: Record<string, unknown> },
+    opts?: { kitchen?: string },
+  ): Promise<NotificationChannel> {
+    return this.post('/api/v1/channels', { kind: 'websocket', events: [], ...channel }, opts?.kitchen);
+  }
+
+  async deleteChannel(name: string, opts?: { kitchen?: string }): Promise<void> {
+    await this.delete(`/api/v1/channels/${encodeURIComponent(name)}`, opts?.kitchen);
+  }
+
+  /**
+   * A ticket for listening to one websocket channel without headers, so a browser can: hand `token` to the page
+   * and connect with `listenToChannel({ url, channel, token })`. Good for a minute.
+   */
+  async channelTicket(name: string, opts?: { kitchen?: string }): Promise<{ token: string; expires_in: number; subprotocol: string }> {
+    return this.post(`/api/v1/channels/${encodeURIComponent(name)}/ws-ticket`, {}, opts?.kitchen);
   }
 
   /** End a `wait` step early, so the run carries on now. Rejects with a 404 if it is not waiting. */

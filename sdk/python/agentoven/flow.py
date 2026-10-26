@@ -47,6 +47,7 @@ __all__ = [
     "each",
     "lookup",
     "mentions",
+    "notify",
     "sub_recipe",
     "together",
     "wait",
@@ -286,6 +287,43 @@ def wait(title: str, duration: Union[str, int, float, timedelta, None] = None, *
     return Node("wait", title, config=config)
 
 
+def notify(
+    title: str,
+    message: str,
+    *,
+    channels: Optional[Sequence[str]] = None,
+    tools: Optional[Sequence[str]] = None,
+    subject: Optional[str] = None,
+    payload: Optional[Dict[str, Any]] = None,
+    on_failure: Optional[str] = None,
+) -> Node:
+    """Push a message out when the recipe reaches this step, then carry on.
+
+    It is how a recipe tells someone something at a chosen point: that a person is needed just before an
+    ``ask(...)`` approval, that a stage is done, that something went the unusual way. ``channels`` are names of
+    notification channels (a ``websocket`` channel is a live feed that listeners connect to; see
+    ``client.listen``); ``tools`` are tools that can send a message. ``message`` and ``subject`` may use
+    ``{{run_id}}``, ``{{recipe}}``, ``{{step}}``, ``{{text}}`` (what the steps before said), ``{{input.field}}`` and
+    ``{{step-name.field}}``. ``payload`` adds fields to what listeners receive.
+
+    The step fails if a target cannot be reached, unless ``on_failure="carry_on"``. A live feed with nobody
+    connected is not a failure.
+    """
+    if on_failure not in (None, "stop", "carry_on"):
+        raise ValueError('on_failure must be "stop" or "carry_on"')
+    config: Dict[str, Any] = {"message": message}
+    if subject:
+        config["subject"] = subject
+    if channels:
+        config["channels"] = list(channels)
+    if on_failure:
+        config["on_failure"] = on_failure
+    if payload:
+        config["payload"] = dict(payload)
+    fields: Dict[str, Any] = {"notify_tools": list(tools)} if tools else {}
+    return Node("notify", title, config=config, fields=fields)
+
+
 def each(title: str, agent: str, over: str, *, max_concurrency: int = 0) -> Node:
     """Run an agent once for each item of a list an earlier step produced. ``over`` is the path to the
     list, such as ``"extract.items"``. Not drawn by the dashboard builder yet: a recipe with one opens read-only there."""
@@ -380,6 +418,11 @@ class Flow:
                     out.append(Problem(n.title, f'"{t}" needs a time to wait.'))
                 elif text and (_wait_seconds(text) or 0) > WAIT_MAX_SECONDS:
                     out.append(Problem(n.title, f'"{t}" would wait longer than 30 days.'))
+            if n.kind == "notify":
+                if not str(n.config.get("message", "")).strip():
+                    out.append(Problem(n.title, f'"{t}" needs a message.'))
+                if not n.config.get("channels") and not n.fields.get("notify_tools"):
+                    out.append(Problem(n.title, f'"{t}" needs a channel or a tool to send to.'))
             if n.kind == "map" and not n.fields.get("source_path"):
                 out.append(Problem(n.title, f'"{t}" needs the list to go over.'))
             if n.kind == "sub_recipe" and not n.fields.get("recipe_ref"):

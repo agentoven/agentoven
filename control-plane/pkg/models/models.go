@@ -409,6 +409,7 @@ const (
 	StepMap       StepKind = "map"        // R8: iterate over array, run agent per item
 	StepSubRecipe StepKind = "sub_recipe" // R8: invoke another recipe as a sub-workflow
 	StepWait      StepKind = "wait"       // pause for a length of time, or until a time
+	StepNotify    StepKind = "notify"     // push a message to channels and tools, then carry on
 )
 
 type Branch struct {
@@ -947,6 +948,8 @@ type NotifyResult struct {
 	Success   bool      `json:"success"`
 	Error     string    `json:"error,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
+	// Recipients is how many connections a websocket channel reached (0 when nobody was listening).
+	Recipients int `json:"recipients,omitempty"`
 }
 
 // SortProvidersForSelection orders providers deterministically — the kitchen's
@@ -1826,6 +1829,8 @@ const (
 	ChannelDiscord ChannelKind = "discord"
 	ChannelEmail   ChannelKind = "email"
 	ChannelZapier  ChannelKind = "zapier"
+	// ChannelWebSocket pushes to the connections listening to the channel (GET /api/v1/channels/{name}/ws).
+	ChannelWebSocket ChannelKind = "websocket"
 )
 
 // NotificationChannel represents a configured notification endpoint.

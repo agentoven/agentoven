@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
   GitBranch, Play, Clock, CheckCircle, XCircle, Pause,
   ArrowRight, ChevronDown, ChevronRight, RefreshCw, AlertTriangle,
-  Bot, Boxes, Hourglass, Search, Shield, Zap, Users, Layers,
+  Bell, Bot, Boxes, Hourglass, Search, Shield, Zap, Users, Layers,
 } from 'lucide-react';
 import {
   recipes, recipeRuns,
@@ -24,6 +24,7 @@ const stepMeta: Record<string, { icon: typeof Bot; color: string; bg: string }> 
   condition:  { icon: GitBranch,    color: 'text-teal-400',    bg: 'bg-teal-500/20 border-teal-500/40' },
   fan_out:    { icon: Zap,          color: 'text-orange-400',  bg: 'bg-orange-500/20 border-orange-500/40' },
   fan_in:     { icon: Layers,       color: 'text-orange-400',  bg: 'bg-orange-500/20 border-orange-500/40' },
+  notify:     { icon: Bell,         color: 'text-green-300',   bg: 'bg-green-500/20 border-green-500/40' },
   wait:       { icon: Hourglass,    color: 'text-rose-300',    bg: 'bg-rose-500/20 border-rose-500/40' },
   sub_recipe: { icon: Boxes,        color: 'text-fuchsia-300', bg: 'bg-fuchsia-500/20 border-fuchsia-500/40' },
 };
@@ -618,6 +619,21 @@ function StepDetailPanel({ step, subRecipe, onOpenSubRun }: { step: StepResult; 
         <InfoItem label="Tokens" value={step.tokens > 0 ? step.tokens.toLocaleString() : '–'} />
         <InfoItem label="Cost" value={step.cost_usd > 0 ? `$${step.cost_usd.toFixed(4)}` : '–'} />
         {step.gate_status && <InfoItem label="Gate" value={step.gate_status} />}
+        {step.notify_results && step.notify_results.length > 0 && (
+          <div className="col-span-2">
+            <p className="text-xs text-[var(--ao-text-muted)] mb-1">Sent to</p>
+            <ul className="list-none m-0 p-0 space-y-1">
+              {step.notify_results.map((r, i) => (
+                <li key={i} className="text-sm flex flex-wrap gap-x-2">
+                  <span className="font-mono">{r.tool.replace(/^channel:/, '')}</span>
+                  {r.success
+                    ? <span className="text-emerald-300">delivered{typeof r.recipients === 'number' ? ` to ${r.recipients} listener${r.recipients === 1 ? '' : 's'}` : ''}</span>
+                    : <span className="text-red-300">{r.error ?? 'failed'}</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         {step.sub_run_id && subRecipe && (
           <div className="col-span-2">
             <p className="text-xs text-[var(--ao-text-muted)] mb-1">Ran another recipe</p>

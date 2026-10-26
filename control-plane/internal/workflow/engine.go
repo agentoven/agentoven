@@ -805,6 +805,9 @@ func (e *Engine) executeStepOnce(ctx context.Context, run *models.RecipeRun, ste
 	case models.StepWait:
 		return e.executeWait(ctx, run, step, result, mu)
 
+	case models.StepNotify:
+		return e.executeNotify(ctx, run, step, result, completed, mu)
+
 	case models.StepSubRecipe:
 		return e.executeSubRecipe(ctx, run, step, result, completed, mu)
 

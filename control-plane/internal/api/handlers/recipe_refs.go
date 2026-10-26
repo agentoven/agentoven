@@ -9,13 +9,19 @@ import (
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 )
 
-// checkWaitSteps refuses a recipe with a wait step whose time cannot be read.
-func checkWaitSteps(steps []models.Step) error {
+// checkStepSettings refuses a recipe with a step whose settings cannot work: a wait whose time cannot be
+// read, a notify with no message or nowhere to send it.
+func checkStepSettings(steps []models.Step) error {
 	for i := range steps {
-		if steps[i].Kind == models.StepWait {
-			if err := workflow.ValidateWaitStep(&steps[i]); err != nil {
-				return err
-			}
+		var err error
+		switch steps[i].Kind {
+		case models.StepWait:
+			err = workflow.ValidateWaitStep(&steps[i])
+		case models.StepNotify:
+			err = workflow.ValidateNotifyStep(&steps[i])
+		}
+		if err != nil {
+			return err
 		}
 	}
 	return nil

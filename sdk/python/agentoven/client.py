@@ -62,6 +62,7 @@ from agentoven.modalities import (
 )
 
 if TYPE_CHECKING:
+    from agentoven.notifications import NotificationConnection
     from agentoven.realtime import RealtimeConnection
 
 __all__ = [
@@ -267,6 +268,61 @@ class AgentOvenClient:
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"run {run_id} of {name} is still {status!r} after {timeout:g}s")
             time.sleep(poll)
+
+    # ── Notification channels ─────────────────────────────────────────────
+
+    def list_notification_channels(self) -> list[dict[str, Any]]:
+        """The notification channels of the kitchen."""
+        return self._get("/api/v1/channels")
+
+    def create_notification_channel(
+        self,
+        name: str,
+        kind: str = "websocket",
+        events: Optional[Sequence[str]] = None,
+        url: Optional[str] = None,
+        secret: Optional[str] = None,
+        config: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Create a channel. ``kind="websocket"`` (the default) is a live feed: listeners connect to it with
+        :meth:`listen`, and a recipe's ``notify`` step names it. A ``webhook`` channel needs ``url`` (and may sign
+        with ``secret``). ``events`` limits which platform events (``gate_waiting``, ``step_failed``...) it also
+        receives on their own; a ``notify`` step reaches a channel it names whatever it subscribes to."""
+        body: dict[str, Any] = {"name": name, "kind": kind, "events": list(events or [])}
+        if url:
+            body["url"] = url
+        if secret:
+            body["secret"] = secret
+        if config:
+            body["config"] = dict(config)
+        return self._post("/api/v1/channels", body)
+
+    def delete_notification_channel(self, name: str) -> dict[str, Any]:
+        return self._delete(f"/api/v1/channels/{_seg(name)}")
+
+    def notification_ticket(self, channel: str) -> dict[str, Any]:
+        """A ticket (``token``, ``expires_in``, ``subprotocol``) for listening to one websocket channel without
+        headers, so a browser can: hand ``token`` to the page and connect with :meth:`listen` ``(token=...)`` or
+        offer ``subprotocol`` next to ``agentoven.v1``."""
+        return self._post(f"/api/v1/channels/{_seg(channel)}/ws-ticket", {})
+
+    def listen(self, channel: str, token: Optional[str] = None) -> "NotificationConnection":
+        """Listen to a websocket channel: an async context manager that yields a listener to iterate. See
+        :mod:`agentoven.notifications`. Requires ``pip install "agentoven[realtime]"``.
+
+        Authenticates with this client's API key and kitchen. Pass ``token`` (from :meth:`notification_ticket`)
+        to connect the way a browser does: no headers, the ticket offered as a WebSocket subprotocol."""
+        from agentoven.notifications import (
+            TICKET_SUBPROTOCOL_PREFIX,
+            WS_SUBPROTOCOL,
+            NotificationConnection,
+            channel_url,
+        )
+
+        url = channel_url(self._url, channel)
+        if token:
+            return NotificationConnection(url, {}, [WS_SUBPROTOCOL, TICKET_SUBPROTOCOL_PREFIX + token])
+        return NotificationConnection(url, self._headers())
 
     def release_wait(self, name: str, run_id: str, step: str, kitchen: Optional[str] = None) -> dict[str, Any]:
         """End a ``wait`` step early, so the run carries on now. Raises ``AgentOvenAPIError`` (404) if it is not waiting."""

@@ -4,6 +4,8 @@ import { MAX_LANES, canRemovePaths, isApproval, isParallel, mentionsExpression, 
 import { metaOfStep } from './stepMeta';
 import RecipeStepSettings, { type RecipeOption } from './RecipeStepSettings';
 import WaitStepSettings from './WaitStepSettings';
+import NotifyStepSettings from './NotifyStepSettings';
+import type { NotificationChannel } from '../../api';
 
 const field = 'w-full h-10 px-3 rounded-[10px] bg-[var(--ao-bg)] border border-[var(--ao-border)] text-sm outline-none focus:border-[var(--ao-brand)]';
 const label = 'flex flex-col gap-1.5 text-[13px] font-medium text-slate-300';
@@ -23,6 +25,9 @@ interface Props {
   /** The recipes a "run a recipe" step may pick, and the name of the one being edited. */
   recipes?: RecipeOption[];
   self?: string;
+  /** The notification channels a notify step may send to, and a way to read them again after one is made. */
+  channels?: NotificationChannel[];
+  onChannelsChanged?: () => void;
   onChange: (id: string, patch: Partial<WireStep>, config?: Record<string, unknown>) => void;
   onDelete: (id: string) => void;
   /** Gives an approval an Approved and a Rejected path, or takes them away. */
@@ -38,7 +43,7 @@ function Select({ value, onChange, children, label: aria }: { value: string; onC
 }
 
 /** Settings for the selected step, in plain words. */
-export default function StepInspector({ node, agents, notifyTools, recipes = [], self = '', onChange, onDelete, onLanes, onApprovalPaths }: Props) {
+export default function StepInspector({ node, agents, notifyTools, recipes = [], self = '', channels = [], onChannelsChanged, onChange, onDelete, onLanes, onApprovalPaths }: Props) {
   const s = node.step;
   const meta = metaOfStep(s);
   const Icon = meta.icon;
@@ -107,6 +112,8 @@ export default function StepInspector({ node, agents, notifyTools, recipes = [],
           </div>
         </>
       )}
+
+      {s.kind === 'notify' && <NotifyStepSettings step={s} channels={channels} tools={notifyTools} onConfig={(config) => set({}, config)} onPatch={(patch) => set(patch)} onChannelsChanged={onChannelsChanged} />}
 
       {s.kind === 'wait' && <WaitStepSettings step={s} onConfig={(config) => set({}, config)} />}
 

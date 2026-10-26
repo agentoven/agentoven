@@ -169,6 +169,28 @@
         {"name":"reply","kind":"agent","config":{"title":"Reply"},"agent_ref":"writer","agent":"writer","depends_on":["until-morning"]},
         {"name":"reply-now","kind":"agent","config":{"title":"Reply now"},"agent_ref":"writer","agent":"writer","depends_on":["not-urgent"]}
       ]
+    },
+    {
+      "name": "notify-before-approval",
+      "description": "Tell the team on a live feed, then wait for a person",
+      "spec": [{"type":"agent","title":"Draft","agent":"writer"},{"type":"notify","title":"Tell the team","message":"Run {{run_id}} of {{recipe}} needs a person to approve it.","subject":"Approval needed","channels":["ops"],"payload":{"priority":"high"}},{"type":"ask","title":"Sign off","within":"4 hours","approved":[{"type":"agent","title":"Send it","agent":"sender"}],"rejected":[]}],
+      "wire": [
+        {"name":"draft","kind":"agent","config":{"title":"Draft"},"agent_ref":"writer","agent":"writer","depends_on":[]},
+        {"name":"tell-the-team","kind":"notify","config":{"title":"Tell the team","message":"Run {{run_id}} of {{recipe}} needs a person to approve it.","subject":"Approval needed","channels":["ops"],"payload":{"priority":"high"}},"depends_on":["draft"]},
+        {"name":"sign-off","kind":"human_gate","config":{"title":"Sign off","max_wait_minutes":240,"on_reject":"branch"},"depends_on":["tell-the-team"],"branches":[{"condition":"approved == true","next_step":"send-it"}],"default_next":"sign-off-rejected"},
+        {"name":"send-it","kind":"agent","config":{"title":"Send it"},"agent_ref":"sender","agent":"sender","depends_on":["sign-off"]},
+        {"name":"sign-off-rejected","kind":"fan_out","depends_on":["sign-off"],"config":{"title":"Carry on","ui":"carry_on"}}
+      ]
+    },
+    {
+      "name": "notify-through-tools",
+      "description": "A message sent through a tool and a channel, carrying on if it cannot be delivered",
+      "spec": [{"type":"agent","title":"Check the order","agent":"checker"},{"type":"notify","title":"Page someone","message":"{{text}}","channels":["ops","audit"],"tools":["pager"],"on_failure":"carry_on"},{"type":"agent","title":"Log it","agent":"logger"}],
+      "wire": [
+        {"name":"check-the-order","kind":"agent","config":{"title":"Check the order"},"agent_ref":"checker","agent":"checker","depends_on":[]},
+        {"name":"page-someone","kind":"notify","config":{"title":"Page someone","message":"{{text}}","channels":["ops","audit"],"on_failure":"carry_on"},"notify_tools":["pager"],"depends_on":["check-the-order"]},
+        {"name":"log-it","kind":"agent","config":{"title":"Log it"},"agent_ref":"logger","agent":"logger","depends_on":["page-someone"]}
+      ]
     }
   ],
   "invalid": [
@@ -178,6 +200,8 @@
     {"name":"a group with a single step","spec":[{"type":"together","lanes":[[{"type":"agent","title":"Only","agent":"a"}],[]]}],"expect":"at least two steps"},
     {"name":"steps left after an approval that does nothing on a rejection","spec":[{"type":"agent","title":"Draft","agent":"writer"},{"type":"ask","title":"Sign off","approved":[{"type":"agent","title":"Send it","agent":"sender"}],"rejected":[]},{"type":"agent","title":"Log it","agent":"logger"}],"expect":"after a rejection"},
     {"name":"a recipe step without a recipe","spec":[{"type":"sub_recipe","title":"Run it","recipe":""}],"expect":"needs a recipe to run"},
-    {"name":"a wait with nothing to wait for","spec":[{"type":"wait","title":"Pause"}],"expect":"needs a time to wait"}
+    {"name":"a wait with nothing to wait for","spec":[{"type":"wait","title":"Pause"}],"expect":"needs a time to wait"},
+    {"name":"a notify with nothing to say","spec":[{"type":"notify","title":"Tell","message":"","channels":["ops"]}],"expect":"needs a message"},
+    {"name":"a notify with nowhere to send","spec":[{"type":"notify","title":"Tell","message":"hi"}],"expect":"needs a channel or a tool"}
   ]
 }

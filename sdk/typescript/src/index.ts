@@ -39,6 +39,10 @@ export {
   createAgent,
 } from '../index.js';
 
+// Live-feed notification channels: listen to what a recipe's notify step pushes
+export { listenToChannel, channelUrl, NotificationListener, NotificationError, CHANNEL_SUBPROTOCOL, CHANNEL_TICKET_SUBPROTOCOL_PREFIX } from './notifications.js';
+export type { ListenOptions, Notification } from './notifications.js';
+
 // Recipes built the way the dashboard builds them: new Flow(...) with the builders in `flow`
 export { Flow, FlowError } from './flow.js';
 export type { AgentOptions, AskOptions, Node as FlowNode, Problem as FlowProblem, WireRecipe, WireStep, Within } from './flow.js';
@@ -116,6 +120,7 @@ export type {
   Ingredient as IngredientType,
   Kitchen,
   KitchenMember,
+  NotificationChannel,
   Promotion,
   Provider,
   RealtimeToken,

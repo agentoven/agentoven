@@ -454,3 +454,39 @@ test('switching a wait from a length to a time drops the length', () => {
   assert.equal(out.config.until, '2026-11-02T09:00:00Z');
   assert.equal('duration' in out.config, false);
 });
+
+// ── Notify ───────────────────────────────────────────────────
+
+const notify = (title: string, config: Record<string, unknown>, extra: Partial<WireStep> = {}): FlowNode => step(title, 'notify', { ...extra, config });
+
+test('a notify step starts with a message and nowhere to send it', () => {
+  const n = newStep('notify', []);
+  assert.equal(n.step.kind, 'notify');
+  assert.match(String(n.step.config?.message), /\{\{run_id\}\}/);
+  assert.match(validate([n], agents)[0].message, /needs a channel or a tool to send to/);
+});
+
+test('a notify step is checked the way the control plane checks it when the recipe is saved', () => {
+  assert.deepEqual(validate([notify('Tell', { message: 'hi', channels: ['ops'] })], agents), []);
+  assert.deepEqual(validate([notify('Tell', { message: 'hi' }, { notify_tools: ['pager'] })], agents), [], 'a tool is a place to send to');
+  assert.match(validate([notify('Tell', { message: '  ', channels: ['ops'] })], agents)[0].message, /needs a message/);
+  assert.equal(validate([notify('Tell', { message: '' })], agents).length, 2, 'both problems are listed');
+});
+
+test('a notify step is written and read back wherever it sits, including right before an approval', () => {
+  const tell = notify('Tell the team', { message: 'Run {{run_id}} needs you', subject: 'Approval', channels: ['ops', 'audit'], on_failure: 'carry_on' }, { notify_tools: ['pager'] });
+  const flows: FlowNode[][] = [
+    [agent('Draft'), tell, approval('Sign off', [agent('Send', 'writer')], [agent('Revise')])],
+    [agent('A'), decide('Urgent?', [tell], [agent('B')])],
+    [together([tell], [agent('Other')])],
+  ];
+  for (const flow of flows) {
+    const wire = compile(flow);
+    const back = rewrap(wire);
+    assert.ok(back.ok, back.ok ? '' : back.reason);
+    if (back.ok) assert.ok(sameWire(compile(back.flow), wire));
+  }
+  const out = compile([tell])[0];
+  assert.deepEqual(out.config, { title: 'Tell the team', message: 'Run {{run_id}} needs you', subject: 'Approval', channels: ['ops', 'audit'], on_failure: 'carry_on' });
+  assert.deepEqual(out.notify_tools, ['pager']);
+});

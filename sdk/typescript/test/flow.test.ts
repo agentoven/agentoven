@@ -4,16 +4,17 @@ import { Flow, FlowError, flow, type FlowNode } from '../src/index.js';
 import { ProClient, AgentOvenAPIError } from '../src/pro-client.js';
 import { FakeControlPlane } from './fake-server.js';
 
-const { agent, ask, check, decide, each, lookup, mentions, subRecipe, together, wait } = flow;
+const { agent, ask, check, decide, each, lookup, mentions, notify, subRecipe, together, wait } = flow;
 
 interface Spec {
-  type: 'agent' | 'check' | 'lookup' | 'decide' | 'ask' | 'together' | 'sub_recipe' | 'wait';
+  type: 'agent' | 'check' | 'lookup' | 'decide' | 'ask' | 'together' | 'sub_recipe' | 'wait' | 'notify';
   title?: string; agent?: string; retries?: number; timeout_secs?: number; top_k?: number;
   mentions?: string[]; when?: string; yes?: Spec[]; no?: Spec[];
   within?: '1 hour' | '4 hours' | '1 day' | '3 days' | 'no limit'; notify?: string; domain?: string; emails?: string[];
   approved?: Spec[]; rejected?: Spec[]; if_nobody_answers?: 'stop' | 'reject'; lanes?: Spec[][];
   recipe?: string; input?: Record<string, string>; output?: Record<string, string>;
   duration?: string; until?: string;
+  message?: string; subject?: string; channels?: string[]; tools?: string[]; on_failure?: 'stop' | 'carry_on'; payload?: Record<string, unknown>;
 }
 const FIXTURES = JSON.parse(readFileSync(new URL('../../fixtures/recipe-flows.json', import.meta.url), 'utf8')) as {
   flows: { name: string; description: string; spec: Spec[]; wire: unknown[] }[];
@@ -36,6 +37,7 @@ function build(t: Spec): FlowNode {
         ifNobodyAnswers: t.if_nobody_answers,
       });
     case 'together': return together(...(t.lanes ?? []).map(list));
+    case 'notify': return notify(t.title!, t.message!, { channels: t.channels, tools: t.tools, subject: t.subject, payload: t.payload, onFailure: t.on_failure });
     case 'wait': return wait(t.title!, { duration: t.duration, until: t.until });
     case 'sub_recipe': return subRecipe(t.title!, t.recipe!, { inputMapping: t.input, outputMapping: t.output });
   }
@@ -114,6 +116,23 @@ describe('writing a flow', () => {
     expect(() => ask('x', { ifNobodyAnswers: 'wait' as never, approved: [] })).toThrow('stop');
     expect(ask('x').config).not.toHaveProperty('on_reject');
     expect(ask('x', { rejected: [] }).config.on_reject).toBe('branch');
+  });
+});
+
+describe('notify', () => {
+  it('carries where and what it sends', () => {
+    const n = notify('Tell', 'Run {{run_id}} needs you', { channels: ['ops'], tools: ['pager'], subject: 'Approval', payload: { priority: 'high' }, onFailure: 'carry_on' });
+    expect(n.config).toEqual({ message: 'Run {{run_id}} needs you', subject: 'Approval', channels: ['ops'], on_failure: 'carry_on', payload: { priority: 'high' } });
+    expect(n.fields).toEqual({ notify_tools: ['pager'] });
+    expect(notify('Tell', 'hi', { channels: ['ops'] }).config).toEqual({ message: 'hi', channels: ['ops'] });
+    expect(() => notify('Tell', 'hi', { channels: ['ops'], onFailure: 'shrug' as never })).toThrow('carry_on');
+  });
+
+  it('is checked before it is sent', () => {
+    expect(new Flow('f', '', [notify('Tell', 'hi')]).validate().map((p) => p.message)).toEqual(['"Tell" needs a channel or a tool to send to.']);
+    expect(new Flow('f', '', [notify('Tell', ' ', { channels: ['ops'] })]).validate().map((p) => p.message)).toEqual(['"Tell" needs a message.']);
+    expect(new Flow('f', '', [notify('Tell', '')]).validate()).toHaveLength(2);
+    expect(new Flow('f', '', [notify('Tell', 'hi', { tools: ['pager'] })]).validate()).toEqual([]);
   });
 });
 
@@ -247,6 +266,21 @@ describe('the client', () => {
     await expect(pro.waitForRecipeRun('r', 'slow', { timeoutMs: 50, pollMs: 10 })).rejects.toThrow("still 'running'");
     api.reply('GET', '/api/v1/recipes/r/runs/gate', { run: { id: 'gate', status: 'paused' }, pending_gates: ['g'] });
     await expect(pro.waitForRecipeRun('r', 'gate', { timeoutMs: 50, pollMs: 10, stopAtGate: false })).rejects.toThrow('still');
+  });
+
+  it('manages channels and hands out tickets', async () => {
+    api.reply('POST', '/api/v1/channels', { name: 'ops', kind: 'websocket' }, 201);
+    api.reply('GET', '/api/v1/channels', [{ name: 'ops' }]);
+    api.reply('DELETE', '/api/v1/channels/ops', {});
+    api.reply('POST', '/api/v1/channels/ops/ws-ticket', { token: 't.k', expires_in: 60, subprotocol: 'agentoven-token.t.k' });
+    await pro.createChannel({ name: 'ops' });
+    expect(api.last.body).toEqual({ kind: 'websocket', events: [], name: 'ops' });
+    await pro.createChannel({ name: 'hook', kind: 'webhook', url: 'https://x.example/h', secret: 's', events: ['gate_waiting'] });
+    expect(api.last.body).toEqual({ kind: 'webhook', events: ['gate_waiting'], name: 'hook', url: 'https://x.example/h', secret: 's' });
+    expect(await pro.listChannels()).toEqual([{ name: 'ops' }]);
+    expect((await pro.channelTicket('ops')).token).toBe('t.k');
+    await pro.deleteChannel('ops');
+    expect(api.last.method).toBe('DELETE');
   });
 
   it('releaseWait ends a wait early', async () => {

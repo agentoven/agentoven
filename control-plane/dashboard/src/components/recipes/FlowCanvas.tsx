@@ -60,6 +60,10 @@ function subtitle(step: WireStep): string {
     case 'agent': case 'evaluator': return step.agent_ref ? step.agent_ref : 'Choose an agent';
     case 'rag': return 'Searches your knowledge';
     case 'sub_recipe': return step.recipe_ref ? `Runs ${step.recipe_ref}` : 'Choose a recipe';
+    case 'notify': {
+      const to = [...(((step.config?.channels as string[] | undefined) ?? [])), ...((step.notify_tools as string[] | undefined) ?? [])];
+      return to.length ? `Tells ${to.join(', ')}` : 'Choose where to send';
+    }
     case 'wait': {
       if (step.config?.duration) return `Waits ${waitWords(step.config.duration)}`;
       if (step.config?.until) { const at = new Date(String(step.config.until)); return Number.isNaN(at.getTime()) ? 'Choose a time' : `Waits until ${at.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}`; }

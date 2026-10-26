@@ -40,6 +40,8 @@ const (
 	EventStepFailed    EventType = "step_failed"
 	EventRunCompleted  EventType = "run_completed"
 	EventRunFailed     EventType = "run_failed"
+	// EventNotification is a message a recipe's notify step sends on purpose, at that point in the flow.
+	EventNotification EventType = "notification"
 )
 
 // Event is the internal notification payload. It maps 1:1 to contracts.NotificationEvent.
@@ -66,6 +68,7 @@ type Service struct {
 	client  *http.Client
 	drivers map[models.ChannelKind]contracts.ChannelDriver
 	drvMu   sync.RWMutex
+	hub     *Hub
 }
 
 // NewService creates a new notification service with the built-in webhook driver.
@@ -76,7 +79,10 @@ func NewService(s store.Store) *Service {
 			Timeout: 15 * time.Second,
 		},
 		drivers: make(map[models.ChannelKind]contracts.ChannelDriver),
+		hub:     NewHub(),
 	}
+	// The WebSocket driver and the hub the connections listen on
+	svc.RegisterDriver(&WebSocketChannelDriver{hub: svc.hub})
 	// Register the built-in OSS webhook driver
 	svc.RegisterDriver(&WebhookChannelDriver{
 		client: svc.client,
@@ -92,6 +98,9 @@ func (s *Service) RegisterDriver(driver contracts.ChannelDriver) {
 	s.drivers[driver.Kind()] = driver
 	log.Info().Str("kind", string(driver.Kind())).Msg("Registered notification channel driver")
 }
+
+// Hub is where WebSocket connections listen for the messages sent through channels of kind websocket.
+func (s *Service) Hub() *Hub { return s.hub }
 
 // GetDriver returns the driver for a given channel kind, or nil.
 func (s *Service) GetDriver(kind models.ChannelKind) contracts.ChannelDriver {
@@ -174,7 +183,7 @@ func (s *Service) DispatchToChannel(ctx context.Context, channel *models.Notific
 		return result
 	}
 
-	if err := driver.Send(ctx, channel, event); err != nil {
+	if err := s.sendThrough(ctx, driver, channel, event, &result); err != nil {
 		result.Error = err.Error()
 		log.Warn().Err(err).Str("channel", channel.Name).Str("kind", string(channel.Kind)).Str("event", string(event.Type)).Msg("Channel notification failed")
 		return result
@@ -182,6 +191,80 @@ func (s *Service) DispatchToChannel(ctx context.Context, channel *models.Notific
 
 	result.Success = true
 	log.Info().Str("channel", channel.Name).Str("kind", string(channel.Kind)).Str("event", string(event.Type)).Str("run", event.RunID).Msg("Channel notification dispatched")
+	return result
+}
+
+// countingDriver is a channel driver that can say how many recipients a message reached.
+type countingDriver interface {
+	SendCounting(ctx context.Context, channel *models.NotificationChannel, event Event) (int, error)
+}
+
+func (s *Service) sendThrough(ctx context.Context, driver contracts.ChannelDriver, channel *models.NotificationChannel, event Event, result *models.NotifyResult) error {
+	if cd, ok := driver.(countingDriver); ok {
+		n, err := cd.SendCounting(ctx, channel, event)
+		result.Recipients = n
+		return err
+	}
+	return driver.Send(ctx, channel, event)
+}
+
+// ── Targeted Dispatch (the notify step) ──────────────────────
+
+// SendTo delivers an event to the channels and tools named, and to nothing else. It is how a recipe's
+// notify step reaches exactly who it was told to. A channel named here receives the event whatever
+// events it is subscribed to: naming it is the request. A name that matches no channel and no tool is a
+// failed result, never a silent skip.
+func (s *Service) SendTo(ctx context.Context, kitchen string, channelNames, toolNames []string, event Event) []models.NotifyResult {
+	var (
+		mu      sync.Mutex
+		wg      sync.WaitGroup
+		results []models.NotifyResult
+	)
+	add := func(r models.NotifyResult) {
+		mu.Lock()
+		results = append(results, r)
+		mu.Unlock()
+	}
+	for _, name := range channelNames {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			add(s.sendToChannelNamed(ctx, kitchen, name, event))
+		}(name)
+	}
+	for _, name := range toolNames {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			add(s.DispatchToTool(ctx, kitchen, name, event))
+		}(name)
+	}
+	wg.Wait()
+	return results
+}
+
+func (s *Service) sendToChannelNamed(ctx context.Context, kitchen, name string, event Event) models.NotifyResult {
+	result := models.NotifyResult{Tool: "channel:" + name, Timestamp: time.Now().UTC()}
+	channel, err := s.store.GetChannel(ctx, kitchen, name)
+	if err != nil || channel == nil {
+		result.Error = fmt.Sprintf("channel %q not found", name)
+		return result
+	}
+	result.Tool = fmt.Sprintf("channel:%s/%s", channel.Kind, channel.Name)
+	if !channel.Active {
+		result.Error = fmt.Sprintf("channel %s is inactive", channel.Name)
+		return result
+	}
+	driver := s.GetDriver(channel.Kind)
+	if driver == nil {
+		result.Error = fmt.Sprintf("no driver registered for channel kind %s", channel.Kind)
+		return result
+	}
+	if err := s.sendThrough(ctx, driver, channel, event, &result); err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	result.Success = true
 	return result
 }
 

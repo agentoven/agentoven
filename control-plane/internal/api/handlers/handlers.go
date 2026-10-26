@@ -30,6 +30,7 @@ import (
 	"github.com/agentoven/agentoven/control-plane/internal/executor"
 	grails "github.com/agentoven/agentoven/control-plane/internal/guardrails"
 	"github.com/agentoven/agentoven/control-plane/internal/mcpgw"
+	"github.com/agentoven/agentoven/control-plane/internal/notify"
 	"github.com/agentoven/agentoven/control-plane/internal/process"
 	"github.com/agentoven/agentoven/control-plane/internal/resolver"
 	"github.com/agentoven/agentoven/control-plane/internal/router"
@@ -79,6 +80,9 @@ type Handlers struct {
 	SkillUploads    *skills.UploadStore
 	// A2ASecret is the key the control plane's tokens for agent pods are derived from (a2aauth).
 	A2ASecret []byte
+
+	// Notifier sends notifications and holds the connections listening to websocket channels.
+	Notifier *notify.Service
 	// SkillRouteGuard, if set, wraps every /api/v1/skills route. An edition that has roles uses it
 	// to decide who may register, approve or delete a skill; with none, any authenticated caller may.
 	SkillRouteGuard func(next http.Handler) http.Handler
@@ -1413,7 +1417,7 @@ func (h *Handlers) CreateRecipe(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := checkWaitSteps(req.Steps); err != nil {
+	if err := checkStepSettings(req.Steps); err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -1480,7 +1484,7 @@ func (h *Handlers) UpdateRecipe(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if err := checkWaitSteps(req.Steps); err != nil {
+		if err := checkStepSettings(req.Steps); err != nil {
 			respondError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -5450,7 +5454,7 @@ func (h *Handlers) ApproveGateWithMetadata(w http.ResponseWriter, r *http.Reques
 
 // ListChannels returns notification channels for the current kitchen.
 func (h *Handlers) ListChannels(w http.ResponseWriter, r *http.Request) {
-	kitchen := r.Header.Get("X-Kitchen")
+	kitchen := middleware.GetKitchen(r.Context())
 	channels, err := h.Store.ListChannels(r.Context(), kitchen)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
@@ -5464,7 +5468,7 @@ func (h *Handlers) ListChannels(w http.ResponseWriter, r *http.Request) {
 
 // GetChannel returns a single notification channel.
 func (h *Handlers) GetChannel(w http.ResponseWriter, r *http.Request) {
-	kitchen := r.Header.Get("X-Kitchen")
+	kitchen := middleware.GetKitchen(r.Context())
 	name := chi.URLParam(r, "channelName")
 	channel, err := h.Store.GetChannel(r.Context(), kitchen, name)
 	if err != nil {
@@ -5482,7 +5486,7 @@ func (h *Handlers) CreateChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ch.Kitchen = r.Header.Get("X-Kitchen")
+	ch.Kitchen = middleware.GetKitchen(r.Context())
 	if ch.Name == "" {
 		respondError(w, http.StatusBadRequest, "Channel name is required")
 		return
@@ -5507,7 +5511,7 @@ func (h *Handlers) CreateChannel(w http.ResponseWriter, r *http.Request) {
 
 // UpdateChannel updates an existing notification channel.
 func (h *Handlers) UpdateChannel(w http.ResponseWriter, r *http.Request) {
-	kitchen := r.Header.Get("X-Kitchen")
+	kitchen := middleware.GetKitchen(r.Context())
 	name := chi.URLParam(r, "channelName")
 
 	existing, err := h.Store.GetChannel(r.Context(), kitchen, name)
@@ -5539,7 +5543,7 @@ func (h *Handlers) UpdateChannel(w http.ResponseWriter, r *http.Request) {
 
 // DeleteChannel removes a notification channel.
 func (h *Handlers) DeleteChannel(w http.ResponseWriter, r *http.Request) {
-	kitchen := r.Header.Get("X-Kitchen")
+	kitchen := middleware.GetKitchen(r.Context())
 	name := chi.URLParam(r, "channelName")
 
 	if err := h.Store.DeleteChannel(r.Context(), kitchen, name); err != nil {

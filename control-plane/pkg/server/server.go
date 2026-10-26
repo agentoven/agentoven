@@ -302,6 +302,7 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 
 	// Build handlers + API router
 	h := handlers.New(dataStore, mr, gw, wf, cat, sessStore, pm)
+	h.Notifier = ns
 
 	// The key agent pods' A2A tokens are derived from: each pod is started holding a token for
 	// itself, and the control plane presents it when it relays a call. Without it pods behave
