@@ -90,7 +90,7 @@ export interface HubTab { to: string; label: string }
 /** Tabs that move between the pages of one hub (Providers and Models, say); each tab is still its own address. */
 export function TabLinks({ tabs }: { tabs: HubTab[] }) {
   return (
-    <nav aria-label="Sections" className="flex gap-1 overflow-x-auto">
+    <nav aria-label="Sections" className="flex flex-wrap gap-x-1">
       {tabs.map((t) => (
         <NavLink
           key={t.to}

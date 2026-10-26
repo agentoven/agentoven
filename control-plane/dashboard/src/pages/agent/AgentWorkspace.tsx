@@ -91,7 +91,7 @@ export default function AgentWorkspace() {
           </div>
         </div>
         {problem && <div className="mt-3"><ErrorBanner message={problem} /></div>}
-        <nav aria-label="Agent sections" className="flex gap-1 mt-5 overflow-x-auto">
+        <nav aria-label="Agent sections" className="flex flex-wrap gap-x-1 mt-5">
           {TABS.map((t) => (
             <NavLink
               key={t.label}
