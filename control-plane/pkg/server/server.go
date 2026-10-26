@@ -313,6 +313,7 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 		pm.SetA2ASecret(a2aSecret)
 		a2aauth.UseSecret(a2aSecret)
 	}
+	h.SecretResolver = secretRes
 	h.ServerInfo = models.CommunityServerInfo(pubCfg.Version)
 
 	// ── Guardrails (R9) ────────────────────────────────────

@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/agentoven/agentoven/control-plane/internal/secretref"
 	"github.com/agentoven/agentoven/control-plane/internal/store"
 	"github.com/agentoven/agentoven/control-plane/pkg/blobstore"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
@@ -461,7 +462,7 @@ func (mr *ModelRouter) ProviderKey(ctx context.Context, kitchen, name string) (s
 // the provider's Config["api_key"] field.
 //
 // Resolution priority:
-//  1. Provider-level SecretRef (k8s:// or env://) → single dynamic key
+//  1. Provider-level SecretRef (k8s://, env:// or vault://) → single dynamic key
 //  2. APIKeys pool with per-key SecretRef support → rotation with dynamic keys
 //  3. APIKeys pool with inline keys → rotation with static keys
 //  4. Legacy Config["api_key"] → single static key
@@ -471,9 +472,11 @@ func (mr *ModelRouter) ProviderKey(ctx context.Context, kitchen, name string) (s
 //   - "random": picks a random enabled key
 //   - "weighted": weighted random selection based on key weights
 func (mr *ModelRouter) SelectAPIKey(provider *models.ModelProvider) string {
+	// A vault:// reference is looked up in the provider's own kitchen, never another.
+	ctx := secretref.WithKitchen(context.Background(), provider.Kitchen)
 	// Priority 1: Provider-level SecretRef (dynamic key from external store)
 	if provider.SecretRef != "" && mr.secretResolver != nil {
-		resolved, err := mr.secretResolver.Resolve(context.Background(), provider.SecretRef)
+		resolved, err := mr.secretResolver.Resolve(ctx, provider.SecretRef)
 		if err != nil {
 			log.Warn().Err(err).Str("provider", provider.Name).Str("ref", provider.SecretRef).Msg("Failed to resolve provider secret ref, falling back")
 		} else if resolved != "" {
@@ -489,7 +492,7 @@ func (mr *ModelRouter) SelectAPIKey(provider *models.ModelProvider) string {
 		}
 		// Resolve SecretRef for this key entry if set
 		if k.SecretRef != "" && mr.secretResolver != nil {
-			resolved, err := mr.secretResolver.Resolve(context.Background(), k.SecretRef)
+			resolved, err := mr.secretResolver.Resolve(ctx, k.SecretRef)
 			if err != nil {
 				log.Warn().Err(err).Str("provider", provider.Name).Str("label", k.Label).Str("ref", k.SecretRef).Msg("Failed to resolve key secret ref, skipping")
 				continue

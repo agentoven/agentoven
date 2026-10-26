@@ -198,6 +198,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 				r.Get("/", h.ListProviders)
 				r.Post("/", h.CreateProvider)
 				r.Get("/templates", h.ListProviderTemplates)
+				r.Post("/seal-keys", h.SealProviderKeys)
 				r.Route("/{providerName}", func(r chi.Router) {
 					r.Get("/", h.GetProvider)
 					r.Put("/", h.UpdateProvider)
