@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 🔎 Calls the platform makes for itself are named in traces
+
+- Skill verification (the model review that decides whether a skill can be used) was recorded as an anonymous `router` call. It is now `skill-verifier`, with `purpose: skill_verification` and the skill's name on the trace and its root span, and shows its prompt, the verdict and the provider it went to as spans. The RAG pipeline's own model calls (HyDE, question decomposition, the answer) are `rag:hyde`, `rag:decompose` and `rag:answer`.
+
 ---
 
 ## [0.9.5] — 2026-10-26

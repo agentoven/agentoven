@@ -346,7 +346,9 @@ func (p *Pipeline) hydeQuery(ctx context.Context, kitchen string, req models.RAG
 	hydePrompt := fmt.Sprintf("Write a short, factual answer to this question. Do not explain, just answer:\n\nQuestion: %s\n\nAnswer:", req.Question)
 
 	routeReq := &models.RouteRequest{
-		Kitchen: kitchen,
+		Kitchen:  kitchen,
+		AgentRef: "rag:hyde",
+		Labels:   map[string]string{"purpose": "rag_hyde"},
 		Messages: []models.ChatMessage{
 			{Role: "user", Content: hydePrompt},
 		},
@@ -396,7 +398,9 @@ Question: %s
 Sub-questions:`, req.Question)
 
 	routeReq := &models.RouteRequest{
-		Kitchen: kitchen,
+		Kitchen:  kitchen,
+		AgentRef: "rag:decompose",
+		Labels:   map[string]string{"purpose": "rag_decompose"},
 		Messages: []models.ChatMessage{
 			{Role: "user", Content: decomposePrompt},
 		},
@@ -496,7 +500,9 @@ Question: %s
 Answer:`, contextBuilder.String(), question)
 
 	routeReq := &models.RouteRequest{
-		Kitchen: kitchen,
+		Kitchen:  kitchen,
+		AgentRef: "rag:answer",
+		Labels:   map[string]string{"purpose": "rag_answer"},
 		Messages: []models.ChatMessage{
 			{Role: "user", Content: prompt},
 		},

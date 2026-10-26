@@ -2073,6 +2073,12 @@ func (mr *ModelRouter) finishRoute(ctx context.Context, req *models.RouteRequest
 			"attempts": len(attempts),
 		},
 	}
+	for k, v := range req.Labels {
+		trace.Metadata[k] = v
+		if k == "purpose" {
+			trace.Tags = append(trace.Tags, v)
+		}
+	}
 	rootStatus, rootErr := "completed", ""
 	if routeErr != nil {
 		trace.Status, rootStatus, rootErr = "failed", "failed", routeErr.Error()
@@ -2089,6 +2095,9 @@ func (mr *ModelRouter) finishRoute(ctx context.Context, req *models.RouteRequest
 			"thinking_enabled": req.ThinkingEnabled,
 		},
 	}}
+	for k, v := range req.Labels {
+		spans[0].Metadata[k] = v
+	}
 
 	// Each provider tried is a span, in order: the failed ones, then the one that answered.
 	cursor := started.UTC()

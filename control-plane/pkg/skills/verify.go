@@ -81,7 +81,11 @@ func verifyIntent(ctx context.Context, r Router, kitchen, pinnedProvider string,
 	}
 
 	resp, err := r.Route(ctx, &models.RouteRequest{
-		Kitchen:        kitchen,
+		Kitchen: kitchen,
+		// Named, so the trace of this call is the skill verifier's and not an anonymous "router" one,
+		// with the skill it was about on it.
+		AgentRef:       "skill-verifier",
+		Labels:         map[string]string{"purpose": "skill_verification", "skill": manifest.Name},
 		PinnedProvider: pinnedProvider,
 		Messages:       []models.ChatMessage{{Role: "user", Content: prompt}},
 		ResponseFormat: &models.ResponseFormat{

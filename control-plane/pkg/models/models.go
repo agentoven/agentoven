@@ -1157,6 +1157,11 @@ type RouteRequest struct {
 	// ── Session/Conversation (R8) ────────────────────────────
 	SessionID string `json:"session_id,omitempty"` // conversation context
 
+	// Labels describe why the call is being made (for example purpose=skill_verification and the
+	// skill's name). They are never sent to a provider; the router copies them onto the trace and
+	// its root span so a call made on the platform's own behalf can be found and told apart.
+	Labels map[string]string `json:"-"`
+
 	// ── Thinking / Extended Reasoning (R10) ──────────────────
 	ThinkingEnabled bool `json:"thinking_enabled,omitempty"` // enable extended thinking (o-series, Claude)
 	ThinkingBudget  int  `json:"thinking_budget,omitempty"`  // max thinking tokens (0 = model default)
