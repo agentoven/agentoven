@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.9.5] — 2026-10-26
+
 ### 🧠 Thinking, spans and per-model pricing
 
 - **Thinking is now asked for and kept.** `thinking_enabled` was accepted by the API but never sent to a provider, so nothing was ever captured. It is now sent in each provider's form (Anthropic extended thinking with a budget, `reasoning_effort` for OpenAI reasoning models, `thinkingConfig` for Gemini, a reasoning budget for OpenRouter, `reasoning_effort` for Ollama), and what comes back is read from `reasoning_content`, `reasoning`, `reasoning_details`, `<think>` tags, Anthropic thinking blocks and Gemini thought parts. It appears on the response, the `llm` span, the trace, and in the dashboard. Anthropic's signed thinking blocks are kept and sent back with tool results, which it requires. Thinking is not sent to a model that is not known to reason.

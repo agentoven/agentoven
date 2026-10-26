@@ -84,4 +84,4 @@ __all__ = [
     "_NativeClient",
 ]
 
-__version__ = "0.8.5b3"
+__version__ = "0.9.5"
