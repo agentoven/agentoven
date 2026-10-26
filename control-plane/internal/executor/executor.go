@@ -98,6 +98,11 @@ type Turn struct {
 	ThinkingBlocks []models.ThinkingBlock `json:"thinking_blocks,omitempty"`
 	LatencyMs      int64                  `json:"latency_ms"`
 	Usage          models.TokenUsage      `json:"usage"`
+	// Provider and Model are what answered this turn's call (after any fallback), so a trace can
+	// show them and price each turn by its own model. Attempts are the providers that failed first.
+	Provider string                `json:"provider,omitempty"`
+	Model    string                `json:"model,omitempty"`
+	Attempts []models.RouteAttempt `json:"attempts,omitempty"`
 }
 
 // ToolGateway is the executor's view of the MCP gateway: it dispatches a tool

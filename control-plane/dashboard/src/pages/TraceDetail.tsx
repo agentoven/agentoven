@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAPI } from '../hooks';
-import { traces, type Trace, type Span, type SpanKind } from '../api';
+import { traces, type Trace, type Span, type SpanKind, type ThinkingBlock } from '../api';
 import {
   PageHeader, StatusBadge, Spinner, ErrorBanner, Card,
 } from '../components/UI';
@@ -297,6 +297,11 @@ function MetadataView({ trace }: { trace: Trace }) {
         </>}
         {trace.tags && trace.tags.length > 0 && <InfoRow label="Tags" value={trace.tags.join(', ')} />}
       </Card>
+      {trace.thinking_blocks && trace.thinking_blocks.length > 0 && (
+        <Card>
+          <ThinkingPanel blocks={trace.thinking_blocks} tokens={trace.usage?.thinking_tokens} />
+        </Card>
+      )}
       {trace.metadata && Object.keys(trace.metadata).length > 0 && (
         <Card>
           <div className="text-[0.7rem] text-[var(--ao-text-muted)] uppercase tracking-wider mb-3">Metadata</div>
@@ -304,6 +309,33 @@ function MetadataView({ trace }: { trace: Trace }) {
         </Card>
       )}
     </div>
+  );
+}
+
+// ── Thinking ─────────────────────────────────────────────────
+
+/** The reasoning an LLM span recorded: it travels in the span's output next to the answer. */
+function thinkingOf(span: Span): ThinkingBlock[] {
+  const out = span.output as { thinking_blocks?: ThinkingBlock[] } | undefined;
+  return Array.isArray(out?.thinking_blocks) ? out!.thinking_blocks! : [];
+}
+
+function ThinkingPanel({ blocks, tokens }: { blocks: ThinkingBlock[]; tokens?: number }) {
+  if (blocks.length === 0) return null;
+  return (
+    <>
+      <div className="text-[0.7rem] text-[var(--ao-text-muted)] uppercase tracking-wider font-semibold mt-5 mb-2">
+        Thinking ({blocks.length} {blocks.length === 1 ? 'block' : 'blocks'}{tokens ? `, ${tokens} tokens` : ''})
+      </div>
+      {blocks.map((b, i) => (
+        <details key={i} className="mb-2 rounded-md border border-[var(--ao-border)] bg-[var(--ao-bg)]" open={blocks.length === 1}>
+          <summary className="cursor-pointer px-3 py-2 text-sm text-[var(--ao-text-muted)]">
+            {b.redacted ? 'Withheld by the provider' : `Block ${i + 1}`}{b.token_count ? ` · ${b.token_count} tokens` : ''}
+          </summary>
+          <pre className="text-sm whitespace-pre-wrap break-words px-3 pb-3 max-h-[400px] overflow-auto">{b.content}</pre>
+        </details>
+      ))}
+    </>
   );
 }
 
@@ -359,6 +391,19 @@ function SpanDetailPanel({ span, onClose }: { span: Span; onClose: () => void })
               {span.usage?.estimated_cost_usd ? <div className="bg-[var(--ao-bg)] rounded-md p-3"><div className="text-[0.65rem] text-[var(--ao-text-muted)] uppercase tracking-wider">Cost</div><div className="text-base font-bold mt-0.5">${span.usage.estimated_cost_usd.toFixed(6)}</div></div> : null}
             </div>
 
+            {span.usage?.price_source === 'fallback' && (
+              <div className="text-xs p-2 mb-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-amber-300">
+                No price is known for this model, so the cost shown is a placeholder. Set one with <code>model_costs</code> on the provider.
+              </div>
+            )}
+            {!!span.usage?.cached_tokens && (
+              <InfoRow label="Cached prompt tokens" value={`${span.usage.cached_tokens}${span.usage.cache_savings_usd ? ` (saved $${span.usage.cache_savings_usd.toFixed(6)})` : ''}`} />
+            )}
+            {!!span.usage?.cache_creation && <InfoRow label="Cache write tokens" value={String(span.usage.cache_creation)} />}
+            {span.usage?.price_source && <InfoRow label="Price source" value={span.usage.price_source.replace('_', ' ')} />}
+
+            <ThinkingPanel blocks={thinkingOf(span)} tokens={span.usage?.thinking_tokens} />
+
             {/* Timing */}
             <div className="text-[0.7rem] text-[var(--ao-text-muted)] uppercase tracking-wider font-semibold mt-5 mb-2">Timing</div>
             <InfoRow label="Start" value={new Date(span.start_time).toISOString()} mono />
@@ -387,6 +432,9 @@ function SpanDetailPanel({ span, onClose }: { span: Span; onClose: () => void })
                   <div key={i} className="py-1.5 border-b border-[var(--ao-border)] text-sm">
                     <span className="font-semibold">{evt.name}</span>
                     <span className="text-[var(--ao-text-muted)] ml-2 text-[0.7rem]">{new Date(evt.timestamp).toISOString()}</span>
+                    {evt.attributes && Object.keys(evt.attributes).length > 0 && (
+                      <pre className="text-xs whitespace-pre-wrap break-words mt-1 text-[var(--ao-text-muted)]">{formatJSON(evt.attributes)}</pre>
+                    )}
                   </div>
                 ))}
               </>

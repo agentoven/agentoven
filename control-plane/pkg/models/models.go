@@ -1256,6 +1256,11 @@ type ChatMessage struct {
 	// Supported: Anthropic ("ephemeral"), OpenAI (auto-prefix caching).
 	// Drivers that don't support caching ignore this field.
 	CacheControl string `json:"cache_control,omitempty"` // "ephemeral" for Anthropic cache breakpoint
+
+	// Thinking is the reasoning the model produced for this assistant message. Anthropic requires
+	// the blocks (with their signatures) to be sent back unchanged while a tool call is outstanding,
+	// so the executor keeps them on the message; other providers ignore the field.
+	Thinking []ThinkingBlock `json:"thinking,omitempty"`
 }
 
 type RouteResponse struct {
@@ -1273,6 +1278,18 @@ type RouteResponse struct {
 	FinishReason string           `json:"finish_reason,omitempty"` // "stop", "tool_calls", "length", "content_filter"
 	ToolCalls    []ToolCallResult `json:"tool_calls,omitempty"`    // structured tool calls from LLM
 	ContentParts []ContentPart    `json:"content_parts,omitempty"` // multi-part response
+
+	// Attempts are the providers tried before this one answered (or all of them, when none did):
+	// what the router's fallback did, so a trace can show it.
+	Attempts []RouteAttempt `json:"attempts,omitempty"`
+}
+
+// RouteAttempt is one provider the router tried for a request.
+type RouteAttempt struct {
+	Provider  string `json:"provider"`
+	Model     string `json:"model"`
+	Error     string `json:"error,omitempty"`
+	LatencyMs int64  `json:"latency_ms"`
 }
 
 type TokenUsage struct {
@@ -1285,6 +1302,10 @@ type TokenUsage struct {
 	CachedTokens    int64   `json:"cached_tokens,omitempty"`     // tokens served from cache
 	CacheCreation   int64   `json:"cache_creation,omitempty"`    // tokens written to cache this turn
 	CacheSavingsUSD float64 `json:"cache_savings_usd,omitempty"` // estimated $ saved via caching
+	// PriceSource says where the model's price came from ("model_override", "catalog", "builtin",
+	// "provider_default", "local" or "fallback"). "fallback" means the model had no known price and
+	// EstimatedCost is a placeholder, not a real figure.
+	PriceSource string `json:"price_source,omitempty"`
 }
 
 type CostSummary struct {
@@ -1718,6 +1739,13 @@ type ThinkingBlock struct {
 	Model      string    `json:"model"`
 	Provider   string    `json:"provider"`
 	Timestamp  time.Time `json:"timestamp"`
+
+	// Signature and Redacted exist for Anthropic, which signs each thinking block and must get it
+	// back untouched in the next turn of a tool-use exchange. Redacted blocks carry no readable
+	// content; Data is the opaque payload to send back.
+	Signature string `json:"signature,omitempty"`
+	Redacted  bool   `json:"redacted,omitempty"`
+	Data      string `json:"data,omitempty"`
 }
 
 // ── Audit Events ─────────────────────────────────────────────
@@ -2191,24 +2219,32 @@ type HumanInputRequest struct {
 // ModelCapability describes the known capabilities and pricing for a model.
 // Populated from the model catalog (LiteLLM enrichment + provider discovery).
 type ModelCapability struct {
-	ModelID           string   `json:"model_id"`                    // canonical ID: "openai/gpt-5-mini"
-	ProviderKind      string   `json:"provider_kind"`               // "openai", "anthropic", "ollama"
-	ModelName         string   `json:"model_name"`                  // provider-specific: "gpt-5-mini"
-	DisplayName       string   `json:"display_name,omitempty"`      // human-friendly name
-	ContextWindow     int      `json:"context_window,omitempty"`    // max input tokens
-	MaxOutputTokens   int      `json:"max_output_tokens,omitempty"` // max output tokens
-	InputCostPer1K    float64  `json:"input_cost_per_1k,omitempty"`
-	OutputCostPer1K   float64  `json:"output_cost_per_1k,omitempty"`
-	SupportsTools     bool     `json:"supports_tools,omitempty"`
-	SupportsVision    bool     `json:"supports_vision,omitempty"`
-	SupportsStreaming bool     `json:"supports_streaming,omitempty"`
-	SupportsThinking  bool     `json:"supports_thinking,omitempty"` // extended thinking / reasoning
-	SupportsJSON      bool     `json:"supports_json,omitempty"`     // structured JSON output
-	TokenParamName    string   `json:"token_param_name,omitempty"`  // "max_tokens" or "max_completion_tokens"
-	APIVersion        string   `json:"api_version,omitempty"`       // recommended API version
-	Modalities        []string `json:"modalities,omitempty"`        // ["text", "image", "audio"]
-	DeprecatedAt      string   `json:"deprecated_at,omitempty"`     // ISO date
-	Source            string   `json:"source,omitempty"`            // "catalog", "discovery", "manual"
+	ModelID           string  `json:"model_id"`                    // canonical ID: "openai/gpt-5-mini"
+	ProviderKind      string  `json:"provider_kind"`               // "openai", "anthropic", "ollama"
+	ModelName         string  `json:"model_name"`                  // provider-specific: "gpt-5-mini"
+	DisplayName       string  `json:"display_name,omitempty"`      // human-friendly name
+	ContextWindow     int     `json:"context_window,omitempty"`    // max input tokens
+	MaxOutputTokens   int     `json:"max_output_tokens,omitempty"` // max output tokens
+	InputCostPer1K    float64 `json:"input_cost_per_1k,omitempty"`
+	OutputCostPer1K   float64 `json:"output_cost_per_1k,omitempty"`
+	SupportsTools     bool    `json:"supports_tools,omitempty"`
+	SupportsVision    bool    `json:"supports_vision,omitempty"`
+	SupportsStreaming bool    `json:"supports_streaming,omitempty"`
+	SupportsThinking  bool    `json:"supports_thinking,omitempty"` // extended thinking / reasoning
+	SupportsJSON      bool    `json:"supports_json,omitempty"`     // structured JSON output
+	// Prices that differ from the plain input and output rate. Zero means "same as that rate".
+	CacheReadCostPer1K  float64 `json:"cache_read_cost_per_1k,omitempty"`  // prompt tokens served from the cache
+	CacheWriteCostPer1K float64 `json:"cache_write_cost_per_1k,omitempty"` // prompt tokens written to the cache
+	ReasoningCostPer1K  float64 `json:"reasoning_cost_per_1k,omitempty"`   // thinking tokens, when billed apart from output
+	// Above LongContextOver prompt tokens the model bills at these rates instead (0 = no tier).
+	LongContextOver     int64    `json:"long_context_over,omitempty"`
+	LongInputCostPer1K  float64  `json:"long_input_cost_per_1k,omitempty"`
+	LongOutputCostPer1K float64  `json:"long_output_cost_per_1k,omitempty"`
+	TokenParamName      string   `json:"token_param_name,omitempty"` // "max_tokens" or "max_completion_tokens"
+	APIVersion          string   `json:"api_version,omitempty"`      // recommended API version
+	Modalities          []string `json:"modalities,omitempty"`       // ["text", "image", "audio"]
+	DeprecatedAt        string   `json:"deprecated_at,omitempty"`    // ISO date
+	Source              string   `json:"source,omitempty"`           // "catalog", "discovery", "manual"
 }
 
 // DiscoveredModel is a model found by querying a provider's list-models API.

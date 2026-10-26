@@ -105,6 +105,9 @@ export interface ThinkingBlock {
   token_count: number;
   model: string;
   provider: string;
+  timestamp?: string;
+  /** Set for reasoning the provider withheld; the content is then a placeholder. */
+  redacted?: boolean;
 }
 
 export interface TestAgentResponse {
@@ -361,6 +364,10 @@ export interface SpanTokenUsage {
   estimated_cost_usd?: number;
   cache_hits?: number;
   cached_tokens?: number;
+  cache_creation?: number;
+  cache_savings_usd?: number;
+  /** Where the model's price came from. "fallback" means no price was known and the cost is a placeholder. */
+  price_source?: string;
 }
 
 export interface Span {
@@ -399,6 +406,7 @@ export interface Trace {
   session_id?: string;
   tags?: string[];
   usage?: SpanTokenUsage;
+  thinking_blocks?: ThinkingBlock[];
   user_id: string;
   created_at: string;
   spans?: Span[];

@@ -552,10 +552,20 @@ func (mr *ModelRouter) SelectAPIKey(provider *models.ModelProvider) string {
 
 // Route sends a request through the router using the specified strategy.
 func (mr *ModelRouter) Route(ctx context.Context, req *models.RouteRequest) (*models.RouteResponse, error) {
+	started := time.Now()
+	resp, attempts, err := mr.routeCore(ctx, req)
+	mr.finishRoute(ctx, req, resp, attempts, started, err)
+	return resp, err
+}
+
+// routeCore tries the providers in order and returns the first answer, with the providers that failed
+// before it. It records nothing about the call (finishRoute does), so a caller that goes on to try
+// something else, a backup provider, records one trace for the whole request.
+func (mr *ModelRouter) routeCore(ctx context.Context, req *models.RouteRequest) (*models.RouteResponse, []models.RouteAttempt, error) {
 	// Get configured providers
 	providers, err := mr.store.ListProviders(ctx, req.Kitchen)
 	if err != nil {
-		return nil, fmt.Errorf("list providers: %w", err)
+		return nil, nil, fmt.Errorf("list providers: %w", err)
 	}
 	if ov, ok := providerTLSOverrideFromContext(ctx); ok {
 		matched := false
@@ -579,7 +589,7 @@ func (mr *ModelRouter) Route(ctx context.Context, req *models.RouteRequest) (*mo
 		}
 	}
 	if len(providers) == 0 {
-		return nil, fmt.Errorf("no model providers configured")
+		return nil, nil, fmt.Errorf("no model providers configured")
 	}
 
 	if req.PinnedProvider != "" {
@@ -596,7 +606,9 @@ func (mr *ModelRouter) Route(ctx context.Context, req *models.RouteRequest) (*mo
 
 	// Try each provider in order (fallback behavior)
 	var lastErr error
+	var attempts []models.RouteAttempt
 	for _, provider := range ordered {
+		t0 := time.Now()
 		resp, err := mr.callWithRetry(ctx, &provider, req)
 		if err != nil {
 			log.Warn().
@@ -605,52 +617,65 @@ func (mr *ModelRouter) Route(ctx context.Context, req *models.RouteRequest) (*mo
 				Err(err).
 				Msg("Provider call failed (after retries), trying next")
 			lastErr = err
+			attempts = append(attempts, mr.attemptOf(&provider, req, err, time.Since(t0)))
 			continue
 		}
 
 		// Track cost
 		mr.trackCost(req.Kitchen, req.AgentRef, resp)
-
-		// Record trace
-		mr.recordTrace(ctx, req, resp)
-
-		return resp, nil
+		return resp, attempts, nil
 	}
 
-	return nil, fmt.Errorf("all providers failed, last error: %w", lastErr)
+	return nil, attempts, fmt.Errorf("all providers failed, last error: %w", lastErr)
+}
+
+// attemptOf describes one provider try for a trace.
+func (mr *ModelRouter) attemptOf(p *models.ModelProvider, req *models.RouteRequest, err error, took time.Duration) models.RouteAttempt {
+	model := req.Model
+	if model == "" && len(p.Models) > 0 {
+		model = p.Models[0]
+	}
+	a := models.RouteAttempt{Provider: p.Name, Model: model, LatencyMs: took.Milliseconds()}
+	if err != nil {
+		a.Error = err.Error()
+	}
+	return a
 }
 
 // routePinned serves a RouteRequest with PinnedProvider set: exactly one
 // named provider is tried, with no fallback to any other — see
 // RouteRequest.PinnedProvider for why that's the point, not a limitation.
-func (mr *ModelRouter) routePinned(ctx context.Context, req *models.RouteRequest, providers []models.ModelProvider) (*models.RouteResponse, error) {
+func (mr *ModelRouter) routePinned(ctx context.Context, req *models.RouteRequest, providers []models.ModelProvider) (*models.RouteResponse, []models.RouteAttempt, error) {
 	for i := range providers {
 		if providers[i].Name != req.PinnedProvider {
 			continue
 		}
+		t0 := time.Now()
 		resp, err := mr.callWithRetry(ctx, &providers[i], req)
 		if err != nil {
-			return nil, fmt.Errorf("pinned provider %q failed: %w", req.PinnedProvider, err)
+			return nil, []models.RouteAttempt{mr.attemptOf(&providers[i], req, err, time.Since(t0))}, fmt.Errorf("pinned provider %q failed: %w", req.PinnedProvider, err)
 		}
 		mr.trackCost(req.Kitchen, req.AgentRef, resp)
-		mr.recordTrace(ctx, req, resp)
-		return resp, nil
+		return resp, nil, nil
 	}
-	return nil, fmt.Errorf("pinned provider %q not found in kitchen %q", req.PinnedProvider, req.Kitchen)
+	return nil, nil, fmt.Errorf("pinned provider %q not found in kitchen %q", req.PinnedProvider, req.Kitchen)
 }
 
 // RouteWithBackup routes a request through the primary provider, and if all
 // primary providers fail, automatically falls back to the backup provider.
 // This is used by InvokeAgent/SendSessionMessage when an agent has a BackupProvider configured.
 func (mr *ModelRouter) RouteWithBackup(ctx context.Context, req *models.RouteRequest, backupProvider, backupModel string) (*models.RouteResponse, error) {
+	started := time.Now()
 	// Try primary route first
-	resp, err := mr.Route(ctx, req)
+	resp, attempts, err := mr.routeCore(ctx, req)
 	if err == nil {
+		mr.finishRoute(ctx, req, resp, attempts, started, nil)
 		return resp, nil
 	}
 
 	// Primary failed — try backup provider if configured
 	if backupProvider == "" {
+		mr.finishRoute(ctx, req, nil, attempts, started, err)
 		return nil, err // no backup, return original error
 	}
 
@@ -662,7 +687,9 @@ func (mr *ModelRouter) RouteWithBackup(ctx context.Context, req *models.RouteReq
 
 	backup, bErr := mr.store.GetProvider(ctx, req.Kitchen, backupProvider)
 	if bErr != nil {
-		return nil, fmt.Errorf("primary providers failed (%w) and backup provider %q not found: %v", err, backupProvider, bErr)
+		err = fmt.Errorf("primary providers failed (%w) and backup provider %q not found: %v", err, backupProvider, bErr)
+		mr.finishRoute(ctx, req, nil, attempts, started, err)
+		return nil, err
 	}
 	if ov, ok := providerTLSOverrideFromContext(ctx); ok && backup != nil && backup.Name == ov.ProviderName {
 		backup.CABundle = ov.CABundle
@@ -683,15 +710,19 @@ func (mr *ModelRouter) RouteWithBackup(ctx context.Context, req *models.RouteReq
 		backupReq.Model = backup.Models[0]
 	}
 
+	t0 := time.Now()
 	resp, bErr = mr.callWithRetry(ctx, backup, &backupReq)
 	if bErr != nil {
-		return nil, fmt.Errorf("primary providers failed (%w) and backup provider %q also failed: %v", err, backupProvider, bErr)
+		attempts = append(attempts, mr.attemptOf(backup, &backupReq, bErr, time.Since(t0)))
+		err = fmt.Errorf("primary providers failed (%w) and backup provider %q also failed: %v", err, backupProvider, bErr)
+		mr.finishRoute(ctx, req, nil, attempts, started, err)
+		return nil, err
 	}
 
 	// Tag the response as coming from backup
 	resp.Provider = backup.Name + " (backup)"
 	mr.trackCost(req.Kitchen, req.AgentRef, resp)
-	mr.recordTrace(ctx, req, resp)
+	mr.finishRoute(ctx, req, resp, attempts, started, nil)
 
 	return resp, nil
 }
@@ -715,6 +746,8 @@ func (mr *ModelRouter) RouteStream(ctx context.Context, req *models.RouteRequest
 
 	ordered := mr.orderProviders(providers, strategy, req.Model)
 
+	started := time.Now()
+	var attempts []models.RouteAttempt
 	var lastErr error
 	for _, provider := range ordered {
 		// Look up driver
@@ -740,14 +773,26 @@ func (mr *ModelRouter) RouteStream(ctx context.Context, req *models.RouteRequest
 		}
 
 		// Fallback: non-streaming call → emit as single chunk
-		resp, err := driver.Call(ctx, &provider, req)
+		t0 := time.Now()
+		resp, err := mr.callProvider(ctx, &provider, req)
 		if err != nil {
 			lastErr = err
+			attempts = append(attempts, mr.attemptOf(&provider, req, err, time.Since(t0)))
 			continue
 		}
 		mr.trackCost(req.Kitchen, req.AgentRef, resp)
-		mr.recordTrace(ctx, req, resp)
+		mr.finishRoute(ctx, req, resp, attempts, started, nil)
 
+		// The reasoning goes out first, then the answer: a streaming client sees it the way it would
+		// from a provider that streams its thinking.
+		for _, tb := range resp.ThinkingBlocks {
+			if tb.Content == "" {
+				continue
+			}
+			if err := callback(&models.StreamChunk{ThinkingContent: tb.Content}); err != nil {
+				return err
+			}
+		}
 		return callback(&models.StreamChunk{
 			Content: resp.Content,
 			Done:    true,
@@ -755,7 +800,9 @@ func (mr *ModelRouter) RouteStream(ctx context.Context, req *models.RouteRequest
 		})
 	}
 
-	return fmt.Errorf("all providers failed (stream), last error: %w", lastErr)
+	err = fmt.Errorf("all providers failed (stream), last error: %w", lastErr)
+	mr.finishRoute(ctx, req, nil, attempts, started, err)
+	return err
 }
 
 // orderProviders sorts providers based on the routing strategy.
@@ -779,8 +826,8 @@ func (mr *ModelRouter) orderProviders(providers []models.ModelProvider, strategy
 	switch strategy {
 	case models.RoutingCostOptimized:
 		sort.Slice(providers, func(i, j int) bool {
-			ci := mr.getProviderCostPer1K(providers[i])
-			cj := mr.getProviderCostPer1K(providers[j])
+			ci := mr.getProviderCostPer1K(providers[i], requestedModel)
+			cj := mr.getProviderCostPer1K(providers[j], requestedModel)
 			return ci < cj
 		})
 
@@ -864,6 +911,15 @@ func (mr *ModelRouter) callProvider(ctx context.Context, provider *models.ModelP
 	if err != nil {
 		return nil, err
 	}
+	// A driver that did not price its own call (one registered from outside, Pro's cloud drivers)
+	// gets the model's price applied here, so its cost is not recorded as zero.
+	if resp.Usage.PriceSource == "" && resp.Usage.EstimatedCost == 0 && (resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0) {
+		priced := model
+		if resp.Model != "" {
+			priced = resp.Model
+		}
+		mr.settle(provider, priced, &resp.Usage)
+	}
 	mr.spendRecord(ctx, provider, &driverReq, resp)
 
 	latencyMs := time.Since(start).Milliseconds()
@@ -895,6 +951,14 @@ type openAIRequest struct {
 	Tools          []models.ToolDefinition `json:"tools,omitempty"`
 	ToolChoice     interface{}             `json:"tool_choice,omitempty"`
 	ResponseFormat *models.ResponseFormat  `json:"response_format,omitempty"`
+	// ReasoningEffort asks a reasoning model to think ("low", "medium", "high"). Reasoning is
+	// OpenRouter's form of the same request.
+	ReasoningEffort string               `json:"reasoning_effort,omitempty"`
+	Reasoning       *openRouterReasoning `json:"reasoning,omitempty"`
+}
+
+type openRouterReasoning struct {
+	MaxTokens int `json:"max_tokens,omitempty"`
 }
 
 // openAIMessage is the wire shape of one chat message. Content is a string for
@@ -927,19 +991,29 @@ func (mr *ModelRouter) openAIMessages(ctx context.Context, prov *models.ModelPro
 type openAIResponse struct {
 	ID      string `json:"id"`
 	Choices []struct {
-		Message struct {
-			Content          string                  `json:"content"`
-			ReasoningContent string                  `json:"reasoning_content,omitempty"` // OpenAI o-series reasoning
-			ToolCalls        []models.ToolCallResult `json:"tool_calls,omitempty"`
-		} `json:"message"`
-		FinishReason string `json:"finish_reason,omitempty"`
+		Message      openAIResponseMessage `json:"message"`
+		FinishReason string                `json:"finish_reason,omitempty"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int64 `json:"prompt_tokens"`
 		CompletionTokens int64 `json:"completion_tokens"`
 		TotalTokens      int64 `json:"total_tokens"`
-		ReasoningTokens  int64 `json:"reasoning_tokens,omitempty"` // o-series reasoning token count
+		ReasoningTokens  int64 `json:"reasoning_tokens,omitempty"` // some compatible servers put it here
+		// OpenAI's own breakdown: cached prompt tokens, and the thinking part of the completion.
+		PromptTokensDetails struct {
+			CachedTokens int64 `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+		CompletionTokensDetails struct {
+			ReasoningTokens int64 `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
+		PromptCacheHitTokens int64 `json:"prompt_cache_hit_tokens,omitempty"` // DeepSeek
 	} `json:"usage"`
+}
+
+type openAIResponseMessage struct {
+	Content   string                  `json:"content"`
+	ToolCalls []models.ToolCallResult `json:"tool_calls,omitempty"`
+	openAIReasoning
 }
 
 func (mr *ModelRouter) callOpenAI(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) (*models.RouteResponse, error) {
@@ -968,6 +1042,7 @@ func (mr *ModelRouter) callOpenAI(ctx context.Context, provider *models.ModelPro
 			oaiReq.ToolChoice = req.ToolChoice
 		}
 	}
+	mr.applyOpenAIThinking(&oaiReq, provider, model, req)
 	body, _ := json.Marshal(oaiReq)
 
 	url := endpoint + "/chat/completions"
@@ -1009,31 +1084,8 @@ func (mr *ModelRouter) callOpenAI(ctx context.Context, provider *models.ModelPro
 		return nil, fmt.Errorf("openai: decode response: %w", err)
 	}
 
-	content := ""
-	var thinkingBlocks []models.ThinkingBlock
-	var toolCalls []models.ToolCallResult
-	finishReason := ""
-	if len(oaiResp.Choices) > 0 {
-		choice := oaiResp.Choices[0]
-		content = choice.Message.Content
-		finishReason = choice.FinishReason
-		toolCalls = choice.Message.ToolCalls
-		// Capture reasoning_content from OpenAI o-series models
-		if rc := choice.Message.ReasoningContent; rc != "" {
-			thinkingBlocks = append(thinkingBlocks, models.ThinkingBlock{
-				Content:    rc,
-				TokenCount: oaiResp.Usage.ReasoningTokens,
-				Model:      model,
-				Provider:   provider.Name,
-				Timestamp:  time.Now().UTC(),
-			})
-		}
-	}
-
-	costPer1KInput := mr.getModelCost(provider, model, "input")
-	costPer1KOutput := mr.getModelCost(provider, model, "output")
-	estimatedCost := float64(oaiResp.Usage.PromptTokens)/1000*costPer1KInput +
-		float64(oaiResp.Usage.CompletionTokens)/1000*costPer1KOutput
+	content, finishReason, thinkingBlocks, toolCalls, usage := openAIResult(oaiResp, model, provider.Name)
+	mr.settle(provider, model, &usage)
 
 	return &models.RouteResponse{
 		ID:             oaiResp.ID,
@@ -1043,14 +1095,26 @@ func (mr *ModelRouter) callOpenAI(ctx context.Context, provider *models.ModelPro
 		ThinkingBlocks: thinkingBlocks,
 		FinishReason:   finishReason,
 		ToolCalls:      toolCalls,
-		Usage: models.TokenUsage{
-			InputTokens:    oaiResp.Usage.PromptTokens,
-			OutputTokens:   oaiResp.Usage.CompletionTokens,
-			TotalTokens:    oaiResp.Usage.TotalTokens,
-			ThinkingTokens: oaiResp.Usage.ReasoningTokens,
-			EstimatedCost:  estimatedCost,
-		},
+		Usage:          usage,
 	}, nil
+}
+
+// applyOpenAIThinking adds the request's thinking setting in the form the provider takes. OpenRouter
+// takes a reasoning budget; the others take an effort. A model not known to reason is left alone.
+func (mr *ModelRouter) applyOpenAIThinking(oaiReq *openAIRequest, provider *models.ModelProvider, model string, req *models.RouteRequest) {
+	if !req.ThinkingEnabled {
+		return
+	}
+	switch provider.Kind {
+	case "openrouter":
+		oaiReq.Reasoning = &openRouterReasoning{MaxTokens: thinkingBudget(req)}
+	case "ollama":
+		oaiReq.ReasoningEffort = reasoningEffort(thinkingBudget(req)) // an older Ollama ignores it
+	default:
+		if mr.canThink(provider.Kind, model) {
+			oaiReq.ReasoningEffort = reasoningEffort(thinkingBudget(req))
+		}
+	}
 }
 
 // ── Anthropic Provider ──────────────────────────────────────
@@ -1069,6 +1133,13 @@ type anthropicRequest struct {
 	MaxTokens  int                `json:"max_tokens"`
 	Tools      []anthropicTool    `json:"tools,omitempty"`
 	ToolChoice interface{}        `json:"tool_choice,omitempty"`
+	Thinking   *anthropicThinking `json:"thinking,omitempty"`
+}
+
+// anthropicThinking turns on extended thinking with a token budget.
+type anthropicThinking struct {
+	Type         string `json:"type"` // "enabled"
+	BudgetTokens int    `json:"budget_tokens"`
 }
 
 // anthropicStructuredOutputTool is the name of the tool structuredOutputTool
@@ -1128,6 +1199,12 @@ type anthropicContentBlock struct {
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	Content   string `json:"content,omitempty"`
 	IsError   bool   `json:"is_error,omitempty"`
+
+	// thinking and redacted_thinking: the model's own reasoning, sent back unchanged (signature
+	// included) in the turn that follows a tool call.
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	Data      string `json:"data,omitempty"`
 }
 
 // anthropicMessagesFrom translates the router's provider-agnostic message
@@ -1144,7 +1221,7 @@ type anthropicContentBlock struct {
 // generic history stores them is exactly what produced "Unexpected role
 // \"tool\"" once, and would still violate Anthropic's turn-pairing even after
 // the role were merely renamed.
-func (mr *ModelRouter) anthropicMessagesFrom(ctx context.Context, prov *models.ModelProvider, model string, msgs []models.ChatMessage) ([]anthropicMessage, error) {
+func (mr *ModelRouter) anthropicMessagesFrom(ctx context.Context, prov *models.ModelProvider, model string, msgs []models.ChatMessage, withThinking bool) ([]anthropicMessage, error) {
 	var out []anthropicMessage
 	for i := 0; i < len(msgs); i++ {
 		m := msgs[i]
@@ -1175,6 +1252,18 @@ func (mr *ModelRouter) anthropicMessagesFrom(ctx context.Context, prov *models.M
 
 		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
 			var blocks []anthropicContentBlock
+			// With thinking on, Anthropic rejects a tool_use turn that does not start with the
+			// thinking blocks the model produced for it.
+			if withThinking {
+				for _, tb := range m.Thinking {
+					switch {
+					case tb.Redacted && tb.Data != "":
+						blocks = append(blocks, anthropicContentBlock{Type: "redacted_thinking", Data: tb.Data})
+					case tb.Signature != "":
+						blocks = append(blocks, anthropicContentBlock{Type: "thinking", Thinking: tb.Content, Signature: tb.Signature})
+					}
+				}
+			}
 			if m.Content != "" {
 				blocks = append(blocks, anthropicContentBlock{Type: "text", Text: m.Content})
 			}
@@ -1214,10 +1303,16 @@ type anthropicResponse struct {
 		ID       string                 `json:"id,omitempty"`    // tool_use block ID
 		Name     string                 `json:"name,omitempty"`  // tool_use function name
 		Input    map[string]interface{} `json:"input,omitempty"` // tool_use arguments
+		// thinking blocks carry a signature; redacted ones an opaque payload instead of text.
+		Signature string `json:"signature,omitempty"`
+		Data      string `json:"data,omitempty"`
 	} `json:"content"`
 	Usage struct {
 		InputTokens  int64 `json:"input_tokens"`
 		OutputTokens int64 `json:"output_tokens"`
+		// Prompt tokens read from and written to the cache are reported apart from input_tokens.
+		CacheReadTokens     int64 `json:"cache_read_input_tokens"`
+		CacheCreationTokens int64 `json:"cache_creation_input_tokens"`
 	} `json:"usage"`
 }
 
@@ -1258,11 +1353,30 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 		}
 	}
 
-	anthMsgs, err := mr.anthropicMessagesFrom(ctx, provider, model, filteredMessages)
+	// Extended thinking: a budget of at least 1,024 tokens that max_tokens must leave room beyond.
+	// It cannot be combined with a forced tool_choice, so a structured-output call (below) goes
+	// without it.
+	_, forcedOutput := structuredOutputTool(req.ResponseFormat)
+	thinkingOn := req.ThinkingEnabled && !(forcedOutput && len(req.Tools) == 0)
+	budget := 0
+	if thinkingOn {
+		budget = thinkingBudget(req)
+		if budget < minAnthropicThinking {
+			budget = minAnthropicThinking
+		}
+		if maxTokens <= budget {
+			maxTokens = budget + 4096
+		}
+	}
+
+	anthMsgs, err := mr.anthropicMessagesFrom(ctx, provider, model, filteredMessages, thinkingOn)
 	if err != nil {
 		return nil, err
 	}
 	anthReq := anthropicRequest{Model: model, System: systemText, Messages: anthMsgs, MaxTokens: maxTokens}
+	if thinkingOn {
+		anthReq.Thinking = &anthropicThinking{Type: "enabled", BudgetTokens: budget}
+	}
 	// Convert tool definitions to Anthropic format
 	if len(req.Tools) > 0 {
 		for _, td := range req.Tools {
@@ -1325,6 +1439,17 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 			// Anthropic extended thinking block
 			thinkingBlocks = append(thinkingBlocks, models.ThinkingBlock{
 				Content:   c.Thinking,
+				Signature: c.Signature,
+				Model:     model,
+				Provider:  provider.Name,
+				Timestamp: time.Now().UTC(),
+			})
+		case "redacted_thinking":
+			// Reasoning the API withheld: nothing to read, but it must be sent back with the tool result.
+			thinkingBlocks = append(thinkingBlocks, models.ThinkingBlock{
+				Content:   "[redacted by the provider]",
+				Redacted:  true,
+				Data:      c.Data,
 				Model:     model,
 				Provider:  provider.Name,
 				Timestamp: time.Now().UTC(),
@@ -1372,11 +1497,21 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 		finishReason = "stop"
 	}
 
-	totalTokens := anthResp.Usage.InputTokens + anthResp.Usage.OutputTokens
-	costPer1KInput := mr.getModelCost(provider, model, "input")
-	costPer1KOutput := mr.getModelCost(provider, model, "output")
-	estimatedCost := float64(anthResp.Usage.InputTokens)/1000*costPer1KInput +
-		float64(anthResp.Usage.OutputTokens)/1000*costPer1KOutput
+	// Anthropic reports cached and cache-written prompt tokens apart from input_tokens. The usage the
+	// router returns counts the whole prompt, with the cached parts broken out, so the cost is
+	// computed from the parts and context and budget arithmetic sees the real prompt size.
+	u := anthResp.Usage
+	usage := models.TokenUsage{
+		InputTokens:   u.InputTokens + u.CacheReadTokens + u.CacheCreationTokens,
+		OutputTokens:  u.OutputTokens, // includes the thinking tokens, which Anthropic does not report apart
+		CachedTokens:  u.CacheReadTokens,
+		CacheCreation: u.CacheCreationTokens,
+	}
+	usage.TotalTokens = usage.InputTokens + usage.OutputTokens
+	if u.CacheReadTokens > 0 {
+		usage.CacheHits = 1
+	}
+	mr.settle(provider, model, &usage)
 
 	return &models.RouteResponse{
 		ID:             anthResp.ID,
@@ -1386,12 +1521,7 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 		ThinkingBlocks: thinkingBlocks,
 		FinishReason:   finishReason,
 		ToolCalls:      toolCalls,
-		Usage: models.TokenUsage{
-			InputTokens:   anthResp.Usage.InputTokens,
-			OutputTokens:  anthResp.Usage.OutputTokens,
-			TotalTokens:   totalTokens,
-			EstimatedCost: estimatedCost,
-		},
+		Usage:          usage,
 	}, nil
 }
 
@@ -1409,6 +1539,7 @@ func (mr *ModelRouter) callOllama(ctx context.Context, provider *models.ModelPro
 		return nil, err
 	}
 	oaiReq := openAIRequest{Model: model, Messages: oaiMsgs, ResponseFormat: req.ResponseFormat}
+	mr.applyOpenAIThinking(&oaiReq, provider, model, req)
 
 	// Include tools if provided
 	if len(req.Tools) > 0 {
@@ -1458,27 +1589,18 @@ func (mr *ModelRouter) callOllama(ctx context.Context, provider *models.ModelPro
 		return nil, fmt.Errorf("ollama: decode response: %w", err)
 	}
 
-	content := ""
-	var toolCalls []models.ToolCallResult
-	finishReason := ""
-	if len(oaiResp.Choices) > 0 {
-		content = oaiResp.Choices[0].Message.Content
-		toolCalls = oaiResp.Choices[0].Message.ToolCalls
-		finishReason = oaiResp.Choices[0].FinishReason
-	}
+	content, finishReason, thinkingBlocks, toolCalls, usage := openAIResult(oaiResp, model, provider.Name)
+	mr.settle(provider, model, &usage)
 
 	return &models.RouteResponse{
-		ID:           uuid.New().String(),
-		Provider:     provider.Name,
-		Model:        model,
-		Content:      content,
-		FinishReason: finishReason,
-		ToolCalls:    toolCalls,
-		Usage: models.TokenUsage{
-			InputTokens:  oaiResp.Usage.PromptTokens,
-			OutputTokens: oaiResp.Usage.CompletionTokens,
-			TotalTokens:  oaiResp.Usage.TotalTokens,
-		},
+		ID:             uuid.New().String(),
+		Provider:       provider.Name,
+		Model:          model,
+		Content:        content,
+		ThinkingBlocks: thinkingBlocks,
+		FinishReason:   finishReason,
+		ToolCalls:      toolCalls,
+		Usage:          usage,
 	}, nil
 }
 
@@ -1906,10 +2028,14 @@ func (mr *ModelRouter) callAnthropicTest(ctx context.Context, provider *models.M
 	return &models.RouteResponse{Provider: provider.Name, Model: model}, nil
 }
 
-// recordTrace creates a trace record for the routed request.
-// Skipped when called from the executor (ContextSkipTrace) since the executor
-// persists rich hierarchical spans instead of flat router traces.
-func (mr *ModelRouter) recordTrace(ctx context.Context, req *models.RouteRequest, resp *models.RouteResponse) {
+// finishRoute records what a routed request did: one trace, with a root span for the request and a
+// child span for every provider tried (the failures with their errors, the one that answered with its
+// model, usage, cost, the model's reasoning and its answer). The executor passes ContextSkipTrace,
+// since it records richer spans of its own, and gets the attempts on the response to add to them.
+func (mr *ModelRouter) finishRoute(ctx context.Context, req *models.RouteRequest, resp *models.RouteResponse, attempts []models.RouteAttempt, started time.Time, routeErr error) {
+	if resp != nil {
+		resp.Attempts = attempts
+	}
 	if shouldSkipTrace(ctx) {
 		return
 	}
@@ -1922,28 +2048,119 @@ func (mr *ModelRouter) recordTrace(ctx context.Context, req *models.RouteRequest
 	if agentName == "" {
 		agentName = "router"
 	}
+	now := time.Now().UTC()
+	total := now.Sub(started.UTC()).Milliseconds()
+	traceID := uuid.New().String()
+	rootID := uuid.New().String()
+
+	strategy := req.Strategy
+	if strategy == "" {
+		strategy = models.RoutingFallback
+	}
+	input := lastUserText(req.Messages)
 
 	trace := &models.Trace{
-		ID:             uuid.New().String(),
-		AgentName:      agentName,
-		Kitchen:        kitchen,
-		Status:         "completed",
-		DurationMs:     resp.LatencyMs,
-		TotalTokens:    resp.Usage.TotalTokens,
-		CostUSD:        resp.Usage.EstimatedCost,
-		ThinkingBlocks: resp.ThinkingBlocks,
+		ID:         traceID,
+		AgentName:  agentName,
+		Kitchen:    kitchen,
+		Status:     "completed",
+		DurationMs: total,
+		InputText:  input,
+		CreatedAt:  now,
 		Metadata: map[string]interface{}{
-			"provider":        resp.Provider,
-			"model":           resp.Model,
-			"strategy":        resp.Strategy,
-			"thinking_tokens": resp.Usage.ThinkingTokens,
+			"strategy": strategy,
+			"model":    req.Model,
+			"attempts": len(attempts),
 		},
-		CreatedAt: time.Now().UTC(),
+	}
+	rootStatus, rootErr := "completed", ""
+	if routeErr != nil {
+		trace.Status, rootStatus, rootErr = "failed", "failed", routeErr.Error()
+		trace.Metadata["error"] = rootErr
+	}
+
+	inJSON, _ := json.Marshal(req.Messages)
+	spans := []models.Span{{
+		ID: rootID, TraceID: traceID, Name: "router.route", Kind: models.SpanKindChain, Status: rootStatus,
+		StartTime: started.UTC(), EndTime: now, DurationMs: total, Error: rootErr,
+		Input: inJSON,
+		Metadata: map[string]interface{}{
+			"strategy": strategy, "requested_model": req.Model, "attempts": len(attempts),
+			"thinking_enabled": req.ThinkingEnabled,
+		},
+	}}
+
+	// Each provider tried is a span, in order: the failed ones, then the one that answered.
+	cursor := started.UTC()
+	for _, a := range attempts {
+		end := cursor.Add(time.Duration(a.LatencyMs) * time.Millisecond)
+		spans = append(spans, models.Span{
+			ID: uuid.New().String(), TraceID: traceID, ParentSpanID: rootID,
+			Name: "llm." + a.Provider, Kind: models.SpanKindLLM, Status: "failed",
+			StartTime: cursor, EndTime: end, DurationMs: a.LatencyMs,
+			Model: a.Model, Provider: a.Provider, Error: a.Error,
+			Metadata: map[string]interface{}{"fallback": true},
+		})
+		cursor = end
+	}
+
+	if resp != nil {
+		trace.OutputText = resp.Content
+		trace.TotalTokens = resp.Usage.TotalTokens
+		trace.CostUSD = resp.Usage.EstimatedCost
+		trace.ThinkingBlocks = resp.ThinkingBlocks
+		usage := resp.Usage
+		trace.Usage = &usage
+		trace.Metadata["provider"] = resp.Provider
+		trace.Metadata["model"] = resp.Model
+		trace.Metadata["strategy"] = resp.Strategy
+		trace.Metadata["thinking_tokens"] = resp.Usage.ThinkingTokens
+		trace.Metadata["price_source"] = resp.Usage.PriceSource
+
+		out, _ := json.Marshal(map[string]interface{}{
+			"content":         resp.Content,
+			"thinking_blocks": resp.ThinkingBlocks,
+			"tool_calls":      resp.ToolCalls,
+			"finish_reason":   resp.FinishReason,
+		})
+		end := cursor.Add(time.Duration(resp.LatencyMs) * time.Millisecond)
+		if end.After(now) {
+			end = now
+		}
+		spans = append(spans, models.Span{
+			ID: uuid.New().String(), TraceID: traceID, ParentSpanID: rootID,
+			Name: "llm." + resp.Provider, Kind: models.SpanKindLLM, Status: "completed",
+			StartTime: cursor, EndTime: end, DurationMs: resp.LatencyMs,
+			Input: inJSON, Output: out, Usage: &usage, Model: resp.Model, Provider: resp.Provider,
+			Metadata: map[string]interface{}{
+				"finish_reason":   resp.FinishReason,
+				"thinking_blocks": len(resp.ThinkingBlocks),
+				"thinking_tokens": resp.Usage.ThinkingTokens,
+				"cached_tokens":   resp.Usage.CachedTokens,
+				"price_source":    resp.Usage.PriceSource,
+			},
+		})
+		spans[0].Usage = &usage
+		spans[0].Output = out
 	}
 
 	if err := mr.store.CreateTrace(ctx, trace); err != nil {
 		log.Warn().Err(err).Msg("Failed to record trace for routed request")
+		return
 	}
+	if err := mr.store.CreateSpans(ctx, spans); err != nil {
+		log.Warn().Err(err).Str("trace_id", traceID).Msg("Failed to record spans for routed request")
+	}
+}
+
+// lastUserText is the text of the last user message, what a trace shows as the request.
+func lastUserText(msgs []models.ChatMessage) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "user" {
+			return msgs[i].Content
+		}
+	}
+	return ""
 }
 
 // ── Cost Helpers ────────────────────────────────────────────
@@ -1963,37 +2180,19 @@ var defaultCosts = map[string]map[string]float64{
 	"gemini-2.0-flash-lite": {"input": 0.000075, "output": 0.0003},
 }
 
-func (mr *ModelRouter) getModelCost(provider *models.ModelProvider, model, direction string) float64 {
-	// 1. Check provider config override (user-set per-provider)
-	key := "cost_per_1k_" + direction
-	if v, ok := provider.Config[key].(float64); ok {
-		return v
+// getProviderCostPer1K is what to rank a provider by under cost-optimised routing: the price of the
+// model being asked for (input plus output) when there is one, else of the provider's first model.
+// Never an average over the provider's models, which would rank a provider by models nobody asked for.
+func (mr *ModelRouter) getProviderCostPer1K(provider models.ModelProvider, requestedModel string) float64 {
+	model := requestedModel
+	if model == "" && len(provider.Models) > 0 {
+		model = provider.Models[0]
 	}
-
-	// 2. Check model catalog (auto-fetched per-model pricing from LiteLLM + builtins)
-	if mr.catalog != nil {
-		if cap := mr.catalog.Lookup(provider.Kind, model); cap != nil {
-			if direction == "input" && cap.InputCostPer1K > 0 {
-				return cap.InputCostPer1K
-			}
-			if direction == "output" && cap.OutputCostPer1K > 0 {
-				return cap.OutputCostPer1K
-			}
-		}
+	if model == "" {
+		return 1.0
 	}
-
-	// 3. Fall back to hardcoded defaults
-	if costs, ok := defaultCosts[model]; ok {
-		return costs[direction]
-	}
-	return 0.001 // generic fallback
-}
-
-func (mr *ModelRouter) getProviderCostPer1K(provider models.ModelProvider) float64 {
-	if len(provider.Models) > 0 {
-		return mr.getModelCost(&provider, provider.Models[0], "input")
-	}
-	return 1.0
+	p := mr.priceOf(&provider, model)
+	return p.InputPer1K + p.OutputPer1K
 }
 
 // Ensure rand is seeded (Go 1.20+ does this automatically)

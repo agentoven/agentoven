@@ -43,7 +43,7 @@ func TestPriceForReportsWhetherThePriceIsReal(t *testing.T) {
 	}{
 		{"builtin table", "oa", "gpt-4o", true, "builtin", 0.0025, 0.01},
 		{"local model is known and free", "local", "llama3", true, "local", 0, 0},
-		{"operator-set price wins", "mine", "custom", true, "provider_config", 0.5, 1.5},
+		{"a provider default prices a model with no price of its own", "mine", "custom", true, "provider_default", 0.5, 1.5},
 		{"an unknown model is not priced", "mystery", "never-heard-of-it", false, "fallback", 0.001, 0.001},
 		{"an unknown provider is not priced", "nope", "gpt-4o", false, "fallback", 0.001, 0.001},
 	}

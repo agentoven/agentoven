@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,6 +37,8 @@ type geminiPart struct {
 	FileData         *geminiFileData       `json:"fileData,omitempty"`
 	FunctionCall     *geminiFunctionCall   `json:"functionCall,omitempty"`
 	FunctionResponse *geminiFunctionResult `json:"functionResponse,omitempty"`
+	// Thought marks a part that is the model's reasoning summary, not its answer.
+	Thought bool `json:"thought,omitempty"`
 }
 
 // geminiBlob is base64 media sent inline with a request.
@@ -93,15 +96,29 @@ type geminiRequest struct {
 	Tools             []geminiTool      `json:"tools,omitempty"`
 	ToolConfig        *geminiToolConfig `json:"toolConfig,omitempty"`
 	SystemInstruction *geminiContent    `json:"systemInstruction,omitempty"`
+	GenerationConfig  *geminiGenConfig  `json:"generationConfig,omitempty"`
+}
+
+// geminiGenConfig carries the generation settings the router sets.
+type geminiGenConfig struct {
+	ThinkingConfig *geminiThinkingConfig `json:"thinkingConfig,omitempty"`
+}
+
+// geminiThinkingConfig asks for thinking, and for its summary to be returned.
+type geminiThinkingConfig struct {
+	IncludeThoughts bool `json:"includeThoughts"`
+	ThinkingBudget  int  `json:"thinkingBudget,omitempty"`
 }
 
 // geminiResponse is the response from generateContent.
 type geminiResponse struct {
 	Candidates    []geminiCandidate `json:"candidates"`
 	UsageMetadata struct {
-		PromptTokenCount     int `json:"promptTokenCount"`
-		CandidatesTokenCount int `json:"candidatesTokenCount"`
-		TotalTokenCount      int `json:"totalTokenCount"`
+		PromptTokenCount        int `json:"promptTokenCount"`
+		CandidatesTokenCount    int `json:"candidatesTokenCount"`
+		TotalTokenCount         int `json:"totalTokenCount"`
+		CachedContentTokenCount int `json:"cachedContentTokenCount"`
+		ThoughtsTokenCount      int `json:"thoughtsTokenCount"` // billed as output; not part of candidatesTokenCount
 	} `json:"usageMetadata"`
 }
 
@@ -389,6 +406,10 @@ func (mr *ModelRouter) callGemini(ctx context.Context, provider *models.ModelPro
 		gemReq.Tools = []geminiTool{{GoogleSearch: &struct{}{}}}
 	}
 
+	if req.ThinkingEnabled && mr.canThinkGemini(provider.Kind, model) {
+		gemReq.GenerationConfig = &geminiGenConfig{ThinkingConfig: &geminiThinkingConfig{IncludeThoughts: true, ThinkingBudget: thinkingBudget(req)}}
+	}
+
 	body, _ := json.Marshal(gemReq)
 
 	url := fmt.Sprintf("%s/models/%s:generateContent", endpoint, model)
@@ -433,6 +454,7 @@ func (mr *ModelRouter) callGemini(ctx context.Context, provider *models.ModelPro
 
 	// Extract content and tool calls from response
 	content := ""
+	var thinkingBlocks []models.ThinkingBlock
 	var toolCalls []models.ToolCallResult
 	finishReason := ""
 
@@ -441,6 +463,14 @@ func (mr *ModelRouter) callGemini(ctx context.Context, provider *models.ModelPro
 		finishReason = mapGeminiFinishReason(candidate.FinishReason)
 
 		for _, part := range candidate.Content.Parts {
+			if part.Thought {
+				if part.Text != "" {
+					thinkingBlocks = append(thinkingBlocks, models.ThinkingBlock{
+						Content: part.Text, Model: model, Provider: provider.Name, Timestamp: time.Now().UTC(),
+					})
+				}
+				continue
+			}
 			if part.Text != "" {
 				content += part.Text
 			}
@@ -465,11 +495,26 @@ func (mr *ModelRouter) callGemini(ctx context.Context, provider *models.ModelPro
 		finishReason = "tool_calls"
 	}
 
-	// Calculate cost
-	costPer1KInput := mr.getModelCost(provider, model, "input")
-	costPer1KOutput := mr.getModelCost(provider, model, "output")
-	estimatedCost := float64(gemResp.UsageMetadata.PromptTokenCount)/1000*costPer1KInput +
-		float64(gemResp.UsageMetadata.CandidatesTokenCount)/1000*costPer1KOutput
+	// Thinking tokens are billed as output but reported apart from the candidates, so they are
+	// added to the output count here (the same meaning the other providers' counts have).
+	um := gemResp.UsageMetadata
+	usage := models.TokenUsage{
+		InputTokens:    int64(um.PromptTokenCount),
+		OutputTokens:   int64(um.CandidatesTokenCount + um.ThoughtsTokenCount),
+		ThinkingTokens: int64(um.ThoughtsTokenCount),
+		CachedTokens:   int64(um.CachedContentTokenCount),
+		TotalTokens:    int64(um.TotalTokenCount),
+	}
+	if usage.TotalTokens == 0 {
+		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
+	}
+	if usage.CachedTokens > 0 {
+		usage.CacheHits = 1
+	}
+	if len(thinkingBlocks) > 0 && um.ThoughtsTokenCount > 0 {
+		thinkingBlocks[0].TokenCount = int64(um.ThoughtsTokenCount)
+	}
+	mr.settle(provider, model, &usage)
 
 	log.Debug().
 		Str("provider", provider.Name).
@@ -481,19 +526,25 @@ func (mr *ModelRouter) callGemini(ctx context.Context, provider *models.ModelPro
 		Msg("Gemini call complete")
 
 	return &models.RouteResponse{
-		ID:           uuid.New().String(),
-		Provider:     provider.Name,
-		Model:        model,
-		Content:      content,
-		FinishReason: finishReason,
-		ToolCalls:    toolCalls,
-		Usage: models.TokenUsage{
-			InputTokens:   int64(gemResp.UsageMetadata.PromptTokenCount),
-			OutputTokens:  int64(gemResp.UsageMetadata.CandidatesTokenCount),
-			TotalTokens:   int64(gemResp.UsageMetadata.TotalTokenCount),
-			EstimatedCost: estimatedCost,
-		},
+		ID:             uuid.New().String(),
+		Provider:       provider.Name,
+		Model:          model,
+		Content:        content,
+		ThinkingBlocks: thinkingBlocks,
+		FinishReason:   finishReason,
+		ToolCalls:      toolCalls,
+		Usage:          usage,
 	}, nil
+}
+
+// canThinkGemini reports whether to send a thinking config: Gemini 2.5 and later models think, and
+// older ones refuse the setting.
+func (mr *ModelRouter) canThinkGemini(kind, model string) bool {
+	if mr.canThink(kind, model) {
+		return true
+	}
+	m := strings.ToLower(model)
+	return strings.Contains(m, "gemini-2.5") || strings.Contains(m, "gemini-3")
 }
 
 // ── Helpers ─────────────────────────────────────────────────

@@ -4187,10 +4187,106 @@ func (h *Handlers) GetAgentLogs(w http.ResponseWriter, r *http.Request) {
 type proxyInvokeResponse struct {
 	Response string `json:"response"`
 	Usage    struct {
-		InputTokens  int64 `json:"input_tokens"`
-		OutputTokens int64 `json:"output_tokens"`
-		TotalTokens  int64 `json:"total_tokens"`
+		InputTokens    int64 `json:"input_tokens"`
+		OutputTokens   int64 `json:"output_tokens"`
+		TotalTokens    int64 `json:"total_tokens"`
+		CachedTokens   int64 `json:"cached_tokens"`
+		CacheCreation  int64 `json:"cache_creation"`
+		ThinkingTokens int64 `json:"thinking_tokens"`
 	} `json:"usage"`
+	// Turns is what the runner did, call by call: the model, its usage, the reasoning it returned
+	// and the tools it ran. Only the AgentOven runner sends it; a LangChain or other hosted
+	// framework's process answers with the response and totals alone.
+	Turns []proxyTurn `json:"turns,omitempty"`
+}
+
+type proxyTurn struct {
+	Number    int    `json:"number"`
+	Model     string `json:"model"`
+	LatencyMs int64  `json:"latency_ms"`
+	Usage     struct {
+		InputTokens    int64 `json:"input_tokens"`
+		OutputTokens   int64 `json:"output_tokens"`
+		TotalTokens    int64 `json:"total_tokens"`
+		CachedTokens   int64 `json:"cached_tokens"`
+		CacheCreation  int64 `json:"cache_creation"`
+		ThinkingTokens int64 `json:"thinking_tokens"`
+	} `json:"usage"`
+	Response       string `json:"response"`
+	ThinkingBlocks []struct {
+		Content    string `json:"content"`
+		TokenCount int64  `json:"token_count"`
+		Redacted   bool   `json:"redacted"`
+	} `json:"thinking_blocks"`
+	ToolCalls []struct {
+		ID        string                 `json:"id"`
+		Name      string                 `json:"name"`
+		Arguments map[string]interface{} `json:"arguments"`
+	} `json:"tool_calls"`
+	ToolResults []struct {
+		ToolCallID string `json:"tool_call_id"`
+		Name       string `json:"name"`
+		Content    string `json:"content"`
+		IsError    bool   `json:"is_error"`
+	} `json:"tool_results"`
+}
+
+type thinkingKey struct{}
+
+// withThinking marks a call to a hosted process as one that should have the model think.
+func withThinking(ctx context.Context, on bool) context.Context {
+	return context.WithValue(ctx, thinkingKey{}, on)
+}
+
+func thinkingFrom(ctx context.Context) bool {
+	on, _ := ctx.Value(thinkingKey{}).(bool)
+	return on
+}
+
+// execTraceFromProxy turns the runner's per-turn record into the executor's trace shape, with every
+// turn priced at the agent's provider's price for the model it used, so a hosted agent's trace has
+// the same spans, thinking and cost as one run in-process.
+func (h *Handlers) execTraceFromProxy(ctx context.Context, agent *models.Agent, traceID string, durationMs int64, resp *proxyInvokeResponse) *executor.ExecutionTrace {
+	et := &executor.ExecutionTrace{TraceID: traceID, AgentName: agent.Name, Kitchen: agent.Kitchen, TotalMs: durationMs}
+	for _, pt := range resp.Turns {
+		model := pt.Model
+		if model == "" {
+			model = agent.ModelName
+		}
+		turn := executor.Turn{
+			Number: pt.Number, Response: pt.Response, LatencyMs: pt.LatencyMs, Provider: agent.ModelProvider, Model: model,
+			Usage: models.TokenUsage{
+				InputTokens: pt.Usage.InputTokens, OutputTokens: pt.Usage.OutputTokens, TotalTokens: pt.Usage.TotalTokens,
+				CachedTokens: pt.Usage.CachedTokens, CacheCreation: pt.Usage.CacheCreation, ThinkingTokens: pt.Usage.ThinkingTokens,
+			},
+		}
+		if h.Router != nil {
+			h.Router.Settle(ctx, agent.Kitchen, agent.ModelProvider, model, &turn.Usage)
+		}
+		for _, tb := range pt.ThinkingBlocks {
+			turn.ThinkingBlocks = append(turn.ThinkingBlocks, models.ThinkingBlock{
+				Content: tb.Content, TokenCount: tb.TokenCount, Redacted: tb.Redacted, Model: model, Provider: agent.ModelProvider,
+			})
+		}
+		for _, tc := range pt.ToolCalls {
+			turn.ToolCalls = append(turn.ToolCalls, executor.ToolCall{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments})
+		}
+		for _, tr := range pt.ToolResults {
+			turn.ToolResults = append(turn.ToolResults, executor.ToolResult{ToolCallID: tr.ToolCallID, Name: tr.Name, Content: tr.Content, IsError: tr.IsError})
+		}
+		et.Turns = append(et.Turns, turn)
+		u := &et.Usage
+		u.InputTokens += turn.Usage.InputTokens
+		u.OutputTokens += turn.Usage.OutputTokens
+		u.TotalTokens += turn.Usage.TotalTokens
+		u.CachedTokens += turn.Usage.CachedTokens
+		u.CacheCreation += turn.Usage.CacheCreation
+		u.ThinkingTokens += turn.Usage.ThinkingTokens
+		u.EstimatedCost += turn.Usage.EstimatedCost
+		u.CacheSavingsUSD += turn.Usage.CacheSavingsUSD
+		u.PriceSource = turn.Usage.PriceSource
+	}
+	return et
 }
 
 // proxyToProcess forwards an invoke call to a framework-native agent's running
@@ -4224,6 +4320,9 @@ func (h *Handlers) proxyToProcess(
 		body["run_id"] = id
 	}
 	callTimeout := 30 * time.Second
+	if thinkingFrom(ctx) {
+		body["thinking_enabled"] = true
+	}
 	if agent.IsAgenticBot() {
 		// A bot's run is tracked by the bot manager under this ID, whether or not the agent has a budget.
 		if err := h.admitBotInvoke(ctx, agent, traceID, message); err != nil {
@@ -4286,9 +4385,21 @@ func (h *Handlers) proxyToProcess(
 	durationMs := time.Since(start).Milliseconds()
 
 	usage := models.TokenUsage{
-		InputTokens:  proxyResp.Usage.InputTokens,
-		OutputTokens: proxyResp.Usage.OutputTokens,
-		TotalTokens:  proxyResp.Usage.TotalTokens,
+		InputTokens:    proxyResp.Usage.InputTokens,
+		OutputTokens:   proxyResp.Usage.OutputTokens,
+		TotalTokens:    proxyResp.Usage.TotalTokens,
+		CachedTokens:   proxyResp.Usage.CachedTokens,
+		CacheCreation:  proxyResp.Usage.CacheCreation,
+		ThinkingTokens: proxyResp.Usage.ThinkingTokens,
+	}
+	// A runner that reports its turns gets them priced, shown as spans and its thinking kept. One
+	// that does not (a hosted framework) is priced from its totals alone.
+	var execTrace *executor.ExecutionTrace
+	if len(proxyResp.Turns) > 0 {
+		execTrace = h.execTraceFromProxy(ctx, agent, traceID, durationMs, &proxyResp)
+		usage = execTrace.Usage
+	} else if h.Router != nil && agent.ModelName != "" && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
+		h.Router.Settle(ctx, agent.Kitchen, agent.ModelProvider, agent.ModelName, &usage)
 	}
 
 	traceRecord := &models.Trace{
@@ -4298,6 +4409,7 @@ func (h *Handlers) proxyToProcess(
 		Status:      "completed",
 		DurationMs:  durationMs,
 		TotalTokens: usage.TotalTokens,
+		CostUSD:     usage.EstimatedCost,
 		InputText:   message,
 		OutputText:  proxyResp.Response,
 		Usage:       &usage,
@@ -4308,7 +4420,14 @@ func (h *Handlers) proxyToProcess(
 		},
 		CreatedAt: time.Now().UTC(),
 	}
+	if execTrace != nil {
+		blocks, _ := summarizeThinking(execTrace)
+		traceRecord.ThinkingBlocks = blocks
+	}
 	h.Store.CreateTrace(ctx, traceRecord)
+	if execTrace != nil {
+		h.persistExecutorSpans(ctx, execTrace)
+	}
 
 	return proxyResp.Response, traceRecord, nil
 }
@@ -4552,7 +4671,7 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	// Framework-native agents without a running process are an error; agentoven-
 	// native agents without a process fall back to the in-process Go executor.
 	if agent.Process != nil && agent.Process.Status == models.ProcessRunning {
-		hostedCtx, endRun := h.beginHostedRun(withCallerSession(r.Context(), req.SessionID), agent)
+		hostedCtx, endRun := h.beginHostedRun(withThinking(withCallerSession(r.Context(), req.SessionID), req.ThinkingEnabled), agent)
 		response, traceRecord, err := h.proxyToProcess(hostedCtx, agent, req.Message, sanitizedVars, nil, kitchen)
 		outcome := endRun()
 		if outcome != nil && outcome.Stopped != nil {
@@ -5090,9 +5209,22 @@ func (h *Handlers) persistExecutorSpans(ctx context.Context, execTrace *executor
 			Input:        reqJSON,
 			Output:       respJSON,
 			Usage:        &turnUsage,
+			Model:        turn.Model,
+			Provider:     turn.Provider,
 			Metadata: map[string]interface{}{
-				"turn_number": turn.Number,
+				"turn_number":     turn.Number,
+				"thinking_blocks": len(turn.ThinkingBlocks),
+				"thinking_tokens": turn.Usage.ThinkingTokens,
+				"cached_tokens":   turn.Usage.CachedTokens,
+				"price_source":    turn.Usage.PriceSource,
 			},
+		}
+		// Providers that failed before this one answered are events on the span.
+		for _, a := range turn.Attempts {
+			llmSpan.Events = append(llmSpan.Events, models.SpanEvent{
+				Name: "fallback", Timestamp: turnStart,
+				Attributes: map[string]interface{}{"provider": a.Provider, "model": a.Model, "error": a.Error, "latency_ms": a.LatencyMs},
+			})
 		}
 		spans = append(spans, llmSpan)
 

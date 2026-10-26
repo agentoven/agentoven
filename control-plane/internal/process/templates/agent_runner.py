@@ -187,6 +187,41 @@ def _find_resolved_tool(name):
     return None
 
 
+# ── Per-request state: thinking settings and what each model call did ─────────
+
+import re
+import time
+
+_REQ = threading.local()
+
+_REASONING_MODEL = re.compile(r"(^|[/-])(o[1-9]|gpt-5|deepseek-r1|qwq|gpt-oss|qwen3|magistral|grok-[34]|claude-(3-7|opus-4|sonnet-4|haiku-4))")
+_THINK_TAGS = re.compile(r"<think>(.*?)</think>", re.S)
+
+
+def _thinking_on():
+    return bool(getattr(_REQ, "thinking", False))
+
+
+def _thinking_budget():
+    return int(getattr(_REQ, "thinking_budget", 0) or 8192)
+
+
+def _reasoning_effort():
+    b = _thinking_budget()
+    return "low" if b <= 2048 else ("medium" if b <= 8192 else "high")
+
+
+def _split_think_tags(text):
+    """Return (text without <think> tags, [reasoning strings])."""
+    found = [m.strip() for m in _THINK_TAGS.findall(text or "") if m.strip()]
+    return (_THINK_TAGS.sub("", text or "").strip() if found else (text or "")), found
+
+
+def _set_last(info):
+    """What the last model call produced besides text: reasoning, cache and thinking token counts."""
+    _REQ.last = info
+
+
 # ── LLM Client ─────────────────────────────────────────────────────────────────
 
 def _get_api_url():
@@ -227,6 +262,10 @@ def _build_llm_request(messages, tools=None, stream=False):
             "messages": user_msgs,
             "stream": stream,
         }
+        if _thinking_on():
+            budget = max(1024, _thinking_budget())
+            body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            body["max_tokens"] = max(body["max_tokens"], budget + 4096)
         if system_msg:
             body["system"] = system_msg
         if tools:
@@ -250,6 +289,8 @@ def _build_llm_request(messages, tools=None, stream=False):
             "messages": messages,
             "stream": stream,
         }
+        if _thinking_on():
+            body["think"] = True
         headers = {"Content-Type": "application/json"}
 
     else:
@@ -265,6 +306,8 @@ def _build_llm_request(messages, tools=None, stream=False):
             body["tool_choice"] = "auto"
         if stream:
             body["stream_options"] = {"include_usage": True}
+        if _thinking_on() and _REASONING_MODEL.search(MODEL_NAME.lower()):
+            body["reasoning_effort"] = _reasoning_effort()
 
         if MODEL_PROVIDER == "azure-openai":
             headers = {"Content-Type": "application/json", "api-key": API_KEY}
@@ -311,14 +354,23 @@ def _call_llm_with_tools(messages, tools):
 
     if MODEL_PROVIDER == "anthropic":
         raw_usage = result.get("usage", {})
+        cache_read = raw_usage.get("cache_read_input_tokens", 0) or 0
+        cache_write = raw_usage.get("cache_creation_input_tokens", 0) or 0
+        # The prompt is counted in full, with the cached parts broken out, as the control plane's
+        # router does, so the cost is priced from the parts.
+        in_tokens = raw_usage.get("input_tokens", 0) + cache_read + cache_write
         usage = {
-            "input_tokens":  raw_usage.get("input_tokens", 0),
+            "input_tokens":  in_tokens,
             "output_tokens": raw_usage.get("output_tokens", 0),
-            "total_tokens":  raw_usage.get("input_tokens", 0) + raw_usage.get("output_tokens", 0),
+            "total_tokens":  in_tokens + raw_usage.get("output_tokens", 0),
+            "cached_tokens": cache_read,
+            "cache_creation": cache_write,
         }
         content = result.get("content", [])
         tool_calls = []
         text_parts = []
+        thinking = []
+        raw_thinking = []
         for block in content:
             if block.get("type") == "tool_use":
                 tool_calls.append({
@@ -330,11 +382,22 @@ def _call_llm_with_tools(messages, tools):
                 })
             elif block.get("type") == "text":
                 text_parts.append(block.get("text", ""))
+            elif block.get("type") == "thinking":
+                thinking.append({"content": block.get("thinking", ""), "signature": block.get("signature", "")})
+                raw_thinking.append({"type": "thinking", "thinking": block.get("thinking", ""), "signature": block.get("signature", "")})
+            elif block.get("type") == "redacted_thinking":
+                thinking.append({"content": "[redacted by the provider]", "redacted": True})
+                raw_thinking.append({"type": "redacted_thinking", "data": block.get("data", "")})
+        _set_last({"thinking": thinking, "raw_thinking": raw_thinking})
         return "\n".join(text_parts), tool_calls, usage
 
     elif MODEL_PROVIDER == "ollama":
         msg = result.get("message", {})
-        return msg.get("content", ""), [], {}
+        text, tagged = _split_think_tags(msg.get("content", ""))
+        thinking = [{"content": t} for t in ([msg["thinking"]] if msg.get("thinking") else []) + tagged]
+        in_t, out_t = result.get("prompt_eval_count", 0) or 0, result.get("eval_count", 0) or 0
+        _set_last({"thinking": thinking})
+        return text, [], {"input_tokens": in_t, "output_tokens": out_t, "total_tokens": in_t + out_t}
 
     else:
         # OpenAI / Azure OpenAI
@@ -343,10 +406,23 @@ def _call_llm_with_tools(messages, tools):
             "input_tokens":  raw_usage.get("prompt_tokens", 0),
             "output_tokens": raw_usage.get("completion_tokens", 0),
             "total_tokens":  raw_usage.get("total_tokens", 0),
+            "cached_tokens": (raw_usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+                             or raw_usage.get("prompt_cache_hit_tokens", 0) or 0,
+            "thinking_tokens": (raw_usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0)
+                               or raw_usage.get("reasoning_tokens", 0) or 0,
         }
         choice = result.get("choices", [{}])[0]
         msg = choice.get("message", {})
-        text = msg.get("content") or ""
+        text, tagged = _split_think_tags(msg.get("content") or "")
+        reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+        if not reasoning:
+            reasoning = "\n".join(
+                d.get("text") or d.get("summary") or "" for d in (msg.get("reasoning_details") or [])
+            ).strip()
+        thinking = [{"content": t} for t in ([reasoning] if reasoning else []) + tagged]
+        if thinking and usage["thinking_tokens"]:
+            thinking[0]["token_count"] = usage["thinking_tokens"]
+        _set_last({"thinking": thinking})
         raw_tcs = msg.get("tool_calls") or []
         tool_calls = [
             {"id": tc.get("id", str(uuid.uuid4())), "function": tc.get("function", {})}
@@ -566,19 +642,38 @@ def run_invoke(message, variables=None, trace_id="", max_turns=None):
     messages.append({"role": "user", "content": message})
 
     tools = TOOL_DEFS if TOOL_DEFS else None
-    total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+                   "cached_tokens": 0, "cache_creation": 0, "thinking_tokens": 0}
+    turns = []
+    _REQ.turns = turns
 
     for _turn in range(max_turns):
+        _set_last({})
+        t0 = time.time()
         text, tool_calls, usage = _call_llm_with_tools(messages, tools)
+        last = getattr(_REQ, "last", {}) or {}
         for k in total_usage:
             total_usage[k] += usage.get(k, 0)
+        turn_rec = {
+            "number": _turn + 1,
+            "model": MODEL_NAME,
+            "provider": MODEL_PROVIDER,
+            "latency_ms": int((time.time() - t0) * 1000),
+            "usage": {k: usage.get(k, 0) for k in ("input_tokens", "output_tokens", "total_tokens", "cached_tokens", "cache_creation", "thinking_tokens")},
+            "response": text or "",
+            "thinking_blocks": last.get("thinking", []),
+            "tool_calls": [],
+            "tool_results": [],
+        }
+        turns.append(turn_rec)
 
         if not tool_calls:
             return text or "", total_usage
 
         # Append assistant turn with tool call declarations
         if MODEL_PROVIDER == "anthropic":
-            blocks = []
+            # With thinking on, the assistant turn must start with the blocks the model produced.
+            blocks = list(last.get("raw_thinking", [])) if _thinking_on() else []
             if text:
                 blocks.append({"type": "text", "text": text})
             for tc in tool_calls:
@@ -610,6 +705,11 @@ def run_invoke(message, variables=None, trace_id="", max_turns=None):
                 fn_args = {}
             result = execute_tool(fn_name, fn_args, trace_id)
             print(f"[{AGENT_NAME}] tool '{fn_name}' → {str(result)[:120]}", file=sys.stderr)
+            turn_rec["tool_calls"].append({"id": tc["id"], "name": fn_name, "arguments": fn_args})
+            turn_rec["tool_results"].append({
+                "tool_call_id": tc["id"], "name": fn_name, "content": str(result),
+                "is_error": str(result).startswith(("Tool error", "Delegation error", "Delegation failed")),
+            })
 
             if MODEL_PROVIDER == "anthropic":
                 messages.append({
@@ -885,6 +985,9 @@ class AgentHandler(BaseHTTPRequestHandler):
         trace_id  = req.get("trace_id", str(uuid.uuid4()))
         max_turns = req.get("max_turns") or MAX_TURNS
 
+        _REQ.thinking = bool(req.get("thinking_enabled"))
+        _REQ.thinking_budget = int(req.get("thinking_budget") or 0)
+        _REQ.turns = []
         previous_ssl_context = _set_request_ssl_context(provider_config)
         try:
             response, usage = run_invoke(
@@ -896,7 +999,13 @@ class AgentHandler(BaseHTTPRequestHandler):
                     "input_tokens":  usage.get("input_tokens", 0),
                     "output_tokens": usage.get("output_tokens", 0),
                     "total_tokens":  usage.get("total_tokens", 0),
+                    "cached_tokens": usage.get("cached_tokens", 0),
+                    "cache_creation": usage.get("cache_creation", 0),
+                    "thinking_tokens": usage.get("thinking_tokens", 0),
                 },
+                "model": MODEL_NAME,
+                "provider": MODEL_PROVIDER,
+                "turns": getattr(_REQ, "turns", []),
             })
         except Exception as e:
             traceback.print_exc(file=sys.stderr)

@@ -696,6 +696,10 @@ func (e *Executor) runLoop(ctx context.Context, st *runState, thinkingEnabled bo
 			attribute.Float64("llm.cost_usd", routeResp.Usage.EstimatedCost),
 			attribute.String("llm.finish_reason", routeResp.FinishReason),
 			attribute.String("llm.provider", routeResp.Provider),
+			attribute.String("llm.model", routeResp.Model),
+			attribute.Int64("llm.thinking_tokens", routeResp.Usage.ThinkingTokens),
+			attribute.Int("llm.thinking_blocks", len(routeResp.ThinkingBlocks)),
+			attribute.String("llm.price_source", routeResp.Usage.PriceSource),
 		)
 		llmSpan.End()
 
@@ -718,7 +722,8 @@ func (e *Executor) runLoop(ctx context.Context, st *runState, thinkingEnabled bo
 		}
 
 		toolCalls := e.extractToolCalls(routeResp)
-		turnRecord := Turn{Number: turn, Request: st.messages, ThinkingBlocks: routeResp.ThinkingBlocks, Usage: routeResp.Usage}
+		turnRecord := Turn{Number: turn, Request: st.messages, ThinkingBlocks: routeResp.ThinkingBlocks, Usage: routeResp.Usage,
+			Provider: routeResp.Provider, Model: routeResp.Model, Attempts: routeResp.Attempts}
 
 		// The model's reply is journaled before anything acts on it. It was paid for, and
 		// a crash while its tools run must not lose it or make a resume ask (and pay) again.
@@ -726,7 +731,7 @@ func (e *Executor) runLoop(ctx context.Context, st *runState, thinkingEnabled bo
 		if len(assistantToolCalls) == 0 && len(toolCalls) > 0 {
 			assistantToolCalls = synthesizeToolCallResults(toolCalls)
 		}
-		assistantMsg := models.ChatMessage{Role: "assistant", Content: routeResp.Content, ToolCalls: assistantToolCalls}
+		assistantMsg := models.ChatMessage{Role: "assistant", Content: routeResp.Content, ToolCalls: assistantToolCalls, Thinking: routeResp.ThinkingBlocks}
 		if opts.journal != nil {
 			if err := opts.journal.AppendAssistant(ctx, st.traceID, turn, assistantMsg, toolCalls, routeResp.Usage, time.Since(turnStart).Milliseconds()); err != nil {
 				log.Warn().Err(err).Str("trace_id", st.traceID).Msg("Failed to journal the model's reply")

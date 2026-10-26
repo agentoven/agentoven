@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -147,8 +148,23 @@ func (c *Catalog) Lookup(providerKind, modelName string) *models.ModelCapability
 	if cap, ok := c.models[modelName]; ok {
 		return cap
 	}
+	// A dated snapshot ("gpt-4o-2024-08-06", "claude-sonnet-4-5-20250929") is priced like the
+	// model it is a snapshot of when the catalog has no entry of its own.
+	if base := stripDateSuffix(modelName); base != modelName {
+		if cap, ok := c.models[providerKind+"/"+base]; ok {
+			return cap
+		}
+		if cap, ok := c.models[base]; ok {
+			return cap
+		}
+	}
 	return nil
 }
+
+var dateSuffix = regexp.MustCompile(`-(\d{4}-\d{2}-\d{2}|\d{8})$`)
+
+// stripDateSuffix removes a trailing snapshot date from a model name.
+func stripDateSuffix(name string) string { return dateSuffix.ReplaceAllString(name, "") }
 
 // LookupByID returns capability data by canonical model_id.
 func (c *Catalog) LookupByID(modelID string) *models.ModelCapability {
@@ -244,6 +260,12 @@ type litellmEntry struct {
 	MaxOutputTokens          int     `json:"max_output_tokens"`
 	InputCostPerToken        float64 `json:"input_cost_per_token"`
 	OutputCostPerToken       float64 `json:"output_cost_per_token"`
+	CacheReadCostPerToken    float64 `json:"cache_read_input_token_cost"`
+	CacheWriteCostPerToken   float64 `json:"cache_creation_input_token_cost"`
+	ReasoningCostPerToken    float64 `json:"output_cost_per_reasoning_token"`
+	InputCostOver200K        float64 `json:"input_cost_per_token_above_200k_tokens"`
+	OutputCostOver200K       float64 `json:"output_cost_per_token_above_200k_tokens"`
+	SupportsReasoning        bool    `json:"supports_reasoning"`
 	LitellmProvider          string  `json:"litellm_provider"`
 	Mode                     string  `json:"mode"`
 	SupportsVision           bool    `json:"supports_vision"`
@@ -281,6 +303,7 @@ func (c *Catalog) fetchLiteLLMData(ctx context.Context) error {
 
 	c.mu.Lock()
 	count := 0
+	bare := map[string]string{} // bare model name -> the LiteLLM key that holds it
 	for modelKey, data := range raw {
 		// Skip the "sample_spec" key
 		if modelKey == "sample_spec" {
@@ -332,14 +355,33 @@ func (c *Catalog) fetchLiteLLMData(ctx context.Context) error {
 			Source:            "catalog",
 		}
 
+		cap.CacheReadCostPer1K = entry.CacheReadCostPerToken * 1000
+		cap.CacheWriteCostPer1K = entry.CacheWriteCostPerToken * 1000
+		cap.ReasoningCostPer1K = entry.ReasoningCostPerToken * 1000
+		if entry.InputCostOver200K > 0 || entry.OutputCostOver200K > 0 {
+			cap.LongContextOver = 200000
+			cap.LongInputCostPer1K = entry.InputCostOver200K * 1000
+			cap.LongOutputCostPer1K = entry.OutputCostOver200K * 1000
+		}
+		if entry.SupportsReasoning {
+			cap.SupportsThinking = true
+		}
+
 		// Check for thinking/reasoning support
 		if strings.Contains(modelName, "o1") || strings.Contains(modelName, "o3") ||
 			strings.Contains(modelName, "claude-3-5-opus") || strings.Contains(modelName, "claude-opus-4") {
 			cap.SupportsThinking = true
 		}
 
+		// Several providers list the same model (openai/gpt-4o, azure/gpt-4o, an aggregator's copy).
+		// The bare name must not depend on which one a map walk reaches last: an entry listed
+		// without a provider prefix owns it, and among prefixed ones the first key in order does.
 		c.models[modelKey] = cap
-		c.models[modelName] = cap
+		c.models[providerKind+"/"+modelName] = cap
+		if holder, taken := bare[modelName]; !taken || (modelKey == modelName && holder != modelName) || (holder != modelName && modelKey < holder) {
+			c.models[modelName] = cap
+			bare[modelName] = modelKey
+		}
 		count++
 	}
 	c.mu.Unlock()
