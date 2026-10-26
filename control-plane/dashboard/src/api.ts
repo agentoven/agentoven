@@ -224,13 +224,12 @@ export const agents = {
 // ── Recipes ───────────────────────────────────────────────────
 
 export interface RecipeStep {
-  name: string;
-  kind: string;
-  agent: string;
-  prompt: string;
-  depends_on: string[];
-  timeout_seconds: number;
-  retry_count: number;
+  name: string; kind: string; agent?: string; agent_ref?: string; prompt?: string;
+  depends_on?: string[]; timeout_secs?: number; max_retries?: number;
+  config?: Record<string, unknown>;
+  branches?: { condition: string; next_step: string }[]; default_next?: string;
+  notify_tools?: string[]; approver_emails?: string[]; approver_domain?: string;
+  [extra: string]: unknown;
 }
 
 export interface Recipe {
@@ -252,8 +251,11 @@ export const recipes = {
     request<Recipe>('/recipes', { method: 'POST', body: JSON.stringify(recipe) }),
   delete: (name: string) =>
     request<void>(`/recipes/${name}`, { method: 'DELETE' }),
+  /** Replaces the description and steps. The server ignores an empty list of steps, so never send one to clear. */
+  update: (name: string, recipe: Partial<Recipe>) =>
+    request<Recipe>(`/recipes/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify(recipe) }),
   bake: (name: string, input: Record<string, unknown>) =>
-    request<unknown>(`/recipes/${name}/bake`, { method: 'POST', body: JSON.stringify(input) }),
+    request<unknown>(`/recipes/${name}/bake`, { method: 'POST', body: JSON.stringify({ input }) }),
 };
 
 // ── Providers ─────────────────────────────────────────────────
@@ -459,6 +461,8 @@ export interface RecipeRun {
   completed_at?: string;
   duration_ms: number;
   error?: string;
+  total_tokens?: number;
+  total_cost_usd?: number;
 }
 
 export interface StepResult {

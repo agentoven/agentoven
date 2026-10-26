@@ -8,7 +8,10 @@ import AgentConfiguration from './pages/agent/Configuration';
 import AgentIngredients from './pages/agent/Ingredients';
 import AgentGuardrails from './pages/agent/Guardrails';
 import AgentTraces from './pages/agent/AgentTraces';
-import { RecipesPage } from './pages/Recipes';
+import Recipes from './pages/Recipes';
+import RecipeNew from './pages/recipes/RecipeNew';
+import RecipeBuilder from './pages/recipes/RecipeBuilder';
+import DishShelf from './pages/DishShelf';
 import { PromptsPage } from './pages/Prompts';
 import { ProvidersPage } from './pages/Providers';
 import { ToolsPage } from './pages/Tools';
@@ -38,8 +41,10 @@ function App() {
             <Route path="guardrails" element={<AgentGuardrails />} />
             <Route path="traces" element={<AgentTraces />} />
           </Route>
-          <Route path="/recipes" element={<RecipesPage />} />
-          <Route path="/dishshelf" element={<PipelineViewPage />} />
+          <Route path="/recipes" element={<Recipes />} />
+          <Route path="/recipes/new" element={<RecipeNew />} />
+          <Route path="/recipes/:name" element={<RecipeBuilder />} />
+          <Route path="/dishshelf" element={<DishShelf />} />
           <Route path="/dishshelf/:recipeName" element={<PipelineViewPage />} />
           <Route path="/dishshelf/:recipeName/runs/:runId" element={<PipelineViewPage />} />
           <Route path="/prompts" element={<PromptsPage />} />

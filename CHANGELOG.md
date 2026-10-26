@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The agent form now saves guardrails as on or off. Before, a guardrail added from the dashboard had no enabled flag and so was never enforced.
 - Choosing a model is one searchable list grouped by provider, with what each provider can handle beside it. "Add a provider" opens a side panel, so a half-filled agent form is kept.
 
+### 🍳 Recipe builder
+
+- Recipes are built by adding steps one after another, with Yes and No paths where a recipe has to choose and groups of steps that run at the same time. Start from a template, blank, or an imported file. The builder writes the same steps the engine already runs, and a recipe it cannot draw safely is shown read-only and left as it is.
+- The recipe list shows each recipe's steps in order and when it last ran. DishShelf shelves every run by where it stands: waiting for a person, running, finished, or needs a look.
+- A "Decide" step's condition can use `text`, the words of the previous step's reply (for example `lower(text) contains "refund"`).
+- Starting a recipe from the dashboard now sends its input as the API expects (`{"input": …}`); before, the input was dropped.
+- Engine tests no longer read or write the developer's `~/.agentoven` data.
+
 ### 🤖 Agentic bots (computer-use agents)
 - **`agenticbot` runtime (seam)** — `Agent.Bot` (`BotConfig`), `contracts.BotControl` (Pro is the sole manager; the community edition refuses), `SandboxProfile` applied by the docker and Kubernetes executors (read-only rootfs, capabilities dropped, non-root, resource limits, runtime class, egress NetworkPolicy), no general control-plane token or provider key inside a bot, every run registered before it starts, a 30-minute invoke timeout for bots. A2A messages and `agentoven_delegate` calls that start a bot run are registered with the bot manager first; `contracts.ToolRunner` lets a bot gate run kitchen tools (and skill tools) in the control plane under the executor's guardrails; a bot's environment carries no tool JSON; `BotConfig` gains shell/files/persistence/takeover/tools settings. See ADR-0029
 
