@@ -173,6 +173,9 @@ func TestSkipMixedDeps(t *testing.T) {
 
 func setupTestEngine(t *testing.T, srv *httptest.Server) *Engine {
 	t.Helper()
+	// The memory store snapshots to the home directory. Point that at a scratch folder, so a test never
+	// reads the developer's own agents or leaves its test agents behind.
+	t.Setenv("HOME", t.TempDir())
 	mem := store.NewMemoryStore()
 	_ = mem.Migrate(context.Background())
 	base := "http://localhost:8080"
@@ -1025,5 +1028,161 @@ func TestCancelRun(t *testing.T) {
 	finished := waitForRun(t, eng, runID, 15)
 	if finished.Status != models.RecipeRunFailed && finished.Status != models.RecipeRunCanceled {
 		t.Errorf("expected failed/canceled after CancelRun, got %s", finished.Status)
+	}
+}
+
+// ── Shapes written by the dashboard's recipe builder ──────────
+//
+// The builder draws a list of steps with Yes and No paths and writes them as: a condition step whose
+// only branch is `condition_met == true` (next step: the first of the Yes path) and whose default is the
+// first step of the No path; an empty path becomes a carry-on pass-through step; whatever follows waits
+// for the last steps of both paths. These tests run exactly those shapes through the engine.
+
+func a2aText(text string) map[string]interface{} {
+	return map[string]interface{}{"result": map[string]interface{}{
+		"artifacts": []interface{}{map[string]interface{}{"parts": []interface{}{map[string]interface{}{"type": "text", "text": text}}}},
+	}}
+}
+
+func runBuilderShape(t *testing.T, triageSays string, steps []models.Step) map[string]string {
+	t.Helper()
+	outputs := map[string]map[string]interface{}{
+		"triage": a2aText(triageSays), "approve": a2aText("approved"), "auto": a2aText("refunded"), "reply": a2aText("sent"),
+		"x": a2aText("x"), "y": a2aText("y"), "z": a2aText("z"),
+	}
+	srv := fakeAgentServer(outputs)
+	defer srv.Close()
+	eng := setupTestEngine(t, srv)
+	ctx := context.Background()
+	for name := range outputs {
+		eng.store.CreateAgent(ctx, &models.Agent{
+			Name: name, Kitchen: "default", Status: models.AgentStatusReady,
+			A2AEndpoint: fmt.Sprintf("%s/api/v1/agents/%s/invoke", srv.URL, name),
+		})
+	}
+	recipe := &models.Recipe{ID: "builder-shape", Name: "builder-shape", Kitchen: "default", Steps: steps}
+	eng.store.CreateRecipe(ctx, recipe)
+	runID, err := eng.ExecuteRecipe(ctx, recipe, "default", map[string]interface{}{"ticket": "t"}, "")
+	if err != nil {
+		t.Fatalf("ExecuteRecipe: %v", err)
+	}
+	run := waitForRun(t, eng, runID, 15)
+	if run.Status != models.RecipeRunCompleted {
+		t.Fatalf("run status = %s, error = %s", run.Status, run.Error)
+	}
+	got := map[string]string{}
+	for _, sr := range run.StepResults {
+		got[sr.StepName] = sr.Status
+	}
+	return got
+}
+
+func decideStep(name, expr, yes, no string, deps ...string) models.Step {
+	return models.Step{
+		Name: name, Kind: models.StepCondition, DependsOn: deps, Config: map[string]interface{}{"expression": expr},
+		Branches:    []models.Branch{{Condition: "condition_met == true", NextStep: yes}},
+		DefaultNext: no,
+	}
+}
+
+func agentStep(name, agent string, deps ...string) models.Step {
+	return models.Step{Name: name, Kind: models.StepAgent, AgentRef: agent, DependsOn: deps}
+}
+
+func TestBuilderDecideWithTwoPaths(t *testing.T) {
+	steps := []models.Step{
+		agentStep("triage", "triage"),
+		decideStep("over-limit", `lower(text) contains "refund"`, "approve", "auto", "triage"),
+		agentStep("approve", "approve", "over-limit"),
+		agentStep("auto", "auto", "over-limit"),
+		agentStep("reply", "reply", "approve", "auto"),
+	}
+	yes := runBuilderShape(t, "Please REFUND my order", steps)
+	if yes["approve"] != "completed" || yes["auto"] != "skipped" || yes["reply"] != "completed" {
+		t.Errorf("yes path: %v", yes)
+	}
+	no := runBuilderShape(t, "Where is my parcel?", steps)
+	if no["approve"] != "skipped" || no["auto"] != "completed" || no["reply"] != "completed" {
+		t.Errorf("no path: %v", no)
+	}
+}
+
+func TestBuilderEmptyPathUsesCarryOn(t *testing.T) {
+	carry := models.Step{Name: "over-limit-otherwise", Kind: models.StepFanOut, DependsOn: []string{"over-limit"}, Config: map[string]interface{}{"ui": "carry_on"}}
+	steps := []models.Step{
+		agentStep("triage", "triage"),
+		decideStep("over-limit", `lower(text) contains "refund"`, "approve", "over-limit-otherwise", "triage"),
+		agentStep("approve", "approve", "over-limit"),
+		carry,
+		agentStep("reply", "reply", "approve", "over-limit-otherwise"),
+	}
+	yes := runBuilderShape(t, "refund", steps)
+	if yes["approve"] != "completed" || yes["over-limit-otherwise"] != "skipped" || yes["reply"] != "completed" {
+		t.Errorf("yes path: %v", yes)
+	}
+	no := runBuilderShape(t, "hello", steps)
+	if no["approve"] != "skipped" || no["over-limit-otherwise"] != "completed" || no["reply"] != "completed" {
+		t.Errorf("no path: %v", no)
+	}
+}
+
+func TestBuilderNestedDecision(t *testing.T) {
+	// outer: yes path is another decision (x or y), no path is z; the last step waits for x, y and z.
+	steps := []models.Step{
+		agentStep("triage", "triage"),
+		decideStep("outer", `lower(text) contains "refund"`, "inner", "z", "triage"),
+		decideStep("inner", `lower(text) contains "refund"`, "x", "y", "outer"),
+		agentStep("x", "x", "inner"),
+		agentStep("y", "y", "inner"),
+		agentStep("z", "z", "outer"),
+		agentStep("reply", "reply", "x", "y", "z"),
+	}
+	// The inner decision tests the outer one's result, which carries no text; it sees only condition_met.
+	steps[2].Config["expression"] = "condition_met == true"
+	yes := runBuilderShape(t, "refund", steps)
+	if yes["x"] != "completed" || yes["y"] != "skipped" || yes["z"] != "skipped" || yes["reply"] != "completed" {
+		t.Errorf("outer yes: %v", yes)
+	}
+	no := runBuilderShape(t, "hello", steps)
+	if no["x"] != "skipped" || no["y"] != "skipped" || no["z"] != "completed" || no["reply"] != "completed" {
+		t.Errorf("outer no: %v", no)
+	}
+}
+
+func TestBuilderSideBySideInsideADecision(t *testing.T) {
+	// The Yes path opens with a carry-on step and then runs x and y side by side; the No path is z.
+	carry := models.Step{Name: "choice-then", Kind: models.StepFanOut, DependsOn: []string{"choice"}, Config: map[string]interface{}{"ui": "carry_on"}}
+	steps := []models.Step{
+		agentStep("triage", "triage"),
+		decideStep("choice", `lower(text) contains "refund"`, "choice-then", "z", "triage"),
+		carry,
+		agentStep("x", "x", "choice-then"),
+		agentStep("y", "y", "choice-then"),
+		agentStep("z", "z", "choice"),
+		agentStep("reply", "reply", "x", "y", "z"),
+	}
+	yes := runBuilderShape(t, "refund", steps)
+	if yes["choice-then"] != "completed" || yes["x"] != "completed" || yes["y"] != "completed" || yes["z"] != "skipped" || yes["reply"] != "completed" {
+		t.Errorf("yes: %v", yes)
+	}
+	no := runBuilderShape(t, "hello", steps)
+	if no["choice-then"] != "skipped" || no["x"] != "skipped" || no["y"] != "skipped" || no["z"] != "completed" || no["reply"] != "completed" {
+		t.Errorf("no: %v", no)
+	}
+}
+
+func TestBuilderSideBySideStepsMeetAgain(t *testing.T) {
+	// plan -> market and copy together -> sign off waits for both (the shape of the smoke-test recipes).
+	steps := []models.Step{
+		agentStep("triage", "triage"),
+		agentStep("x", "x", "triage"),
+		agentStep("y", "y", "triage"),
+		agentStep("reply", "reply", "x", "y"),
+	}
+	got := runBuilderShape(t, "go", steps)
+	for _, n := range []string{"triage", "x", "y", "reply"} {
+		if got[n] != "completed" {
+			t.Errorf("%s = %s, want completed (%v)", n, got[n], got)
+		}
 	}
 }

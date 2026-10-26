@@ -1643,6 +1643,7 @@ func (e *Engine) executeCondition(ctx context.Context, step *models.Step, result
 	// Build environment from dependency outputs
 	env := make(map[string]interface{})
 	mu.Lock()
+	var texts []string
 	for _, dep := range step.DependsOn {
 		if sr, ok := completed[dep]; ok && sr.Output != nil {
 			env[dep] = sr.Output
@@ -1650,9 +1651,18 @@ func (e *Engine) executeCondition(ctx context.Context, step *models.Step, result
 			for k, v := range sr.Output {
 				env[k] = v
 			}
+			if t := extractTextFromA2AOutput(sr.Output); t != "" {
+				texts = append(texts, t)
+			}
 		}
 	}
 	mu.Unlock()
+	// `text` is what the steps before said, in plain words, so a condition can test an agent's answer
+	// (lower(text) contains "refund") without knowing how the reply is wrapped. An output that has its
+	// own `text` key keeps it.
+	if _, has := env["text"]; !has && len(texts) > 0 {
+		env["text"] = strings.Join(texts, "\n")
+	}
 
 	conditionMet := false
 	if expression != "" {
