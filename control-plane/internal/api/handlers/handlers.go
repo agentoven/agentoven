@@ -257,7 +257,7 @@ func (h *Handlers) ListAgents(w http.ResponseWriter, r *http.Request) {
 		agents = filtered
 	}
 
-	respondJSON(w, http.StatusOK, agents)
+	respondJSON(w, http.StatusOK, models.RedactAgents(agents))
 }
 
 func (h *Handlers) RegisterAgent(w http.ResponseWriter, r *http.Request) {
@@ -299,7 +299,7 @@ func (h *Handlers) RegisterAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Info().Str("agent", req.Name).Str("id", req.ID).Str("kitchen", kitchen).Msg("Agent registered")
-	respondJSON(w, http.StatusCreated, req)
+	respondJSON(w, http.StatusCreated, req.Redacted())
 }
 
 func (h *Handlers) GetAgent(w http.ResponseWriter, r *http.Request) {
@@ -315,7 +315,7 @@ func (h *Handlers) GetAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	respondJSON(w, http.StatusOK, agent)
+	respondJSON(w, http.StatusOK, agent.Redacted())
 }
 
 func (h *Handlers) UpdateAgent(w http.ResponseWriter, r *http.Request) {
@@ -357,7 +357,7 @@ func (h *Handlers) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		agent.MaxTurns = req.MaxTurns
 	}
 	if len(req.Ingredients) > 0 {
-		agent.Ingredients = req.Ingredients
+		agent.Ingredients = models.RestoreRedactedIngredients(req.Ingredients, agent.Ingredients)
 	}
 	if len(req.Skills) > 0 {
 		agent.Skills = req.Skills
@@ -405,7 +405,7 @@ func (h *Handlers) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	respondJSON(w, http.StatusOK, agent)
+	respondJSON(w, http.StatusOK, agent.Redacted())
 }
 
 func (h *Handlers) DeleteAgent(w http.ResponseWriter, r *http.Request) {
@@ -1073,7 +1073,7 @@ func (h *Handlers) RecookAgent(w http.ResponseWriter, r *http.Request) {
 		agent.MaxTurns = req.MaxTurns
 	}
 	if len(req.Ingredients) > 0 {
-		agent.Ingredients = req.Ingredients
+		agent.Ingredients = models.RestoreRedactedIngredients(req.Ingredients, agent.Ingredients)
 	}
 	if len(req.Guardrails) > 0 {
 		agent.Guardrails = req.Guardrails
@@ -1339,7 +1339,7 @@ func (h *Handlers) ListAgentVersions(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	respondJSON(w, http.StatusOK, versions)
+	respondJSON(w, http.StatusOK, models.RedactAgents(versions))
 }
 
 func (h *Handlers) GetAgentVersion(w http.ResponseWriter, r *http.Request) {
@@ -1356,7 +1356,7 @@ func (h *Handlers) GetAgentVersion(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	respondJSON(w, http.StatusOK, agent)
+	respondJSON(w, http.StatusOK, agent.Redacted())
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -3904,14 +3904,15 @@ func (h *Handlers) GetAgentConfig(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, http.StatusBadRequest, map[string]interface{}{
 			"error":   "Ingredient resolution failed",
 			"details": err.Error(),
-			"partial": resolved,
+			"partial": resolved.Redacted(),
 		})
 		return
 	}
 
+	// The provider key is the platform's to hold: callers see that one is set, not what it is.
 	respondJSON(w, http.StatusOK, models.AgentConfig{
-		Agent:       *agent,
-		Ingredients: *resolved,
+		Agent:       agent.Redacted(),
+		Ingredients: *resolved.Redacted(),
 	})
 }
 
