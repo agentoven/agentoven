@@ -77,7 +77,7 @@ function TraceRow({ trace, picked, onPick, onOpen, onTag, expander, indent }: {
             </button>
           )}
           <span className="font-semibold text-sm truncate">{expander ? (trace.recipe_name || trace.agent_name) : trace.agent_name}</span>
-          {expander && <span className="text-[0.65rem] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20">📋 recipe run{expander.steps ? ` · ${expander.steps} steps` : ''}</span>}
+          {expander && <span className="text-[0.65rem] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20">📋 recipe run{expander.steps ? ` · ${expander.steps} ${expander.steps === 1 ? 'step' : 'steps'}` : ''}</span>}
           {realtime && <span className="text-[0.65rem] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">🎙️ realtime</span>}
           {recipe && !expander && !indent && <span className="text-xs text-[var(--ao-text-muted)] truncate">/ {trace.recipe_name}</span>}
           {indent && typeof trace.metadata?.step_name === 'string' && <span className="text-xs text-[var(--ao-text-muted)] truncate">· step {trace.metadata.step_name}</span>}
@@ -118,7 +118,7 @@ function TraceItem({ trace, grouped, picked, onPick, onOpen, onTag, includeArchi
   return (
     <div className="flex flex-col gap-1">
       <TraceRow trace={trace} picked={picked} onPick={onPick} onOpen={onOpen} onTag={onTag}
-        expander={{ open, toggle: () => setOpen((o) => !o), steps: steps?.length || (typeof trace.metadata?.steps === 'number' ? trace.metadata.steps : undefined) }} />
+        expander={{ open, toggle: () => setOpen((o) => !o), steps: typeof trace.metadata?.steps === 'number' ? trace.metadata.steps : steps?.length }} />
       {open && (
         <div className="ml-6 pl-3 border-l-2 border-purple-500/25 flex flex-col gap-1">
           {!steps && !failed && <div className="text-xs text-[var(--ao-text-muted)] px-2 py-1">Loading steps…</div>}
