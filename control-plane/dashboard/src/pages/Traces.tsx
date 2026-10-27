@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Activity, RefreshCw, Search, Download, GitCompare, ArrowDown, ArrowUp, X } from 'lucide-react';
+import { Activity, RefreshCw, Search, Download, GitCompare, ArrowDown, ArrowUp, X, ChevronDown, ChevronRight } from 'lucide-react';
 import { traces, type Trace, type TraceFilters, type TraceStats, type TraceSession } from '../api';
 import {
   PageHeader, Card, StatusBadge, EmptyState,
@@ -50,6 +50,87 @@ const selectCls = 'px-2.5 py-1.5 text-sm rounded-md border border-[var(--ao-bord
 
 type SortKey = NonNullable<TraceFilters['sort']>;
 
+const GRID = 'grid-cols-[28px_1fr_90px_150px_80px_70px_90px_70px]';
+
+/** One trace as a row. A recipe run (a recipe's own trace) opens to show its steps when the list is grouped. */
+function TraceRow({ trace, picked, onPick, onOpen, onTag, expander, indent }: {
+  trace: Trace; picked: string[]; onPick: (id: string) => void; onOpen: (id: string) => void; onTag: (tag: string) => void;
+  expander?: { open: boolean; toggle: () => void; steps?: number };
+  indent?: boolean;
+}) {
+  const realtime = !!(trace.tags?.includes('realtime') || trace.metadata?.source === 'realtime');
+  const recipe = !!trace.recipe_name;
+  return (
+    <div
+      onClick={() => onOpen(trace.id)}
+      className={`grid ${GRID} gap-3 items-center border border-[var(--ao-border)] rounded-lg px-4 py-3 cursor-pointer hover:border-[var(--ao-brand)] transition-colors ${indent ? 'bg-[var(--ao-bg)] opacity-90' : 'bg-[var(--ao-surface)]'}`}
+      style={{ borderLeft: `3px solid ${realtime ? '#10b981' : recipe ? '#8b5cf6' : '#3b82f6'}` }}
+    >
+      <input type="checkbox" checked={picked.includes(trace.id)} title="Select to compare"
+        onClick={(e) => e.stopPropagation()} onChange={() => onPick(trace.id)} />
+      <div className="min-w-0">
+        <div className="flex items-center gap-2">
+          {expander && (
+            <button type="button" aria-label={expander.open ? 'Hide steps' : 'Show steps'} title={expander.open ? 'Hide steps' : 'Show steps'}
+              onClick={(e) => { e.stopPropagation(); expander.toggle(); }} className="text-[var(--ao-text-muted)] hover:text-[var(--ao-text)] -ml-1">
+              {expander.open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+            </button>
+          )}
+          <span className="font-semibold text-sm truncate">{expander ? (trace.recipe_name || trace.agent_name) : trace.agent_name}</span>
+          {expander && <span className="text-[0.65rem] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20">📋 recipe run{expander.steps ? ` · ${expander.steps} steps` : ''}</span>}
+          {realtime && <span className="text-[0.65rem] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">🎙️ realtime</span>}
+          {recipe && !expander && !indent && <span className="text-xs text-[var(--ao-text-muted)] truncate">/ {trace.recipe_name}</span>}
+          {indent && typeof trace.metadata?.step_name === 'string' && <span className="text-xs text-[var(--ao-text-muted)] truncate">· step {trace.metadata.step_name}</span>}
+          {(trace.tags ?? []).filter((tag) => tag !== 'realtime').slice(0, 3).map((tag) => (
+            <span key={tag} onClick={(e) => { e.stopPropagation(); onTag(tag); }}
+              className="text-[0.65rem] px-1.5 py-0.5 rounded bg-[var(--ao-bg)] text-[var(--ao-text-muted)] hover:text-[var(--ao-text)]">{tag}</span>
+          ))}
+        </div>
+        {trace.input_text && <div className="text-xs text-[var(--ao-text-muted)] truncate mt-0.5">{trace.input_text.slice(0, 140)}</div>}
+      </div>
+      <StatusBadge status={trace.status} />
+      <span className="text-xs text-[var(--ao-text-muted)] truncate" title={modelOf(trace)}>{modelOf(trace) || '—'}</span>
+      <span className="text-sm font-medium">{formatDuration(trace.duration_ms)}</span>
+      <span className="text-sm font-medium">{formatTokens(trace.total_tokens)}</span>
+      <span className="text-sm font-medium">{formatCost(trace.cost_usd ?? 0)}</span>
+      <span className="text-xs text-[var(--ao-text-muted)]">{timeAgo(trace.created_at)}</span>
+    </div>
+  );
+}
+
+/** A row of the list: an agent call as it is, a recipe run (when grouped) with its steps under it. */
+function TraceItem({ trace, grouped, picked, onPick, onOpen, onTag, includeArchived }: {
+  trace: Trace; grouped: boolean; picked: string[]; onPick: (id: string) => void; onOpen: (id: string) => void; onTag: (tag: string) => void;
+  includeArchived: boolean;
+}) {
+  const isRun = grouped && !!trace.recipe_name && !trace.parent_trace_id;
+  const [open, setOpen] = useState(false);
+  const [steps, setSteps] = useState<Trace[] | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (!isRun || !open || steps) return;
+    traces.list({ parent: trace.id, sort: 'created_at', order: 'asc', limit: 200, include_archived: includeArchived })
+      .then(setSteps).catch(() => setFailed(true));
+  }, [isRun, open, steps, trace.id, includeArchived]);
+
+  if (!isRun) return <TraceRow trace={trace} picked={picked} onPick={onPick} onOpen={onOpen} onTag={onTag} />;
+  return (
+    <div className="flex flex-col gap-1">
+      <TraceRow trace={trace} picked={picked} onPick={onPick} onOpen={onOpen} onTag={onTag}
+        expander={{ open, toggle: () => setOpen((o) => !o), steps: steps?.length || (typeof trace.metadata?.steps === 'number' ? trace.metadata.steps : undefined) }} />
+      {open && (
+        <div className="ml-6 pl-3 border-l-2 border-purple-500/25 flex flex-col gap-1">
+          {!steps && !failed && <div className="text-xs text-[var(--ao-text-muted)] px-2 py-1">Loading steps…</div>}
+          {failed && <div className="text-xs text-red-400 px-2 py-1">The steps could not be loaded.</div>}
+          {steps && steps.length === 0 && <div className="text-xs text-[var(--ao-text-muted)] px-2 py-1">This run made no model calls (its steps were not agents).</div>}
+          {steps?.map((st) => <TraceRow key={st.id} trace={st} picked={picked} onPick={onPick} onOpen={onOpen} onTag={onTag} indent />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function TracesPage() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
@@ -66,12 +147,19 @@ export function TracesPage() {
     q: params.get('q') || undefined,
     range: (params.get('range') as TraceFilters['range']) || undefined,
     min_cost: params.get('min_cost') ? Number(params.get('min_cost')) : undefined,
-    roots: params.get('roots') === 'true' || undefined,
     include_archived: params.get('include_archived') === 'true' || undefined,
     sort: (params.get('sort') as SortKey) || undefined,
     order: (params.get('order') as 'asc' | 'desc') || undefined,
   }), [params]);
   const page = Number(params.get('page') || 0);
+
+  // A recipe run is one row, with its steps under it (opened on demand). Grouping is off when the list is
+  // flat on request, and while a search names something that lives inside a run (an agent, a model, a tag, a
+  // session, words): then the steps themselves are what is being looked for.
+  const flat = params.get('flat') === 'true';
+  const hunting = !!(filters.agent || filters.model || filters.tag || filters.session || filters.q);
+  const grouped = !flat && !hunting;
+  const query: TraceFilters = useMemo(() => ({ ...filters, roots: grouped || undefined }), [filters, grouped]);
 
   const setFilter = (key: string, value: string | undefined) => {
     const next = new URLSearchParams(params);
@@ -112,7 +200,7 @@ export function TracesPage() {
   const fetchData = useCallback(() => {
     setLoading(true);
     setError(null);
-    const q = { ...filters };
+    const q = { ...query };
     Promise.all([
       view === 'traces' ? traces.page({ ...q, limit: PAGE, offset: page * PAGE }) : Promise.resolve(null),
       traces.stats(q),
@@ -125,7 +213,7 @@ export function TracesPage() {
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
-  }, [filters, page, view]);
+  }, [query, page, view]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -263,9 +351,10 @@ export function TracesPage() {
           <option value="0.1">≥ $0.10</option>
           <option value="1">≥ $1</option>
         </select>
-        <label className="flex items-center gap-1.5 text-sm text-[var(--ao-text-muted)]">
-          <input type="checkbox" checked={!!filters.roots} onChange={(e) => setFilter('roots', e.target.checked ? 'true' : undefined)} />
-          Top-level only
+        <label className="flex items-center gap-1.5 text-sm text-[var(--ao-text-muted)]"
+          title={hunting ? 'Grouping is off while you search for an agent, model, tag, session or text: the steps themselves are listed' : 'Show each recipe run as one row, with its steps under it'}>
+          <input type="checkbox" checked={grouped} disabled={hunting} onChange={(e) => setFilter('flat', e.target.checked ? undefined : 'true')} />
+          Group recipe runs
         </label>
         <label className="flex items-center gap-1.5 text-sm text-[var(--ao-text-muted)]" title="Runs of archived recipes are kept for audit but hidden by default">
           <input type="checkbox" checked={!!filters.include_archived} onChange={(e) => setFilter('include_archived', e.target.checked ? 'true' : undefined)} />
@@ -319,40 +408,11 @@ export function TracesPage() {
             <SortHead k="created_at">When</SortHead>
           </div>
           <div className="flex flex-col gap-1.5">
-            {items.map((trace) => {
-              const isAgent = !trace.recipe_name;
-              return (
-                <div
-                  key={trace.id}
-                  onClick={() => navigate(`/traces/${trace.id}`)}
-                  className="grid grid-cols-[28px_1fr_90px_150px_80px_70px_90px_70px] gap-3 items-center bg-[var(--ao-surface)] border border-[var(--ao-border)] rounded-lg px-4 py-3 cursor-pointer hover:border-[var(--ao-brand)] transition-colors"
-                  style={{ borderLeft: `3px solid ${isAgent ? '#3b82f6' : '#8b5cf6'}` }}
-                >
-                  <input type="checkbox" checked={picked.includes(trace.id)} title="Select to compare"
-                    onClick={(e) => e.stopPropagation()} onChange={() => togglePick(trace.id)} />
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="font-semibold text-sm truncate">{trace.agent_name}</span>
-                      {(trace.tags?.includes('realtime') || trace.metadata?.source === 'realtime') && (
-                        <span className="text-[0.65rem] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">🎙️ realtime</span>
-                      )}
-                      {trace.recipe_name && <span className="text-xs text-[var(--ao-text-muted)] truncate">/ {trace.recipe_name}</span>}
-                      {(trace.tags ?? []).filter((tag) => tag !== 'realtime').slice(0, 3).map((tag) => (
-                        <span key={tag} onClick={(e) => { e.stopPropagation(); setFilter('tag', tag); }}
-                          className="text-[0.65rem] px-1.5 py-0.5 rounded bg-[var(--ao-bg)] text-[var(--ao-text-muted)] hover:text-[var(--ao-text)]">{tag}</span>
-                      ))}
-                    </div>
-                    {trace.input_text && <div className="text-xs text-[var(--ao-text-muted)] truncate mt-0.5">{trace.input_text.slice(0, 140)}</div>}
-                  </div>
-                  <StatusBadge status={trace.status} />
-                  <span className="text-xs text-[var(--ao-text-muted)] truncate" title={modelOf(trace)}>{modelOf(trace) || '—'}</span>
-                  <span className="text-sm font-medium">{formatDuration(trace.duration_ms)}</span>
-                  <span className="text-sm font-medium">{formatTokens(trace.total_tokens)}</span>
-                  <span className="text-sm font-medium">{formatCost(trace.cost_usd ?? 0)}</span>
-                  <span className="text-xs text-[var(--ao-text-muted)]">{timeAgo(trace.created_at)}</span>
-                </div>
-              );
-            })}
+            {items.map((trace) => (
+              <TraceItem key={trace.id} trace={trace} grouped={grouped} picked={picked} onPick={togglePick}
+                onOpen={(id) => navigate(`/traces/${id}`)} onTag={(tag) => setFilter('tag', tag)}
+                includeArchived={!!filters.include_archived} />
+            ))}
           </div>
 
           <div className="flex items-center justify-between mt-4 text-sm text-[var(--ao-text-muted)]">
