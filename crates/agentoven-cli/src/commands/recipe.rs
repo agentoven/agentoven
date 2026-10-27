@@ -14,7 +14,7 @@ pub enum RecipeCommands {
     List,
     /// Get recipe details.
     Get(GetArgs),
-    /// Delete a recipe.
+    /// Archive a recipe (its runs are kept).
     Delete(DeleteArgs),
     /// Bake (execute) a recipe.
     Bake(RecipeBakeArgs),
@@ -223,7 +223,7 @@ async fn get(args: GetArgs) -> anyhow::Result<()> {
 async fn delete(args: DeleteArgs) -> anyhow::Result<()> {
     if !args.force {
         let confirm = dialoguer::Confirm::new()
-            .with_prompt(format!("  Delete recipe '{}'?", args.name))
+            .with_prompt(format!("  Archive recipe '{}'? Its runs are kept.", args.name))
             .default(false)
             .interact()?;
         if !confirm {
@@ -234,9 +234,9 @@ async fn delete(args: DeleteArgs) -> anyhow::Result<()> {
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.delete_recipe(&args.name).await {
-        Ok(()) => println!("  {} Recipe '{}' deleted.", "✓".green().bold(), args.name),
+        Ok(()) => println!("  {} Recipe '{}' archived (its runs are kept).", "✓".green().bold(), args.name),
         Err(e) => println!(
-            "  {} Delete failed: {}",
+            "  {} Archive failed: {}",
             "✗".red().bold(),
             e.to_string().dimmed()
         ),

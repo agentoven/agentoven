@@ -1,10 +1,13 @@
-import { useState, useMemo } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useState, useMemo, useEffect } from 'react';
+import { useParams, useNavigate, Link } from 'react-router-dom';
+import { Download, GitCompare, ChevronRight, ChevronDown } from 'lucide-react';
 import { useAPI } from '../hooks';
 import { traces, type Trace, type Span, type SpanKind, type ThinkingBlock } from '../api';
 import {
   PageHeader, StatusBadge, Spinner, ErrorBanner, Card,
 } from '../components/UI';
+import { SpanIO, ThinkingPanel, CopyButton, formatJSON } from '../components/traces/SpanIO';
+import { TagEditor, FeedbackPanel } from '../components/traces/TraceFeedback';
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -20,12 +23,6 @@ function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
   return String(n);
-}
-
-function formatJSON(value: unknown): string {
-  if (value == null) return '';
-  if (typeof value === 'string') return value;
-  try { return JSON.stringify(value, null, 2); } catch { return String(value); }
 }
 
 // ── Span Kind Styling ────────────────────────────────────────
@@ -78,61 +75,134 @@ function flattenTree(nodes: SpanNode[]): SpanNode[] {
 
 // ── Main Page ────────────────────────────────────────────────
 
+function formatCost(c: number): string {
+  if (!c) return '$0';
+  if (c < 0.0001) return `$${c.toExponential(1)}`;
+  return `$${c.toFixed(c < 0.01 ? 5 : 4)}`;
+}
+
 export function TraceDetailPage() {
   const { traceId } = useParams<{ traceId: string }>();
   const navigate = useNavigate();
-  const { data: trace, loading, error, refetch } = useAPI(() => traces.get(traceId!));
+  const { data, loading, error, refetch } = useAPI(() => traces.get(traceId!));
+  // The trace as shown: the loaded one, plus the tags and feedback changed on this page.
+  const [edited, setEdited] = useState<Trace | null>(null);
+  const trace = edited && edited.id === data?.id ? edited : data;
   const [selectedSpan, setSelectedSpan] = useState<Span | null>(null);
-  const [activeTab, setActiveTab] = useState<'waterfall' | 'spans' | 'metadata'>('waterfall');
+  const [activeTab, setActiveTab] = useState<'trace' | 'waterfall' | 'spans' | 'metadata'>('trace');
+  const [children, setChildren] = useState<Trace[]>([]);
+
+  useEffect(() => { setEdited(null); setSelectedSpan(null); }, [traceId]);
+  useEffect(() => {
+    if (!traceId) return;
+    traces.list({ parent: traceId, sort: 'created_at', order: 'asc', limit: 100, include_archived: true }).then(setChildren).catch(() => setChildren([]));
+  }, [traceId]);
 
   if (loading) return <Spinner />;
   if (error) return <ErrorBanner message={error} onRetry={refetch} />;
   if (!trace) return <ErrorBanner message="Trace not found" />;
 
+  const runId = typeof trace.metadata?.run_id === 'string' ? trace.metadata.run_id : '';
+  // Back returns to the list as it was left (filters, page), when the page was opened from it.
+  const back = () => ((window.history.state?.idx ?? 0) > 0 ? navigate(-1) : navigate('/traces'));
+  const download = () => {
+    const blob = new Blob([JSON.stringify(trace, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `trace-${trace.id}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
   return (
     <div>
-      {/* Header */}
       <PageHeader
         title={
           <div className="flex items-center gap-3">
-            <button onClick={() => navigate('/traces')} className="text-[var(--ao-text-muted)] text-xl hover:text-[var(--ao-text)]">←</button>
+            <button onClick={back} title="Back to traces" className="text-[var(--ao-text-muted)] text-xl hover:text-[var(--ao-text)]">←</button>
             <span>{trace.agent_name}</span>
             <StatusBadge status={trace.status} />
           </div> as unknown as string
         }
         description={`Trace ${trace.id.slice(0, 12)}… • ${new Date(trace.created_at).toLocaleString()}`}
+        action={
+          <div className="flex items-center gap-2">
+            <button onClick={() => navigate(`/traces/compare?a=${trace.id}`)} className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-[var(--ao-border)] hover:bg-[var(--ao-surface-hover)]">
+              <GitCompare size={14} /> Compare
+            </button>
+            <button onClick={download} className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-[var(--ao-border)] hover:bg-[var(--ao-surface-hover)]">
+              <Download size={14} /> JSON
+            </button>
+          </div>
+        }
       />
 
+      {/* Where this trace sits */}
+      <div className="px-8 pt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+        {trace.recipe_name && (
+          <span className="text-[var(--ao-text-muted)]">
+            Recipe{' '}
+            {runId
+              ? <Link className="text-[var(--ao-brand-light)] hover:underline" to={`/recipes/${encodeURIComponent(trace.recipe_name)}/runs/${runId}`}>{trace.recipe_name}</Link>
+              : trace.recipe_name}
+            {typeof trace.metadata?.step_name === 'string' && <> · step <span className="text-[var(--ao-text)]">{trace.metadata.step_name}</span></>}
+          </span>
+        )}
+        {trace.parent_trace_id && <Link className="text-[var(--ao-brand-light)] hover:underline" to={`/traces/${trace.parent_trace_id}`}>↑ Parent trace</Link>}
+        {trace.session_id && <Link className="text-[var(--ao-brand-light)] hover:underline" to={`/traces?session=${encodeURIComponent(trace.session_id)}`}>Session {trace.session_id.slice(0, 12)}</Link>}
+        {typeof trace.metadata?.model === 'string' && <span className="text-[var(--ao-text-muted)]">Model <span className="text-[var(--ao-text)]">{trace.metadata.model}</span></span>}
+        <div className="ml-auto"><TagEditor trace={trace} onChange={setEdited} /></div>
+      </div>
+
       {/* Stats */}
-      <div className="px-8 pt-4 grid grid-cols-5 gap-3 mb-4">
+      <div className="px-8 pt-3 grid grid-cols-2 md:grid-cols-6 gap-3 mb-4">
         <Card><div className="text-[0.7rem] text-[var(--ao-text-muted)] uppercase tracking-wider">Duration</div><div className="text-xl font-bold mt-0.5">{formatDuration(trace.duration_ms)}</div></Card>
         <Card><div className="text-[0.7rem] text-[var(--ao-text-muted)] uppercase tracking-wider">Total Tokens</div><div className="text-xl font-bold mt-0.5">{formatTokens(trace.total_tokens || 0)}</div></Card>
-        <Card><div className="text-[0.7rem] text-[var(--ao-text-muted)] uppercase tracking-wider">Cost</div><div className="text-xl font-bold mt-0.5">${(trace.cost_usd ?? 0).toFixed(4)}</div></Card>
+        <Card><div className="text-[0.7rem] text-[var(--ao-text-muted)] uppercase tracking-wider">Cost</div><div className="text-xl font-bold mt-0.5">{formatCost(trace.cost_usd ?? 0)}</div></Card>
         <Card><div className="text-[0.7rem] text-[var(--ao-text-muted)] uppercase tracking-wider">Spans</div><div className="text-xl font-bold mt-0.5">{trace.spans?.length || 0}</div></Card>
-        <Card><div className="text-[0.7rem] text-[var(--ao-text-muted)] uppercase tracking-wider">I/O Tokens</div><div className="text-xl font-bold mt-0.5">{trace.usage ? `${formatTokens(trace.usage.input_tokens)} / ${formatTokens(trace.usage.output_tokens)}` : '—'}</div></Card>
+        <Card><div className="text-[0.7rem] text-[var(--ao-text-muted)] uppercase tracking-wider">In / Out Tokens</div><div className="text-xl font-bold mt-0.5">{trace.usage ? `${formatTokens(trace.usage.input_tokens)} / ${formatTokens(trace.usage.output_tokens)}` : '—'}</div></Card>
+        <Card><div className="text-[0.7rem] text-[var(--ao-text-muted)] uppercase tracking-wider">Thinking</div><div className="text-xl font-bold mt-0.5">{trace.usage?.thinking_tokens ? formatTokens(trace.usage.thinking_tokens) : trace.thinking_blocks?.length ? `${trace.thinking_blocks.length} blocks` : '—'}</div></Card>
       </div>
 
       {/* Input/Output */}
       {(trace.input_text || trace.output_text) && (
-        <div className="px-8 grid grid-cols-2 gap-3 mb-4">
+        <div className="px-8 grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
           {trace.input_text && (
             <Card>
-              <div className="text-[0.7rem] text-[var(--ao-text-muted)] uppercase tracking-wider mb-2">Input</div>
-              <pre className="text-sm whitespace-pre-wrap break-words max-h-28 overflow-auto">{trace.input_text}</pre>
+              <div className="flex items-center justify-between mb-2"><span className="text-[0.7rem] text-[var(--ao-text-muted)] uppercase tracking-wider">Input</span><CopyButton text={trace.input_text} /></div>
+              <pre className="text-sm whitespace-pre-wrap break-words max-h-32 overflow-auto">{trace.input_text}</pre>
             </Card>
           )}
           {trace.output_text && (
             <Card>
-              <div className="text-[0.7rem] text-[var(--ao-text-muted)] uppercase tracking-wider mb-2">Output</div>
-              <pre className="text-sm whitespace-pre-wrap break-words max-h-28 overflow-auto">{trace.output_text}</pre>
+              <div className="flex items-center justify-between mb-2"><span className="text-[0.7rem] text-[var(--ao-text-muted)] uppercase tracking-wider">Output</span><CopyButton text={trace.output_text} /></div>
+              <pre className="text-sm whitespace-pre-wrap break-words max-h-32 overflow-auto">{trace.output_text}</pre>
             </Card>
           )}
         </div>
       )}
 
+      <div className="px-8 mb-4"><FeedbackPanel trace={trace} onChange={setEdited} /></div>
+
+      {children.length > 0 && (
+        <div className="px-8 mb-4">
+          <Card>
+            <div className="text-[0.7rem] text-[var(--ao-text-muted)] uppercase tracking-wider mb-2">Child traces ({children.length})</div>
+            <div className="flex flex-col">
+              {children.map((c) => (
+                <Link key={c.id} to={`/traces/${c.id}`} className="flex items-center justify-between py-1.5 border-t border-[var(--ao-border)] text-sm hover:text-[var(--ao-brand-light)]">
+                  <span className="flex items-center gap-2"><StatusBadge status={c.status} />{c.agent_name}{typeof c.metadata?.step_name === 'string' && <span className="text-xs text-[var(--ao-text-muted)]">· {c.metadata.step_name}</span>}</span>
+                  <span className="text-xs text-[var(--ao-text-muted)]">{formatDuration(c.duration_ms)} · {formatTokens(c.total_tokens)} tok · {formatCost(c.cost_usd ?? 0)}</span>
+                </Link>
+              ))}
+            </div>
+          </Card>
+        </div>
+      )}
+
       {/* Tabs */}
       <div className="px-8 flex gap-1 mb-4 border-b border-[var(--ao-border)]">
-        {(['waterfall', 'spans', 'metadata'] as const).map((tab) => (
+        {(['trace', 'waterfall', 'spans', 'metadata'] as const).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -144,14 +214,187 @@ export function TraceDetailPage() {
       </div>
 
       <div className="px-8 pb-8">
+        {activeTab === 'trace' && <TraceSplitView trace={trace} />}
         {activeTab === 'waterfall' && <WaterfallView trace={trace} selectedSpan={selectedSpan} onSelectSpan={setSelectedSpan} />}
         {activeTab === 'spans' && <SpanListView trace={trace} onSelectSpan={setSelectedSpan} />}
         {activeTab === 'metadata' && <MetadataView trace={trace} />}
       </div>
 
-      {/* Span Detail Slide-Over */}
-      {selectedSpan && <SpanDetailPanel span={selectedSpan} onClose={() => setSelectedSpan(null)} />}
+      {/* Span Detail Slide-Over (waterfall and list) */}
+      {selectedSpan && activeTab !== 'trace' && <SpanDetailPanel span={selectedSpan} onClose={() => setSelectedSpan(null)} />}
     </div>
+  );
+}
+
+// ── Trace view: the span tree beside the selected span ───────
+
+function TraceSplitView({ trace }: { trace: Trace }) {
+  const spans = trace.spans || [];
+  const tree = useMemo(() => buildSpanTree(spans), [spans]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [kinds, setKinds] = useState<Set<SpanKind>>(new Set());
+  const [query, setQuery] = useState('');
+
+  const flat = useMemo(() => {
+    const out: SpanNode[] = [];
+    const walk = (ns: SpanNode[]) => ns.forEach((n) => { out.push(n); if (!collapsed.has(n.span.id)) walk(n.children); });
+    walk(tree);
+    return out;
+  }, [tree, collapsed]);
+
+  const byModel = useMemo(() => {
+    const m = new Map<string, { calls: number; tokens: number; cost: number; ms: number }>();
+    for (const sp of spans) {
+      if (sp.kind !== 'llm') continue;
+      const key = `${sp.provider ? sp.provider + '/' : ''}${sp.model || sp.name}`;
+      const cur = m.get(key) ?? { calls: 0, tokens: 0, cost: 0, ms: 0 };
+      cur.calls++; cur.tokens += sp.usage?.total_tokens ?? 0; cur.cost += sp.usage?.estimated_cost_usd ?? 0; cur.ms += sp.duration_ms;
+      m.set(key, cur);
+    }
+    return [...m.entries()];
+  }, [spans]);
+
+  if (!spans.length) return <WaterfallView trace={trace} selectedSpan={null} onSelectSpan={() => undefined} />;
+
+  const q = query.trim().toLowerCase();
+  const visible = flat.filter((n) =>
+    (kinds.size === 0 || kinds.has(n.span.kind)) &&
+    (!q || n.span.name.toLowerCase().includes(q) || (n.span.model ?? '').toLowerCase().includes(q) || JSON.stringify(n.span.output ?? '').toLowerCase().includes(q)));
+  const span = spans.find((s) => s.id === selected) ?? visible[0]?.span ?? spans[0];
+  const kindsPresent = [...new Set(spans.map((s) => s.kind))];
+  const toggle = (id: string) => setCollapsed((c) => { const n = new Set(c); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const totalMs = Math.max(trace.duration_ms, 1);
+
+  return (
+    <div>
+      {byModel.length > 0 && (
+        <Card className="mb-3 !p-3">
+          <div className="text-[0.7rem] text-[var(--ao-text-muted)] uppercase tracking-wider mb-1.5">Model calls</div>
+          <div className="grid grid-cols-[1fr_60px_80px_80px_80px] gap-x-3 text-xs">
+            <span className="text-[var(--ao-text-muted)]">Model</span><span className="text-[var(--ao-text-muted)]">Calls</span><span className="text-[var(--ao-text-muted)]">Tokens</span><span className="text-[var(--ao-text-muted)]">Time</span><span className="text-[var(--ao-text-muted)]">Cost</span>
+            {byModel.map(([name, v]) => (
+              <div key={name} className="contents">
+                <span className="font-medium truncate">{name}</span><span>{v.calls}</span><span>{formatTokens(v.tokens)}</span><span>{formatDuration(v.ms)}</span><span>{formatCost(v.cost)}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2 mb-2">
+        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search spans"
+          className="px-2.5 py-1.5 text-sm rounded-md border border-[var(--ao-border)] bg-[var(--ao-surface)] w-56" />
+        {kindsPresent.map((k) => (
+          <button key={k} onClick={() => setKinds((c) => { const n = new Set(c); if (n.has(k)) n.delete(k); else n.add(k); return n; })}
+            className={`px-2 py-1 rounded text-xs border ${kinds.has(k) ? 'border-[var(--ao-brand)] text-[var(--ao-text)]' : 'border-[var(--ao-border)] text-[var(--ao-text-muted)]'}`}>
+            {(kindColors[k] || kindColors.chain).icon} {(kindColors[k] || kindColors.chain).label}
+          </button>
+        ))}
+        <button onClick={() => setCollapsed(new Set(spans.filter((s) => spans.some((c) => c.parent_span_id === s.id)).map((s) => s.id)))} className="text-xs text-[var(--ao-text-muted)] hover:text-[var(--ao-text)] ml-auto">Collapse all</button>
+        <button onClick={() => setCollapsed(new Set())} className="text-xs text-[var(--ao-text-muted)] hover:text-[var(--ao-text)]">Expand all</button>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(320px,2fr)_3fr] gap-3 items-start">
+        {/* Tree */}
+        <Card className="!p-2 max-h-[640px] overflow-auto">
+          {visible.map((n) => {
+            const sp = n.span;
+            const kcfg = kindColors[sp.kind] || kindColors.chain;
+            const failed = sp.status === 'failed' || sp.status === 'error' || !!sp.error;
+            const hasKids = n.children.length > 0;
+            return (
+              <div key={sp.id} onClick={() => setSelected(sp.id)}
+                className={`flex items-center gap-1.5 py-1.5 pr-2 rounded cursor-pointer ${span?.id === sp.id ? 'bg-[var(--ao-surface-hover)]' : 'hover:bg-white/5'}`}
+                style={{ paddingLeft: 6 + n.depth * 16 }}>
+                <button onClick={(e) => { e.stopPropagation(); if (hasKids) toggle(sp.id); }} className={`w-4 text-[var(--ao-text-muted)] ${hasKids ? '' : 'invisible'}`}>
+                  {collapsed.has(sp.id) ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                </button>
+                <span title={kcfg.label}>{kcfg.icon}</span>
+                <div className="min-w-0 flex-1">
+                  <div className={`text-[0.8rem] font-medium truncate ${failed ? 'text-red-400' : ''}`}>{sp.name}</div>
+                  <div className="text-[0.65rem] text-[var(--ao-text-muted)] truncate">
+                    {sp.model ? `${sp.model} · ` : ''}{formatDuration(sp.duration_ms)}
+                    {sp.usage?.total_tokens ? ` · ${formatTokens(sp.usage.total_tokens)} tok` : ''}
+                    {sp.usage?.estimated_cost_usd ? ` · ${formatCost(sp.usage.estimated_cost_usd)}` : ''}
+                  </div>
+                  <div className="h-1 mt-1 rounded bg-[var(--ao-border)] overflow-hidden"><div className={`h-full ${kcfg.bar}`} style={{ width: `${Math.min(100, (sp.duration_ms / totalMs) * 100)}%` }} /></div>
+                </div>
+              </div>
+            );
+          })}
+          {visible.length === 0 && <div className="p-4 text-sm text-[var(--ao-text-muted)]">No span matches.</div>}
+        </Card>
+
+        {/* Selected span */}
+        {span && <SpanDetail span={span} />}
+      </div>
+    </div>
+  );
+}
+
+function SpanDetail({ span }: { span: Span }) {
+  const [tab, setTab] = useState<'input' | 'output' | 'details'>('output');
+  const kcfg = kindColors[span.kind] || kindColors.chain;
+  const hasInput = span.input != null;
+  const t = tab === 'input' && !hasInput ? 'output' : tab;
+  return (
+    <Card className="!p-0 overflow-hidden">
+      <div className="p-3 border-b border-[var(--ao-border)]">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-lg">{kcfg.icon}</span>
+          <span className="font-bold">{span.name}</span>
+          <SpanKindBadge kind={span.kind} />
+          <StatusBadge status={span.status} />
+          {span.model && <span className="text-xs px-2 py-0.5 rounded bg-[var(--ao-bg)] text-[var(--ao-text-muted)]">{span.model}</span>}
+          {span.provider && <span className="text-xs px-2 py-0.5 rounded bg-[var(--ao-bg)] text-[var(--ao-text-muted)]">{span.provider}</span>}
+        </div>
+        <div className="flex gap-4 mt-2 text-xs text-[var(--ao-text-muted)] flex-wrap">
+          <span>{formatDuration(span.duration_ms)}</span>
+          {span.usage && <span>{formatTokens(span.usage.input_tokens)} in · {formatTokens(span.usage.output_tokens)} out{span.usage.thinking_tokens ? ` · ${formatTokens(span.usage.thinking_tokens)} thinking` : ''}</span>}
+          {!!span.usage?.estimated_cost_usd && <span>{formatCost(span.usage.estimated_cost_usd)}{span.usage.price_source === 'fallback' ? ' (placeholder price)' : ''}</span>}
+          {!!span.usage?.cached_tokens && <span>{formatTokens(span.usage.cached_tokens)} cached</span>}
+        </div>
+        {span.error && <pre className="text-xs whitespace-pre-wrap mt-2 p-2 bg-red-500/10 border border-red-500/30 rounded text-red-300">{span.error}</pre>}
+      </div>
+      <div className="px-3 flex gap-1 border-b border-[var(--ao-border)]">
+        {(['input', 'output', 'details'] as const).filter((x) => x !== 'input' || hasInput).map((x) => (
+          <button key={x} onClick={() => setTab(x)}
+            className={`px-3 py-2 text-sm font-medium capitalize ${t === x ? 'text-[var(--ao-brand)] border-b-2 border-[var(--ao-brand)]' : 'text-[var(--ao-text-muted)] hover:text-[var(--ao-text)]'}`}>{x}</button>
+        ))}
+      </div>
+      <div className="p-3 max-h-[560px] overflow-auto">
+        {t === 'input' && <SpanIO value={span.input} empty="No input recorded" />}
+        {t === 'output' && <SpanIO value={span.output} empty="No output recorded" />}
+        {t === 'details' && (
+          <div className="text-sm">
+            {span.usage?.price_source && <InfoRow label="Price source" value={span.usage.price_source.replace('_', ' ')} />}
+            {!!span.usage?.cache_savings_usd && <InfoRow label="Saved by caching" value={formatCost(span.usage.cache_savings_usd)} />}
+            <InfoRow label="Start" value={new Date(span.start_time).toISOString()} mono />
+            <InfoRow label="End" value={new Date(span.end_time).toISOString()} mono />
+            <InfoRow label="Span ID" value={span.id} mono />
+            {span.parent_span_id && <InfoRow label="Parent" value={span.parent_span_id} mono />}
+            {span.events && span.events.length > 0 && (
+              <>
+                <div className="text-[0.7rem] text-[var(--ao-text-muted)] uppercase tracking-wider font-semibold mt-4 mb-1">Events</div>
+                {span.events.map((e, i) => (
+                  <div key={i} className="py-1 border-b border-[var(--ao-border)]">
+                    <span className="font-semibold">{e.name}</span>
+                    {e.attributes && <pre className="text-xs whitespace-pre-wrap break-words text-[var(--ao-text-muted)]">{formatJSON(e.attributes)}</pre>}
+                  </div>
+                ))}
+              </>
+            )}
+            {span.metadata && Object.keys(span.metadata).length > 0 && (
+              <>
+                <div className="text-[0.7rem] text-[var(--ao-text-muted)] uppercase tracking-wider font-semibold mt-4 mb-1">Metadata</div>
+                <pre className="text-xs whitespace-pre-wrap break-words p-2 bg-[var(--ao-bg)] rounded border border-[var(--ao-border)]">{formatJSON(span.metadata)}</pre>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </Card>
   );
 }
 
@@ -320,25 +563,6 @@ function thinkingOf(span: Span): ThinkingBlock[] {
   return Array.isArray(out?.thinking_blocks) ? out!.thinking_blocks! : [];
 }
 
-function ThinkingPanel({ blocks, tokens }: { blocks: ThinkingBlock[]; tokens?: number }) {
-  if (blocks.length === 0) return null;
-  return (
-    <>
-      <div className="text-[0.7rem] text-[var(--ao-text-muted)] uppercase tracking-wider font-semibold mt-5 mb-2">
-        Thinking ({blocks.length} {blocks.length === 1 ? 'block' : 'blocks'}{tokens ? `, ${tokens} tokens` : ''})
-      </div>
-      {blocks.map((b, i) => (
-        <details key={i} className="mb-2 rounded-md border border-[var(--ao-border)] bg-[var(--ao-bg)]" open={blocks.length === 1}>
-          <summary className="cursor-pointer px-3 py-2 text-sm text-[var(--ao-text-muted)]">
-            {b.redacted ? 'Withheld by the provider' : `Block ${i + 1}`}{b.token_count ? ` · ${b.token_count} tokens` : ''}
-          </summary>
-          <pre className="text-sm whitespace-pre-wrap break-words px-3 pb-3 max-h-[400px] overflow-auto">{b.content}</pre>
-        </details>
-      ))}
-    </>
-  );
-}
-
 // ── Span Detail Panel ────────────────────────────────────────
 
 function SpanDetailPanel({ span, onClose }: { span: Span; onClose: () => void }) {
@@ -450,17 +674,8 @@ function SpanDetailPanel({ span, onClose }: { span: Span; onClose: () => void })
           </>
         )}
 
-        {tab === 'input' && (
-          span.input
-            ? <pre className="text-sm whitespace-pre-wrap break-words p-3 bg-[var(--ao-bg)] rounded-md border border-[var(--ao-border)] max-h-[500px] overflow-auto">{formatJSON(span.input)}</pre>
-            : <div className="text-center py-8 text-[var(--ao-text-muted)] text-sm">No input data</div>
-        )}
-
-        {tab === 'output' && (
-          span.output
-            ? <pre className="text-sm whitespace-pre-wrap break-words p-3 bg-[var(--ao-bg)] rounded-md border border-[var(--ao-border)] max-h-[500px] overflow-auto">{formatJSON(span.output)}</pre>
-            : <div className="text-center py-8 text-[var(--ao-text-muted)] text-sm">No output data</div>
-        )}
+        {tab === 'input' && <SpanIO value={span.input} empty="No input data" />}
+        {tab === 'output' && <SpanIO value={span.output} empty="No output data" />}
       </div>
     </div>
   );

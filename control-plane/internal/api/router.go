@@ -163,6 +163,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 				r.Put("/", h.UpdateRecipe)
 				r.Delete("/", h.DeleteRecipe)
 				r.Post("/bake", h.BakeRecipe)
+				r.Post("/restore", h.RestoreRecipe)
 				r.Get("/history", h.RecipeHistory)
 
 				// Recipe runs
@@ -171,6 +172,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 					r.Route("/{runId}", func(r chi.Router) {
 						r.Get("/", h.GetRecipeRun)
 						r.Post("/cancel", h.CancelRecipeRun)
+						r.Post("/rerun", h.RerunRecipeRun)
 						r.Post("/gates/{stepName}/approve", h.ApproveGate)
 						r.Post("/steps/{stepName}/release", h.ReleaseWait)
 					})
@@ -323,8 +325,14 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 		// Traces & Observability
 		r.Route("/traces", func(r chi.Router) {
 			r.Get("/", h.ListTraces)
+			r.Get("/stats", h.TraceStats)
+			r.Get("/sessions", h.ListTraceSessions)
 			r.Get("/{traceId}", h.GetTrace)
+			r.Patch("/{traceId}", h.UpdateTrace)
 			r.Get("/{traceId}/spans", h.ListSpans) // hierarchical spans for waterfall
+			r.Get("/{traceId}/scores", h.ListTraceScores)
+			r.Post("/{traceId}/scores", h.AddTraceScore)
+			r.Delete("/{traceId}/scores/{scoreId}", h.DeleteTraceScore)
 		})
 
 		// Spans — direct span access

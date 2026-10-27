@@ -312,8 +312,34 @@ export class ProClient {
     return agents.map((a) => a.name);
   }
 
+  /**
+   * Archive a recipe. It is hidden and can no longer be run or edited, but it and its runs are kept (a run is a
+   * record of what models did); `restoreRecipe` brings it back.
+   */
   async deleteRecipe(name: string, opts?: { kitchen?: string }): Promise<void> {
     await this.delete(`/api/v1/recipes/${encodeURIComponent(name)}`, opts?.kitchen);
+  }
+
+  /** Bring an archived recipe back. */
+  async restoreRecipe(name: string, opts?: { kitchen?: string }): Promise<Recipe> {
+    return this.post(`/api/v1/recipes/${encodeURIComponent(name)}/restore`, {}, opts?.kitchen);
+  }
+
+  /**
+   * Run a recipe again with the input (and environment) of an earlier run, or with `input` instead. Returns at
+   * once with the new `run_id` and the `rerun_of` it repeats.
+   */
+  async rerunRecipeRun(
+    name: string,
+    runId: string,
+    input?: Record<string, unknown>,
+    opts?: { kitchen?: string },
+  ): Promise<{ run_id: string; rerun_of: string; status: string }> {
+    return this.post(
+      `/api/v1/recipes/${encodeURIComponent(name)}/runs/${encodeURIComponent(runId)}/rerun`,
+      input ? { input } : {},
+      opts?.kitchen,
+    );
   }
 
   async bakeRecipe(

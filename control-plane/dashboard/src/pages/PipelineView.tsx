@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
-  GitBranch, Play, Clock, CheckCircle, XCircle, Pause,
+  GitBranch, Play, Clock, RotateCcw, Archive, CheckCircle, XCircle, Pause,
   ArrowRight, ChevronDown, ChevronRight, RefreshCw, AlertTriangle,
   Bell, Bot, Boxes, Hourglass, Search, Shield, Zap, Users, Layers,
 } from 'lucide-react';
@@ -13,6 +13,8 @@ import {
   PageHeader, Card, Spinner, ErrorBanner, Button, StatusBadge, Modal,
 } from '../components/UI';
 import GateDecision from '../components/recipes/GateDecision';
+import RunsTable from '../components/recipes/RunsTable';
+import RunRecipeModal from '../components/recipes/RunRecipeModal';
 
 // ── Step kind → icon + colour mapping ─────────────────────────
 
@@ -128,10 +130,12 @@ export function PipelineViewPage() {
   const [polling, setPolling] = useState(false);
   const [detailStep, setDetailStep] = useState<StepResult | null>(null);
   const [pendingGates, setPendingGates] = useState<string[]>([]);
+  const [rerunning, setRerunning] = useState<string | null>(null);
+  const [showRun, setShowRun] = useState(false);
 
   // Load recipe list
   useEffect(() => {
-    recipes.list()
+    recipes.list('include')
       .then(setRecipeList)
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
@@ -151,8 +155,8 @@ export function PipelineViewPage() {
       if (runId) {
         const found = (runs || []).find((run) => run.id === runId);
         if (found) setSelectedRun(found);
-      } else if (runs && runs.length > 0) {
-        setSelectedRun(runs[0]);
+      } else {
+        setSelectedRun(null); // the recipe's runs are listed; one is opened from there
       }
     } catch (e: unknown) {
       setError((e as Error).message);
@@ -198,6 +202,26 @@ export function PipelineViewPage() {
     return () => { clearInterval(timer); setPolling(false); };
   }, [selectedRun?.id, selectedRun?.status, selectedRecipe?.name, reloadRun]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Runs the recipe again with the input of an earlier run, and opens the new run.
+  const rerun = async (run: RecipeRun) => {
+    if (!selectedRecipe) return;
+    setRerunning(run.id);
+    setError(null);
+    try {
+      const started = await recipeRuns.rerun(selectedRecipe.name, run.id);
+      navigate(`/recipes/${encodeURIComponent(selectedRecipe.name)}/runs/${started.run_id}`);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setRerunning(null);
+    }
+  };
+
+  const restore = async () => {
+    if (!selectedRecipe) return;
+    try { setSelectedRecipe(await recipes.restore(selectedRecipe.name)); } catch (e) { setError((e as Error).message); }
+  };
+
   // Layout nodes from recipe steps
   const nodes = useMemo(
     () => (selectedRecipe ? layoutDAG(selectedRecipe.steps) : []),
@@ -235,7 +259,7 @@ export function PipelineViewPage() {
             {recipeList.map((r) => (
               <Card
                 key={r.id}
-                onClick={() => navigate(`/dishshelf/${r.name}`)}
+                onClick={() => navigate(`/recipes/${encodeURIComponent(r.name)}/runs`)}
                 className="cursor-pointer"
               >
                 <div className="flex items-center gap-2 mb-2">
@@ -254,6 +278,41 @@ export function PipelineViewPage() {
             ))}
           </div>
         )}
+      </div>
+    );
+  }
+
+  // ── A recipe's runs ────────────────────────────────────────
+
+  const archived = !!selectedRecipe.archived_at;
+  const archivedBanner = archived && (
+    <div className="mx-4 sm:mx-8 mb-4 flex items-center gap-3 px-4 py-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-sm">
+      <Archive size={16} className="text-amber-300" />
+      <span className="flex-1">This recipe is archived. Its runs are kept for audit and can still be read, but it cannot be run or edited.</span>
+      <Button size="sm" variant="secondary" onClick={restore}>Restore</Button>
+    </div>
+  );
+
+  if (!runId) {
+    return (
+      <div>
+        <PageHeader
+          title={`Runs: ${selectedRecipe.name}`}
+          description={selectedRecipe.description || `${selectedRecipe.steps?.length ?? 0} steps`}
+          action={
+            <div className="flex items-center gap-2">
+              <Button size="sm" variant="secondary" onClick={() => navigate('/recipes')}>← Recipes</Button>
+              {!archived && <Link to={`/recipes/${encodeURIComponent(selectedRecipe.name)}`} className="inline-flex items-center h-[34px] px-3 rounded-lg text-[13px] font-medium border border-[var(--ao-border)] hover:bg-[var(--ao-surface-hover)]">Edit</Link>}
+              {!archived && <Button size="sm" onClick={() => setShowRun(true)}><Play size={13} className="mr-1.5" /> Run</Button>}
+            </div>
+          }
+        />
+        {archivedBanner}
+        {error && <ErrorBanner message={error} />}
+        <RunsTable runs={runList} archived={archived} rerunning={rerunning}
+          onOpen={(r) => navigate(`/recipes/${encodeURIComponent(selectedRecipe.name)}/runs/${r.id}`)} onRerun={rerun} />
+        <RunRecipeModal recipe={showRun ? selectedRecipe.name : null} stepCount={selectedRecipe.steps?.length} onClose={() => setShowRun(false)}
+          onStarted={(n) => { loadRecipe(n); }} />
       </div>
     );
   }
@@ -287,17 +346,24 @@ export function PipelineViewPage() {
                 <RefreshCw size={12} className="animate-spin" /> Live
               </span>
             )}
+            {selectedRun && (
+              <Button size="sm" variant="secondary" disabled={archived || rerunning === selectedRun.id}
+                onClick={() => rerun(selectedRun)}>
+                <RotateCcw size={13} className={`mr-1.5 ${rerunning === selectedRun.id ? 'animate-spin' : ''}`} /> Run again
+              </Button>
+            )}
             <Button
               size="sm"
               variant="secondary"
-              onClick={() => { setSelectedRecipe(null); setSelectedRun(null); navigate('/dishshelf'); }}
+              onClick={() => navigate(`/recipes/${encodeURIComponent(selectedRecipe.name)}/runs`)}
             >
-              ← DishShelf
+              ← Runs
             </Button>
           </div>
         }
       />
 
+      {archivedBanner}
       {error && <ErrorBanner message={error} />}
 
       <div className="flex h-[calc(100vh-80px)]">
@@ -314,7 +380,7 @@ export function PipelineViewPage() {
               {runList.map((run) => (
                 <li
                   key={run.id}
-                  onClick={() => setSelectedRun(run)}
+                  onClick={() => navigate(`/recipes/${encodeURIComponent(selectedRecipe.name)}/runs/${run.id}`, { replace: true })}
                   className={`px-4 py-3 cursor-pointer border-b border-[var(--ao-border)] hover:bg-[var(--ao-surface-hover)] transition-colors ${
                     selectedRun?.id === run.id ? 'bg-[var(--ao-surface-hover)] border-l-2 border-l-[var(--ao-brand)]' : ''
                   }`}
@@ -357,6 +423,14 @@ export function PipelineViewPage() {
                 {selectedRun.duration_ms > 0 && (
                   <span className="text-xs text-[var(--ao-text-muted)]">
                     Duration: {fmtMs(selectedRun.duration_ms)}
+                  </span>
+                )}
+                {selectedRun.rerun_of && (
+                  <span className="text-xs text-[var(--ao-text-muted)]">
+                    Run again of{' '}
+                    <Link className="text-[var(--ao-brand-light)] hover:underline font-mono" to={`/recipes/${encodeURIComponent(selectedRecipe.name)}/runs/${selectedRun.rerun_of}`}>
+                      {selectedRun.rerun_of.slice(0, 8)}
+                    </Link>
                   </span>
                 )}
                 {selectedRun.error && (
@@ -595,7 +669,7 @@ export function PipelineViewPage() {
           <StepDetailPanel
             step={detailStep}
             subRecipe={String(selectedRecipe.steps.find((s) => s.name === detailStep.step_name)?.recipe_ref ?? '') || undefined}
-            onOpenSubRun={(recipe, id) => { setDetailStep(null); navigate(`/dishshelf/${encodeURIComponent(recipe)}/runs/${id}`); }}
+            onOpenSubRun={(recipe, id) => { setDetailStep(null); navigate(`/recipes/${encodeURIComponent(recipe)}/runs/${id}`); }}
           />
         )}
       </Modal>

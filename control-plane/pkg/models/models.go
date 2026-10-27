@@ -506,7 +506,16 @@ type Recipe struct {
 	CreatedAt          time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at" db:"updated_at"`
 	CreatedBy          string    `json:"created_by,omitempty" db:"created_by"`
+
+	// ArchivedAt is when the recipe was archived (what deleting one does). An archived recipe is
+	// hidden from lists, cannot be run or edited, and keeps its runs, which stay readable for audit.
+	// Restoring it clears this.
+	ArchivedAt *time.Time `json:"archived_at,omitempty" db:"archived_at"`
+	ArchivedBy string     `json:"archived_by,omitempty" db:"archived_by"`
 }
+
+// IsArchived reports whether the recipe has been archived.
+func (r *Recipe) IsArchived() bool { return r.ArchivedAt != nil }
 
 // ── Kitchen (Workspace/Tenant) ───────────────────────────────
 
@@ -763,6 +772,36 @@ type Trace struct {
 	// Spans are loaded eagerly by GetTrace (with spans=true) or ListSpansByTrace.
 	// Not persisted on the Trace row itself — stored in the spans table/map.
 	Spans []Span `json:"spans,omitempty" db:"-"`
+
+	// Scores are the feedback attached to the trace (loaded with it, not part of the trace row).
+	Scores []TraceScore `json:"scores,omitempty" db:"-"`
+}
+
+// ── Trace scores (feedback) ──────────────────────────────────
+
+// TraceScore is a judgement attached to a trace, or to one span of it: a person's thumbs up or down, a
+// grade from an evaluator, a number a pipeline computed. It is how a trace is rated after the fact.
+type TraceScore struct {
+	ID        string    `json:"id"`
+	TraceID   string    `json:"trace_id"`
+	SpanID    string    `json:"span_id,omitempty"`
+	Name      string    `json:"name"`            // what is being scored: "quality", "helpful", "faithfulness"
+	Value     float64   `json:"value"`           // 0..1 by convention (1 = good); any number is accepted
+	Label     string    `json:"label,omitempty"` // "good", "bad", ...
+	Comment   string    `json:"comment,omitempty"`
+	Source    string    `json:"source"` // "user", "api" or "eval"
+	CreatedBy string    `json:"created_by,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// TraceStats summarises the traces a filter matches.
+type TraceStats struct {
+	Count       int     `json:"count"`
+	Errors      int     `json:"errors"` // status failed, error or blocked
+	TotalTokens int64   `json:"total_tokens"`
+	TotalCost   float64 `json:"total_cost_usd"`
+	P50Ms       int64   `json:"p50_ms"`
+	P95Ms       int64   `json:"p95_ms"`
 }
 
 // ── Span ─────────────────────────────────────────────────────
@@ -911,6 +950,7 @@ type RecipeRun struct {
 	StepResults  []StepResult           `json:"step_results,omitempty"`
 	ParentRunID  string                 `json:"parent_run_id,omitempty" db:"parent_run_id"` // R8: set when this run is a sub-recipe invocation
 	TriggeredBy  string                 `json:"triggered_by,omitempty" db:"triggered_by"`   // Identity.Subject of the caller who started this run
+	RerunOf      string                 `json:"rerun_of,omitempty" db:"rerun_of"`           // the run this one repeats, when it was started with "run again"
 	StartedAt    time.Time              `json:"started_at" db:"started_at"`
 	CompletedAt  *time.Time             `json:"completed_at,omitempty" db:"completed_at"`
 	DurationMs   int64                  `json:"duration_ms,omitempty" db:"duration_ms"`

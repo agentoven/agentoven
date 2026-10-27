@@ -104,7 +104,7 @@ export default function RecipeBuilder() {
         </div>
         <nav aria-label="Recipe sections" className="flex flex-wrap gap-x-1 mt-4">
           <span className="h-11 px-3.5 inline-flex items-center text-sm font-medium border-b-2 border-[var(--ao-brand)] -mb-px">Design</span>
-          <Link to={`/dishshelf/${encodeURIComponent(data.name)}`} className="h-11 px-3.5 inline-flex items-center text-sm font-medium border-b-2 border-transparent -mb-px text-[var(--ao-text-muted)] hover:text-[var(--ao-text)]">Runs</Link>
+          <Link to={`/recipes/${encodeURIComponent(data.name)}/runs`} className="h-11 px-3.5 inline-flex items-center text-sm font-medium border-b-2 border-transparent -mb-px text-[var(--ao-text-muted)] hover:text-[var(--ao-text)]">Runs</Link>
         </nav>
       </div>
       {error && <div className="px-4 sm:px-8 pt-4"><ErrorBanner message={error} /></div>}
@@ -171,7 +171,7 @@ export default function RecipeBuilder() {
         </div>
       )}
 
-      <RunRecipeModal recipe={showRun ? data.name : null} stepCount={flow.length} onClose={() => setShowRun(false)} onStarted={(r) => navigate(`/dishshelf/${encodeURIComponent(r)}`)} />
+      <RunRecipeModal recipe={showRun ? data.name : null} stepCount={flow.length} onClose={() => setShowRun(false)} onStarted={(r) => navigate(`/recipes/${encodeURIComponent(r)}/runs`)} />
     </div>
   );
 }

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 🔭 Traces you can search, compare and rate; recipes you archive instead of delete
+
+- **Traces got the tools a tracing product has.** The list filters by agent, recipe, status, model, provider, tag, session, text (input, output, agent, ID), cost, latency and time, sorts by time, cost, latency or tokens, and pages with a total. `GET /api/v1/traces/stats` gives the count, error count, tokens, cost and p50/p95 latency of whatever a filter matches, and `/traces/sessions` groups traces into conversations. The dashboard has all of it, with the filters kept in the address, a summary strip, a Sessions tab and Export.
+- **A trace page that reads like a conversation.** A tree of spans beside the selected span: its input as chat messages, its answer, thinking, tool calls and arguments, tokens in and out, cache, cost (flagged when the price is a placeholder) and latency; a table of model calls by model; search and kind filters over the spans; links to the parent trace, the child traces (a recipe run's steps), the recipe run and the session.
+- **Feedback and tags.** Rate a trace Good or Bad with a comment (`POST /api/v1/traces/{id}/scores`, also usable from an evaluator or a pipeline) and tag it (`PATCH /api/v1/traces/{id}`). What a trace says happened is not editable.
+- **Compare two traces** side by side: latency, tokens, cost, input, output and spans, with the difference.
+- **Deleting a recipe archives it.** Its runs are records of what models did and what they cost, so they are kept: the recipe and its runs are hidden (and so are the traces they made, unless "Include archived recipes" is on), the recipe cannot be run or edited, and its name stays taken. `POST /api/v1/recipes/{name}/restore` brings it back. The recipes list has "Show archived", Runs and Restore.
+- **Run a recipe run again** with the same input (or an edited one): `POST /api/v1/recipes/{name}/runs/{runId}/rerun`, and a Run again button on the run and in the runs list. The new run says which run it repeats.
+- **A recipe's runs have a page of their own** at `/recipes/<name>/runs`, and the Back button on a run returns there (the old `/dishshelf/<name>` addresses redirect). The Python and TypeScript clients gained `restore_recipe` / `restoreRecipe` and `rerun_recipe_run` / `rerunRecipeRun`; `delete_recipe` and `agentoven recipe delete` now archive.
+
 ### 🩹 Hosted agents answer again: A2A and recipe runs
 
 - **A hosted agent's process is brought back when it is needed.** After a server restart (or a crash) an agent was still `ready` but its process was gone, so A2A calls failed with "Backend unreachable: connection refused" and every recipe step that used the agent failed with them. The first call that needs the process now starts it (once, even when several recipe steps need it together) and records where it is. Agents on Kubernetes and external agents are left alone.

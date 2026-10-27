@@ -245,10 +245,18 @@ export interface Recipe {
   created_by: string;
   created_at: string;
   updated_at: string;
+  /** Set when the recipe has been archived (what deleting one does). Its runs are kept, hidden. */
+  archived_at?: string;
+  archived_by?: string;
 }
 
 export const recipes = {
-  list: () => request<Recipe[]>('/recipes'),
+  /** Live recipes by default; 'only' lists the archived ones, 'include' lists both. */
+  list: (archived?: 'only' | 'include') =>
+    request<Recipe[]>(`/recipes${archived ? `?archived=${archived}` : ''}`),
+  /** Brings an archived recipe back. */
+  restore: (name: string) =>
+    request<Recipe>(`/recipes/${encodeURIComponent(name)}/restore`, { method: 'POST' }),
   get: (name: string) => request<Recipe>(`/recipes/${name}`),
   create: (recipe: Partial<Recipe>) =>
     request<Recipe>('/recipes', { method: 'POST', body: JSON.stringify(recipe) }),
@@ -410,20 +418,87 @@ export interface Trace {
   user_id: string;
   created_at: string;
   spans?: Span[];
+  scores?: TraceScore[];
+}
+
+/** Feedback on a trace or one of its spans: a thumbs up or down, an evaluator's grade, a number. */
+export interface TraceScore {
+  id: string;
+  trace_id: string;
+  span_id?: string;
+  name: string;
+  value: number;
+  label?: string;
+  comment?: string;
+  source: 'user' | 'api' | 'eval';
+  created_by?: string;
+  created_at: string;
+}
+
+export interface TraceStats {
+  count: number;
+  errors: number;
+  total_tokens: number;
+  total_cost_usd: number;
+  p50_ms: number;
+  p95_ms: number;
+}
+
+export interface TraceSession {
+  session_id: string;
+  traces: number;
+  agents: string[];
+  total_tokens: number;
+  total_cost_usd: number;
+  first_at: string;
+  last_at: string;
+  errors: number;
+}
+
+/** Everything the trace list can be narrowed, sorted and paged by. */
+export interface TraceFilters {
+  agent?: string; recipe?: string; status?: string; model?: string; provider?: string; tag?: string;
+  session?: string; parent?: string; roots?: boolean;
+  /** Text in the input, the output, the agent name or the ID. */
+  q?: string;
+  min_cost?: number; max_cost?: number; min_duration?: number; max_duration?: number;
+  range?: '1h' | '24h' | '7d' | '30d';
+  sort?: 'created_at' | 'cost' | 'duration' | 'tokens'; order?: 'asc' | 'desc';
+  limit?: number; offset?: number;
+  /** Also show the traces of archived recipes' runs (hidden by default). */
+  include_archived?: boolean;
+}
+
+function traceQuery(f?: TraceFilters): string {
+  const params = new URLSearchParams();
+  Object.entries(f ?? {}).forEach(([k, v]) => {
+    if (v !== undefined && v !== '' && v !== false && !(typeof v === 'number' && Number.isNaN(v))) params.set(k, String(v));
+  });
+  const qs = params.toString();
+  return qs ? `?${qs}` : '';
 }
 
 export const traces = {
-  list: (filters?: { agent?: string; recipe?: string; status?: string }) => {
-    const params = new URLSearchParams();
-    if (filters?.agent) params.set('agent', filters.agent);
-    if (filters?.recipe) params.set('recipe', filters.recipe);
-    if (filters?.status) params.set('status', filters.status);
-    const qs = params.toString();
-    return request<Trace[]>(`/traces${qs ? '?' + qs : ''}`);
+  list: (filters?: TraceFilters) => request<Trace[]>(`/traces${traceQuery(filters)}`),
+  /** One page of the list, with the total the filter matches. */
+  page: async (filters?: TraceFilters): Promise<{ items: Trace[]; total: number }> => {
+    const res = await fetch(`${BASE}/traces${traceQuery(filters)}`, { headers: { 'Content-Type': 'application/json' } });
+    if (!res.ok) throw new APIError((await res.json().catch(() => ({}))).error || `API error ${res.status}`, res.status);
+    const items = (await res.json()) as Trace[];
+    return { items, total: Number(res.headers.get('X-Total-Count') ?? items.length) };
   },
+  stats: (filters?: TraceFilters) => request<TraceStats>(`/traces/stats${traceQuery(filters)}`),
+  sessions: (filters?: TraceFilters) => request<TraceSession[]>(`/traces/sessions${traceQuery(filters)}`),
   get: (id: string) => request<Trace>(`/traces/${id}?spans=true`),
   spans: (traceId: string) => request<Span[]>(`/traces/${traceId}/spans`),
   span: (spanId: string) => request<Span>(`/spans/${spanId}`),
+  /** Replaces the trace's tags. */
+  setTags: (id: string, tags: string[]) =>
+    request<Trace>(`/traces/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ tags }) }),
+  addScore: (id: string, score: { name?: string; value: number; label?: string; comment?: string; span_id?: string }) =>
+    request<TraceScore>(`/traces/${encodeURIComponent(id)}/scores`, { method: 'POST', body: JSON.stringify(score) }),
+  deleteScore: (id: string, scoreId: string) =>
+    request<void>(`/traces/${encodeURIComponent(id)}/scores/${encodeURIComponent(scoreId)}`, { method: 'DELETE' }),
 };
 
 // ── Prompts ───────────────────────────────────────────────────
@@ -473,6 +548,10 @@ export interface RecipeRun {
   total_cost_usd?: number;
   /** Set when this run was started by a step of another run. */
   parent_run_id?: string;
+  /** Set when this run was started with "run again": the run it repeats. */
+  rerun_of?: string;
+  triggered_by?: string;
+  environment?: string;
 }
 
 export interface StepResult {
@@ -519,6 +598,12 @@ export const recipeRuns = {
     request<RecipeRun>(`/recipes/${recipeName}/runs/${runId}`),
   cancel: (recipeName: string, runId: string) =>
     request<void>(`/recipes/${recipeName}/runs/${runId}/cancel`, { method: 'POST' }),
+  /** Runs the recipe again with the same input (or the given one). Returns the new run's ID. */
+  rerun: (recipeName: string, runId: string, input?: Record<string, unknown>) =>
+    request<{ run_id: string; rerun_of: string }>(`/recipes/${encodeURIComponent(recipeName)}/runs/${encodeURIComponent(runId)}/rerun`, {
+      method: 'POST',
+      body: JSON.stringify(input ? { input } : {}),
+    }),
   /** Ends a wait step early. */
   release: (recipeName: string, runId: string, stepName: string) =>
     request<unknown>(`/recipes/${encodeURIComponent(recipeName)}/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(stepName)}/release`, { method: 'POST' }),

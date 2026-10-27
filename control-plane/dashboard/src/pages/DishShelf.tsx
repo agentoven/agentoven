@@ -119,7 +119,7 @@ export default function DishShelf() {
                     const n = note(r);
                     const bars = (r.step_results ?? []).map((x) => barColor(x.status));
                     return (
-                      <Link key={r.id} to={`/dishshelf/${encodeURIComponent(r.recipe)}/runs/${r.id}`}
+                      <Link key={r.id} to={`/recipes/${encodeURIComponent(r.recipe)}/runs/${r.id}`}
                         className={`block p-3.5 rounded-xl bg-[var(--ao-surface)] border ${s.id === 'waiting' ? 'border-amber-400/50' : s.id === 'problem' ? 'border-red-400/40' : 'border-[var(--ao-border)]'} hover:border-[var(--ao-brand-light)]`}>
                         <div className="flex items-baseline justify-between gap-2">
                           <span className="text-[14.5px] font-semibold truncate">{r.recipe}</span>

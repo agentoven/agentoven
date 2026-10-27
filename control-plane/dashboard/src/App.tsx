@@ -18,6 +18,8 @@ import { ToolsPage } from './pages/Tools';
 import { SkillsPage } from './pages/Skills';
 import { TracesPage } from './pages/Traces';
 import { TraceDetailPage } from './pages/TraceDetail';
+import { TraceComparePage } from './pages/TraceCompare';
+import { useParams } from 'react-router-dom';
 import { OverviewPage } from './pages/Overview';
 import { EmbeddingsPage } from './pages/Embeddings';
 import { VectorStoresPage } from './pages/VectorStores';
@@ -45,14 +47,17 @@ function App() {
           <Route path="/recipes/new" element={<RecipeNew />} />
           <Route path="/recipes/:name" element={<RecipeBuilder />} />
           <Route path="/dishshelf" element={<DishShelf />} />
-          <Route path="/dishshelf/:recipeName" element={<PipelineViewPage />} />
-          <Route path="/dishshelf/:recipeName/runs/:runId" element={<PipelineViewPage />} />
+          <Route path="/recipes/:recipeName/runs" element={<PipelineViewPage />} />
+          <Route path="/recipes/:recipeName/runs/:runId" element={<PipelineViewPage />} />
+          <Route path="/dishshelf/:recipeName" element={<LegacyRunsRedirect />} />
+          <Route path="/dishshelf/:recipeName/runs/:runId" element={<LegacyRunsRedirect />} />
           <Route path="/prompts" element={<PromptsPage />} />
           <Route path="/providers" element={<ProvidersPage />} />
           <Route path="/catalog" element={<CatalogPage />} />
           <Route path="/tools" element={<ToolsPage />} />
           <Route path="/skills" element={<SkillsPage />} />
           <Route path="/traces" element={<TracesPage />} />
+          <Route path="/traces/compare" element={<TraceComparePage />} />
           <Route path="/traces/:traceId" element={<TraceDetailPage />} />
           <Route path="/embeddings" element={<EmbeddingsPage />} />
           <Route path="/vectorstores" element={<VectorStoresPage />} />
@@ -66,3 +71,9 @@ function App() {
 }
 
 export default App;
+
+/** The old DishShelf addresses of a recipe's runs, kept so a bookmark or a shared link still lands. */
+function LegacyRunsRedirect() {
+  const { recipeName = '', runId } = useParams<{ recipeName: string; runId?: string }>();
+  return <Navigate replace to={`/recipes/${encodeURIComponent(recipeName)}/runs${runId ? `/${runId}` : ''}`} />;
+}

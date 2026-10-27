@@ -1371,6 +1371,17 @@ func (h *Handlers) GetAgentVersion(w http.ResponseWriter, r *http.Request) {
 // ── Recipe Handlers ──────────────────────────────────────────
 // ══════════════════════════════════════════════════════════════
 
+// archivedView says which recipes a list should show: the live ones (the default), all of them
+// ("?archived=include"), or only the archived ones ("?archived=only"). "?include_archived=true" is
+// the same as include.
+func archivedView(r *http.Request) string {
+	v := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("archived")))
+	if v == "" && strings.EqualFold(r.URL.Query().Get("include_archived"), "true") {
+		v = "include"
+	}
+	return v
+}
+
 func (h *Handlers) ListRecipes(w http.ResponseWriter, r *http.Request) {
 	kitchen := middleware.GetKitchen(r.Context())
 	recipes, err := h.Store.ListRecipes(r.Context(), kitchen)
@@ -1378,10 +1389,17 @@ func (h *Handlers) ListRecipes(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if recipes == nil {
-		recipes = []models.Recipe{}
+	view := archivedView(r)
+	shown := make([]models.Recipe, 0, len(recipes))
+	for _, rec := range recipes {
+		switch {
+		case view == "include",
+			view == "only" && rec.IsArchived(),
+			view != "only" && !rec.IsArchived():
+			shown = append(shown, rec)
+		}
 	}
-	respondJSON(w, http.StatusOK, recipes)
+	respondJSON(w, http.StatusOK, shown)
 }
 
 func (h *Handlers) CreateRecipe(w http.ResponseWriter, r *http.Request) {
@@ -1402,10 +1420,16 @@ func (h *Handlers) CreateRecipe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	kitchen := middleware.GetKitchen(r.Context())
+	// An archived recipe still holds its name (its runs belong to it): say so rather than replace it.
+	if existing, err := h.Store.GetRecipe(r.Context(), kitchen, req.Name); err == nil && existing.IsArchived() {
+		respondError(w, http.StatusConflict, fmt.Sprintf("Recipe '%s' is archived: restore it, or choose another name", req.Name))
+		return
+	}
 	req.ID = uuid.New().String()
 	req.Kitchen = kitchen
 	req.CreatedAt = time.Now().UTC()
 	req.UpdatedAt = time.Now().UTC()
+	req.ArchivedAt, req.ArchivedBy = nil, ""
 
 	// Normalize client-facing "agent" field into AgentRef used by the engine.
 	for i := range req.Steps {
@@ -1464,6 +1488,10 @@ func (h *Handlers) UpdateRecipe(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if recipe.IsArchived() {
+		respondError(w, http.StatusConflict, fmt.Sprintf("Recipe '%s' is archived: restore it to change it", recipeName))
+		return
+	}
 
 	var req models.Recipe
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1503,15 +1531,142 @@ func (h *Handlers) UpdateRecipe(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, recipe)
 }
 
+// DeleteRecipe archives a recipe, the way deleting an agent retires it: the recipe and every run it
+// has stay in the store (a run is a record of what models did, and must remain auditable), but the
+// recipe disappears from lists and can no longer be run or edited. RestoreRecipe undoes it.
 func (h *Handlers) DeleteRecipe(w http.ResponseWriter, r *http.Request) {
 	recipeName := chi.URLParam(r, "recipeName")
 	kitchen := middleware.GetKitchen(r.Context())
 
-	if err := h.Store.DeleteRecipe(r.Context(), kitchen, recipeName); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	recipe, err := h.Store.GetRecipe(r.Context(), kitchen, recipeName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
+	if !recipe.IsArchived() {
+		now := time.Now().UTC()
+		recipe.ArchivedAt = &now
+		recipe.ArchivedBy = callerSubject(r)
+		recipe.UpdatedAt = now
+		if err := h.Store.UpdateRecipe(r.Context(), recipe); err != nil {
+			respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		log.Info().Str("recipe", recipeName).Str("by", recipe.ArchivedBy).Msg("Recipe archived")
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// RestoreRecipe brings an archived recipe back. POST /api/v1/recipes/{recipeName}/restore
+func (h *Handlers) RestoreRecipe(w http.ResponseWriter, r *http.Request) {
+	recipeName := chi.URLParam(r, "recipeName")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	recipe, err := h.Store.GetRecipe(r.Context(), kitchen, recipeName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	if recipe.IsArchived() {
+		recipe.ArchivedAt, recipe.ArchivedBy = nil, ""
+		recipe.UpdatedAt = time.Now().UTC()
+		if err := h.Store.UpdateRecipe(r.Context(), recipe); err != nil {
+			respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		log.Info().Str("recipe", recipeName).Msg("Recipe restored")
+	}
+	respondJSON(w, http.StatusOK, recipe)
+}
+
+// callerSubject is who made the request, for the record of who archived something.
+func callerSubject(r *http.Request) string {
+	if id := pkgmw.GetIdentity(r.Context()); id != nil {
+		return id.Subject
+	}
+	return ""
+}
+
+// recipeExecContext is the context a recipe run starts under: the caller's key (so the run's agent
+// calls are made as them) and identity (for the record of who started it).
+func recipeExecContext(r *http.Request) context.Context {
+	execCtx := r.Context()
+	if triggerKey := extractAPIKeyFromRequest(r); triggerKey != "" {
+		execCtx = workflow.WithExecutionAPIKey(execCtx, triggerKey)
+	}
+	if id := pkgmw.GetIdentity(r.Context()); id != nil && id.Subject != "" {
+		execCtx = workflow.WithTriggeredBy(execCtx, id.Subject)
+	}
+	return execCtx
+}
+
+// RerunRecipeRun starts a recipe again with the input (and environment) of an earlier run: "run again".
+// The new run records which run it repeats. It uses the recipe as it is now, not as it was then.
+// POST /api/v1/recipes/{recipeName}/runs/{runId}/rerun  body (optional): {"input": {...}, "environment": "..."}
+func (h *Handlers) RerunRecipeRun(w http.ResponseWriter, r *http.Request) {
+	recipeName := chi.URLParam(r, "recipeName")
+	runID := chi.URLParam(r, "runId")
+	kitchen := middleware.GetKitchen(r.Context())
+
+	recipe, err := h.Store.GetRecipe(r.Context(), kitchen, recipeName)
+	if err != nil {
+		if _, ok := err.(*store.ErrNotFound); ok {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	if recipe.IsArchived() {
+		respondError(w, http.StatusConflict, fmt.Sprintf("Recipe '%s' is archived: restore it to run it", recipeName))
+		return
+	}
+	prev, err := h.Store.GetRecipeRun(r.Context(), runID)
+	if err != nil || prev.RecipeID != recipe.ID {
+		respondError(w, http.StatusNotFound, fmt.Sprintf("Run '%s' not found for recipe '%s'", runID, recipeName))
+		return
+	}
+
+	var req struct {
+		Input       map[string]interface{} `json:"input"`
+		Environment *string                `json:"environment"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	input := prev.Input
+	if req.Input != nil {
+		input = req.Input
+	}
+	env := prev.Environment
+	if req.Environment != nil {
+		env = *req.Environment
+	}
+
+	executor := h.RecipeExecutor
+	if executor == nil {
+		executor = h.Workflow
+	}
+	newID, err := executor.ExecuteRecipe(workflow.WithRerunOf(recipeExecContext(r), prev.ID), recipe, kitchen, input, env)
+	if err != nil {
+		if strings.HasPrefix(err.Error(), "permission_denied") {
+			respondError(w, http.StatusForbidden, err.Error())
+		} else {
+			respondError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	log.Info().Str("recipe", recipeName).Str("run_id", newID).Str("rerun_of", prev.ID).Msg("Recipe run repeated")
+	respondJSON(w, http.StatusAccepted, map[string]string{
+		"recipe": recipeName, "status": "running", "run_id": newID, "rerun_of": prev.ID,
+		"poll": "/api/v1/recipes/" + recipeName + "/runs/" + newID,
+	})
 }
 
 func (h *Handlers) BakeRecipe(w http.ResponseWriter, r *http.Request) {
@@ -1525,6 +1680,11 @@ func (h *Handlers) BakeRecipe(w http.ResponseWriter, r *http.Request) {
 		} else {
 			respondError(w, http.StatusInternalServerError, err.Error())
 		}
+		return
+	}
+
+	if recipe.IsArchived() {
+		respondError(w, http.StatusConflict, fmt.Sprintf("Recipe '%s' is archived: restore it to run it", recipeName))
 		return
 	}
 
@@ -1542,15 +1702,7 @@ func (h *Handlers) BakeRecipe(w http.ResponseWriter, r *http.Request) {
 		executor = h.Workflow
 	}
 
-	execCtx := r.Context()
-	if triggerKey := extractAPIKeyFromRequest(r); triggerKey != "" {
-		execCtx = workflow.WithExecutionAPIKey(execCtx, triggerKey)
-	}
-	if id := pkgmw.GetIdentity(r.Context()); id != nil && id.Subject != "" {
-		execCtx = workflow.WithTriggeredBy(execCtx, id.Subject)
-	}
-
-	runID, err := executor.ExecuteRecipe(execCtx, recipe, kitchen, req.Input, req.Environment)
+	runID, err := executor.ExecuteRecipe(recipeExecContext(r), recipe, kitchen, req.Input, req.Environment)
 	if err != nil {
 		if err.Error() == "permission_denied" || len(err.Error()) > 0 && err.Error()[:16] == "permission_denied" {
 			respondError(w, http.StatusForbidden, err.Error())
@@ -2421,34 +2573,6 @@ func (h *Handlers) UpdateMCPTool(w http.ResponseWriter, r *http.Request) {
 // ── Trace Handlers ───────────────────────────────────────────
 // ══════════════════════════════════════════════════════════════
 
-func (h *Handlers) ListTraces(w http.ResponseWriter, r *http.Request) {
-	kitchen := middleware.GetKitchen(r.Context())
-
-	// Parse optional filter query params
-	limit := 500
-	if v := r.URL.Query().Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 5000 {
-			limit = n
-		}
-	}
-	filter := store.TraceFilter{
-		AgentName:  r.URL.Query().Get("agent"),
-		RecipeName: r.URL.Query().Get("recipe"),
-		Status:     r.URL.Query().Get("status"),
-		Limit:      limit,
-	}
-
-	traces, err := h.Store.ListTracesFiltered(r.Context(), kitchen, filter)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if traces == nil {
-		traces = []models.Trace{}
-	}
-	respondJSON(w, http.StatusOK, traces)
-}
-
 func (h *Handlers) GetTrace(w http.ResponseWriter, r *http.Request) {
 	kitchen := middleware.GetKitchen(r.Context())
 	traceID := chi.URLParam(r, "traceId")
@@ -2473,6 +2597,9 @@ func (h *Handlers) GetTrace(w http.ResponseWriter, r *http.Request) {
 	if trace.Kitchen != "" && trace.Kitchen != kitchen {
 		respondError(w, http.StatusNotFound, "trace not found")
 		return
+	}
+	if scores, err := h.Store.ListTraceScores(r.Context(), traceID); err == nil {
+		trace.Scores = scores
 	}
 	respondJSON(w, http.StatusOK, trace)
 }

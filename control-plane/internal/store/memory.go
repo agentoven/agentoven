@@ -6,9 +6,11 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +24,7 @@ type snapshot struct {
 	Recipes       map[string]*models.Recipe              `json:"recipes"`
 	Kitchens      map[string]*models.Kitchen             `json:"kitchens"`
 	Traces        map[string]*models.Trace               `json:"traces"`
+	TraceScores   map[string][]models.TraceScore         `json:"trace_scores,omitempty"` // key: trace id
 	Providers     map[string]*models.ModelProvider       `json:"providers"`
 	RecipeRuns    map[string]*models.RecipeRun           `json:"recipe_runs"`
 	Tools         map[string]*models.MCPTool             `json:"tools"`
@@ -51,6 +54,7 @@ type MemoryStore struct {
 	recipes            map[string]*models.Recipe              // key: kitchen:name
 	kitchens           map[string]*models.Kitchen             // key: id
 	traces             map[string]*models.Trace               // key: id
+	traceScores        map[string][]models.TraceScore         // key: trace id
 	spans              map[string]*models.Span                // key: span_id
 	spansByTrace       map[string][]string                    // key: trace_id → []span_id (ordered)
 	providers          map[string]*models.ModelProvider       // key: kitchen:name
@@ -107,6 +111,7 @@ func NewMemoryStore() *MemoryStore {
 		recipes:            make(map[string]*models.Recipe),
 		kitchens:           make(map[string]*models.Kitchen),
 		traces:             make(map[string]*models.Trace),
+		traceScores:        make(map[string][]models.TraceScore),
 		providers:          make(map[string]*models.ModelProvider),
 		recipeRuns:         make(map[string]*models.RecipeRun),
 		tools:              make(map[string]*models.MCPTool),
@@ -223,6 +228,7 @@ func (m *MemoryStore) evictExpiredTraces() {
 	for id, t := range m.traces {
 		if t.CreatedAt.Before(cutoff) {
 			delete(m.traces, id)
+			delete(m.traceScores, id)
 			evicted++
 		}
 	}
@@ -242,6 +248,7 @@ func (m *MemoryStore) saveSnapshot() {
 		Recipes:       m.recipes,
 		Kitchens:      m.kitchens,
 		Traces:        m.traces,
+		TraceScores:   m.traceScores,
 		Providers:     m.providers,
 		RecipeRuns:    m.recipeRuns,
 		Tools:         m.tools,
@@ -319,6 +326,9 @@ func (m *MemoryStore) loadSnapshot() {
 	}
 	if snap.Traces != nil {
 		m.traces = snap.Traces
+		if snap.TraceScores != nil {
+			m.traceScores = snap.TraceScores
+		}
 	}
 	if snap.Providers != nil {
 		m.providers = snap.Providers
@@ -718,35 +728,203 @@ func (m *MemoryStore) ListTraces(_ context.Context, kitchen string, limit int) (
 	return result, nil
 }
 
+// matchTrace reports whether a trace satisfies a filter. spans are the trace's own, for the filters that
+// look into them (the model and provider a trace used). Caller holds m.mu.
+func (m *MemoryStore) matchTrace(t *models.Trace, kitchen string, f TraceFilter) bool {
+	if kitchen != "" && t.Kitchen != kitchen {
+		return false
+	}
+	if f.AgentName != "" && t.AgentName != f.AgentName {
+		return false
+	}
+	if f.RecipeName != "" && t.RecipeName != f.RecipeName {
+		return false
+	}
+	if f.Status != "" && t.Status != f.Status {
+		return false
+	}
+	if f.SessionID != "" && t.SessionID != f.SessionID {
+		return false
+	}
+	if f.ParentTraceID != "" && t.ParentTraceID != f.ParentTraceID {
+		return false
+	}
+	if f.RootsOnly && t.ParentTraceID != "" {
+		return false
+	}
+	if f.Tag != "" {
+		found := false
+		for _, tag := range t.Tags {
+			if tag == f.Tag {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	if f.MinCostUSD > 0 && t.CostUSD < f.MinCostUSD {
+		return false
+	}
+	if f.MaxCostUSD > 0 && t.CostUSD > f.MaxCostUSD {
+		return false
+	}
+	if f.MinDurationMs > 0 && t.DurationMs < f.MinDurationMs {
+		return false
+	}
+	if f.MaxDurationMs > 0 && t.DurationMs > f.MaxDurationMs {
+		return false
+	}
+	if !f.Since.IsZero() && t.CreatedAt.Before(f.Since) {
+		return false
+	}
+	if !f.Until.IsZero() && t.CreatedAt.After(f.Until) {
+		return false
+	}
+	for _, name := range f.ExcludeRecipes {
+		if t.RecipeName != "" && t.RecipeName == name {
+			return false
+		}
+	}
+	if f.Search != "" {
+		q := strings.ToLower(f.Search)
+		if !strings.Contains(strings.ToLower(t.InputText), q) && !strings.Contains(strings.ToLower(t.OutputText), q) &&
+			!strings.Contains(strings.ToLower(t.AgentName), q) && !strings.Contains(strings.ToLower(t.ID), q) {
+			return false
+		}
+	}
+	if f.Model != "" || f.Provider != "" {
+		if !m.traceUsed(t, f.Model, f.Provider) {
+			return false
+		}
+	}
+	return true
+}
+
+// traceUsed reports whether a trace, or any of its spans, used the model and provider (either may be empty).
+func (m *MemoryStore) traceUsed(t *models.Trace, model, provider string) bool {
+	if (model == "" || fmt.Sprint(t.Metadata["model"]) == model) && (provider == "" || fmt.Sprint(t.Metadata["provider"]) == provider) &&
+		(t.Metadata["model"] != nil || t.Metadata["provider"] != nil) {
+		return true
+	}
+	for _, sid := range m.spansByTrace[t.ID] {
+		sp := m.spans[sid]
+		if sp != nil && (model == "" || sp.Model == model) && (provider == "" || sp.Provider == provider) && (sp.Model != "" || sp.Provider != "") {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *MemoryStore) ListTracesFiltered(_ context.Context, kitchen string, filter TraceFilter) ([]models.Trace, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+
+	var result []models.Trace
+	for _, t := range m.traces {
+		if m.matchTrace(t, kitchen, filter) {
+			result = append(result, *t)
+		}
+	}
+	sortTraces(result, filter.SortBy, filter.Asc)
 
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = 500
 	}
-
-	var result []models.Trace
-	for _, t := range m.traces {
-		if kitchen != "" && t.Kitchen != kitchen {
-			continue
+	if filter.Offset > 0 {
+		if filter.Offset >= len(result) {
+			return nil, nil
 		}
-		if filter.AgentName != "" && t.AgentName != filter.AgentName {
-			continue
-		}
-		if filter.RecipeName != "" && t.RecipeName != filter.RecipeName {
-			continue
-		}
-		if filter.Status != "" && t.Status != filter.Status {
-			continue
-		}
-		result = append(result, *t)
-		if len(result) >= limit {
-			break
-		}
+		result = result[filter.Offset:]
+	}
+	if len(result) > limit {
+		result = result[:limit]
 	}
 	return result, nil
+}
+
+// sortTraces orders traces by the named column, newest or largest first unless asc.
+func sortTraces(ts []models.Trace, by string, asc bool) {
+	less := func(i, j int) bool { return ts[i].CreatedAt.After(ts[j].CreatedAt) }
+	switch by {
+	case "cost":
+		less = func(i, j int) bool { return ts[i].CostUSD > ts[j].CostUSD }
+	case "duration":
+		less = func(i, j int) bool { return ts[i].DurationMs > ts[j].DurationMs }
+	case "tokens":
+		less = func(i, j int) bool { return ts[i].TotalTokens > ts[j].TotalTokens }
+	}
+	sort.SliceStable(ts, func(i, j int) bool {
+		if asc {
+			return less(j, i)
+		}
+		return less(i, j)
+	})
+}
+
+func (m *MemoryStore) TraceStats(_ context.Context, kitchen string, filter TraceFilter) (models.TraceStats, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var st models.TraceStats
+	var durations []int64
+	for _, t := range m.traces {
+		if !m.matchTrace(t, kitchen, filter) {
+			continue
+		}
+		st.Count++
+		switch t.Status {
+		case "failed", "error", "blocked":
+			st.Errors++
+		}
+		st.TotalTokens += t.TotalTokens
+		st.TotalCost += t.CostUSD
+		durations = append(durations, t.DurationMs)
+	}
+	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+	if n := len(durations); n > 0 {
+		st.P50Ms = durations[(n-1)*50/100]
+		st.P95Ms = durations[(n-1)*95/100]
+	}
+	return st, nil
+}
+
+func (m *MemoryStore) CreateTraceScore(_ context.Context, score *models.TraceScore) error {
+	m.mu.Lock()
+	if _, ok := m.traces[score.TraceID]; !ok {
+		m.mu.Unlock()
+		return &ErrNotFound{Entity: "trace", Key: score.TraceID}
+	}
+	m.traceScores[score.TraceID] = append(m.traceScores[score.TraceID], *score)
+	m.mu.Unlock()
+	m.requestSave()
+	return nil
+}
+
+func (m *MemoryStore) ListTraceScores(_ context.Context, traceID string) ([]models.TraceScore, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return append([]models.TraceScore(nil), m.traceScores[traceID]...), nil
+}
+
+func (m *MemoryStore) DeleteTraceScore(_ context.Context, traceID, scoreID string) error {
+	m.mu.Lock()
+	scores := m.traceScores[traceID]
+	kept := scores[:0:0]
+	for _, sc := range scores {
+		if sc.ID != scoreID {
+			kept = append(kept, sc)
+		}
+	}
+	found := len(kept) != len(scores)
+	m.traceScores[traceID] = kept
+	m.mu.Unlock()
+	if !found {
+		return &ErrNotFound{Entity: "trace score", Key: scoreID}
+	}
+	m.requestSave()
+	return nil
 }
 
 func (m *MemoryStore) GetTrace(_ context.Context, id string) (*models.Trace, error) {
@@ -776,6 +954,7 @@ func (m *MemoryStore) DeleteTrace(_ context.Context, id string) error {
 		return &ErrNotFound{Entity: "trace", Key: id}
 	}
 	delete(m.traces, id)
+	delete(m.traceScores, id)
 	// Also delete associated spans
 	if spanIDs, ok := m.spansByTrace[id]; ok {
 		for _, sid := range spanIDs {

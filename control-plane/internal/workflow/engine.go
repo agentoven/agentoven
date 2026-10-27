@@ -101,6 +101,21 @@ func WithTriggeredBy(ctx context.Context, subject string) context.Context {
 	return context.WithValue(ctx, triggeredByCtxKey{}, subject)
 }
 
+type rerunOfCtxKey struct{}
+
+// WithRerunOf marks the run about to be started as a repeat of an earlier one.
+func WithRerunOf(ctx context.Context, runID string) context.Context {
+	if strings.TrimSpace(runID) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, rerunOfCtxKey{}, runID)
+}
+
+func rerunOfFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(rerunOfCtxKey{}).(string)
+	return strings.TrimSpace(v)
+}
+
 func triggeredByFromContext(ctx context.Context) string {
 	v, _ := ctx.Value(triggeredByCtxKey{}).(string)
 	return strings.TrimSpace(v)
@@ -139,6 +154,9 @@ func NewEngine(s store.Store, notifier *notify.Service, baseURL string) *Engine 
 // via GetActiveDeployment → GetAgentVersion. Pass "" to resolve the live agent (OSS default).
 // If envSlug is empty, recipe.DefaultEnvironment is used as a fallback.
 func (e *Engine) ExecuteRecipe(ctx context.Context, recipe *models.Recipe, kitchen string, input map[string]interface{}, envSlug string) (string, error) {
+	if recipe.IsArchived() {
+		return "", fmt.Errorf("recipe '%s' is archived: restore it to run it", recipe.Name)
+	}
 	runID := uuid.New().String()
 	authAPIKey := executionAPIKeyFromContext(ctx)
 
@@ -155,6 +173,7 @@ func (e *Engine) ExecuteRecipe(ctx context.Context, recipe *models.Recipe, kitch
 		Status:      models.RecipeRunRunning,
 		Input:       input,
 		TriggeredBy: triggeredByFromContext(ctx),
+		RerunOf:     rerunOfFromContext(ctx),
 		StartedAt:   time.Now().UTC(),
 	}
 

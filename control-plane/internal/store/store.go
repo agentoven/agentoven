@@ -98,22 +98,50 @@ type KitchenStore interface {
 
 // ── Trace Store ─────────────────────────────────────────────
 
-// TraceFilter defines optional filters for listing traces.
+// TraceFilter defines optional filters for listing traces. Every field that is set narrows the
+// result; none is required.
 type TraceFilter struct {
-	AgentName  string // exact match on agent_name
-	RecipeName string // exact match on recipe_name
-	Status     string // exact match on status
-	Limit      int    // max results (default 100)
+	AgentName     string // exact match on agent_name
+	RecipeName    string // exact match on recipe_name
+	Status        string // exact match on status
+	Model         string // the trace used this model (on its own or on any of its spans)
+	Provider      string // the trace used this provider
+	Tag           string // the trace carries this tag
+	SessionID     string // exact match on session_id
+	ParentTraceID string // children of this trace
+	RootsOnly     bool   // only traces with no parent
+	Search        string // case-insensitive substring of the input, the output or the agent name
+	MinCostUSD    float64
+	MaxCostUSD    float64 // 0 = no upper bound
+	MinDurationMs int64
+	MaxDurationMs int64 // 0 = no upper bound
+	Since         time.Time
+	Until         time.Time
+	// ExcludeRecipes hides the traces of these recipes: the archived ones, whose runs stay in the
+	// store for audit but are not shown unless asked for.
+	ExcludeRecipes []string
+
+	SortBy string // "created_at" (default), "cost", "duration", "tokens"
+	Asc    bool   // oldest/smallest first; the default is newest/largest first
+	Limit  int    // max results (default 100, at most 5000)
+	Offset int
 }
 
 type TraceStore interface {
 	ListTraces(ctx context.Context, kitchen string, limit int) ([]models.Trace, error)
 	ListTracesFiltered(ctx context.Context, kitchen string, filter TraceFilter) ([]models.Trace, error)
+	// TraceStats summarises every trace the filter matches (its Limit, Offset and sort are ignored).
+	TraceStats(ctx context.Context, kitchen string, filter TraceFilter) (models.TraceStats, error)
 	GetTrace(ctx context.Context, id string) (*models.Trace, error)
 	GetTraceWithSpans(ctx context.Context, id string) (*models.Trace, error)
 	CreateTrace(ctx context.Context, trace *models.Trace) error
 	UpdateTrace(ctx context.Context, trace *models.Trace) error
 	DeleteTrace(ctx context.Context, id string) error
+
+	// Scores are feedback on a trace (or one of its spans).
+	CreateTraceScore(ctx context.Context, score *models.TraceScore) error
+	ListTraceScores(ctx context.Context, traceID string) ([]models.TraceScore, error)
+	DeleteTraceScore(ctx context.Context, traceID, scoreID string) error
 }
 
 // ── Span Store ──────────────────────────────────────────────

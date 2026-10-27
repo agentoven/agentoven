@@ -217,9 +217,27 @@ class AgentOvenClient:
         return client._put(f"/api/v1/recipes/{_seg(recipe.name)}", {"description": body["description"], "steps": body["steps"]})
 
     def delete_recipe(self, name: str, kitchen: Optional[str] = None) -> dict[str, Any]:
-        """Delete a recipe. The control plane refuses while it still has runs."""
+        """Archive a recipe. It is hidden and can no longer be run or edited, but it and its runs are kept (a run
+        is a record of what models did); :meth:`restore_recipe` brings it back."""
         client = self if kitchen is None else self.with_kitchen(kitchen)
         return client._delete(f"/api/v1/recipes/{_seg(name)}")
+
+    def restore_recipe(self, name: str, kitchen: Optional[str] = None) -> dict[str, Any]:
+        """Bring an archived recipe back."""
+        client = self if kitchen is None else self.with_kitchen(kitchen)
+        return client._post(f"/api/v1/recipes/{_seg(name)}/restore", {})
+
+    def rerun_recipe_run(
+        self,
+        name: str,
+        run_id: str,
+        input: Optional[Mapping[str, Any]] = None,
+        kitchen: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Run a recipe again with the input (and environment) of an earlier run, or with ``input`` instead.
+        Returns at once with the new ``run_id`` and the ``rerun_of`` it repeats; see :meth:`wait_for_recipe_run`."""
+        client = self if kitchen is None else self.with_kitchen(kitchen)
+        return client._post(f"/api/v1/recipes/{_seg(name)}/runs/{_seg(run_id)}/rerun", {"input": dict(input)} if input is not None else {})
 
     def run_recipe(
         self,

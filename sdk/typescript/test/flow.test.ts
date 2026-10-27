@@ -233,6 +233,16 @@ describe('the client', () => {
     expect(api.last.body).toEqual({ name: 'raw', steps: [{ name: 'a', kind: 'agent', agent_ref: 'x' }] });
   });
 
+  it('restoreRecipe and rerunRecipeRun', async () => {
+    api.reply('POST', '/api/v1/recipes/refund-review/restore', { name: 'refund-review' });
+    expect((await pro.restoreRecipe('refund-review')).name).toBe('refund-review');
+    api.reply('POST', '/api/v1/recipes/refund-review/runs/r1/rerun', { run_id: 'r2', rerun_of: 'r1', status: 'running' }, 202);
+    expect(await pro.rerunRecipeRun('refund-review', 'r1')).toEqual({ run_id: 'r2', rerun_of: 'r1', status: 'running' });
+    expect(api.last.body).toEqual({});
+    await pro.rerunRecipeRun('refund-review', 'r1', { text: 'other' });
+    expect(api.last.body).toEqual({ input: { text: 'other' } });
+  });
+
   it('a server refusal is an API error', async () => {
     api.reply('POST', '/api/v1/recipes', { error: 'recipe exists' }, 409);
     await expect(pro.createRecipe(FLOW)).rejects.toBeInstanceOf(AgentOvenAPIError);

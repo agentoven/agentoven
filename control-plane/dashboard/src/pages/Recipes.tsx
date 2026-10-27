@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { BookOpen, Play, Plus, Search, Trash2, UserCheck } from 'lucide-react';
+import { Archive, ArchiveRestore, BookOpen, History, Play, Plus, Search, UserCheck } from 'lucide-react';
 import { useAPI } from '../hooks';
 import { recipeRuns, recipes, type Recipe, type RecipeRun } from '../api';
 import { Button, EmptyState, ErrorBanner, PageHeader, Spinner } from '../components/UI';
@@ -53,7 +53,10 @@ function Flow({ steps }: { steps: WireStep[] }) {
 export default function Recipes() {
   const canWrite = true;
   const navigate = useNavigate();
-  const { data, loading, error, refetch } = useAPI(() => recipes.list());
+  const [showArchived, setShowArchived] = useState(false);
+  const { data, loading, error, refetch } = useAPI(() => recipes.list(showArchived ? 'include' : undefined));
+  const first = useRef(true);
+  useEffect(() => { if (first.current) { first.current = false; return; } refetch(); }, [showArchived]); // eslint-disable-line react-hooks/exhaustive-deps
   const [runs, setRuns] = useState<Record<string, RecipeRun[]>>({});
   const [query, setQuery] = useState('');
   const [problem, setProblem] = useState('');
@@ -76,14 +79,16 @@ export default function Recipes() {
     return (data ?? []).filter((r) => !q || r.name.toLowerCase().includes(q) || (r.description ?? '').toLowerCase().includes(q));
   }, [data, query]);
 
-  const remove = async (r: Recipe) => {
-    if (!window.confirm(`Delete the recipe '${r.name}'? This cannot be undone.`)) return;
+  // Deleting a recipe archives it: it is hidden and cannot be run, and its runs are kept, because a run is a
+  // record of what models did. It can be restored.
+  const archive = async (r: Recipe) => {
+    if (!window.confirm(`Archive the recipe '${r.name}'?\n\nIt will be hidden and can no longer be run or edited. Its runs are kept for audit, and you can restore it.`)) return;
     setProblem('');
-    try { await recipes.delete(r.name); refetch(); } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Delete failed';
-      // The server keeps a recipe's runs and refuses to delete a recipe that has any.
-      setProblem(/recipe_runs|foreign key/i.test(msg) ? `"${r.name}" has runs, so it cannot be deleted yet. Edit it instead.` : msg);
-    }
+    try { await recipes.delete(r.name); refetch(); } catch (e) { setProblem(e instanceof Error ? e.message : 'Archive failed'); }
+  };
+  const restore = async (r: Recipe) => {
+    setProblem('');
+    try { await recipes.restore(r.name); refetch(); } catch (e) { setProblem(e instanceof Error ? e.message : 'Restore failed'); }
   };
 
   if (loading && !data) return <Spinner />;
@@ -106,12 +111,17 @@ export default function Recipes() {
           <EmptyState icon={<BookOpen size={48} />} title="No recipes yet" description="A recipe chains agents, checks and people into one workflow." action={canWrite ? <Button onClick={() => navigate('/recipes/new')}>New recipe</Button> : undefined} />
         ) : (
           <>
-            <label className="relative block max-w-[380px]">
+            <div className="flex flex-wrap items-center gap-4">
+            <label className="relative block w-full max-w-[380px]">
               <span className="sr-only">Search recipes</span>
               <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--ao-text-muted)] pointer-events-none" />
               <input type="text" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search recipes"
                 className="w-full h-10 pl-9 pr-3 rounded-[10px] border border-[var(--ao-border)] bg-[var(--ao-surface)] text-sm outline-none focus:border-[var(--ao-brand-light)]" />
             </label>
+            <label className="flex items-center gap-2 text-[13px] text-[var(--ao-text-muted)]" title="Archived recipes keep their runs, hidden by default">
+              <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} /> Show archived
+            </label>
+            </div>
             <div className="rounded-2xl border border-[var(--ao-border)] bg-[var(--ao-surface)] overflow-x-auto">
               <div className="min-w-[900px]">
                 <div className="grid gap-4 px-5 h-[42px] items-center border-b border-[var(--ao-border)] text-xs font-semibold uppercase tracking-wider text-[var(--ao-text-muted)]" style={{ gridTemplateColumns: COLS }}>
@@ -120,22 +130,34 @@ export default function Recipes() {
                 {shown.map((r) => {
                   const last = lastRun(runs[r.name]);
                   return (
-                    <div key={r.id} className="grid gap-4 px-5 py-4 items-center border-b border-[var(--ao-border)] last:border-b-0" style={{ gridTemplateColumns: COLS }}>
+                    <div key={r.id} className={`grid gap-4 px-5 py-4 items-center border-b border-[var(--ao-border)] last:border-b-0 ${r.archived_at ? 'opacity-60' : ''}`} style={{ gridTemplateColumns: COLS }}>
                       <div className="min-w-0">
-                        <Link to={`/recipes/${encodeURIComponent(r.name)}`} className="block text-[15px] font-semibold truncate hover:text-[var(--ao-brand-light)]">{r.name}</Link>
+                        <Link to={r.archived_at ? `/recipes/${encodeURIComponent(r.name)}/runs` : `/recipes/${encodeURIComponent(r.name)}`} className="block text-[15px] font-semibold truncate hover:text-[var(--ao-brand-light)]">{r.name}{r.archived_at && <span className="ml-2 align-middle text-[11px] font-medium px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300">Archived</span>}</Link>
                         <div className={`mt-0.5 text-[13px] truncate ${r.description ? 'text-[var(--ao-text-muted)]' : 'italic text-[var(--ao-text-muted)]/60'}`}>{r.description || 'No description'}</div>
                       </div>
                       <Flow steps={(r.steps ?? []) as WireStep[]} />
                       <div className="text-[13px] text-slate-300 font-mono">{r.version ? `v${r.version.replace(/^v/, '')}` : ''}</div>
                       <div className="flex items-center gap-2 text-[13px]" style={{ color: last.color }}><span className="w-2 h-2 rounded-full shrink-0" style={{ background: last.dot }} />{last.text}</div>
                       <div className="flex items-center justify-end gap-2">
-                        <button type="button" onClick={() => setRunning(r.name)} disabled={(r.steps ?? []).length === 0}
-                          title={(r.steps ?? []).length === 0 ? 'Add a step first' : undefined}
-                          className="inline-flex items-center gap-1.5 h-[34px] px-3 rounded-lg text-[13px] font-semibold border border-[var(--ao-brand)]/55 text-[var(--ao-brand-light)] hover:bg-[var(--ao-brand)]/10 disabled:opacity-40 disabled:cursor-not-allowed">
-                          <Play size={13} fill="currentColor" /> Run
-                        </button>
-                        <Link to={`/recipes/${encodeURIComponent(r.name)}`} className="inline-flex items-center h-[34px] px-3 rounded-lg text-[13px] font-medium border border-[var(--ao-border)] hover:bg-[var(--ao-surface-hover)]">Edit</Link>
-                        {canWrite && <ActionDropdown items={[{ label: 'Delete', icon: <Trash2 size={14} />, onClick: () => remove(r), danger: true }]} label={r.name} />}
+                        {r.archived_at ? (
+                          <>
+                            <Link to={`/recipes/${encodeURIComponent(r.name)}/runs`} className="inline-flex items-center gap-1.5 h-[34px] px-3 rounded-lg text-[13px] font-medium border border-[var(--ao-border)] hover:bg-[var(--ao-surface-hover)]"><History size={13} /> Runs</Link>
+                            {canWrite && <button type="button" onClick={() => restore(r)} className="inline-flex items-center gap-1.5 h-[34px] px-3 rounded-lg text-[13px] font-semibold border border-[var(--ao-brand)]/55 text-[var(--ao-brand-light)] hover:bg-[var(--ao-brand)]/10"><ArchiveRestore size={13} /> Restore</button>}
+                          </>
+                        ) : (
+                          <>
+                            <button type="button" onClick={() => setRunning(r.name)} disabled={(r.steps ?? []).length === 0}
+                              title={(r.steps ?? []).length === 0 ? 'Add a step first' : undefined}
+                              className="inline-flex items-center gap-1.5 h-[34px] px-3 rounded-lg text-[13px] font-semibold border border-[var(--ao-brand)]/55 text-[var(--ao-brand-light)] hover:bg-[var(--ao-brand)]/10 disabled:opacity-40 disabled:cursor-not-allowed">
+                              <Play size={13} fill="currentColor" /> Run
+                            </button>
+                            <Link to={`/recipes/${encodeURIComponent(r.name)}`} className="inline-flex items-center h-[34px] px-3 rounded-lg text-[13px] font-medium border border-[var(--ao-border)] hover:bg-[var(--ao-surface-hover)]">Edit</Link>
+                            {canWrite && <ActionDropdown items={[
+                              { label: 'Runs', icon: <History size={14} />, onClick: () => navigate(`/recipes/${encodeURIComponent(r.name)}/runs`) },
+                              { label: 'Archive', icon: <Archive size={14} />, onClick: () => archive(r), danger: true },
+                            ]} label={r.name} />}
+                          </>
+                        )}
                       </div>
                     </div>
                   );
@@ -153,7 +175,7 @@ export default function Recipes() {
           </>
         )}
       </div>
-      <RunRecipeModal recipe={running} onClose={() => setRunning(null)} onStarted={(n) => navigate(`/dishshelf/${encodeURIComponent(n)}`)} stepCount={(data ?? []).find((r) => r.name === running)?.steps?.length} />
+      <RunRecipeModal recipe={running} onClose={() => setRunning(null)} onStarted={(n) => navigate(`/recipes/${encodeURIComponent(n)}/runs`)} stepCount={(data ?? []).find((r) => r.name === running)?.steps?.length} />
     </div>
   );
 }
