@@ -848,7 +848,7 @@ func (e *Executor) executeDelegation(ctx context.Context, agent *models.Agent, t
 	}
 
 	// For managed agents, resolve and execute directly
-	if target.Mode == models.AgentModeManaged {
+	if target.IsManaged() {
 		resolved := target.ResolvedConfig
 		if resolved == nil {
 			return ToolResult{

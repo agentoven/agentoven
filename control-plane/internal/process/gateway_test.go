@@ -154,3 +154,22 @@ func fmtJSON(t *testing.T, v interface{}) string {
 	}
 	return string(b)
 }
+
+// An agent stored before resolved configs existed names its model on the agent itself. Its process
+// must still be given the credential (or the gateway), not started with none and left to fail on its
+// first model call with "x-api-key header is required".
+func TestAnAgentWithNoResolvedConfigStillGetsAModelCredential(t *testing.T) {
+	legacy := &models.Agent{Name: "old", Kitchen: "k", ModelProvider: "anthropic", ModelName: "claude-haiku-4-5"}
+
+	env := managerWithKey("sk-REAL-PROVIDER-KEY").buildEnvironment(legacy, 9100)
+	if env["AGENT_API_KEY"] != "sk-REAL-PROVIDER-KEY" || env["AGENT_MODEL_PROVIDER"] != "anthropic" || env["AGENT_MODEL_NAME"] != "claude-haiku-4-5" {
+		t.Fatalf("without a gateway the process gets the provider's key: %v", env)
+	}
+
+	m := managerWithKey("sk-REAL-PROVIDER-KEY")
+	m.SetModelGateway(&fakeGateway{ok: true})
+	env = m.buildEnvironment(legacy, 9100)
+	if env["AGENT_API_KEY"] != "ao_run_token" || env["AGENT_MODEL_GATEWAY"] != "openai" || env["AGENT_GATEWAY_MODEL"] != "anthropic/claude-haiku-4-5" {
+		t.Fatalf("with a gateway it gets the gateway and its credential, never the key: %v", env)
+	}
+}

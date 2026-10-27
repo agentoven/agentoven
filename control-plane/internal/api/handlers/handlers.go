@@ -3336,7 +3336,7 @@ func (h *Handlers) ResolveBackendEndpoint(agent *models.Agent) (string, string) 
 	}
 
 	// Managed agents: use the spawned process endpoint
-	if agent.Mode == models.AgentModeManaged || agent.Mode == "" {
+	if agent.IsManaged() {
 		if agent.Process != nil && agent.Process.Status == models.ProcessRunning {
 			if agent.Process.Endpoint != "" {
 				return agent.Process.Endpoint, "managed_process_endpoint"
@@ -4555,7 +4555,7 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if agent.Mode != models.AgentModeManaged {
+	if !agent.IsManaged() {
 		respondError(w, http.StatusBadRequest,
 			fmt.Sprintf("Agent '%s' is in '%s' mode — use the A2A endpoint for external agents", agentName, agent.Mode))
 		return
@@ -4852,7 +4852,7 @@ func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if agent.Mode != models.AgentModeManaged {
+	if !agent.IsManaged() {
 		respondError(w, http.StatusBadRequest,
 			fmt.Sprintf("Agent '%s' is in '%s' mode — use the A2A endpoint for external agents", agentName, agent.Mode))
 		return

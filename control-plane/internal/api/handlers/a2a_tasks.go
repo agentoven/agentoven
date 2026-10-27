@@ -96,7 +96,7 @@ func (h *Handlers) a2aSendAsync(w http.ResponseWriter, r *http.Request, rpcID in
 	case agent.Kitchen != callerKitchen:
 		a2aRPCError(w, rpcID, -32004, "Asynchronous tasks are not supported across kitchens", nil)
 		return
-	case agent.Mode != models.AgentModeManaged || agent.IsFrameworkNative() || (agent.Process != nil && agent.Process.Status == models.ProcessRunning):
+	case !agent.IsManaged() || agent.IsFrameworkNative() || (agent.Process != nil && agent.Process.Status == models.ProcessRunning):
 		a2aRPCError(w, rpcID, -32004, "Asynchronous tasks run on AgentOven's own agent loop; this agent runs its own, so call it without configuration.blocking=false", nil)
 		return
 	}

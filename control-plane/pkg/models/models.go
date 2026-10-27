@@ -96,6 +96,12 @@ const (
 	AgentModeExternal AgentMode = "external"
 )
 
+// IsManaged reports whether AgentOven runs the agent. An agent stored before modes existed has none,
+// and has always been treated as managed; code that tests the mode must not read "" as "not managed".
+func (a *Agent) IsManaged() bool {
+	return a.Mode == AgentModeManaged || a.Mode == ""
+}
+
 // AgentBehavior controls whether an agent is single-turn (reactive) or
 // runs an autonomous reasoning loop with memory (agentic).
 type AgentBehavior string

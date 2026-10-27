@@ -158,7 +158,7 @@ func (r *Resolver) Resolve(ctx context.Context, agent *models.Agent) (*models.Re
 	}
 
 	// For managed agents, a model ingredient is required
-	if agent.Mode == models.AgentModeManaged && resolved.Model == nil {
+	if agent.IsManaged() && resolved.Model == nil {
 		errors = append(errors, "managed agents require at least one model ingredient")
 	}
 

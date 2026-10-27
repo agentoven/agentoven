@@ -183,7 +183,7 @@ func (h *Handlers) proxyA2AGuarded(w http.ResponseWriter, r *http.Request, backe
 		return
 	}
 	if h.Guardrails == nil || len(gr) == 0 {
-		h.proxyA2ARequest(w, r, backendURL, agent.Name, agent.Kitchen, agent.Mode == models.AgentModeManaged)
+		h.proxyA2ARequest(w, r, backendURL, agent.Name, agent.Kitchen, agent.IsManaged())
 		return
 	}
 
@@ -191,7 +191,7 @@ func (h *Handlers) proxyA2AGuarded(w http.ResponseWriter, r *http.Request, backe
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	req := parseA2ARequest(body)
 	if !req.hasMsg {
-		h.proxyA2ARequest(w, r, backendURL, agent.Name, agent.Kitchen, agent.Mode == models.AgentModeManaged)
+		h.proxyA2ARequest(w, r, backendURL, agent.Name, agent.Kitchen, agent.IsManaged())
 		return
 	}
 
@@ -218,12 +218,12 @@ func (h *Handlers) proxyA2AGuarded(w http.ResponseWriter, r *http.Request, backe
 
 	if req.streaming && !outputStageEnabled(gr) {
 		// Nothing to check on the way out: relay the stream as it arrives.
-		h.proxyA2ARequest(w, r, backendURL, agent.Name, agent.Kitchen, agent.Mode == models.AgentModeManaged)
+		h.proxyA2ARequest(w, r, backendURL, agent.Name, agent.Kitchen, agent.IsManaged())
 		return
 	}
 
 	rec := newBufferedResponse()
-	h.proxyA2ARequest(rec, r, backendURL, agent.Name, agent.Kitchen, agent.Mode == models.AgentModeManaged)
+	h.proxyA2ARequest(rec, r, backendURL, agent.Name, agent.Kitchen, agent.IsManaged())
 	out := a2aResponseText(rec.body.Bytes())
 	if req.streaming {
 		// An agent with output rules does not stream: the frames are held back, checked,

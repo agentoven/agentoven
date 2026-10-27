@@ -38,6 +38,7 @@ type Engine struct {
 	store    store.Store
 	client   *http.Client
 	notifier *notify.Service
+	pricer   func(ctx context.Context, kitchen, provider, model string, u *models.TokenUsage)
 
 	// baseURL is the control plane's own HTTP origin (e.g. "http://localhost:8080").
 	// The engine routes all A2A and RAG calls through the control plane gateway
@@ -108,6 +109,12 @@ func triggeredByFromContext(ctx context.Context) string {
 // NewEngine creates a new workflow execution engine.
 // baseURL is the control plane's HTTP origin (e.g. "http://localhost:8080").
 // All agent and RAG calls are routed through the gateway via this URL.
+// SetPricer lets the engine put a cost on the turns an agent reports (the runner knows its tokens, not
+// what the provider charges). Without one, steps carry tokens and a cost only if the agent sent one.
+func (e *Engine) SetPricer(f func(ctx context.Context, kitchen, provider, model string, u *models.TokenUsage)) {
+	e.pricer = f
+}
+
 func NewEngine(s store.Store, notifier *notify.Service, baseURL string) *Engine {
 	if baseURL == "" {
 		baseURL = "http://localhost:8080"
@@ -1027,6 +1034,24 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 		return fmt.Errorf("A2A error: %v", rpcErr["message"])
 	}
 
+	// An HTTP error whose body is not a JSON-RPC answer (the agent's process refused the call, say)
+	// is a failed step, not a completed one whose output is the error.
+	if resp.StatusCode >= 400 && rpcResp["result"] == nil {
+		detail := ""
+		for _, k := range []string{"message", "error"} {
+			if v, ok := rpcResp[k].(string); ok && strings.TrimSpace(v) != "" {
+				detail = v
+				break
+			}
+		}
+		hint := fmt.Sprintf("agent '%s' refused the call (HTTP %d)", agentRef, resp.StatusCode)
+		if detail != "" {
+			hint += ": " + detail
+		}
+		e.createStepTrace(ctx, kitchen, agentRef, recipeName, run.ID, step.Name, "error", stepStart, 0, 0, "", hint, parentTID)
+		return fmt.Errorf("%s", hint)
+	}
+
 	// Check for task-level failure in an otherwise valid JSON-RPC response.
 	if rpcResult, ok := rpcResp["result"].(map[string]interface{}); ok {
 		if statusMap, ok := rpcResult["status"].(map[string]interface{}); ok {
@@ -1060,6 +1085,19 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 
 	outputText, tokens, costUSD := extractA2AMetrics(rpcResp)
 
+	// An agent that reports its turns (the built-in runner does) has them priced here, at its provider's
+	// price for the model each turn used, and the step carries the totals.
+	execTrace := execTraceFromResult(rpcResp)
+	if execTrace != nil {
+		e.priceExecTrace(ctx, kitchen, agent, execTrace)
+		if execTrace.Usage.TotalTokens > 0 {
+			tokens = execTrace.Usage.TotalTokens
+		}
+		if execTrace.Usage.EstimatedCost > 0 {
+			costUSD = execTrace.Usage.EstimatedCost
+		}
+	}
+
 	// Populate cost/token data on the step result
 	result.Tokens = tokens
 	result.CostUSD = costUSD
@@ -1069,8 +1107,8 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 
 	// Persist executor spans from the pod's exec_trace so the waterfall
 	// visualisation is populated in the pro Postgres store.
-	if stepTraceID != "" {
-		e.persistA2ASpans(ctx, rpcResp, stepTraceID)
+	if stepTraceID != "" && execTrace != nil {
+		e.persistA2ASpans(ctx, execTrace, stepTraceID)
 	}
 
 	result.Output = rpcResp
@@ -1112,31 +1150,59 @@ func (e *Engine) createStepTrace(ctx context.Context, kitchen, agentName, recipe
 	return traceID
 }
 
-// persistA2ASpans extracts the exec_trace embedded in an A2A JSON-RPC response
-// by the pod's handleA2ATaskSend and persists the span waterfall to the store.
-// The exec_trace is nested at result.metadata.exec_trace.
-func (e *Engine) persistA2ASpans(ctx context.Context, rpcResp map[string]interface{}, traceID string) {
+// execTraceFromResult reads the exec_trace an agent embeds in its A2A reply (result.metadata.exec_trace).
+// It returns nil when there is none or it has no turns.
+func execTraceFromResult(rpcResp map[string]interface{}) *executor.ExecutionTrace {
 	result, ok := rpcResp["result"].(map[string]interface{})
 	if !ok {
-		return
+		return nil
 	}
 	meta, ok := result["metadata"].(map[string]interface{})
 	if !ok {
-		return
+		return nil
 	}
 	rawTrace, ok := meta["exec_trace"]
 	if !ok {
-		return
+		return nil
 	}
 	traceBytes, err := json.Marshal(rawTrace)
 	if err != nil {
-		return
+		return nil
 	}
-	var execTrace executor.ExecutionTrace
-	if err := json.Unmarshal(traceBytes, &execTrace); err != nil || len(execTrace.Turns) == 0 {
-		return
+	var et executor.ExecutionTrace
+	if err := json.Unmarshal(traceBytes, &et); err != nil || len(et.Turns) == 0 {
+		return nil
 	}
+	return &et
+}
 
+// priceExecTrace puts a cost on each turn of a trace the agent reported and recomputes its totals.
+func (e *Engine) priceExecTrace(ctx context.Context, kitchen string, agent *models.Agent, et *executor.ExecutionTrace) {
+	var total models.TokenUsage
+	for i := range et.Turns {
+		t := &et.Turns[i]
+		if t.Model == "" {
+			t.Model = agent.ModelName
+		}
+		t.Provider = agent.ModelProvider
+		if e.pricer != nil && t.Model != "" {
+			e.pricer(ctx, kitchen, agent.ModelProvider, t.Model, &t.Usage)
+		}
+		total.InputTokens += t.Usage.InputTokens
+		total.OutputTokens += t.Usage.OutputTokens
+		total.TotalTokens += t.Usage.TotalTokens
+		total.ThinkingTokens += t.Usage.ThinkingTokens
+		total.CachedTokens += t.Usage.CachedTokens
+		total.CacheCreation += t.Usage.CacheCreation
+		total.EstimatedCost += t.Usage.EstimatedCost
+		total.CacheSavingsUSD += t.Usage.CacheSavingsUSD
+		total.PriceSource = t.Usage.PriceSource
+	}
+	et.Usage = total
+}
+
+// persistA2ASpans writes the span waterfall for a step from the agent's exec_trace.
+func (e *Engine) persistA2ASpans(ctx context.Context, execTrace *executor.ExecutionTrace, traceID string) {
 	// Override the trace ID so spans link to the step trace in Postgres
 	// (the pod's exec_trace carries the pod-local task ID, not the pro trace ID).
 	execTrace.TraceID = traceID
@@ -1182,8 +1248,9 @@ func (e *Engine) persistA2ASpans(ctx context.Context, rpcResp map[string]interfa
 		turnUsage := turn.Usage
 		reqJSON, _ := json.Marshal(turn.Request)
 		respJSON, _ := json.Marshal(map[string]interface{}{
-			"content":    turn.Response,
-			"tool_calls": turn.ToolCalls,
+			"content":         turn.Response,
+			"thinking_blocks": turn.ThinkingBlocks,
+			"tool_calls":      turn.ToolCalls,
 		})
 		spans = append(spans, models.Span{
 			ID:           llmSpanID,
@@ -1198,7 +1265,15 @@ func (e *Engine) persistA2ASpans(ctx context.Context, rpcResp map[string]interfa
 			Input:        reqJSON,
 			Output:       respJSON,
 			Usage:        &turnUsage,
-			Metadata:     map[string]interface{}{"turn_number": turn.Number},
+			Model:        turn.Model,
+			Provider:     turn.Provider,
+			Metadata: map[string]interface{}{
+				"turn_number":     turn.Number,
+				"thinking_blocks": len(turn.ThinkingBlocks),
+				"thinking_tokens": turn.Usage.ThinkingTokens,
+				"cached_tokens":   turn.Usage.CachedTokens,
+				"price_source":    turn.Usage.PriceSource,
+			},
 		})
 
 		if len(turn.ToolCalls) > 0 {

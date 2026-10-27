@@ -475,7 +475,7 @@ func (m *Manager) SubscribeK8sLogs(ctx context.Context, kitchen, agentName strin
 
 // providerKey reads the key of the provider agent runs on, from the provider, now.
 func (m *Manager) providerKey(agent *models.Agent) string {
-	provider := agent.ResolvedConfig.Model.Provider
+	provider, _, _ := modelOf(agent)
 	if m.keys == nil {
 		log.Warn().Str("agent", agent.Name).Str("provider", provider).Msg("No source of provider keys is installed: the process is started without a model credential")
 		return ""
@@ -488,6 +488,17 @@ func (m *Manager) providerKey(agent *models.Agent) string {
 		return ""
 	}
 	return key
+}
+
+// modelOf is the provider, model and endpoint an agent's process should use. An agent baked by this
+// version carries them in its resolved config; one stored before resolved configs existed (or by a
+// store that does not keep them) names them on the agent itself, and its process still needs the same
+// credential or gateway, or every model call it makes goes out with none.
+func modelOf(agent *models.Agent) (provider, model, endpoint string) {
+	if rc := agent.ResolvedConfig; rc != nil && rc.Model != nil {
+		return rc.Model.Provider, rc.Model.Model, rc.Model.Endpoint
+	}
+	return agent.ModelProvider, agent.ModelName, ""
 }
 
 // buildEnvironment creates the env vars map for the agent process.
@@ -509,38 +520,36 @@ func (m *Manager) buildEnvironment(agent *models.Agent, port int) map[string]str
 	}
 
 	// Model config — from resolved config first, then top-level fields
-	if agent.ResolvedConfig != nil && agent.ResolvedConfig.Model != nil {
-		env["AGENT_MODEL_PROVIDER"] = agent.ResolvedConfig.Model.Provider
-		env["AGENT_MODEL_NAME"] = agent.ResolvedConfig.Model.Model
+	provider, model, endpoint := modelOf(agent)
+	if provider != "" {
+		env["AGENT_MODEL_PROVIDER"] = provider
+	}
+	if model != "" {
+		env["AGENT_MODEL_NAME"] = model
+	}
+	if provider != "" {
 		if key := m.providerKey(agent); key != "" {
 			env["AGENT_API_KEY"] = key
 		}
-		if agent.ResolvedConfig.Model.Endpoint != "" {
-			env["AGENT_API_ENDPOINT"] = agent.ResolvedConfig.Model.Endpoint
-		}
-	} else {
-		if agent.ModelProvider != "" {
-			env["AGENT_MODEL_PROVIDER"] = agent.ModelProvider
-		}
-		if agent.ModelName != "" {
-			env["AGENT_MODEL_NAME"] = agent.ModelName
+		if endpoint != "" {
+			env["AGENT_API_ENDPOINT"] = endpoint
 		}
 	}
 
 	// Model gateway: the process calls the gateway with a credential that only opens the
 	// gateway, instead of calling the provider with the provider's own key.
-	if m.gateway != nil && agent.ResolvedConfig != nil && agent.ResolvedConfig.Model != nil {
-		endpoint, token, ok, err := m.gateway.EnvFor(agent)
+	if m.gateway != nil && provider != "" {
+		gwEndpoint, token, ok, err := m.gateway.EnvFor(agent)
 		switch {
 		case err != nil:
 			delete(env, "AGENT_API_KEY")
 			delete(env, "AGENT_API_ENDPOINT")
 			log.Error().Err(err).Str("agent", agent.Name).Msg("Model gateway credential could not be minted; the process is started without a model credential")
 		case ok:
-			env["AGENT_API_ENDPOINT"] = endpoint
+			env["AGENT_API_ENDPOINT"] = gwEndpoint
 			env["AGENT_API_KEY"] = token
 			env["AGENT_MODEL_GATEWAY"] = "openai"
-			env["AGENT_GATEWAY_MODEL"] = agent.ResolvedConfig.Model.Provider + "/" + agent.ResolvedConfig.Model.Model
+			env["AGENT_GATEWAY_MODEL"] = provider + "/" + model
 		}
 	}
 

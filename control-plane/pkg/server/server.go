@@ -258,6 +258,7 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 	ns := notify.NewService(dataStore)
 	baseURL := fmt.Sprintf("http://localhost:%d", cfg.Port)
 	wf := workflow.NewEngine(dataStore, ns, baseURL)
+	wf.SetPricer(mr.Settle)
 
 	log.Info().Msg("✅ Model Router initialized")
 	log.Info().Msg("✅ MCP Gateway initialized")

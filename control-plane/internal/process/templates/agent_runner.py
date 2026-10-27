@@ -827,7 +827,17 @@ def _a2a_create_task(task_id, user_message, provider_config=None):
     tasks[task_id] = task
     previous_ssl_context = _set_request_ssl_context(provider_config or {})
     try:
-        response_text, _ = run_invoke(user_message, trace_id=task_id)
+        t0 = time.time()
+        response_text, usage = run_invoke(user_message, trace_id=task_id)
+        # What the call used, and turn by turn what it did, so a recipe step that runs this agent has
+        # tokens, cost and spans like any other run. The control plane prices the turns.
+        task["usage"] = {k: usage.get(k, 0) for k in ("input_tokens", "output_tokens", "total_tokens", "cached_tokens", "cache_creation", "thinking_tokens")}
+        task["metadata"] = {"exec_trace": {
+            "trace_id": task_id, "agent_name": AGENT_NAME, "kitchen": AGENT_KITCHEN,
+            "total_ms": int((time.time() - t0) * 1000),
+            "usage": task["usage"],
+            "turns": getattr(_REQ, "turns", []),
+        }}
         task["artifacts"].append({"parts": [{"type": "text", "text": response_text}]})
         task["status"] = {"state": "completed"}
         task["history"].append({

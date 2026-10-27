@@ -174,7 +174,7 @@ func (h *Handlers) CreateTask(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if agent.Mode != models.AgentModeManaged {
+	if !agent.IsManaged() {
 		respondError(w, http.StatusBadRequest, fmt.Sprintf("agent '%s' is in '%s' mode; tasks run managed agents", agent.Name, agent.Mode))
 		return
 	}
