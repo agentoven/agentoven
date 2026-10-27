@@ -53,6 +53,10 @@ func TestAnUnconfinedLocalBotIsRefusedUnlessDevelopmentOptIn(t *testing.T) {
 
 func TestABotManagerRefusalStopsTheStartBeforeAPortIsTaken(t *testing.T) {
 	t.Setenv("AGENTOVEN_BOT_ALLOW_LOCAL", "true")
+	// Whether 9100 is free on the machine running the test is not what is being tested.
+	real := portFree
+	portFree = func(int) bool { return true }
+	defer func() { portFree = real }()
 	m := NewManager()
 	m.SetBotControl(&fakeBots{err: errors.New("kill switch is on")})
 	_, err := m.Start(context.Background(), botAgent())

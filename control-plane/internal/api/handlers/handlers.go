@@ -3257,7 +3257,7 @@ func (h *Handlers) A2AAgentEndpoint(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		backendURL, backendReason := h.resolveEnvBackendEndpoint(agent, envSlug)
+		backendURL, backendReason := h.resolveEnvBackendEndpoint(r.Context(), agent, envSlug)
 		if backendURL == "" {
 			w.Header().Set("Content-Type", "application/a2a+json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3294,7 +3294,7 @@ func (h *Handlers) A2AAgentEndpoint(w http.ResponseWriter, r *http.Request) {
 	//   - Managed agents: ProcessInfo.Endpoint (local/docker/k8s subprocess)
 	//   - External agents: BackendEndpoint (user-provided URL)
 	// This ensures auth, RBAC, observability, and rate-limiting for every call.
-	backendURL, backendReason := h.ResolveBackendEndpoint(agent)
+	backendURL, backendReason := h.liveBackend(r.Context(), agent)
 	if backendURL == "" {
 		w.Header().Set("Content-Type", "application/a2a+json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3437,7 +3437,7 @@ func (h *Handlers) A2AAgentEnvEndpoint(w http.ResponseWriter, r *http.Request) {
 
 	// Resolve env-specific backend: look for the A2A endpoint registered
 	// for this environment slug on the agent record, then fall back to global.
-	backendURL, backendReason := h.resolveEnvBackendEndpoint(agent, envSlug)
+	backendURL, backendReason := h.resolveEnvBackendEndpoint(r.Context(), agent, envSlug)
 	if backendURL == "" {
 		a2aError(-32003, "No backend available", "Agent has no backend for environment '"+envSlug+"'")
 		return
@@ -3457,7 +3457,7 @@ func (h *Handlers) A2AAgentEnvEndpoint(w http.ResponseWriter, r *http.Request) {
 // environment. Checks agent.EnvEndpoints[envSlug] first (set by the operator
 // when a K8s workload reaches Running in that env), then falls back to the
 // global ResolveBackendEndpoint.
-func (h *Handlers) resolveEnvBackendEndpoint(agent *models.Agent, envSlug string) (string, string) {
+func (h *Handlers) resolveEnvBackendEndpoint(ctx context.Context, agent *models.Agent, envSlug string) (string, string) {
 	// Env-specific endpoint map populated by the operator per-env workload
 	if agent.EnvEndpoints != nil {
 		if ep, ok := agent.EnvEndpoints[envSlug]; ok && ep != "" {
@@ -3465,7 +3465,7 @@ func (h *Handlers) resolveEnvBackendEndpoint(agent *models.Agent, envSlug string
 		}
 	}
 	// Fall back to global backend (handles non-env baked agents gracefully)
-	url, reason := h.ResolveBackendEndpoint(agent)
+	url, reason := h.liveBackend(ctx, agent)
 	if url != "" {
 		return url, "global_fallback_" + reason
 	}
@@ -4302,6 +4302,12 @@ func (h *Handlers) proxyToProcess(
 	kitchen string,
 ) (string, *models.Trace, error) {
 	if agent.Process == nil || agent.Process.Status != models.ProcessRunning {
+		// Not recorded as running: bring it back if this control plane runs it.
+		if err := h.ensureProcess(ctx, agent); err != nil {
+			return "", nil, fmt.Errorf("agent '%s': %w", agent.Name, err)
+		}
+	}
+	if agent.Process == nil || agent.Process.Status != models.ProcessRunning {
 		return "", nil, fmt.Errorf("agent '%s' process is not running — bake it first", agent.Name)
 	}
 
@@ -4670,6 +4676,13 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	// This works for all runtimes (agentoven-native and framework-native alike).
 	// Framework-native agents without a running process are an error; agentoven-
 	// native agents without a process fall back to the in-process Go executor.
+	if agent.IsFrameworkNative() && (agent.Process == nil || agent.Process.Status != models.ProcessRunning) {
+		// Its process is the only thing that can run it: bring it back rather than fail.
+		if err := h.ensureProcess(r.Context(), agent); err != nil {
+			respondError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+	}
 	if agent.Process != nil && agent.Process.Status == models.ProcessRunning {
 		hostedCtx, endRun := h.beginHostedRun(withThinking(withCallerSession(r.Context(), req.SessionID), req.ThinkingEnabled), agent)
 		response, traceRecord, err := h.proxyToProcess(hostedCtx, agent, req.Message, sanitizedVars, nil, kitchen)
@@ -4870,6 +4883,12 @@ func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if agent.IsFrameworkNative() && (agent.Process == nil || agent.Process.Status != models.ProcessRunning) {
+		if err := h.ensureProcess(r.Context(), agent); err != nil {
+			respondError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+	}
 	if agent.Process != nil && agent.Process.Status == models.ProcessRunning {
 		sanitizedVars := req.Variables
 		if sanitizedVars == nil {

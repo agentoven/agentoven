@@ -55,6 +55,14 @@ MODEL_PROVIDER    = os.environ.get("AGENT_MODEL_PROVIDER", "openai")
 MODEL_NAME        = os.environ.get("AGENT_MODEL_NAME", "gpt-4o")
 API_KEY           = os.environ.get("AGENT_API_KEY", "")
 API_ENDPOINT      = os.environ.get("AGENT_API_ENDPOINT", "")
+# With the control plane's metered model gateway, AGENT_API_ENDPOINT is the gateway's OpenAI-compatible
+# base URL (already ending in /v1), AGENT_API_KEY a credential for it, and the model is named
+# "provider/model". Every call then speaks the OpenAI protocol whatever the provider kind is: the
+# gateway translates for the real provider.
+GATEWAY           = os.environ.get("AGENT_MODEL_GATEWAY", "") == "openai"
+GATEWAY_MODEL     = os.environ.get("AGENT_GATEWAY_MODEL", "")
+RUN_ID_HEADER     = "X-AgentOven-Run-Id"
+WIRE              = "openai" if GATEWAY else MODEL_PROVIDER   # the protocol the model calls speak
 SKILLS            = [s.strip() for s in os.environ.get("AGENT_SKILLS", "").split(",") if s.strip()]
 MAX_TURNS         = int(os.environ.get("AGENT_MAX_TURNS", "10"))
 
@@ -226,19 +234,21 @@ def _set_last(info):
 
 def _get_api_url():
     """Return the chat completions URL for the configured provider."""
+    if GATEWAY and API_ENDPOINT:
+        return API_ENDPOINT.rstrip("/") + "/chat/completions"
     if API_ENDPOINT:
         base = API_ENDPOINT.rstrip("/")
-        if MODEL_PROVIDER == "azure-openai":
+        if WIRE == "azure-openai":
             return f"{base}/openai/deployments/{MODEL_NAME}/chat/completions?api-version=2024-12-01-preview"
-        if MODEL_PROVIDER == "ollama":
+        if WIRE == "ollama":
             return f"{base}/api/chat"
         return f"{base}/v1/chat/completions"
 
-    if MODEL_PROVIDER == "openai":
+    if WIRE == "openai":
         return "https://api.openai.com/v1/chat/completions"
-    if MODEL_PROVIDER == "anthropic":
+    if WIRE == "anthropic":
         return "https://api.anthropic.com/v1/messages"
-    if MODEL_PROVIDER == "ollama":
+    if WIRE == "ollama":
         return "http://localhost:11434/api/chat"
     return "https://api.openai.com/v1/chat/completions"
 
@@ -247,7 +257,7 @@ def _build_llm_request(messages, tools=None, stream=False):
     """Return (url, headers, body) for a chat completion request."""
     url = _get_api_url()
 
-    if MODEL_PROVIDER == "anthropic":
+    if WIRE == "anthropic":
         system_msg = ""
         user_msgs = []
         for m in messages:
@@ -283,7 +293,7 @@ def _build_llm_request(messages, tools=None, stream=False):
             "anthropic-version": "2023-06-01",
         }
 
-    elif MODEL_PROVIDER == "ollama":
+    elif WIRE == "ollama":
         body = {
             "model": MODEL_NAME,
             "messages": messages,
@@ -296,7 +306,7 @@ def _build_llm_request(messages, tools=None, stream=False):
     else:
         # OpenAI / Azure OpenAI compatible
         body = {
-            "model": MODEL_NAME,
+            "model": GATEWAY_MODEL if (GATEWAY and GATEWAY_MODEL) else MODEL_NAME,
             "messages": messages,
             "max_completion_tokens": 4096,
             "stream": stream,
@@ -309,10 +319,15 @@ def _build_llm_request(messages, tools=None, stream=False):
         if _thinking_on() and _REASONING_MODEL.search(MODEL_NAME.lower()):
             body["reasoning_effort"] = _reasoning_effort()
 
-        if MODEL_PROVIDER == "azure-openai":
+        if WIRE == "azure-openai":
             headers = {"Content-Type": "application/json", "api-key": API_KEY}
         else:
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {API_KEY}"}
+
+    # The gateway holds a run to its budget: it needs to know which run this call belongs to.
+    run_id = getattr(_REQ, "run_id", "")
+    if GATEWAY and run_id:
+        headers[RUN_ID_HEADER] = run_id
 
     return url, headers, body
 
@@ -329,9 +344,9 @@ def call_llm(messages):
         error_body = e.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"LLM API error {e.code}: {error_body}")
 
-    if MODEL_PROVIDER == "anthropic":
+    if WIRE == "anthropic":
         return result.get("content", [{}])[0].get("text", "")
-    if MODEL_PROVIDER == "ollama":
+    if WIRE == "ollama":
         return result.get("message", {}).get("content", "")
     return result.get("choices", [{}])[0].get("message", {}).get("content", "")
 
@@ -352,7 +367,7 @@ def _call_llm_with_tools(messages, tools):
         error_body = e.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"LLM API error {e.code}: {error_body}")
 
-    if MODEL_PROVIDER == "anthropic":
+    if WIRE == "anthropic":
         raw_usage = result.get("usage", {})
         cache_read = raw_usage.get("cache_read_input_tokens", 0) or 0
         cache_write = raw_usage.get("cache_creation_input_tokens", 0) or 0
@@ -391,7 +406,7 @@ def _call_llm_with_tools(messages, tools):
         _set_last({"thinking": thinking, "raw_thinking": raw_thinking})
         return "\n".join(text_parts), tool_calls, usage
 
-    elif MODEL_PROVIDER == "ollama":
+    elif WIRE == "ollama":
         msg = result.get("message", {})
         text, tagged = _split_think_tags(msg.get("content", ""))
         thinking = [{"content": t} for t in ([msg["thinking"]] if msg.get("thinking") else []) + tagged]
@@ -461,7 +476,7 @@ def _call_llm_stream(messages, tools, on_token, on_tool_call_start, on_usage):
                 except Exception:
                     continue
 
-                if MODEL_PROVIDER == "anthropic":
+                if WIRE == "anthropic":
                     ctype = chunk.get("type", "")
                     if ctype == "content_block_delta":
                         delta = chunk.get("delta", {})
@@ -671,7 +686,7 @@ def run_invoke(message, variables=None, trace_id="", max_turns=None):
             return text or "", total_usage
 
         # Append assistant turn with tool call declarations
-        if MODEL_PROVIDER == "anthropic":
+        if WIRE == "anthropic":
             # With thinking on, the assistant turn must start with the blocks the model produced.
             blocks = list(last.get("raw_thinking", [])) if _thinking_on() else []
             if text:
@@ -711,7 +726,7 @@ def run_invoke(message, variables=None, trace_id="", max_turns=None):
                 "is_error": str(result).startswith(("Tool error", "Delegation error", "Delegation failed")),
             })
 
-            if MODEL_PROVIDER == "anthropic":
+            if WIRE == "anthropic":
                 messages.append({
                     "role": "user",
                     "content": [{"type": "tool_result", "tool_use_id": tc["id"], "content": str(result)}],
@@ -960,6 +975,11 @@ class AgentHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._respond_json(400, {"error": "invalid JSON"})
             return
+
+        # The run this call is accounted to, named by the control plane (header, or the body of /invoke).
+        _REQ.run_id = self.headers.get(RUN_ID_HEADER, "") or (request.get("run_id", "") if isinstance(request, dict) else "")
+        _REQ.thinking = False
+        _REQ.thinking_budget = 0
 
         path = self.path.split("?")[0]
 

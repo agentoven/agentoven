@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"github.com/agentoven/agentoven/control-plane/pkg/a2aauth"
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
+	"net"
 	"os"
 	"sync"
 	"time"
@@ -45,10 +46,23 @@ func newPortAllocator(startPort int) *portAllocator {
 	}
 }
 
+// portFree reports whether nothing is listening on the port. A variable so tests can stand in.
+var portFree = func(port int) bool {
+	l, err := net.Listen("tcp4", fmt.Sprintf("0.0.0.0:%d", port)) // the family the runners bind
+	if err != nil {
+		return false
+	}
+	_ = l.Close()
+	return true
+}
+
+// Allocate hands out the next port that is neither ours nor in use by something else. Handing out a
+// port another process holds (a runner orphaned by an earlier crash, an unrelated service) makes the
+// agent's process fail to bind and the bake burn the agent.
 func (pa *portAllocator) Allocate() int {
 	pa.mu.Lock()
 	defer pa.mu.Unlock()
-	for pa.used[pa.nextPort] {
+	for pa.used[pa.nextPort] || !portFree(pa.nextPort) {
 		pa.nextPort++
 	}
 	port := pa.nextPort

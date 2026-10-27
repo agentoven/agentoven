@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 🩹 Hosted agents answer again: A2A and recipe runs
+
+- **A hosted agent's process is brought back when it is needed.** After a server restart (or a crash) an agent was still `ready` but its process was gone, so A2A calls failed with "Backend unreachable: connection refused" and every recipe step that used the agent failed with them. The first call that needs the process now starts it (once, even when several recipe steps need it together) and records where it is. Agents on Kubernetes and external agents are left alone.
+- **The built-in runner speaks the model gateway.** With Pro's metered gateway in front of model calls (the default in Pro) the runner built the wrong URL and used the provider's own wire format, so every model call was refused and A2A tasks and recipe steps failed. It now sends gateway calls in the OpenAI shape with its credential, the `provider/model` name and its run's ID.
+- **A port something else holds is skipped.** An agent process was given port 9100 and up without checking, so a leftover process on that port made the bake fail with "exited before becoming ready" and burn the agent.
+- **Pro now stops agent processes on shutdown.** Its `main` returned as soon as the HTTP server closed, before the shutdown goroutine had stopped the agent processes, so some were left running (and holding their ports) after every restart.
+
 ### 🔎 Calls the platform makes for itself are named in traces
 
 - Skill verification (the model review that decides whether a skill can be used) was recorded as an anonymous `router` call. It is now `skill-verifier`, with `purpose: skill_verification` and the skill's name on the trace and its root span, and shows its prompt, the verdict and the provider it went to as spans. The RAG pipeline's own model calls (HyDE, question decomposition, the answer) are `rag:hyde`, `rag:decompose` and `rag:answer`.
