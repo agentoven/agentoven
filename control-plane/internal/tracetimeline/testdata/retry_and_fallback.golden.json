@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "trace_id": "t1",
+  "environment": "prod",
+  "agent_version": "1.2.0",
+  "started_at": "2026-10-29T09:00:00Z",
+  "total_ms": 900,
+  "critical_path_ms": 900,
+  "span_count": 7,
+  "truncated": false,
+  "spans": [
+    {
+      "id": "route",
+      "depth": 0,
+      "kind": "chain",
+      "name": "router.route",
+      "status": "completed",
+      "offset_ms": 0,
+      "duration_ms": 900,
+      "critical": true
+    },
+    {
+      "id": "f1",
+      "parent_id": "route",
+      "depth": 1,
+      "kind": "llm",
+      "name": "llm.azure",
+      "status": "failed",
+      "offset_ms": 0,
+      "duration_ms": 300,
+      "critical": true,
+      "attempt": 1,
+      "error": "429"
+    },
+    {
+      "id": "tool1",
+      "parent_id": "route",
+      "depth": 1,
+      "kind": "tool",
+      "name": "lookup",
+      "status": "failed",
+      "offset_ms": 0,
+      "duration_ms": 10,
+      "attempt": 1
+    },
+    {
+      "id": "tool2",
+      "parent_id": "route",
+      "depth": 1,
+      "kind": "tool",
+      "name": "lookup",
+      "status": "completed",
+      "offset_ms": 20,
+      "duration_ms": 10,
+      "attempt": 2,
+      "retry_of": "tool1"
+    },
+    {
+      "id": "tool3",
+      "parent_id": "route",
+      "depth": 1,
+      "kind": "tool",
+      "name": "lookup",
+      "status": "completed",
+      "offset_ms": 40,
+      "duration_ms": 10
+    },
+    {
+      "id": "f2",
+      "parent_id": "route",
+      "depth": 1,
+      "kind": "llm",
+      "name": "llm.openai",
+      "status": "failed",
+      "offset_ms": 300,
+      "duration_ms": 200,
+      "critical": true,
+      "attempt": 2,
+      "retry_of": "f1",
+      "error": "500"
+    },
+    {
+      "id": "ok",
+      "parent_id": "route",
+      "depth": 1,
+      "kind": "llm",
+      "name": "llm.anthropic",
+      "status": "completed",
+      "offset_ms": 500,
+      "duration_ms": 400,
+      "critical": true,
+      "attempt": 3,
+      "retry_of": "f2",
+      "model": "claude",
+      "provider": "openai",
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10,
+        "total_tokens": 60,
+        "estimated_cost_usd": 0.001,
+        "price_source": "catalog"
+      },
+      "cost_usd": 0.001,
+      "price_source": "catalog"
+    }
+  ],
+  "models": [
+    {
+      "model": "claude",
+      "provider": "openai",
+      "calls": 1,
+      "input_tokens": 50,
+      "output_tokens": 10,
+      "total_tokens": 60,
+      "cost_usd": 0.001
+    }
+  ],
+  "lanes": [],
+  "totals": {
+    "input_tokens": 50,
+    "output_tokens": 10,
+    "total_tokens": 60,
+    "estimated_cost_usd": 0.001
+  }
+}

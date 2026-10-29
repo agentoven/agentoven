@@ -746,6 +746,12 @@ func (m *MemoryStore) matchTrace(t *models.Trace, kitchen string, f TraceFilter)
 	if f.SessionID != "" && t.SessionID != f.SessionID {
 		return false
 	}
+	if f.Environment != "" && t.Environment != f.Environment {
+		return false
+	}
+	if f.AgentVersion != "" && t.AgentVersion != f.AgentVersion {
+		return false
+	}
 	if f.ParentTraceID != "" && t.ParentTraceID != f.ParentTraceID {
 		return false
 	}
@@ -938,7 +944,8 @@ func (m *MemoryStore) GetTrace(_ context.Context, id string) (*models.Trace, err
 	return &copy, nil
 }
 
-func (m *MemoryStore) CreateTrace(_ context.Context, trace *models.Trace) error {
+func (m *MemoryStore) CreateTrace(ctx context.Context, trace *models.Trace) error {
+	trace.Stamp(ctx)
 	m.mu.Lock()
 	copy := *trace
 	m.traces[trace.ID] = &copy
@@ -973,6 +980,13 @@ func (m *MemoryStore) UpdateTrace(_ context.Context, trace *models.Trace) error 
 		return &ErrNotFound{Entity: "trace", Key: trace.ID}
 	}
 	copy := *trace
+	// A rewrite that does not name them keeps where the trace ran.
+	if old := m.traces[trace.ID]; copy.Environment == "" {
+		copy.Environment = old.Environment
+	}
+	if old := m.traces[trace.ID]; copy.AgentVersion == "" {
+		copy.AgentVersion = old.AgentVersion
+	}
 	m.traces[trace.ID] = &copy
 	m.requestSave()
 	return nil
@@ -1403,7 +1417,8 @@ func (m *MemoryStore) UpsertKitchenSettings(_ context.Context, settings *models.
 
 // ── Audit Store ─────────────────────────────────────────────
 
-func (m *MemoryStore) CreateAuditEvent(_ context.Context, event *models.AuditEvent) error {
+func (m *MemoryStore) CreateAuditEvent(ctx context.Context, event *models.AuditEvent) error {
+	event.StampTrace(ctx)
 	m.mu.Lock()
 	copy := *event
 	m.auditEvents = append(m.auditEvents, &copy)
@@ -1428,6 +1443,12 @@ func (m *MemoryStore) ListAuditEvents(_ context.Context, filter models.AuditFilt
 			continue
 		}
 		if filter.Resource != "" && e.Resource != filter.Resource {
+			continue
+		}
+		if len(filter.TraceIDs) > 0 && !containsString(filter.TraceIDs, e.TraceID) {
+			continue
+		}
+		if filter.HasTraceID && e.TraceID == "" {
 			continue
 		}
 		if filter.Since != nil && e.Timestamp.Before(*filter.Since) {
@@ -1466,6 +1487,12 @@ func (m *MemoryStore) CountAuditEvents(_ context.Context, filter models.AuditFil
 			continue
 		}
 		if filter.Environment != "" && e.Environment != filter.Environment {
+			continue
+		}
+		if len(filter.TraceIDs) > 0 && !containsString(filter.TraceIDs, e.TraceID) {
+			continue
+		}
+		if filter.HasTraceID && e.TraceID == "" {
 			continue
 		}
 		if filter.Since != nil && e.Timestamp.Before(*filter.Since) {
@@ -2509,3 +2536,12 @@ func (m *MemoryStore) CheckCrossKitchenAccess(_ context.Context, sourceKitchen, 
 
 // Compile-time check that MemoryStore implements Store.
 var _ Store = (*MemoryStore)(nil)
+
+func containsString(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}

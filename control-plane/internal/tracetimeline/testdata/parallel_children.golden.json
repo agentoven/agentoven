@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "trace_id": "t1",
+  "environment": "prod",
+  "agent_version": "1.2.0",
+  "started_at": "2026-10-29T09:00:00Z",
+  "total_ms": 1000,
+  "critical_path_ms": 1000,
+  "span_count": 5,
+  "truncated": false,
+  "spans": [
+    {
+      "id": "root",
+      "depth": 0,
+      "kind": "chain",
+      "name": "recipe",
+      "status": "completed",
+      "offset_ms": 0,
+      "duration_ms": 1000,
+      "critical": true
+    },
+    {
+      "id": "a",
+      "parent_id": "root",
+      "depth": 1,
+      "kind": "agent",
+      "name": "branch-a",
+      "status": "completed",
+      "offset_ms": 100,
+      "duration_ms": 300
+    },
+    {
+      "id": "b",
+      "parent_id": "root",
+      "depth": 1,
+      "kind": "agent",
+      "name": "branch-b",
+      "status": "completed",
+      "offset_ms": 100,
+      "duration_ms": 700,
+      "critical": true
+    },
+    {
+      "id": "b1",
+      "parent_id": "b",
+      "depth": 2,
+      "kind": "tool",
+      "name": "step-b1",
+      "status": "completed",
+      "offset_ms": 100,
+      "duration_ms": 200,
+      "critical": true
+    },
+    {
+      "id": "b2",
+      "parent_id": "b",
+      "depth": 2,
+      "kind": "tool",
+      "name": "step-b2",
+      "status": "completed",
+      "offset_ms": 300,
+      "duration_ms": 500,
+      "critical": true
+    }
+  ],
+  "models": [],
+  "lanes": [],
+  "totals": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0,
+    "estimated_cost_usd": 0
+  }
+}

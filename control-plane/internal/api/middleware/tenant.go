@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	pkgmw "github.com/agentoven/agentoven/control-plane/pkg/middleware"
+	"github.com/agentoven/agentoven/control-plane/pkg/models"
 )
 
 type contextKey string
@@ -25,6 +26,9 @@ func TenantExtractor(next http.Handler) http.Handler {
 		// Use pkg/middleware for the kitchen context key (shared with enterprise repo)
 		ctx := pkgmw.SetKitchen(r.Context(), kitchen)
 		ctx = context.WithValue(ctx, TenantIDKey, kitchen)
+		if env := pkgmw.EnvironmentFromRequest(r); env != "" {
+			ctx = models.WithTraceStamp(ctx, models.TraceStamp{Environment: env})
+		}
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

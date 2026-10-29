@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "trace_id": "t1",
+  "environment": "prod",
+  "agent_version": "1.2.0",
+  "started_at": "2026-10-29T09:00:00Z",
+  "total_ms": 1000,
+  "critical_path_ms": 1000,
+  "span_count": 4,
+  "truncated": false,
+  "spans": [
+    {
+      "id": "root",
+      "depth": 0,
+      "kind": "agent",
+      "name": "agent",
+      "status": "completed",
+      "offset_ms": 0,
+      "duration_ms": 1000,
+      "critical": true
+    },
+    {
+      "id": "hosted",
+      "parent_id": "root",
+      "depth": 1,
+      "kind": "agent",
+      "name": "hosted-agent",
+      "status": "completed",
+      "offset_ms": 0,
+      "duration_ms": 1000,
+      "critical": true,
+      "skew": true
+    },
+    {
+      "id": "rounded",
+      "parent_id": "root",
+      "depth": 1,
+      "kind": "tool",
+      "name": "rounded",
+      "status": "completed",
+      "offset_ms": 900,
+      "duration_ms": 100
+    },
+    {
+      "id": "late",
+      "parent_id": "root",
+      "depth": 1,
+      "kind": "tool",
+      "name": "late",
+      "status": "completed",
+      "offset_ms": 1000,
+      "duration_ms": 0
+    }
+  ],
+  "models": [],
+  "lanes": [],
+  "totals": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0,
+    "estimated_cost_usd": 0
+  }
+}

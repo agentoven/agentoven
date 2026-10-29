@@ -103,6 +103,10 @@ type Turn struct {
 	Provider string                `json:"provider,omitempty"`
 	Model    string                `json:"model,omitempty"`
 	Attempts []models.RouteAttempt `json:"attempts,omitempty"`
+	// SpanID is the span this turn's model call is recorded under. It is chosen when the call is
+	// made, so a capture hook can file the whole call under it even though the run's spans are
+	// written when the run ends. Empty on a turn replayed from a journal written before this field.
+	SpanID string `json:"span_id,omitempty"`
 }
 
 // ToolGateway is the executor's view of the MCP gateway: it dispatches a tool

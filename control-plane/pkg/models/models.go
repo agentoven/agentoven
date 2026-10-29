@@ -769,6 +769,12 @@ type Trace struct {
 	Usage           *TokenUsage            `json:"usage,omitempty"`
 	RuntimeMetadata map[string]interface{} `json:"runtime_metadata,omitempty"`
 
+	// Environment is the slug of the environment the call was made for, and AgentVersion the baked
+	// version of the agent that ran (ADR-0039). The version names the system prompt: the exact text
+	// that was sent is the system message of the captured request.
+	Environment  string `json:"environment,omitempty"`
+	AgentVersion string `json:"agent_version,omitempty"`
+
 	// Spans are loaded eagerly by GetTrace (with spans=true) or ListSpansByTrace.
 	// Not persisted on the Trace row itself — stored in the spans table/map.
 	Spans []Span `json:"spans,omitempty" db:"-"`
@@ -1841,6 +1847,10 @@ type AuditEvent struct {
 	RegulationTags     []string               `json:"regulation_tags,omitempty"`              // HIPAA, SOC2, GxP, GDPR
 	DataClassification string                 `json:"data_classification,omitempty"`          // public, internal, confidential, restricted
 	Environment        string                 `json:"environment,omitempty" db:"environment"` // env slug — set on env-scoped A2A calls
+	// TraceID is the trace the event belongs to, when it belongs to one (ADR-0039). It is also written
+	// into Details["trace_id"], which a hash chain covers; this field is the derived column used to
+	// look events up and is not itself hashed. See StampTrace.
+	TraceID string `json:"trace_id,omitempty" db:"trace_id"`
 
 	// Principal attribution (ADR-0031 §4)
 	Phase         AuditPhase `json:"phase,omitempty" db:"phase"`
@@ -1864,10 +1874,14 @@ type AuditFilter struct {
 	Action      string
 	Resource    string
 	Environment string
-	Since       *time.Time
-	Until       *time.Time
-	Limit       int
-	Offset      int
+	// TraceIDs limits the list to events of these traces (one trace, or a recipe run's whole tree).
+	TraceIDs []string
+	// HasTraceID limits the list to events that belong to some trace.
+	HasTraceID bool
+	Since    *time.Time
+	Until    *time.Time
+	Limit    int
+	Offset   int
 
 	// Chain walking (ADR-0031 §2) — verification pages through events in
 	// sequence order, which offset-based paging cannot guarantee.

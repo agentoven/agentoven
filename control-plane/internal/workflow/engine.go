@@ -473,6 +473,9 @@ func (e *Engine) executeAsync(ctx context.Context, run *models.RecipeRun, recipe
 		e.runsMu.Unlock()
 	}()
 
+	// Every trace this run writes says which environment it was for (ADR-0039).
+	ctx = models.WithTraceStamp(ctx, models.TraceStamp{Environment: run.Environment})
+
 	// Create a parent trace for the entire recipe run
 	recipeStart := time.Now().UTC()
 	parentTraceID := uuid.New().String()
@@ -936,6 +939,9 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 			}
 		}
 	}
+
+	// The traces this step writes name the version that ran: the pinned one in an environment.
+	ctx = models.WithTraceStamp(ctx, models.TraceStamp{AgentVersion: agent.Version})
 
 	switch agent.Status {
 	case models.AgentStatusReady:

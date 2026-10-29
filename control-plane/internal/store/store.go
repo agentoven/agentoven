@@ -107,6 +107,8 @@ type TraceFilter struct {
 	Model         string // the trace used this model (on its own or on any of its spans)
 	Provider      string // the trace used this provider
 	Tag           string // the trace carries this tag
+	Environment   string // exact match on the environment slug
+	AgentVersion  string // exact match on the agent's baked version
 	SessionID     string // exact match on session_id
 	ParentTraceID string // children of this trace
 	RootsOnly     bool   // only traces with no parent

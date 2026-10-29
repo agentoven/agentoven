@@ -22,6 +22,7 @@ import (
 //	agent, recipe, status, model, provider, tag, session, parent   exact matches
 //	roots=true                       only traces with no parent
 //	q                                text in the input, the output, the agent name or the ID
+//	environment, agent_version       exact match (ADR-0039)
 //	min_cost, max_cost               dollars
 //	min_duration, max_duration       milliseconds
 //	range=1h|24h|7d|30d              or since / until as RFC 3339 times
@@ -34,6 +35,7 @@ func (h *Handlers) traceFilterFrom(r *http.Request, kitchen string) store.TraceF
 		AgentName: q.Get("agent"), RecipeName: q.Get("recipe"), Status: q.Get("status"),
 		Model: q.Get("model"), Provider: q.Get("provider"), Tag: q.Get("tag"),
 		SessionID: q.Get("session"), ParentTraceID: q.Get("parent"),
+		Environment: q.Get("environment"), AgentVersion: q.Get("agent_version"),
 		RootsOnly: q.Get("roots") == "true", Search: strings.TrimSpace(q.Get("q")),
 		SortBy: q.Get("sort"), Asc: strings.EqualFold(q.Get("order"), "asc"),
 		Limit: 500,

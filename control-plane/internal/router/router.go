@@ -106,6 +106,9 @@ type ModelRouter struct {
 	costMu sync.RWMutex
 	costs  map[string]*models.CostSummary
 
+	// capturer, when set, is handed every call that gets a span, whole (ADR-0039).
+	capturer models.LLMCallCapturer
+
 	// ProviderDriver registry — maps provider kind to its driver.
 	// OSS registers openai, azure-openai, anthropic, ollama, gemini at init.
 	// Pro calls RegisterDriver("bedrock", ...) etc. to add enterprise drivers.
@@ -2028,6 +2031,13 @@ func (mr *ModelRouter) callAnthropicTest(ctx context.Context, provider *models.M
 	return &models.RouteResponse{Provider: provider.Name, Model: model}, nil
 }
 
+// SetCallCapturer installs the hook that receives every routed call, complete. Pass nil to remove it.
+// It is set once at start-up, before the router serves a request.
+func (mr *ModelRouter) SetCallCapturer(c models.LLMCallCapturer) { mr.capturer = c }
+
+// CallCapturer is the installed hook, so the executor, which records its own spans, can use the same one.
+func (mr *ModelRouter) CallCapturer() models.LLMCallCapturer { return mr.capturer }
+
 // finishRoute records what a routed request did: one trace, with a root span for the request and a
 // child span for every provider tried (the failures with their errors, the one that answered with its
 // model, usage, cost, the model's reasoning and its answer). The executor passes ContextSkipTrace,
@@ -2101,10 +2111,13 @@ func (mr *ModelRouter) finishRoute(ctx context.Context, req *models.RouteRequest
 
 	// Each provider tried is a span, in order: the failed ones, then the one that answered.
 	cursor := started.UTC()
+	var calls []models.LLMCall
 	for _, a := range attempts {
 		end := cursor.Add(time.Duration(a.LatencyMs) * time.Millisecond)
+		attemptID := uuid.New().String()
+		calls = append(calls, models.LLMCall{SpanID: attemptID, StartedAt: cursor, Error: a.Error})
 		spans = append(spans, models.Span{
-			ID: uuid.New().String(), TraceID: traceID, ParentSpanID: rootID,
+			ID: attemptID, TraceID: traceID, ParentSpanID: rootID,
 			Name: "llm." + a.Provider, Kind: models.SpanKindLLM, Status: "failed",
 			StartTime: cursor, EndTime: end, DurationMs: a.LatencyMs,
 			Model: a.Model, Provider: a.Provider, Error: a.Error,
@@ -2136,8 +2149,10 @@ func (mr *ModelRouter) finishRoute(ctx context.Context, req *models.RouteRequest
 		if end.After(now) {
 			end = now
 		}
+		answerID := uuid.New().String()
+		calls = append(calls, models.LLMCall{SpanID: answerID, StartedAt: cursor, Response: resp})
 		spans = append(spans, models.Span{
-			ID: uuid.New().String(), TraceID: traceID, ParentSpanID: rootID,
+			ID: answerID, TraceID: traceID, ParentSpanID: rootID,
 			Name: "llm." + resp.Provider, Kind: models.SpanKindLLM, Status: "completed",
 			StartTime: cursor, EndTime: end, DurationMs: resp.LatencyMs,
 			Input: inJSON, Output: out, Usage: &usage, Model: resp.Model, Provider: resp.Provider,
@@ -2159,6 +2174,15 @@ func (mr *ModelRouter) finishRoute(ctx context.Context, req *models.RouteRequest
 	}
 	if err := mr.store.CreateSpans(ctx, spans); err != nil {
 		log.Warn().Err(err).Str("trace_id", traceID).Msg("Failed to record spans for routed request")
+		return
+	}
+	if mr.capturer != nil {
+		for _, c := range calls {
+			c.TraceID, c.Kitchen, c.AgentName, c.Request = traceID, kitchen, agentName, req
+			if err := mr.capturer.CaptureLLMCall(ctx, c); err != nil {
+				log.Warn().Err(err).Str("trace_id", traceID).Str("span_id", c.SpanID).Msg("Failed to capture routed call")
+			}
+		}
 	}
 }
 

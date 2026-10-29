@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "trace_id": "t1",
+  "environment": "prod",
+  "agent_version": "1.2.0",
+  "started_at": "2026-10-29T09:00:00Z",
+  "total_ms": 1000,
+  "critical_path_ms": 1000,
+  "span_count": 7,
+  "truncated": false,
+  "spans": [
+    {
+      "id": "root",
+      "depth": 0,
+      "kind": "agent",
+      "name": "agent",
+      "status": "completed",
+      "offset_ms": 0,
+      "duration_ms": 1000,
+      "critical": true
+    },
+    {
+      "id": "kid",
+      "parent_id": "root",
+      "depth": 1,
+      "kind": "tool",
+      "name": "kid",
+      "status": "completed",
+      "offset_ms": 10,
+      "duration_ms": 10,
+      "critical": true
+    },
+    {
+      "id": "lost",
+      "depth": 1,
+      "kind": "tool",
+      "name": "lost",
+      "status": "completed",
+      "offset_ms": 20,
+      "duration_ms": 10,
+      "critical": true,
+      "orphan": true
+    },
+    {
+      "id": "lost-kid",
+      "parent_id": "lost",
+      "depth": 2,
+      "kind": "tool",
+      "name": "lost-kid",
+      "status": "completed",
+      "offset_ms": 21,
+      "duration_ms": 5,
+      "critical": true
+    },
+    {
+      "id": "second-root",
+      "depth": 1,
+      "kind": "agent",
+      "name": "second-root",
+      "status": "completed",
+      "offset_ms": 30,
+      "duration_ms": 10,
+      "critical": true,
+      "orphan": true
+    },
+    {
+      "id": "loop-a",
+      "depth": 1,
+      "kind": "tool",
+      "name": "loop-a",
+      "status": "completed",
+      "offset_ms": 40,
+      "duration_ms": 10,
+      "critical": true,
+      "orphan": true
+    },
+    {
+      "id": "loop-b",
+      "parent_id": "loop-a",
+      "depth": 2,
+      "kind": "tool",
+      "name": "loop-b",
+      "status": "completed",
+      "offset_ms": 41,
+      "duration_ms": 5,
+      "critical": true
+    }
+  ],
+  "models": [],
+  "lanes": [],
+  "totals": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0,
+    "estimated_cost_usd": 0
+  }
+}

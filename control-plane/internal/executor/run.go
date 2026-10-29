@@ -739,7 +739,8 @@ func (e *Executor) runLoop(ctx context.Context, st *runState, thinkingEnabled bo
 
 		toolCalls := e.extractToolCalls(routeResp)
 		turnRecord := Turn{Number: turn, Request: st.messages, ThinkingBlocks: routeResp.ThinkingBlocks, Usage: routeResp.Usage,
-			Provider: routeResp.Provider, Model: routeResp.Model, Attempts: routeResp.Attempts}
+			Provider: routeResp.Provider, Model: routeResp.Model, Attempts: routeResp.Attempts,
+			SpanID: e.captureCall(ctx, st.traceID, agent, turn, turnStart, routeReq, routeResp)}
 
 		// The model's reply is journaled before anything acts on it. It was paid for, and
 		// a crash while its tools run must not lose it or make a resume ask (and pay) again.
@@ -1117,4 +1118,27 @@ func (e *Executor) bindRun(ctx context.Context, st *runState, opts loopOpts) con
 		}
 	}
 	return ctx
+}
+
+// captureCall hands the model call that was just answered, whole, to the router's capture hook (when
+// one is installed) and returns the ID of the span it will be recorded under. The run's spans are
+// written when it ends, by which time the oldest turns' requests have been dropped to bound memory, so
+// the capture has to happen here, at the call.
+func (e *Executor) captureCall(ctx context.Context, traceID string, agent *models.Agent, turn int, started time.Time, req *models.RouteRequest, resp *models.RouteResponse) string {
+	spanID := uuid.New().String()
+	c := e.router.CallCapturer()
+	if c == nil {
+		return spanID
+	}
+	snap := *req
+	snap.Messages = append([]models.ChatMessage(nil), req.Messages...)
+	snap.Tools = append([]models.ToolDefinition(nil), req.Tools...)
+	err := c.CaptureLLMCall(ctx, models.LLMCall{
+		TraceID: traceID, SpanID: spanID, Kitchen: agent.Kitchen, AgentName: agent.Name,
+		Turn: turn, StartedAt: started.UTC(), Request: &snap, Response: resp,
+	})
+	if err != nil {
+		log.Warn().Err(err).Str("trace_id", traceID).Int("turn", turn).Msg("Failed to capture model call")
+	}
+	return spanID
 }

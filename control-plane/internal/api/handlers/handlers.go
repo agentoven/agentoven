@@ -802,6 +802,8 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		runCtx, _ := withRunTrace(r.Context())
+		r = r.WithContext(runCtx)
 		response, trace, err := h.Executor.Execute(r.Context(), agent, req.Message, resolved, nil, req.ThinkingEnabled)
 		if h.respondRunStopped(w, agentName, trace, err) {
 			return
@@ -828,16 +830,17 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 		// Record trace
 		traceUsage := trace.Usage
 		traceRecord := &models.Trace{
-			ID:          trace.TraceID,
-			AgentName:   agentName,
-			Kitchen:     kitchen,
-			Status:      traceStatus(trace),
-			DurationMs:  trace.TotalMs,
-			TotalTokens: trace.Usage.TotalTokens,
-			CostUSD:     trace.Usage.EstimatedCost,
-			InputText:   req.Message,
-			OutputText:  response,
-			Usage:       &traceUsage,
+			ID:           trace.TraceID,
+			AgentName:    agentName,
+			AgentVersion: agent.Version,
+			Kitchen:      kitchen,
+			Status:       traceStatus(trace),
+			DurationMs:   trace.TotalMs,
+			TotalTokens:  trace.Usage.TotalTokens,
+			CostUSD:      trace.Usage.EstimatedCost,
+			InputText:    req.Message,
+			OutputText:   response,
+			Usage:        &traceUsage,
 			Metadata: map[string]interface{}{
 				"mode":  "managed",
 				"turns": len(trace.Turns),
@@ -955,16 +958,17 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 	// Record trace — enriched with input/output text and full token usage
 	traceUsage := resp.Usage
 	trace := &models.Trace{
-		ID:          uuid.New().String(),
-		AgentName:   agentName,
-		Kitchen:     kitchen,
-		Status:      "completed",
-		DurationMs:  duration.Milliseconds(),
-		TotalTokens: resp.Usage.TotalTokens,
-		CostUSD:     resp.Usage.EstimatedCost,
-		InputText:   req.Message,
-		OutputText:  resp.Content,
-		Usage:       &traceUsage,
+		ID:           uuid.New().String(),
+		AgentName:    agentName,
+		AgentVersion: agent.Version,
+		Kitchen:      kitchen,
+		Status:       "completed",
+		DurationMs:   duration.Milliseconds(),
+		TotalTokens:  resp.Usage.TotalTokens,
+		CostUSD:      resp.Usage.EstimatedCost,
+		InputText:    req.Message,
+		OutputText:   resp.Content,
+		Usage:        &traceUsage,
 		Metadata: map[string]interface{}{
 			"provider":        resp.Provider,
 			"model":           resp.Model,
@@ -3023,11 +3027,12 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 
 		// Create initial trace immediately so tasks/get can find it
 		initialTrace := &models.Trace{
-			ID:        taskID,
-			AgentName: agentName,
-			Kitchen:   kitchen,
-			Status:    "working",
-			InputText: userMessage,
+			ID:           taskID,
+			AgentName:    agentName,
+			AgentVersion: agent.Version,
+			Kitchen:      kitchen,
+			Status:       "working",
+			InputText:    userMessage,
 			Metadata: map[string]interface{}{
 				"source":  "a2a",
 				"task_id": taskID,
@@ -3080,6 +3085,7 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 			}
 		} else {
 			userMsg := models.ChatMessage{Role: "user", Content: userMessage, ContentParts: userParts}
+			execCtx, _ = withRunTrace(execCtx)
 			resp, et, execErr := h.Executor.ExecuteMessage(execCtx, agent, userMsg, resolved, nil, false)
 			response = resp
 			execTrace = et
@@ -3111,15 +3117,16 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 		}
 
 		trace := &models.Trace{
-			ID:          taskID,
-			AgentName:   agentName,
-			Kitchen:     kitchen,
-			Status:      status,
-			TotalTokens: totalTokens,
-			CostUSD:     costUSD,
-			InputText:   userMessage,
-			OutputText:  response,
-			Usage:       usage,
+			ID:           taskID,
+			AgentName:    agentName,
+			AgentVersion: agent.Version,
+			Kitchen:      kitchen,
+			Status:       status,
+			TotalTokens:  totalTokens,
+			CostUSD:      costUSD,
+			InputText:    userMessage,
+			OutputText:   response,
+			Usage:        usage,
 			Metadata: map[string]interface{}{
 				"source":  "a2a",
 				"task_id": taskID,
@@ -4560,16 +4567,17 @@ func (h *Handlers) proxyToProcess(
 	}
 
 	traceRecord := &models.Trace{
-		ID:          traceID,
-		AgentName:   agent.Name,
-		Kitchen:     kitchen,
-		Status:      "completed",
-		DurationMs:  durationMs,
-		TotalTokens: usage.TotalTokens,
-		CostUSD:     usage.EstimatedCost,
-		InputText:   message,
-		OutputText:  proxyResp.Response,
-		Usage:       &usage,
+		ID:           traceID,
+		AgentName:    agent.Name,
+		AgentVersion: agent.Version,
+		Kitchen:      kitchen,
+		Status:       "completed",
+		DurationMs:   durationMs,
+		TotalTokens:  usage.TotalTokens,
+		CostUSD:      usage.EstimatedCost,
+		InputText:    message,
+		OutputText:   proxyResp.Response,
+		Usage:        &usage,
 		Metadata: map[string]interface{}{
 			"mode":    "managed",
 			"runtime": string(agent.Runtime),
@@ -4883,6 +4891,8 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Execute the agentic loop
+	runCtx, _ := withRunTrace(r.Context())
+	r = r.WithContext(runCtx)
 	response, trace, err := h.Executor.Execute(r.Context(), agent, req.Message, resolved, sanitizedVars, req.ThinkingEnabled, req.SessionID)
 	if h.respondRunStopped(w, agentName, trace, err) {
 		return
@@ -4911,17 +4921,18 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	// Record trace in store — enriched with full token breakdown, input, and session
 	traceUsage := trace.Usage
 	traceRecord := &models.Trace{
-		ID:          trace.TraceID,
-		AgentName:   agentName,
-		Kitchen:     kitchen,
-		Status:      traceStatus(trace),
-		DurationMs:  trace.TotalMs,
-		TotalTokens: trace.Usage.TotalTokens,
-		CostUSD:     trace.Usage.EstimatedCost,
-		InputText:   req.Message,
-		OutputText:  response,
-		SessionID:   trace.SessionID,
-		Usage:       &traceUsage,
+		ID:           trace.TraceID,
+		AgentName:    agentName,
+		AgentVersion: agent.Version,
+		Kitchen:      kitchen,
+		Status:       traceStatus(trace),
+		DurationMs:   trace.TotalMs,
+		TotalTokens:  trace.Usage.TotalTokens,
+		CostUSD:      trace.Usage.EstimatedCost,
+		InputText:    req.Message,
+		OutputText:   response,
+		SessionID:    trace.SessionID,
+		Usage:        &traceUsage,
 		Metadata: map[string]interface{}{
 			"mode":  "managed",
 			"turns": len(trace.Turns),
@@ -5116,6 +5127,8 @@ func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 		return nil
 	}
 
+	runCtx, _ := withRunTrace(r.Context())
+	r = r.WithContext(runCtx)
 	response, trace, err := h.Executor.ExecuteStream(r.Context(), agent, req.Message, resolved, sanitizedVars, req.ThinkingEnabled, writeEvent, req.SessionID)
 	if held != nil && !h.releaseHeld(w, r, agent, gr, held, response) {
 		return // blocked: the caller got a 403 and none of the reply
@@ -5133,17 +5146,18 @@ func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 
 	traceUsage := trace.Usage
 	traceRecord := &models.Trace{
-		ID:          trace.TraceID,
-		AgentName:   agentName,
-		Kitchen:     kitchen,
-		Status:      traceStatus(trace),
-		DurationMs:  trace.TotalMs,
-		TotalTokens: trace.Usage.TotalTokens,
-		CostUSD:     trace.Usage.EstimatedCost,
-		InputText:   req.Message,
-		OutputText:  response,
-		SessionID:   trace.SessionID,
-		Usage:       &traceUsage,
+		ID:           trace.TraceID,
+		AgentName:    agentName,
+		AgentVersion: agent.Version,
+		Kitchen:      kitchen,
+		Status:       traceStatus(trace),
+		DurationMs:   trace.TotalMs,
+		TotalTokens:  trace.Usage.TotalTokens,
+		CostUSD:      trace.Usage.EstimatedCost,
+		InputText:    req.Message,
+		OutputText:   response,
+		SessionID:    trace.SessionID,
+		Usage:        &traceUsage,
 		Metadata: map[string]interface{}{
 			"mode":  "managed",
 			"turns": len(trace.Turns),
@@ -5229,6 +5243,7 @@ func (h *Handlers) ResumeRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	r = r.WithContext(models.WithTraceStamp(r.Context(), models.TraceStamp{TraceID: traceID}))
 	response, trace, err := h.Executor.ResumeFor(r.Context(), kitchen, agentName, traceID, decision)
 	h.decisionApplied(r, sig, decisionApplyError(err))
 	if err != nil {
@@ -5255,16 +5270,17 @@ func (h *Handlers) ResumeRun(w http.ResponseWriter, r *http.Request) {
 
 	traceUsage := trace.Usage
 	traceRecord := &models.Trace{
-		ID:          trace.TraceID,
-		AgentName:   agentName,
-		Kitchen:     kitchen,
-		Status:      traceStatus(trace),
-		DurationMs:  trace.TotalMs,
-		TotalTokens: trace.Usage.TotalTokens,
-		CostUSD:     trace.Usage.EstimatedCost,
-		OutputText:  response,
-		SessionID:   trace.SessionID,
-		Usage:       &traceUsage,
+		ID:           trace.TraceID,
+		AgentName:    agentName,
+		AgentVersion: agent.Version,
+		Kitchen:      kitchen,
+		Status:       traceStatus(trace),
+		DurationMs:   trace.TotalMs,
+		TotalTokens:  trace.Usage.TotalTokens,
+		CostUSD:      trace.Usage.EstimatedCost,
+		OutputText:   response,
+		SessionID:    trace.SessionID,
+		Usage:        &traceUsage,
 		Metadata: map[string]interface{}{
 			"mode":  "managed",
 			"turns": len(trace.Turns),
@@ -5365,7 +5381,10 @@ func (h *Handlers) persistExecutorSpans(ctx context.Context, execTrace *executor
 		turnOffset = turnEnd
 
 		// LLM span for this turn
-		llmSpanID := uuid.New().String()
+		llmSpanID := turn.SpanID
+		if llmSpanID == "" {
+			llmSpanID = uuid.New().String()
+		}
 		turnUsage := turn.Usage
 
 		// Serialize the request messages as input
@@ -7137,4 +7156,13 @@ func (h *Handlers) SetGuardrailPolicy(src contracts.WorkspaceGuardrailSource) {
 	if h.Executor != nil {
 		h.Executor.SetGuardrailPolicy(src)
 	}
+}
+
+// withRunTrace chooses the trace ID of the run about to start and records it on the context. The
+// executor uses it as the run's ID, and every audit event the run causes (a guardrail verdict, a
+// budget pause, an approval) carries it, which is what lets a trace show its governance events.
+func withRunTrace(ctx context.Context) (context.Context, string) {
+	id := uuid.New().String()
+	ctx = executor.WithTraceID(ctx, id)
+	return models.WithTraceStamp(ctx, models.TraceStamp{TraceID: id}), id
 }

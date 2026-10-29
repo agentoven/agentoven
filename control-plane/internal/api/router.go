@@ -330,6 +330,8 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 			r.Get("/{traceId}", h.GetTrace)
 			r.Patch("/{traceId}", h.UpdateTrace)
 			r.Get("/{traceId}/spans", h.ListSpans) // hierarchical spans for waterfall
+			r.Get("/{traceId}/timeline", h.TraceTimeline)
+			r.Get("/{traceId}/audit", h.TraceAudit)
 			r.Get("/{traceId}/scores", h.ListTraceScores)
 			r.Post("/{traceId}/scores", h.AddTraceScore)
 			r.Delete("/{traceId}/scores/{scoreId}", h.DeleteTraceScore)

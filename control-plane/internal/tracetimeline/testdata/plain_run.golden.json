@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "trace_id": "t1",
+  "environment": "prod",
+  "agent_version": "1.2.0",
+  "started_at": "2026-10-29T09:00:00Z",
+  "total_ms": 1000,
+  "critical_path_ms": 1000,
+  "span_count": 4,
+  "truncated": false,
+  "spans": [
+    {
+      "id": "root",
+      "depth": 0,
+      "kind": "agent",
+      "name": "agent",
+      "status": "completed",
+      "offset_ms": 0,
+      "duration_ms": 1000,
+      "critical": true
+    },
+    {
+      "id": "l1",
+      "parent_id": "root",
+      "depth": 1,
+      "kind": "llm",
+      "name": "llm.turn_1",
+      "status": "completed",
+      "offset_ms": 0,
+      "duration_ms": 400,
+      "critical": true,
+      "model": "gpt-4o",
+      "provider": "openai",
+      "usage": {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "total_tokens": 120,
+        "estimated_cost_usd": 0.002,
+        "price_source": "catalog"
+      },
+      "cost_usd": 0.002,
+      "price_source": "catalog"
+    },
+    {
+      "id": "tool1",
+      "parent_id": "l1",
+      "depth": 2,
+      "kind": "tool",
+      "name": "search",
+      "status": "completed",
+      "offset_ms": 200,
+      "duration_ms": 150,
+      "critical": true
+    },
+    {
+      "id": "l2",
+      "parent_id": "root",
+      "depth": 1,
+      "kind": "llm",
+      "name": "llm.turn_2",
+      "status": "completed",
+      "offset_ms": 400,
+      "duration_ms": 600,
+      "critical": true,
+      "model": "gpt-4o",
+      "provider": "openai",
+      "usage": {
+        "input_tokens": 300,
+        "output_tokens": 80,
+        "total_tokens": 380,
+        "estimated_cost_usd": 0.006,
+        "price_source": "catalog"
+      },
+      "cost_usd": 0.006,
+      "price_source": "catalog"
+    }
+  ],
+  "models": [
+    {
+      "model": "gpt-4o",
+      "provider": "openai",
+      "calls": 2,
+      "input_tokens": 400,
+      "output_tokens": 100,
+      "total_tokens": 500,
+      "cost_usd": 0.008
+    }
+  ],
+  "lanes": [],
+  "totals": {
+    "input_tokens": 400,
+    "output_tokens": 100,
+    "total_tokens": 500,
+    "estimated_cost_usd": 0.008
+  }
+}
