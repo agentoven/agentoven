@@ -196,7 +196,11 @@ impl AgentOvenClient {
     ) -> anyhow::Result<serde_json::Value> {
         let url = self.url("/api/v1/recipes");
         let body = serde_json::json!({"name": name, "description": description, "steps": steps});
-        let resp = self.authed_request(self.http.post(url)).json(&body).send().await?;
+        let resp = self
+            .authed_request(self.http.post(url))
+            .json(&body)
+            .send()
+            .await?;
         let status = resp.status();
         let text = resp.text().await?;
         if !status.is_success() {
@@ -945,6 +949,21 @@ impl AgentOvenClient {
         approved: bool,
         comment: Option<&str>,
     ) -> anyhow::Result<serde_json::Value> {
+        self.approve_gate_signed(recipe, run_id, step_name, approved, comment, None)
+            .await
+    }
+
+    /// Approve or reject a human gate with a signing token from [`Self::sign_decision`]. On Pro every
+    /// decision is signed; without a token the decision is sent unsigned, as the community edition expects.
+    pub async fn approve_gate_signed(
+        &self,
+        recipe: &str,
+        run_id: &str,
+        step_name: &str,
+        approved: bool,
+        comment: Option<&str>,
+        signing_token: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!(
             "/api/v1/recipes/{recipe}/runs/{run_id}/gates/{step_name}/approve"
         ));
@@ -952,13 +971,61 @@ impl AgentOvenClient {
         if let Some(c) = comment {
             body["comment"] = serde_json::json!(c);
         }
-        let resp = self
-            .authed_request(self.http.post(url))
+        let mut req = self.authed_request(self.http.post(url)).json(&body);
+        if let Some(t) = signing_token {
+            req = req.header("X-Signing-Token", t);
+        }
+        let resp = req.send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("{status}: {}", signing_message(&text));
+        }
+        Ok(resp.json().await?)
+    }
+
+    /// Prove who you are again and get the single-use signing token for one decision (Pro, ADR-0041).
+    /// `gate` names the kind of decision (`recipe_gate`, `skill_approval`, ...), `record_id` what is decided,
+    /// `meaning` is `approved` or `rejected`, `password` is the password of the local account signed in with.
+    pub async fn sign_decision(
+        &self,
+        gate: &str,
+        record_id: &str,
+        meaning: &str,
+        password: &str,
+    ) -> anyhow::Result<String> {
+        let request =
+            serde_json::json!({ "gate": gate, "record_id": record_id, "meaning": meaning });
+        let challenge = self
+            .authed_request(self.http.post(self.url("/api/v1/signatures/challenge")))
+            .json(&request)
+            .send()
+            .await?;
+        if !challenge.status().is_success() {
+            let text = challenge.text().await.unwrap_or_default();
+            anyhow::bail!("{}", signing_message(&text));
+        }
+        let challenge: serde_json::Value = challenge.json().await?;
+        let digest = challenge["subject"]["digest"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("the control plane sent no digest to sign"))?;
+        let mut body = request;
+        body["digest"] = serde_json::json!(digest);
+        body["password"] = serde_json::json!(password);
+        let reply = self
+            .authed_request(self.http.post(self.url("/api/v1/signatures/token")))
             .json(&body)
             .send()
-            .await?
-            .error_for_status()?;
-        Ok(resp.json().await?)
+            .await?;
+        if !reply.status().is_success() {
+            let text = reply.text().await.unwrap_or_default();
+            anyhow::bail!("{}", signing_message(&text));
+        }
+        let reply: serde_json::Value = reply.json().await?;
+        reply["signing_token"]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| anyhow::anyhow!("the control plane sent no signing token"))
     }
 
     // ── Audit Operations ─────────────────────────────────────
@@ -1075,4 +1142,21 @@ impl AgentOvenClient {
         }
         b
     }
+}
+
+/// The message in a signing error body (`{"error": code, "message": text}`), or the body itself.
+fn signing_message(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            let code = v["error"].as_str().unwrap_or_default().to_string();
+            let msg = v["message"].as_str().unwrap_or_default().to_string();
+            match (code.is_empty(), msg.is_empty()) {
+                (false, false) => Some(format!("{code}: {msg}")),
+                (false, true) => Some(code),
+                (true, false) => Some(msg),
+                _ => None,
+            }
+        })
+        .unwrap_or_else(|| body.to_string())
 }

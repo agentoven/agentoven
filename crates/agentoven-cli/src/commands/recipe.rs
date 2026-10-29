@@ -85,6 +85,9 @@ pub struct ApproveArgs {
     /// Comment.
     #[arg(long)]
     pub comment: Option<String>,
+    /// Sign the decision (AgentOven Pro signs every human decision): you are asked for your password.
+    #[arg(long)]
+    pub sign: bool,
 }
 
 pub async fn execute(cmd: RecipeCommands) -> anyhow::Result<()> {
@@ -120,7 +123,11 @@ async fn create(args: CreateArgs) -> anyhow::Result<()> {
             .get("steps")
             .and_then(|v| v.as_array())
             .ok_or_else(|| anyhow::anyhow!("Missing 'steps' array in {}", from_path))?;
-        let description = parsed.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let description = parsed
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let (steps, warnings) = steps_from_documents(steps_arr)?;
         (description, steps, warnings)
     } else {
@@ -130,13 +137,20 @@ async fn create(args: CreateArgs) -> anyhow::Result<()> {
         println!("  {} {}", "⚠".yellow().bold(), w.dimmed());
     }
 
-    match client.create_recipe_steps(&args.name, &description, steps).await {
+    match client
+        .create_recipe_steps(&args.name, &description, steps)
+        .await
+    {
         Ok(created) => {
             println!(
                 "  {} Recipe '{}' created (ID: {}).",
                 "✓".green().bold(),
                 args.name,
-                created.get("id").and_then(|v| v.as_str()).unwrap_or("-").dimmed()
+                created
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-")
+                    .dimmed()
             );
             println!(
                 "  {} Execute with: {}",
@@ -146,7 +160,11 @@ async fn create(args: CreateArgs) -> anyhow::Result<()> {
             Ok(())
         }
         Err(e) => {
-            println!("  {} Could not create recipe: {}", "✗".red().bold(), e.to_string().dimmed());
+            println!(
+                "  {} Could not create recipe: {}",
+                "✗".red().bold(),
+                e.to_string().dimmed()
+            );
             Err(e)
         }
     }
@@ -223,7 +241,10 @@ async fn get(args: GetArgs) -> anyhow::Result<()> {
 async fn delete(args: DeleteArgs) -> anyhow::Result<()> {
     if !args.force {
         let confirm = dialoguer::Confirm::new()
-            .with_prompt(format!("  Archive recipe '{}'? Its runs are kept.", args.name))
+            .with_prompt(format!(
+                "  Archive recipe '{}'? Its runs are kept.",
+                args.name
+            ))
             .default(false)
             .interact()?;
         if !confirm {
@@ -234,7 +255,11 @@ async fn delete(args: DeleteArgs) -> anyhow::Result<()> {
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
     match client.delete_recipe(&args.name).await {
-        Ok(()) => println!("  {} Recipe '{}' archived (its runs are kept).", "✓".green().bold(), args.name),
+        Ok(()) => println!(
+            "  {} Recipe '{}' archived (its runs are kept).",
+            "✓".green().bold(),
+            args.name
+        ),
         Err(e) => println!(
             "  {} Archive failed: {}",
             "✗".red().bold(),
@@ -352,13 +377,41 @@ async fn approve(args: ApproveArgs) -> anyhow::Result<()> {
     );
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
+    let token = if args.sign {
+        let password = dialoguer::Password::new()
+            .with_prompt("  Password (to sign this decision)")
+            .interact()?;
+        let meaning = if args.approved {
+            "approved"
+        } else {
+            "rejected"
+        };
+        let record = format!("{}:{}", args.run_id, args.gate_id);
+        match client
+            .sign_decision("recipe_gate", &record, meaning, &password)
+            .await
+        {
+            Ok(t) => Some(t),
+            Err(e) => {
+                println!(
+                    "  {} Not signed: {}",
+                    "✗".red().bold(),
+                    e.to_string().dimmed()
+                );
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
     match client
-        .approve_gate(
+        .approve_gate_signed(
             &args.name,
             &args.run_id,
             &args.gate_id,
             args.approved,
             args.comment.as_deref(),
+            token.as_deref(),
         )
         .await
     {
@@ -376,6 +429,12 @@ async fn approve(args: ApproveArgs) -> anyhow::Result<()> {
         }
         Err(e) => {
             println!("  {} Failed: {}", "✗".red().bold(), e.to_string().dimmed());
+            if !args.sign && e.to_string().contains("signature_required") {
+                println!(
+                    "  {} AgentOven Pro signs every decision: run it again with --sign",
+                    "→".bold()
+                );
+            }
         }
     }
     Ok(())

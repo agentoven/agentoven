@@ -254,6 +254,9 @@ pub struct ApproveArgs {
     /// Reviewer note recorded with the decision.
     #[arg(long, alias = "reason")]
     pub note: Option<String>,
+    /// Sign the decision (AgentOven Pro signs every review): you are asked for your password.
+    #[arg(long)]
+    pub sign: bool,
 }
 
 #[derive(Args)]
@@ -263,6 +266,9 @@ pub struct RejectArgs {
     /// Reason recorded with the decision.
     #[arg(long, alias = "note")]
     pub reason: Option<String>,
+    /// Sign the decision (AgentOven Pro signs every review): you are asked for your password.
+    #[arg(long)]
+    pub sign: bool,
 }
 
 // ── Entry point ──────────────────────────────────────────────
@@ -351,10 +357,10 @@ pub async fn run(cmd: SkillsCommands, api: &Api, json: bool) -> anyhow::Result<R
         SkillsCommands::Catalog(a) => catalog(api, &a, json).await,
         SkillsCommands::Import(a) => import(api, a, json).await,
         SkillsCommands::Approve(a) => {
-            review(api, &a.name, "approve", a.note.as_deref(), json).await
+            review(api, &a.name, "approve", a.note.as_deref(), json, a.sign).await
         }
         SkillsCommands::Reject(a) => {
-            review(api, &a.name, "reject", a.reason.as_deref(), json).await
+            review(api, &a.name, "reject", a.reason.as_deref(), json, a.sign).await
         }
     }
 }
@@ -503,22 +509,73 @@ async fn analyze(api: &Api, args: AnalyzeArgs, json: bool) -> anyhow::Result<Rep
     verdict_report("analyze", Some(args.name.clone()), &reply, json)
 }
 
+/// Proves who you are again and returns the single-use token for signing one decision on a skill.
+async fn sign_review(api: &Api, name: &str, action: &str) -> anyhow::Result<String> {
+    let password = dialoguer::Password::new()
+        .with_prompt("  Password (to sign this decision)")
+        .interact()?;
+    let meaning = if action == "approve" {
+        "approved"
+    } else {
+        "rejected"
+    };
+    let request = json!({ "gate": "skill_approval", "record_id": name, "meaning": meaning });
+    let challenge = api
+        .send(
+            reqwest::Method::POST,
+            "/api/v1/signatures/challenge",
+            Some(&request),
+        )
+        .await?;
+    if challenge.status != 200 {
+        return Err(api_error("start signing", &challenge));
+    }
+    let digest = challenge.body["subject"]["digest"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let mut body = request;
+    body["digest"] = json!(digest);
+    body["password"] = json!(password);
+    let reply = api
+        .send(
+            reqwest::Method::POST,
+            "/api/v1/signatures/token",
+            Some(&body),
+        )
+        .await?;
+    if reply.status != 200 {
+        return Err(api_error("sign", &reply));
+    }
+    reply.body["signing_token"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| anyhow!("the control plane sent no signing token"))
+}
+
 async fn review(
     api: &Api,
     name: &str,
     action: &str,
     note: Option<&str>,
     json: bool,
+    sign: bool,
 ) -> anyhow::Result<Report> {
     let mut body = json!({});
     if let Some(n) = note {
         body["note"] = json!(n);
     }
+    let token = if sign {
+        Some(sign_review(api, name, action).await?)
+    } else {
+        None
+    };
     let reply = api
-        .send(
+        .send_signed(
             reqwest::Method::POST,
             &skill_path(name, &format!("/{action}")),
             Some(&body),
+            token.as_deref(),
         )
         .await?;
     if reply.status != 200 {
@@ -961,7 +1018,21 @@ impl Api {
         path: &str,
         body: Option<&Value>,
     ) -> anyhow::Result<Reply> {
+        self.send_signed(method, path, body, None).await
+    }
+
+    /// `send` carrying a signing token (Pro signs every human decision).
+    pub async fn send_signed(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&Value>,
+        signing_token: Option<&str>,
+    ) -> anyhow::Result<Reply> {
         let mut req = self.http.request(method, format!("{}{}", self.base, path));
+        if let Some(t) = signing_token {
+            req = req.header("X-Signing-Token", t);
+        }
         if let Some(key) = &self.api_key {
             req = req.bearer_auth(key);
         }

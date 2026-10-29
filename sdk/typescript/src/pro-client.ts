@@ -421,30 +421,71 @@ export class ProClient {
     return this.post(`/api/v1/channels/${encodeURIComponent(name)}/ws-ticket`, {}, opts?.kitchen);
   }
 
-  /** End a `wait` step early, so the run carries on now. Rejects with a 404 if it is not waiting. */
-  releaseWait(name: string, runId: string, step: string, opts?: { kitchen?: string }): Promise<unknown> {
-    return this.post(
+  /**
+   * Prove who you are again and get the single-use signing token for one decision (Pro, ADR-0041). `gate` is the
+   * kind of decision (`recipe_gate`, `tool_approval`, `budget_extension`, `wait_release`, `skill_approval`,
+   * `environment_promotion`, `bot_action`), `recordId` what is decided, `meaning` is `approved` or `rejected`, and
+   * `password` is the password of the local account you signed in with. The token is good for a minute and for
+   * exactly this decision; send it in the `X-Signing-Token` header. An API key or service account cannot sign. An
+   * account that signs in through an identity provider signs in the dashboard, not here.
+   */
+  async signDecision(gate: string, recordId: string, meaning: 'approved' | 'rejected', password: string, payload?: Record<string, unknown>): Promise<string> {
+    const request = { gate, record_id: recordId, meaning, payload: payload ?? {} };
+    const challenge = await this.post<{ subject: { digest: string } }>('/api/v1/signatures/challenge', request);
+    const reply = await this.post<{ signing_token: string }>('/api/v1/signatures/token', { ...request, digest: challenge.subject.digest, password });
+    return reply.signing_token;
+  }
+
+  /** Signed decisions of the kitchen: who signed (name and role), when, the meaning, and what became of the decision. */
+  listSignatures(gate = '', recordId = ''): Promise<SignatureRecord[]> {
+    return this.get(`/api/v1/signatures?gate=${encodeURIComponent(gate)}&record_id=${encodeURIComponent(recordId)}`);
+  }
+
+  /** Check the kitchen's signature chain: `ok` is false, with where it breaks, if one was changed or removed. */
+  verifySignatures(): Promise<{ kitchen: string; count: number; ok: boolean; broken_at?: number; reason?: string; head_hash?: string }> {
+    return this.get('/api/v1/signatures/verify');
+  }
+
+  /**
+   * End a `wait` step early, so the run carries on now. Rejects with a 404 if it is not waiting. On Pro the
+   * decision is signed: pass `password`, the password of your local account.
+   */
+  async releaseWait(name: string, runId: string, step: string, opts?: { kitchen?: string; password?: string }): Promise<unknown> {
+    const extra = opts?.password !== undefined ? { 'X-Signing-Token': await this.signDecision('wait_release', `${runId}:${step}`, 'approved', opts.password) } : undefined;
+    return this.request(
+      'POST',
       `/api/v1/recipes/${encodeURIComponent(name)}/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(step)}/release`,
       {},
       opts?.kitchen,
+      extra,
     );
   }
 
-  /** Approve a step that is waiting for a person. The decision is recorded with who made it. */
-  approveGate(runId: string, step: string, comments?: string): Promise<unknown> {
-    return this.decideGate(runId, step, true, comments);
+  /**
+   * Approve a step that is waiting for a person. The decision is recorded with who made it. On Pro every decision
+   * is signed: pass `opts.password`, the password of your local account, and the SDK signs it (`signDecision`).
+   * Without one the call is unsigned, which Pro refuses with `signature_required`.
+   */
+  approveGate(runId: string, step: string, comments?: string, opts?: { password?: string }): Promise<unknown> {
+    return this.decideGate(runId, step, true, comments, opts?.password);
   }
 
   /** Reject a waiting step. `reason` is recorded and passed to the step that follows the Rejected path. */
-  rejectGate(runId: string, step: string, reason?: string): Promise<unknown> {
-    return this.decideGate(runId, step, false, reason);
+  rejectGate(runId: string, step: string, reason?: string, opts?: { password?: string }): Promise<unknown> {
+    return this.decideGate(runId, step, false, reason, opts?.password);
   }
 
-  private decideGate(runId: string, step: string, approved: boolean, comments?: string): Promise<unknown> {
-    return this.post(`/api/v1/approvals/${encodeURIComponent(runId)}/${encodeURIComponent(step)}`, {
-      approved,
-      ...(comments ? { comments } : {}),
-    });
+  private async decideGate(runId: string, step: string, approved: boolean, comments?: string, password?: string): Promise<unknown> {
+    const extra = password !== undefined
+      ? { 'X-Signing-Token': await this.signDecision('recipe_gate', `${runId}:${step}`, approved ? 'approved' : 'rejected', password) }
+      : undefined;
+    return this.request(
+      'POST',
+      `/api/v1/approvals/${encodeURIComponent(runId)}/${encodeURIComponent(step)}`,
+      { approved, ...(comments ? { comments } : {}) },
+      undefined,
+      extra,
+    );
   }
 
   async listRecipeRuns(recipeName: string, opts?: { kitchen?: string }): Promise<RecipeRun[]> {
@@ -914,11 +955,11 @@ export class ProClient {
     return h;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, kitchenOverride?: string): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown, kitchenOverride?: string, extraHeaders?: Record<string, string>): Promise<T> {
     const url = `${this.baseUrl}${path}`;
     const res = await fetch(url, {
       method,
-      headers: this.headers(kitchenOverride),
+      headers: { ...this.headers(kitchenOverride), ...extraHeaders },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
 
@@ -972,4 +1013,24 @@ function providerConfig(
     cfg.modalities = resolveModalities(cfg.modalities as Parameters<typeof resolveModalities>[0], { allowClear });
   }
   return cfg;
+}
+
+/** One signed decision: who signed, when, with what meaning, and what became of the decision. */
+export interface SignatureRecord {
+  id: string;
+  kitchen: string;
+  seq: number;
+  gate: string;
+  record_id: string;
+  meaning: string;
+  digest: string;
+  signer_id: string;
+  signer_email: string;
+  printed_name: string;
+  signer_role: string;
+  auth_method: string;
+  auth_time: string;
+  signed_at: string;
+  outcome?: string;
+  outcome_detail?: string;
 }

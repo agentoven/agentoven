@@ -342,24 +342,66 @@ class AgentOvenClient:
             return NotificationConnection(url, {}, [WS_SUBPROTOCOL, TICKET_SUBPROTOCOL_PREFIX + token])
         return NotificationConnection(url, self._headers())
 
-    def release_wait(self, name: str, run_id: str, step: str, kitchen: Optional[str] = None) -> dict[str, Any]:
-        """End a ``wait`` step early, so the run carries on now. Raises ``AgentOvenAPIError`` (404) if it is not waiting."""
+    def sign_decision(self, gate: str, record_id: str, meaning: str, password: str, payload: Optional[dict[str, Any]] = None) -> str:
+        """Prove who you are again and get the single-use signing token for one decision (Pro, ADR-0041).
+
+        ``gate`` is the kind of decision (``recipe_gate``, ``tool_approval``, ``budget_extension``, ``wait_release``,
+        ``skill_approval``, ``environment_promotion``, ``bot_action``), ``record_id`` what is decided, ``meaning`` is
+        ``"approved"`` or ``"rejected"``, and ``password`` is the password of the local account you signed in with.
+        The token is good for a minute and for exactly this decision; pass it as ``signing_token`` or send it in the
+        ``X-Signing-Token`` header. An API key or service account cannot sign: it gets ``signature_required``.
+        An account that signs in through an identity provider signs in the dashboard, not here.
+        """
+        request = {"gate": gate, "record_id": record_id, "meaning": meaning, "payload": payload or {}}
+        challenge = self._post("/api/v1/signatures/challenge", request)
+        reply = self._post("/api/v1/signatures/token", {**request, "digest": challenge["subject"]["digest"], "password": password})
+        return reply["signing_token"]
+
+    def list_signatures(self, gate: str = "", record_id: str = "") -> list[dict[str, Any]]:
+        """Signed decisions of the kitchen: who signed (name and role), when, the meaning, and what became of the decision."""
+        from urllib.parse import quote
+
+        return self._get(f"/api/v1/signatures?gate={quote(gate)}&record_id={quote(record_id)}")
+
+    def verify_signatures(self) -> dict[str, Any]:
+        """Check the kitchen's signature chain: ``ok`` is false, with where it breaks, if one was changed or removed."""
+        return self._get("/api/v1/signatures/verify")
+
+    def release_wait(
+        self, name: str, run_id: str, step: str, kitchen: Optional[str] = None, *, password: Optional[str] = None
+    ) -> dict[str, Any]:
+        """End a ``wait`` step early, so the run carries on now. Raises ``AgentOvenAPIError`` (404) if it is not waiting.
+
+        On Pro the decision is signed: pass the ``password`` of your local account (see :meth:`sign_decision`).
+        """
         client = self if kitchen is None else self.with_kitchen(kitchen)
-        return client._post(f"/api/v1/recipes/{_seg(name)}/runs/{_seg(run_id)}/steps/{_seg(step)}/release", {})
+        headers = None
+        if password is not None:
+            token = client.sign_decision("wait_release", f"{run_id}:{step}", "approved", password)
+            headers = {"X-Signing-Token": token}
+        return client._request("POST", f"/api/v1/recipes/{_seg(name)}/runs/{_seg(run_id)}/steps/{_seg(step)}/release", {}, headers)
 
-    def approve_gate(self, run_id: str, step: str, comments: Optional[str] = None) -> dict[str, Any]:
-        """Approve a step that is waiting for a person. The decision is recorded with who made it."""
-        return self._decide_gate(run_id, step, True, comments)
+    def approve_gate(self, run_id: str, step: str, comments: Optional[str] = None, *, password: Optional[str] = None) -> dict[str, Any]:
+        """Approve a step that is waiting for a person. The decision is recorded with who made it.
 
-    def reject_gate(self, run_id: str, step: str, reason: Optional[str] = None) -> dict[str, Any]:
+        On Pro every decision is signed: pass the ``password`` of your local account and the SDK signs it
+        (:meth:`sign_decision`). Without one the call is unsigned, which Pro refuses with ``signature_required``.
+        """
+        return self._decide_gate(run_id, step, True, comments, password)
+
+    def reject_gate(self, run_id: str, step: str, reason: Optional[str] = None, *, password: Optional[str] = None) -> dict[str, Any]:
         """Reject a waiting step. ``reason`` is recorded and passed to the step that follows the Rejected path."""
-        return self._decide_gate(run_id, step, False, reason)
+        return self._decide_gate(run_id, step, False, reason, password)
 
-    def _decide_gate(self, run_id: str, step: str, approved: bool, comments: Optional[str]) -> dict[str, Any]:
+    def _decide_gate(self, run_id: str, step: str, approved: bool, comments: Optional[str], password: Optional[str] = None) -> dict[str, Any]:
         body: dict[str, Any] = {"approved": approved}
         if comments:
             body["comments"] = comments
-        return self._post(f"/api/v1/approvals/{_seg(run_id)}/{_seg(step)}", body)
+        headers = None
+        if password is not None:
+            token = self.sign_decision("recipe_gate", f"{run_id}:{step}", "approved" if approved else "rejected", password)
+            headers = {"X-Signing-Token": token}
+        return self._request("POST", f"/api/v1/approvals/{_seg(run_id)}/{_seg(step)}", body, headers)
 
     def bake_recipe(self, name: str, input: Optional[Any] = None, kitchen: Optional[str] = None) -> str:
         native = self._native if kitchen is None else self.with_kitchen(kitchen)._native
@@ -1095,10 +1137,10 @@ class AgentOvenClient:
             h["Authorization"] = f"Bearer {self._api_key}"
         return h
 
-    def _request(self, method: str, path: str, body: Optional[dict[str, Any]] = None) -> Any:
+    def _request(self, method: str, path: str, body: Optional[dict[str, Any]] = None, headers: Optional[dict[str, str]] = None) -> Any:
         url = self._url + path
         data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(url, data=data, headers=self._headers(), method=method)
+        req = urllib.request.Request(url, data=data, headers={**self._headers(), **(headers or {})}, method=method)
         try:
             with urllib.request.urlopen(req) as resp:
                 raw = resp.read()
