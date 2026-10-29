@@ -278,6 +278,62 @@ export class ProClient {
     return this.get(`/api/v1/traces/matrix?kitchen=${encodeURIComponent(this.kitchen)}`);
   }
 
+  // ── Traces ────────────────────────────────────────────────────────────────
+
+  /**
+   * Traces, newest first. `filters` are the list endpoint's own; `view` is the id of a saved view, whose
+   * filters apply unless named as well.
+   */
+  async listTraces(filters: TraceListFilters = {}): Promise<Record<string, unknown>[]> {
+    const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(filters)) if (v !== undefined && v !== '' && v !== null) q.set(k, String(v));
+    const qs = q.toString();
+    return this.get(`/api/v1/traces${qs ? `?${qs}` : ''}`);
+  }
+
+  async getTrace(traceId: string): Promise<Record<string, unknown>> {
+    return this.get(`/api/v1/traces/${encodeURIComponent(traceId)}`);
+  }
+
+  /**
+   * The trace laid out on a clock, computed by the server: each span's depth, offset and duration, the critical
+   * path, retries and fallbacks, tokens and cost by model, and the governance events. A large trace comes in
+   * pages; pass the previous page's `cursor` for the next.
+   */
+  async traceTimeline(traceId: string, opts: { limit?: number; cursor?: string } = {}): Promise<TraceTimeline> {
+    const q = new URLSearchParams();
+    if (opts.limit) q.set('limit', String(opts.limit));
+    if (opts.cursor) q.set('cursor', opts.cursor);
+    const qs = q.toString();
+    return this.get(`/api/v1/traces/${encodeURIComponent(traceId)}/timeline${qs ? `?${qs}` : ''}`);
+  }
+
+  /**
+   * The audit events recorded for a trace (and, for a recipe run, every trace under it), in order, with each
+   * event's sequence number and hash where the audit log is chained, and a `coverage` note saying from when
+   * events can be found by trace.
+   */
+  async traceAudit(traceId: string): Promise<TraceAudit> {
+    return this.get(`/api/v1/traces/${encodeURIComponent(traceId)}/audit`);
+  }
+
+  /** Your saved views of the trace list and the ones shared in this kitchen. */
+  async listTraceViews(): Promise<TraceView[]> {
+    return this.get('/api/v1/trace-views');
+  }
+
+  async saveTraceView(name: string, filter: TraceListFilters = {}, shared = false): Promise<TraceView> {
+    return this.post('/api/v1/trace-views', { name, filter, shared });
+  }
+
+  async updateTraceView(viewId: string, name: string, filter: TraceListFilters = {}, shared = false): Promise<TraceView> {
+    return this.put(`/api/v1/trace-views/${encodeURIComponent(viewId)}`, { name, filter, shared });
+  }
+
+  async deleteTraceView(viewId: string): Promise<void> {
+    return this.delete(`/api/v1/trace-views/${encodeURIComponent(viewId)}`);
+  }
+
   // ── Recipes ───────────────────────────────────────────────────────────────
 
   async listRecipes(opts?: { kitchen?: string }): Promise<Recipe[]> {
@@ -1016,6 +1072,42 @@ function providerConfig(
 }
 
 /** One signed decision: who signed, when, with what meaning, and what became of the decision. */
+/** What the trace list can be narrowed by; the same keys a saved view's filter holds. */
+export interface TraceListFilters {
+  agent?: string; recipe?: string; status?: string; model?: string; provider?: string; tag?: string; session?: string;
+  environment?: string; agent_version?: string; q?: string;
+  min_cost?: number; max_cost?: number; min_duration?: number; max_duration?: number;
+  range?: '1h' | '24h' | '7d' | '30d'; sort?: 'created_at' | 'cost' | 'duration' | 'tokens'; order?: 'asc' | 'desc';
+  roots?: boolean; include_archived?: boolean; limit?: number; offset?: number;
+  /** The id of a saved view; its filters apply unless named as well. */
+  view?: string;
+}
+
+export interface TraceView {
+  id: string; kitchen: string; owner: string; owner_name?: string; name: string;
+  filter: TraceListFilters; shared: boolean; created_at: string; updated_at: string;
+}
+
+export interface TimelineSpan {
+  id: string; parent_id?: string; depth: number; kind: string; name: string; status: string;
+  offset_ms: number; duration_ms: number; critical?: boolean; skew?: boolean; orphan?: boolean;
+  attempt?: number; retry_of?: string; model?: string; provider?: string; error?: string;
+  cost_usd?: number; price_source?: string;
+}
+
+export interface TraceTimeline {
+  schema_version: number; trace_id: string; environment?: string; agent_version?: string;
+  started_at: string; total_ms: number; critical_path_ms: number; span_count: number;
+  truncated: boolean; cursor?: string; spans: TimelineSpan[];
+  models: { model: string; provider?: string; calls: number; input_tokens: number; output_tokens: number; total_tokens: number; cost_usd: number }[];
+  lanes: { name: string; events: { at: string; offset_ms: number; action: string; resource?: string; actor?: string; status?: number; seq?: number; entry_hash?: string }[] }[];
+}
+
+export interface TraceAudit {
+  trace_id: string; count: number; events: Record<string, unknown>[];
+  coverage: { from: string | null; complete: boolean; note: string };
+}
+
 export interface SignatureRecord {
   id: string;
   kitchen: string;

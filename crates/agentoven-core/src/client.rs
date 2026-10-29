@@ -849,6 +849,104 @@ impl AgentOvenClient {
         Ok(resp.json().await?)
     }
 
+    /// List traces with any of the list endpoint's filters (`environment`, `agent_version`, `status`,
+    /// `view` ...), newest first. Pairs with an empty value are left out.
+    pub async fn list_traces_filtered(
+        &self,
+        filters: &[(&str, &str)],
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        let mut url = self.url("/api/v1/traces");
+        {
+            let mut query = url.query_pairs_mut();
+            for (k, v) in filters {
+                if !v.is_empty() {
+                    query.append_pair(k, v);
+                }
+            }
+        }
+        let resp = self
+            .authed_request(self.http.get(url))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
+    /// A trace laid out on a clock, computed by the server (spans with depth, offset and duration, the
+    /// critical path, retries, roll-ups by model, governance events). `cursor` is the previous page's.
+    pub async fn trace_timeline(
+        &self,
+        trace_id: &str,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let mut url = self.url(&format!("/api/v1/traces/{trace_id}/timeline"));
+        {
+            let mut query = url.query_pairs_mut();
+            if let Some(l) = limit {
+                query.append_pair("limit", &l.to_string());
+            }
+            if let Some(c) = cursor {
+                query.append_pair("cursor", c);
+            }
+        }
+        let resp = self
+            .authed_request(self.http.get(url))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
+    /// The audit events recorded for a trace and the traces under it, in order, with a coverage note.
+    pub async fn trace_audit(&self, trace_id: &str) -> anyhow::Result<serde_json::Value> {
+        let url = self.url(&format!("/api/v1/traces/{trace_id}/audit"));
+        let resp = self
+            .authed_request(self.http.get(url))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
+    /// Saved views of the trace list: your own and the kitchen's shared ones.
+    pub async fn list_trace_views(&self) -> anyhow::Result<Vec<serde_json::Value>> {
+        let url = self.url("/api/v1/trace-views");
+        let resp = self
+            .authed_request(self.http.get(url))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
+    /// Save the given filters of the trace list under a name.
+    pub async fn save_trace_view(
+        &self,
+        name: &str,
+        filter: serde_json::Value,
+        shared: bool,
+    ) -> anyhow::Result<serde_json::Value> {
+        let url = self.url("/api/v1/trace-views");
+        let resp = self
+            .authed_request(self.http.post(url))
+            .json(&serde_json::json!({ "name": name, "filter": filter, "shared": shared }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
+    /// Delete a saved view.
+    pub async fn delete_trace_view(&self, view_id: &str) -> anyhow::Result<()> {
+        let url = self.url(&format!("/api/v1/trace-views/{view_id}"));
+        self.authed_request(self.http.delete(url))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// Get a specific trace.
     pub async fn get_trace(&self, trace_id: &str) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/traces/{trace_id}"));

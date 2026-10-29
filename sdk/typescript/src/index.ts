@@ -95,6 +95,7 @@ export type { AttachmentOptions, AudioClip, AudioInput, ContentPart, ContentPart
 
 // Pro REST client
 export { ProClient, AgentOvenAPIError, AudioModalityError } from './pro-client.js';
+export type { TraceListFilters, TraceView, TraceTimeline, TimelineSpan, TraceAudit } from './pro-client.js';
 
 // Re-export all types
 export type {

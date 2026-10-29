@@ -846,14 +846,48 @@ class AgentOvenClient:
 
     # ── Traces (OSS route) ────────────────────────────────────────────────
 
-    def list_traces(self, agent: Optional[str] = None, limit: int = 50) -> list[dict[str, Any]]:
-        params = [f"limit={limit}"]
+    def list_traces(self, agent: Optional[str] = None, limit: int = 50, **filters: Any) -> list[dict[str, Any]]:
+        """List traces, newest first.
+
+        `filters` are the list endpoint's own: status, model, provider, tag, session, recipe, environment,
+        agent_version, q, min_cost, max_cost, range ("1h", "24h", "7d", "30d"), sort, order, offset, and
+        view (the id of a saved view, whose filters apply unless named here as well).
+        """
+        params: dict[str, Any] = {"limit": limit, **filters}
         if agent:
-            params.append(f"agent={agent}")
-        return self._get("/api/v1/traces?" + "&".join(params))
+            params["agent"] = agent
+        query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None and v != ""})
+        return self._get("/api/v1/traces?" + query)
 
     def get_trace(self, trace_id: str) -> dict[str, Any]:
         return self._get(f"/api/v1/traces/{trace_id}")
+
+    def trace_timeline(self, trace_id: str, limit: Optional[int] = None, cursor: Optional[str] = None) -> dict[str, Any]:
+        """The trace laid out on a clock, computed by the server: each span's depth, offset and duration, the
+        critical path, retries and fallbacks, tokens and cost by model, and the governance events. A large
+        trace comes in pages: pass the previous page's `cursor` for the next."""
+        query = urllib.parse.urlencode({k: v for k, v in {"limit": limit, "cursor": cursor}.items() if v})
+        return self._get(f"/api/v1/traces/{_seg(trace_id)}/timeline" + (f"?{query}" if query else ""))
+
+    def trace_audit(self, trace_id: str) -> dict[str, Any]:
+        """The audit events recorded for a trace (and, for a recipe run, for every trace under it), in order,
+        with each event's sequence number and hash where the audit log is chained, and a `coverage` note saying
+        from when events can be found by trace."""
+        return self._get(f"/api/v1/traces/{_seg(trace_id)}/audit")
+
+    def list_trace_views(self) -> list[dict[str, Any]]:
+        """Your saved views of the trace list and the ones shared in this kitchen."""
+        return self._get("/api/v1/trace-views")
+
+    def save_trace_view(self, name: str, filter: Optional[Mapping[str, Any]] = None, shared: bool = False) -> dict[str, Any]:
+        """Save the filters of a trace list under a name. `filter` takes the keys `list_traces` takes."""
+        return self._post("/api/v1/trace-views", {"name": name, "filter": dict(filter or {}), "shared": shared})
+
+    def update_trace_view(self, view_id: str, name: str, filter: Optional[Mapping[str, Any]] = None, shared: bool = False) -> dict[str, Any]:
+        return self._put(f"/api/v1/trace-views/{_seg(view_id)}", {"name": name, "filter": dict(filter or {}), "shared": shared})
+
+    def delete_trace_view(self, view_id: str) -> None:
+        self._delete(f"/api/v1/trace-views/{_seg(view_id)}")
 
     # ── Server info ───────────────────────────────────────────────────────
 
