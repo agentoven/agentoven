@@ -1445,3 +1445,53 @@ func TestARecipeThatCallsItselfStopsAtTheNestingLimit(t *testing.T) {
 		t.Errorf("status %s, error %q", run.Status, run.Error)
 	}
 }
+
+// TestApproverRoles: a step can name roles as well as people. A role counts only when the edition
+// knows the approver's role (a signed decision in Pro); a person on the list qualifies either way.
+func TestApproverRoles(t *testing.T) {
+	cases := []struct {
+		name  string
+		step  models.Step
+		who   Approver
+		allow bool
+	}{
+		{"role listed", models.Step{ApproverRoles: []string{"chef", "head_chef"}}, Approver{ID: "1", Email: "a@x.test", Role: "chef"}, true},
+		{"role not listed", models.Step{ApproverRoles: []string{"chef"}}, Approver{ID: "1", Email: "a@x.test", Role: "baker"}, false},
+		{"person listed, role not", models.Step{ApproverEmails: []string{"a@x.test"}, ApproverRoles: []string{"head_chef"}}, Approver{ID: "1", Email: "a@x.test", Role: "baker"}, true},
+		{"role listed, person not", models.Step{ApproverEmails: []string{"z@x.test"}, ApproverRoles: []string{"baker"}}, Approver{ID: "1", Email: "a@x.test", Role: "baker"}, true},
+		{"neither", models.Step{ApproverEmails: []string{"z@x.test"}, ApproverRoles: []string{"head_chef"}}, Approver{ID: "1", Email: "a@x.test", Role: "baker"}, false},
+		{"retired admin means a head chef", models.Step{ApproverRoles: []string{"admin"}}, Approver{ID: "1", Email: "a@x.test", Role: "head_chef"}, true},
+		{"a restaurateur is admitted where a head chef is", models.Step{ApproverRoles: []string{"head_chef"}}, Approver{ID: "1", Email: "a@x.test", Role: "restaurateur"}, true},
+		{"a head chef is not admitted where only a restaurateur is", models.Step{ApproverRoles: []string{"restaurateur"}}, Approver{ID: "1", Email: "a@x.test", Role: "head_chef"}, false},
+		{"role unknown: roles are not enforced (the community edition)", models.Step{ApproverRoles: []string{"head_chef"}}, Approver{ID: "1", Email: "a@x.test"}, true},
+		{"role listed but the domain is wrong", models.Step{ApproverRoles: []string{"chef"}, ApproverDomain: "corp.com"}, Approver{ID: "1", Email: "a@other.io", Role: "baker"}, false},
+	}
+	for i, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			eng := setupTestEngine(t, nil)
+			ctx := context.Background()
+			id := fmt.Sprintf("gate-roles-%d", i)
+			c.step.Name, c.step.Kind = "gate", models.StepHumanGate
+			recipe := &models.Recipe{ID: id, Name: id, Kitchen: "default", Steps: []models.Step{c.step}}
+			eng.store.CreateRecipe(ctx, recipe)
+			runID, err := eng.ExecuteRecipe(ctx, recipe, "default", nil, "")
+			if err != nil {
+				t.Fatalf("ExecuteRecipe: %v", err)
+			}
+			waitForPaused(t, eng, runID)
+			ok, err := eng.ApproveGateAs(runID, "gate", true, c.who, "api", "")
+			if c.allow {
+				if err != nil || !ok {
+					t.Fatalf("should be allowed: ok=%v err=%v", ok, err)
+				}
+				waitForRun(t, eng, runID, 15)
+				return
+			}
+			if !errors.Is(err, ErrApproverUnauthorized) {
+				t.Fatalf("want ErrApproverUnauthorized, got ok=%v err=%v", ok, err)
+			}
+			eng.CancelRun(runID)
+		})
+	}
+}

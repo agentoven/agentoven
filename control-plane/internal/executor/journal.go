@@ -140,6 +140,8 @@ type JournalHeader struct {
 	ThinkingEnabled bool                        `json:"thinking_enabled,omitempty"`
 	SessionID       string                      `json:"session_id,omitempty"`
 	StartedAt       time.Time                   `json:"started_at"`
+	// StartedBy is who started the run (see startedBy); empty for a system caller.
+	StartedBy string `json:"started_by,omitempty"`
 	// Budget is the limits the run started under, after tightening by the agent,
 	// the request and any parent's grant. Extensions granted later are separate
 	// records, so a resume rebuilds exactly the current limits.
@@ -986,6 +988,10 @@ func pauseKindOf(st *JournalState) string {
 	}
 	return string(PauseApproval)
 }
+
+// PauseKindOf says why a paused run is waiting ("approval", "budget", "stall"), "" when it is not
+// paused. A decision that unblocks it is a signed gate (Pro ADR-0041).
+func PauseKindOf(st *JournalState) string { return pauseKindOf(st) }
 
 func (j *FileJournal) Discard(_ context.Context, traceID string) error {
 	l := j.lockFor(traceID)

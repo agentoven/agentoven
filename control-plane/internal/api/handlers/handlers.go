@@ -60,6 +60,10 @@ type Handlers struct {
 	Executor   *executor.Executor
 	// CredentialOwners decides who owns a new scoped key (nil in the community edition).
 	CredentialOwners contracts.CredentialOwnerPolicy
+	// DecisionSigner, when set (Pro), requires every human decision to carry a signature
+	// (Pro ADR-0041). The community edition has none and decides as before.
+	DecisionSigner contracts.DecisionSigner
+	describers     map[string]contracts.DecisionDescriber
 	// Tasks runs agents in the background (nil when the execution journal is off).
 	Tasks *executor.TaskManager
 	// SecretResolver resolves secret references and, when a vault is installed (Pro), is where
@@ -215,6 +219,7 @@ func New(s store.Store, mr *router.ModelRouter, gw *mcpgw.Gateway, wf *workflow.
 	}
 	exec.SetAudit(h.auditRun)
 	h.startTaskRecovery()
+	h.RegisterOwnDecisionGates()
 	return h
 }
 
@@ -1800,7 +1805,17 @@ func (h *Handlers) GetRecipeRun(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) ReleaseWait(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runId")
 	stepName := chi.URLParam(r, "stepName")
-	if !h.Workflow.ReleaseWait(runID, stepName) {
+	sig, ok := h.signDecision(w, r, contracts.GateWaitRelease, runID+":"+stepName, contracts.MeaningApproved, nil)
+	if !ok {
+		return
+	}
+	released := h.Workflow.ReleaseWait(runID, stepName)
+	var applyErr error
+	if !released {
+		applyErr = fmt.Errorf("step is not waiting")
+	}
+	h.decisionApplied(r, sig, applyErr)
+	if !released {
 		respondError(w, http.StatusNotFound, fmt.Sprintf("Step '%s' of run '%s' is not waiting", stepName, runID))
 		return
 	}
@@ -1832,6 +1847,13 @@ func (h *Handlers) ApproveGate(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if h.DecisionSigner != nil {
+		// This route records no approver and checks no constraint. With signatures on, it is the
+		// same decision as the route that does, so it takes the same path.
+		h.approveSignedGate(w, r, runID, stepName, req.Approved, "", "")
 		return
 	}
 
@@ -5198,7 +5220,17 @@ func (h *Handlers) ResumeRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A decision on a paused run is a signed gate (Pro ADR-0041).
+	var sig *contracts.SignedDecision
+	if h.DecisionSigner != nil && decision != nil {
+		var ok bool
+		if sig, ok = h.signRunDecision(w, r, kitchen, traceID, decision); !ok {
+			return
+		}
+	}
+
 	response, trace, err := h.Executor.ResumeFor(r.Context(), kitchen, agentName, traceID, decision)
+	h.decisionApplied(r, sig, decisionApplyError(err))
 	if err != nil {
 		switch {
 		case h.respondRunStopped(w, agentName, trace, err):
@@ -5745,6 +5777,12 @@ func (h *Handlers) ApproveGateWithMetadata(w http.ResponseWriter, r *http.Reques
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	// With signatures on, the approver is the verified signer; the fields in the body are ignored.
+	if h.DecisionSigner != nil {
+		h.approveSignedGate(w, r, runID, stepName, req.Approved, req.Channel, req.Comments)
 		return
 	}
 
@@ -7088,7 +7126,9 @@ func (h *Handlers) SetSubagentRuntime(rt contracts.SubagentRuntime) {
 }
 
 // SetCredentialOwnerPolicy makes every new scoped key belong to a person the policy accepts.
-func (h *Handlers) SetCredentialOwnerPolicy(p contracts.CredentialOwnerPolicy) { h.CredentialOwners = p }
+func (h *Handlers) SetCredentialOwnerPolicy(p contracts.CredentialOwnerPolicy) {
+	h.CredentialOwners = p
+}
 
 // SetGuardrailPolicy makes workspace guardrails apply to every request this handler
 // serves and to every tool call the executor dispatches. Pass nil to turn them off.

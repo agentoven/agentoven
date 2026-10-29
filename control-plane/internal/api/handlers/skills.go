@@ -12,6 +12,7 @@ import (
 
 	"github.com/agentoven/agentoven/control-plane/internal/api/middleware"
 	"github.com/agentoven/agentoven/control-plane/internal/store"
+	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	pkgmw "github.com/agentoven/agentoven/control-plane/pkg/middleware"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/agentoven/agentoven/control-plane/pkg/skills"
@@ -504,34 +505,53 @@ func (h *Handlers) reviewSkill(w http.ResponseWriter, r *http.Request, approve b
 	if id := pkgmw.GetIdentity(r.Context()); id != nil {
 		reviewer = id.Subject
 	}
+	// A review of a skill is a signed gate (Pro ADR-0041): the reviewer is the verified signer.
+	meaning := contracts.MeaningRejected
+	if approve {
+		meaning = contracts.MeaningApproved
+	}
+	sig, signedOK := h.signDecision(w, r, contracts.GateSkillApproval, name, meaning, nil)
+	if !signedOK {
+		return
+	}
+	if sig != nil {
+		reviewer = sig.SignerID
+	}
+	finish := func(err error) { h.decisionApplied(r, sig, err) }
 	skill.VerificationReasoning += fmt.Sprintf("\n\n[human review by %s] %s", reviewer, note)
 	skill.UpdatedAt = time.Now().UTC()
 
 	if !approve {
 		skill.Status = models.SkillStatusRejected
 		if err := h.Store.UpdateSkill(r.Context(), skill); err != nil {
+			finish(err)
 			respondError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		finish(nil)
 		respondJSON(w, http.StatusOK, skill)
 		return
 	}
 
 	if skill.Manifest == nil {
+		finish(fmt.Errorf("skill has no manifest on record"))
 		respondError(w, http.StatusInternalServerError, "skill has no manifest on record")
 		return
 	}
 	registered, err := h.registerSkillTools(r.Context(), kitchen, skill.Name, skill.Manifest, nil)
 	if err != nil {
+		finish(err)
 		respondError(w, http.StatusInternalServerError, "approved, but failed to register tools: "+err.Error())
 		return
 	}
 	skill.RegisteredTools = registered
 	skill.Status = models.SkillStatusAccepted
 	if err := h.Store.UpdateSkill(r.Context(), skill); err != nil {
+		finish(err)
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	finish(nil)
 	respondJSON(w, http.StatusOK, skill)
 }
 

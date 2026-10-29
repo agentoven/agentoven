@@ -266,6 +266,18 @@ var ErrApproverUnauthorized = fmt.Errorf("approver is not authorised for this ga
 // Returns (false, ErrApproverUnauthorized) when the caller fails the step's approver
 // constraints. Returns (false, nil) when the gate doesn't exist or is no longer pending.
 func (e *Engine) ApproveGateWithMetadata(runID, stepName string, approved bool, approverID, approverEmail, approverIssuer, channel, comments string) (bool, error) {
+	return e.ApproveGateAs(runID, stepName, approved, Approver{ID: approverID, Email: approverEmail, Issuer: approverIssuer}, channel, comments)
+}
+
+// Approver is who decides a gate. Role is the role they hold in the gate's kitchen; it is set only
+// when the edition can say (Pro), and only then do a step's approver_roles apply.
+type Approver struct {
+	ID, Email, Issuer, Role string
+}
+
+// ApproveGateAs approves or rejects a gate as a named approver, after checking the step's constraints
+// against them.
+func (e *Engine) ApproveGateAs(runID, stepName string, approved bool, who Approver, channel, comments string) (bool, error) {
 	gateKey := runID + ":" + stepName
 	ctx := context.Background()
 
@@ -275,7 +287,7 @@ func (e *Engine) ApproveGateWithMetadata(runID, stepName string, approved bool, 
 	}
 
 	// Enforce approver constraints declared in the recipe step definition.
-	if authErr := e.checkApproverConstraints(ctx, record, approverID, approverEmail, approverIssuer); authErr != nil {
+	if authErr := e.checkApproverConstraints(ctx, record, who); authErr != nil {
 		return false, authErr
 	}
 
@@ -285,8 +297,8 @@ func (e *Engine) ApproveGateWithMetadata(runID, stepName string, approved bool, 
 	} else {
 		record.Status = "rejected"
 	}
-	record.ApproverID = approverID
-	record.ApproverEmail = approverEmail
+	record.ApproverID = who.ID
+	record.ApproverEmail = who.Email
 	record.ApproverChannel = channel
 	record.Comments = comments
 	record.ResolvedAt = &now
@@ -306,11 +318,15 @@ func (e *Engine) ApproveGateWithMetadata(runID, stepName string, approved bool, 
 	return true, nil
 }
 
-// checkApproverConstraints validates approverID/approverEmail against the
-// approver constraints declared on the recipe Step.  Returns nil when no
-// constraints are defined (open gate) or when the approver satisfies them.
-// approverIssuer is the OIDC issuer from the caller's token (empty for API-key callers).
-func (e *Engine) checkApproverConstraints(ctx context.Context, record *models.ApprovalRecord, approverID, approverEmail, approverIssuer string) error {
+// checkApproverConstraints validates the approver against the constraints declared on the recipe
+// Step. Returns nil when no constraints are defined (open gate) or when the approver satisfies them.
+//
+// Who qualifies: a person on the step's approver_emails list, or (when the approver's role is known)
+// one whose role is in approver_roles. Either wins outright, even across tenants. If the step names
+// people or roles and the approver is neither, the gate is closed to them unless a domain or tenant
+// constraint can still admit them. A domain and a same-tenant constraint must then hold.
+func (e *Engine) checkApproverConstraints(ctx context.Context, record *models.ApprovalRecord, who Approver) error {
+	approverID, approverEmail, approverIssuer := who.ID, who.Email, who.Issuer
 	// Load the recipe run to find the kitchen and recipe name.
 	run, err := e.store.GetRecipeRun(ctx, record.RunID)
 	if err != nil {
@@ -351,17 +367,29 @@ func (e *Engine) checkApproverConstraints(ctx context.Context, record *models.Ap
 
 	email := strings.ToLower(strings.TrimSpace(approverEmail))
 
-	// 1. Explicit email allow-list wins outright (even cross-tenant).
-	if len(step.ApproverEmails) > 0 {
-		for _, allowed := range step.ApproverEmails {
-			if strings.ToLower(strings.TrimSpace(allowed)) == email {
-				return nil
-			}
+	// 1. A named person, or a listed role, qualifies outright (even cross-tenant). Roles count only
+	//    when the edition knows the approver's role.
+	emailListed := false
+	for _, allowed := range step.ApproverEmails {
+		if strings.ToLower(strings.TrimSpace(allowed)) == email {
+			emailListed = true
+			break
 		}
-		// Caller is not in the explicit allow-list. If no other constraint can
-		// grant access, deny immediately (allow-list is exclusive when it is the
-		// only declared constraint).
+	}
+	roleListed := who.Role != "" && approverRoleListed(step.ApproverRoles, who.Role)
+	namesPeople := len(step.ApproverEmails) > 0 || (len(step.ApproverRoles) > 0 && who.Role != "")
+	if namesPeople {
+		if emailListed || roleListed {
+			return nil
+		}
+		// Not listed. If no other constraint can admit them, the gate is closed to them.
 		if step.ApproverDomain == "" && !step.RequireSameTenant {
+			if len(step.ApproverEmails) > 0 && len(step.ApproverRoles) > 0 {
+				return fmt.Errorf("%w: %q is neither on the approver list nor in an approver role (%s)", ErrApproverUnauthorized, approverEmail, strings.Join(step.ApproverRoles, ", "))
+			}
+			if len(step.ApproverRoles) > 0 {
+				return fmt.Errorf("%w: role %q is not an approver role for this step (%s)", ErrApproverUnauthorized, who.Role, strings.Join(step.ApproverRoles, ", "))
+			}
 			return fmt.Errorf("%w: email %q is not in the approver allow-list", ErrApproverUnauthorized, approverEmail)
 		}
 	}
@@ -386,25 +414,31 @@ func (e *Engine) checkApproverConstraints(ctx context.Context, record *models.Ap
 		if e.oidcIssuer != "" && approverIssuer != "" {
 			if strings.TrimSpace(approverIssuer) != e.oidcIssuer {
 				// Allow if the approver is explicitly listed by email (cross-tenant exception).
-				explicitlyAllowed := false
-				for _, allowed := range step.ApproverEmails {
-					if strings.ToLower(strings.TrimSpace(allowed)) == email {
-						explicitlyAllowed = true
-						break
-					}
-				}
-				if !explicitlyAllowed {
+				if !emailListed {
 					return fmt.Errorf("%w: approver issuer %q does not match expected tenant issuer", ErrApproverUnauthorized, approverIssuer)
 				}
 			}
 		}
 	}
-
-	// 4. Role constraints are enforced by the Pro RBAC layer; OSS has no roles.
-	//    If only role constraints are set and we reach here, allow through
-	//    (the Pro handler will have already applied RBAC middleware).
-	_ = approverID // used by Pro layer
 	return nil
+}
+
+// approverRoleListed reports whether role is one of the roles a step names. The retired "admin" in a
+// list means a Head Chef or a Restaurateur, and a Restaurateur is admitted wherever a Head Chef is.
+func approverRoleListed(listed []string, role string) bool {
+	role = strings.ToLower(strings.TrimSpace(role))
+	for _, l := range listed {
+		l = strings.ToLower(strings.TrimSpace(l))
+		switch {
+		case l == role:
+			return true
+		case l == "admin" && (role == "head_chef" || role == "restaurateur"):
+			return true
+		case l == "head_chef" && role == "restaurateur":
+			return true
+		}
+	}
+	return false
 }
 
 // ── DAG Execution ───────────────────────────────────────────

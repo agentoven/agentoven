@@ -10,6 +10,7 @@ import (
 
 	"github.com/agentoven/agentoven/control-plane/internal/router"
 	inttelemetry "github.com/agentoven/agentoven/control-plane/internal/telemetry"
+	pkgmw "github.com/agentoven/agentoven/control-plane/pkg/middleware"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -197,6 +198,7 @@ func (e *Executor) ExecuteMessage(ctx context.Context, agent *models.Agent, user
 			SessionID: st.trace.SessionID, StartedAt: st.start,
 			Budget: budgetPtr(base), ParentTraceID: parentRunID(ctx),
 			Schema: journalSchema, InitialMessages: st.messages, LongRun: st.longRun,
+			StartedBy: startedBy(ctx),
 		}); err != nil {
 			log.Warn().Err(err).Str("trace_id", st.traceID).Msg("Failed to start journal for run; continuing without durability for this run")
 		}
@@ -233,6 +235,7 @@ func (e *Executor) ExecuteStreamMessage(ctx context.Context, agent *models.Agent
 			SessionID: st.trace.SessionID, StartedAt: st.start,
 			Budget: budgetPtr(base), ParentTraceID: parentRunID(ctx),
 			Schema: journalSchema, InitialMessages: st.messages, LongRun: st.longRun,
+			StartedBy: startedBy(ctx),
 		}); err != nil {
 			log.Warn().Err(err).Str("trace_id", st.traceID).Msg("Failed to start journal for run; continuing without durability for this run")
 		}
@@ -475,6 +478,19 @@ func (e *Executor) checkRunAgent(ctx context.Context, kitchen, agentName, traceI
 		return fmt.Errorf("executor: run %s not found", traceID)
 	}
 	return nil
+}
+
+// startedBy is who started the run: the e-mail of the authenticated caller, else their subject.
+// A GxP kitchen bars that person from signing the run's approvals (Pro ADR-0041).
+func startedBy(ctx context.Context) string {
+	id := pkgmw.GetIdentity(ctx)
+	if id == nil {
+		return ""
+	}
+	if id.Email != "" {
+		return id.Email
+	}
+	return id.Subject
 }
 
 // RunState returns a run's journaled state, if the run is in kitchen. A run in another

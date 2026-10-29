@@ -354,7 +354,17 @@ func (h *Handlers) ResumeTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A decision on a paused task is a signed gate (Pro ADR-0041).
+	var sig *contracts.SignedDecision
+	if h.DecisionSigner != nil && decision != nil {
+		var ok bool
+		if sig, ok = h.signRunDecision(w, r, kitchen, snap.ID, decision); !ok {
+			return
+		}
+	}
+
 	out, err := h.Tasks.Resume(r.Context(), kitchen, snap.Agent, snap.ID, decision, h.filterFor(context.WithoutCancel(r.Context()), agent))
+	h.decisionApplied(r, sig, decisionApplyError(err))
 	switch {
 	case errors.Is(err, executor.ErrTaskNotFound):
 		respondError(w, http.StatusNotFound, "task not found")
