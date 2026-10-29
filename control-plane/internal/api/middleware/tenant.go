@@ -3,7 +3,6 @@ package middleware
 import (
 	"context"
 	"net/http"
-	"strings"
 
 	pkgmw "github.com/agentoven/agentoven/control-plane/pkg/middleware"
 )
@@ -20,34 +19,8 @@ const (
 // and falls back to "default".
 func TenantExtractor(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		kitchen := ""
-
-		// Priority 1: X-Kitchen header
-		if h := r.Header.Get("X-Kitchen"); h != "" {
-			kitchen = strings.TrimSpace(h)
-		}
-
-		// Priority 2: kitchen query parameter
-		if kitchen == "" {
-			if q := r.URL.Query().Get("kitchen"); q != "" {
-				kitchen = strings.TrimSpace(q)
-			}
-		}
-
-		// Priority 3: Extract tenant from Authorization header (Bearer token)
-		// Phase 1: Read the "sub" or "tenant" claim from a JWT if present.
-		// Full JWT validation (signature, expiry) deferred to Phase 2 auth middleware.
-		if kitchen == "" {
-			if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-				// Future: decode JWT claims and extract tenant/kitchen
-				_ = strings.TrimPrefix(auth, "Bearer ")
-			}
-		}
-
-		// Default kitchen
-		if kitchen == "" {
-			kitchen = "default"
-		}
+		// X-Kitchen header, else the kitchen query parameter, else "default".
+		kitchen := pkgmw.KitchenFromRequest(r)
 
 		// Use pkg/middleware for the kitchen context key (shared with enterprise repo)
 		ctx := pkgmw.SetKitchen(r.Context(), kitchen)

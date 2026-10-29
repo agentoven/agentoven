@@ -58,6 +58,8 @@ type Handlers struct {
 	Workflow   *workflow.Engine
 	Resolver   *resolver.Resolver
 	Executor   *executor.Executor
+	// CredentialOwners decides who owns a new scoped key (nil in the community edition).
+	CredentialOwners contracts.CredentialOwnerPolicy
 	// Tasks runs agents in the background (nil when the execution journal is off).
 	Tasks *executor.TaskManager
 	// SecretResolver resolves secret references and, when a vault is installed (Pro), is where
@@ -6689,6 +6691,9 @@ func (h *Handlers) HandleCreateScopedKey(w http.ResponseWriter, r *http.Request)
 		AgentNames []string `json:"agent_names"` // ["*"] for all agents
 		MaxCalls   int      `json:"max_calls"`   // 0 = unlimited
 		ExpiresIn  string   `json:"expires_in"`  // e.g. "24h", "7d", "" = never
+		// OwnerEmail names the person the key belongs to. With an owner policy installed (Pro) it
+		// is mandatory: left out it is the caller, and the person must be a member of the kitchen.
+		OwnerEmail string `json:"owner_email"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON body")
@@ -6697,6 +6702,19 @@ func (h *Handlers) HandleCreateScopedKey(w http.ResponseWriter, r *http.Request)
 	if req.Label == "" {
 		respondError(w, http.StatusBadRequest, "label is required")
 		return
+	}
+	var owner *contracts.CredentialOwner
+	if h.CredentialOwners != nil {
+		var err error
+		if owner, err = h.CredentialOwners.ResolveOwner(r, kitchen, req.OwnerEmail, ""); err != nil {
+			var ae *contracts.AuthError
+			if errors.As(err, &ae) {
+				respondJSON(w, ae.Status, map[string]string{"error": ae.Code, "message": ae.Message})
+				return
+			}
+			respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	if len(req.AgentNames) == 0 {
 		respondError(w, http.StatusBadRequest, "agent_names is required (use [\"*\"] for all agents)")
@@ -6754,6 +6772,9 @@ func (h *Handlers) HandleCreateScopedKey(w http.ResponseWriter, r *http.Request)
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
+	if owner != nil {
+		key.OwnerUserID, key.OwnerEmail = owner.UserID, owner.Email
+	}
 
 	if err := h.Store.CreateScopedKey(r.Context(), key); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
@@ -6771,6 +6792,7 @@ func (h *Handlers) HandleCreateScopedKey(w http.ResponseWriter, r *http.Request)
 		"max_calls":   key.MaxCalls,
 		"expires_at":  key.ExpiresAt,
 		"created_by":  key.CreatedBy,
+		"owner_email": key.OwnerEmail,
 		"created_at":  key.CreatedAt,
 	})
 }
@@ -7064,6 +7086,9 @@ func (h *Handlers) SetSubagentRuntime(rt contracts.SubagentRuntime) {
 		h.Executor.SetSubagentRuntime(rt)
 	}
 }
+
+// SetCredentialOwnerPolicy makes every new scoped key belong to a person the policy accepts.
+func (h *Handlers) SetCredentialOwnerPolicy(p contracts.CredentialOwnerPolicy) { h.CredentialOwners = p }
 
 // SetGuardrailPolicy makes workspace guardrails apply to every request this handler
 // serves and to every tool call the executor dispatches. Pass nil to turn them off.

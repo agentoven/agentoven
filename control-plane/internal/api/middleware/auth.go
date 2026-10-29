@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -50,6 +51,13 @@ func (am *AuthMiddleware) Handler(next http.Handler) http.Handler {
 		identity, err := am.chain.Authenticate(r.Context(), r)
 		if err != nil {
 			log.Debug().Err(err).Str("path", r.URL.Path).Msg("Authentication failed")
+			var ae *contracts.AuthError
+			if errors.As(err, &ae) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(ae.Status)
+				json.NewEncoder(w).Encode(map[string]string{"error": ae.Code, "message": ae.Message})
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("WWW-Authenticate", `Bearer realm="agentoven"`)
 			w.WriteHeader(http.StatusUnauthorized)

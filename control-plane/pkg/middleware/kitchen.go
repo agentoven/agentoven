@@ -4,7 +4,11 @@
 // can use GetKitchen() and SetKitchen() in its own middleware.
 package middleware
 
-import "context"
+import (
+	"context"
+	"net/http"
+	"strings"
+)
 
 type contextKey string
 
@@ -22,4 +26,16 @@ func GetKitchen(ctx context.Context) string {
 // SetKitchen stores the kitchen name in the context.
 func SetKitchen(ctx context.Context, kitchen string) context.Context {
 	return context.WithValue(ctx, kitchenKey, kitchen)
+}
+
+// KitchenFromRequest is the kitchen a request names: the X-Kitchen header, else the kitchen query
+// parameter, else "default". The tenant middleware and any identity enricher must agree on it.
+func KitchenFromRequest(r *http.Request) string {
+	if h := strings.TrimSpace(r.Header.Get("X-Kitchen")); h != "" {
+		return h
+	}
+	if q := strings.TrimSpace(r.URL.Query().Get("kitchen")); q != "" {
+		return q
+	}
+	return "default"
 }

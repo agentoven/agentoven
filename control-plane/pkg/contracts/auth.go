@@ -122,3 +122,36 @@ func IsPlatformAdmin(role string) bool {
 func IsKitchenOwner(role string) bool {
 	return IsPlatformAdmin(role) || role == RoleHeadChef
 }
+
+// AuthError is an authentication or authorization refusal that names its HTTP status and a stable
+// code. A provider, an identity enricher or an owner policy returns one when the plain 401 of a
+// failed login would mislead: the person is known, they may simply not enter this kitchen.
+type AuthError struct {
+	Status  int
+	Code    string
+	Message string
+}
+
+func (e *AuthError) Error() string { return e.Message }
+
+// IdentityEnricher runs on the identity a provider returned, before the request goes on. Pro uses
+// it to resolve a person's role in the kitchen the request names (membership), and to refuse a
+// credential whose owner has left. It returns the identity to use, or an error (an *AuthError for a
+// specific status). It must not mutate the identity it is given.
+type IdentityEnricher func(ctx context.Context, r *http.Request, id *Identity) (*Identity, error)
+
+// CredentialOwner is the person a service credential belongs to.
+type CredentialOwner struct {
+	UserID string `json:"owner_user_id"`
+	Email  string `json:"owner_email"`
+}
+
+// CredentialOwnerPolicy decides who owns a credential about to be created. Pro installs one that
+// requires an owner who is a member of the kitchen (ADR-0042); the community edition has none and
+// credentials there carry only their creator.
+type CredentialOwnerPolicy interface {
+	// ResolveOwner validates the requested owner (an e-mail, empty for "the caller") for a
+	// credential in kitchen with the given role ("" for the default). It returns the owner to
+	// record or an *AuthError.
+	ResolveOwner(r *http.Request, kitchen, requestedOwnerEmail, role string) (*CredentialOwner, error)
+}

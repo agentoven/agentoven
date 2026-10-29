@@ -30,6 +30,15 @@ import (
 type ProviderChain struct {
 	mu        sync.RWMutex
 	providers []contracts.AuthProvider
+	enrich    contracts.IdentityEnricher
+}
+
+// SetEnricher installs a function that runs on every identity a provider returns, before the
+// request goes on (Pro resolves a person's role in the requested kitchen there). Pass nil to remove.
+func (c *ProviderChain) SetEnricher(fn contracts.IdentityEnricher) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.enrich = fn
 }
 
 // NewProviderChain creates an empty auth provider chain.
@@ -75,6 +84,7 @@ func (c *ProviderChain) Authenticate(ctx context.Context, r *http.Request) (*con
 	c.mu.RLock()
 	providers := make([]contracts.AuthProvider, len(c.providers))
 	copy(providers, c.providers)
+	enrich := c.enrich
 	c.mu.RUnlock()
 
 	for _, p := range providers {
@@ -91,6 +101,15 @@ func (c *ProviderChain) Authenticate(ctx context.Context, r *http.Request) (*con
 			return nil, err
 		}
 		if identity != nil {
+			if enrich != nil {
+				enriched, err := enrich(ctx, r, identity)
+				if err != nil {
+					return nil, err
+				}
+				if enriched != nil {
+					identity = enriched
+				}
+			}
 			// Authenticated!
 			log.Debug().
 				Str("provider", p.Name()).

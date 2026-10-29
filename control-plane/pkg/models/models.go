@@ -2744,9 +2744,13 @@ type ScopedAPIKey struct {
 	Role             string     `json:"role"`              // one of: admin, chef, baker, auditor, finance, viewer (default: viewer)
 	ExpiresAt        *time.Time `json:"expires_at"`        // nil = never expires
 	CreatedBy        string     `json:"created_by"`        // Identity.Subject who created this key
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
-	Revoked          bool       `json:"revoked"`
+	// OwnerUserID and OwnerEmail are the person the key belongs to. Pro requires one that is a
+	// member of the key's kitchen and stops the key when that stops being true (Pro ADR-0042).
+	OwnerUserID string    `json:"owner_user_id,omitempty"`
+	OwnerEmail  string    `json:"owner_email,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Revoked     bool      `json:"revoked"`
 }
 
 // IsExpired returns true if the key has passed its expiration time.
