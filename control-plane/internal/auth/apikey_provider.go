@@ -84,6 +84,7 @@ func (p *APIKeyProvider) Authenticate(_ context.Context, r *http.Request) (*cont
 	return &contracts.Identity{
 		Subject:     "apikey:" + keyHash[:16],
 		Provider:    "apikey",
+		Kind:        "api_key", // an installation credential, not a person
 		Role:        p.defaultRole,
 		DisplayName: "API Key User",
 		ExpiresAt:   time.Now().Add(24 * time.Hour), // API keys don't expire per-request

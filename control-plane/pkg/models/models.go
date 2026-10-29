@@ -2526,6 +2526,9 @@ type ServiceAccount struct {
 	TokenPrefix string     `json:"token_prefix" db:"token_prefix"` // first 8 chars ("ao_sa_Ab")
 	ExpiresAt   *time.Time `json:"expires_at,omitempty" db:"expires_at"`
 	CreatedBy   string     `json:"created_by" db:"created_by"`
+	// OwnerUserID and OwnerEmail are the person the account acts on behalf of (Pro ADR-0042).
+	OwnerUserID string     `json:"owner_user_id,omitempty" db:"owner_user_id"`
+	OwnerEmail  string     `json:"owner_email,omitempty" db:"owner_email"`
 	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
 	LastUsedAt  *time.Time `json:"last_used_at,omitempty" db:"last_used_at"`
 	Revoked     bool       `json:"revoked" db:"revoked"`

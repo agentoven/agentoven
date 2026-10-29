@@ -9,6 +9,7 @@ import (
 
 	"github.com/agentoven/agentoven/control-plane/internal/store"
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
+	"github.com/agentoven/agentoven/control-plane/pkg/models"
 )
 
 // ScopedKeyProvider authenticates requests using scoped API keys.
@@ -86,7 +87,8 @@ func (p *ScopedKeyProvider) Authenticate(ctx context.Context, r *http.Request) (
 		DisplayName: scopedKey.Label,
 		// The key's creator is the accountable owner until reassigned. Without
 		// this, scoped-key activity audits as "scopedkey:<id>" and no human.
-		OwnerSubject: scopedKey.CreatedBy,
+		OwnerSubject: ownerSubject(scopedKey),
+		OwnerEmail:   scopedKey.OwnerEmail,
 		ExpiresAt:    time.Now().Add(1 * time.Hour), // session-level expiry
 		Claims: map[string]string{
 			"key_id":  scopedKey.ID,
@@ -96,4 +98,12 @@ func (p *ScopedKeyProvider) Authenticate(ctx context.Context, r *http.Request) (
 	}
 
 	return identity, nil
+}
+
+// ownerSubject is the accountable person: the key's owner when it has one, else its creator.
+func ownerSubject(k *models.ScopedAPIKey) string {
+	if k.OwnerUserID != "" {
+		return k.OwnerUserID
+	}
+	return k.CreatedBy
 }
