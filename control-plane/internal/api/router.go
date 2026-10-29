@@ -337,6 +337,14 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 			r.Delete("/{traceId}/scores/{scoreId}", h.DeleteTraceScore)
 		})
 
+		// Saved views of the trace list
+		r.Route("/trace-views", func(r chi.Router) {
+			r.Get("/", h.ListTraceViews)
+			r.Post("/", h.CreateTraceView)
+			r.Put("/{viewId}", h.UpdateTraceView)
+			r.Delete("/{viewId}", h.DeleteTraceView)
+		})
+
 		// Spans — direct span access
 		r.Get("/spans/{spanId}", h.GetSpan)
 

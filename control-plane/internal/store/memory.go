@@ -45,6 +45,7 @@ type snapshot struct {
 	Environments  map[string]*models.Environment         `json:"environments"`     // key: kitchen:slug
 	Deployments   map[string]*models.AgentDeployment     `json:"deployments"`      // key: id
 	ServiceAccts  map[string]*models.ServiceAccount      `json:"service_accounts"` // key: id
+	TraceViews    map[string]*models.TraceView           `json:"trace_views,omitempty"`
 }
 
 // MemoryStore implements Store with in-memory maps.
@@ -77,6 +78,7 @@ type MemoryStore struct {
 	deployments        map[string]*models.AgentDeployment     // key: id
 	serviceAccts       map[string]*models.ServiceAccount      // key: id
 	crossKitchenGrants map[string]*models.CrossKitchenGrant   // key: id
+	traceViews         map[string]*models.TraceView           // key: id
 
 	// Agent version history — append-only, keyed by kitchen:name
 	agentVersions map[string][]*models.Agent // key: kitchen:name → version history
@@ -133,6 +135,7 @@ func NewMemoryStore() *MemoryStore {
 		deployments:        make(map[string]*models.AgentDeployment),
 		serviceAccts:       make(map[string]*models.ServiceAccount),
 		crossKitchenGrants: make(map[string]*models.CrossKitchenGrant),
+		traceViews:         make(map[string]*models.TraceView),
 		spans:              make(map[string]*models.Span),
 		spansByTrace:       make(map[string][]string),
 		saveCh:             make(chan struct{}, 1),
@@ -268,6 +271,7 @@ func (m *MemoryStore) saveSnapshot() {
 		Environments:  m.environments,
 		Deployments:   m.deployments,
 		ServiceAccts:  m.serviceAccts,
+		TraceViews:    m.traceViews,
 	}
 	data, err := json.MarshalIndent(snap, "", "  ")
 	m.mu.RUnlock()
@@ -350,6 +354,9 @@ func (m *MemoryStore) loadSnapshot() {
 	}
 	if snap.AgentVersions != nil {
 		m.agentVersions = snap.AgentVersions
+	}
+	if snap.TraceViews != nil {
+		m.traceViews = snap.TraceViews
 	}
 	if snap.AuditEvents != nil {
 		m.auditEvents = snap.AuditEvents

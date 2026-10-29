@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -168,3 +169,46 @@ func TestTracesFilterByEnvironmentAndAgentVersion(t *testing.T) {
 }
 
 var _ = handlers.Handlers{}
+
+// A run whose reply an output guardrail withheld still happened: the model was called and paid for.
+// It must exist as a trace, carrying the trace ID its audit event names, and must not keep the reply.
+func TestABlockedRunIsATraceThatJoinsItsAuditEventAndKeepsNoReply(t *testing.T) {
+	for name, tc := range map[string]struct {
+		call func(h *handlers.Handlers) http.HandlerFunc
+		url  string
+	}{
+		"invoke": {func(h *handlers.Handlers) http.HandlerFunc { return h.InvokeAgent }, "/invoke"},
+		"stream": {func(h *handlers.Handlers) http.HandlerFunc { return h.StreamInvokeAgent }, "/invoke/stream"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := goAgentHandlers(t, "their SSN is "+leakedSSN, nativeGuardrails())
+			rec := call(tc.call(h), tc.url, msg("what is the id?"), map[string]string{"agentName": "go-agent"})
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+			}
+			trs, err := h.Store.ListTracesFiltered(context.Background(), "default", store.TraceFilter{AgentName: "go-agent"})
+			if err != nil || len(trs) != 1 || trs[0].Status != "blocked" || trs[0].OutputText != "" {
+				t.Fatalf("a blocked run should be one trace, status blocked, no output: %+v (%v)", trs, err)
+			}
+			evs, _ := h.Store.ListAuditEvents(context.Background(), models.AuditFilter{Kitchen: "default", TraceIDs: []string{trs[0].ID}})
+			if len(evs) != 1 || evs[0].Action != "guardrail.output_blocked" {
+				t.Fatalf("the guardrail's audit event should carry the run's trace id: %+v", evs)
+			}
+			spans, _ := h.Store.ListSpansByTrace(context.Background(), trs[0].ID)
+			if len(spans) == 0 {
+				t.Fatal("the blocked run's spans were not recorded")
+			}
+			for _, sp := range spans {
+				if strings.Contains(string(sp.Output), leakedSSN) || strings.Contains(string(sp.Input), leakedSSN) {
+					t.Errorf("the withheld reply was kept in span %s: %s", sp.Name, sp.Output)
+				}
+			}
+			tl, _ := getJSON[tracetimeline.Timeline](t, func(w http.ResponseWriter, r *http.Request) {
+				h.TraceTimeline(w, withChiParam(r, "traceId", trs[0].ID))
+			}, "/api/v1/traces/"+trs[0].ID+"/timeline")
+			if len(tl.Lanes) != 1 || len(tl.Lanes[0].Events) != 1 {
+				t.Errorf("the timeline's governance lane should show the block: %+v", tl.Lanes)
+			}
+		})
+	}
+}

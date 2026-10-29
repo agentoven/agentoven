@@ -33,6 +33,10 @@ type ErrNotFound = store.ErrNotFound
 // Exposed so enterprise repo can reference it in store implementations.
 type TraceFilter = store.TraceFilter
 
+// ErrConflict is the error a Store returns for a duplicate entity, as ErrNotFound is for a missing one: a
+// store built outside this repository returns these very types so the handlers answer 404 and 409.
+type ErrConflict = store.ErrConflict
+
 // ── Model Router Service ────────────────────────────────────
 
 // ModelRouterService routes LLM requests to configured providers.

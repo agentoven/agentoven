@@ -4910,6 +4910,7 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "output", nil, gErr)
 		} else if !eval.Passed {
 			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "output", eval, nil)
+			h.recordBlockedRun(r.Context(), agent, req.Message, trace)
 			respondJSON(w, http.StatusForbidden, map[string]interface{}{
 				"error":      "Output blocked by guardrails",
 				"guardrails": eval.Results,
@@ -5131,6 +5132,7 @@ func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(runCtx)
 	response, trace, err := h.Executor.ExecuteStream(r.Context(), agent, req.Message, resolved, sanitizedVars, req.ThinkingEnabled, writeEvent, req.SessionID)
 	if held != nil && !h.releaseHeld(w, r, agent, gr, held, response) {
+		h.recordBlockedRun(r.Context(), agent, req.Message, trace)
 		return // blocked: the caller got a 403 and none of the reply
 	}
 	var pausedErr *executor.PausedError
@@ -7165,4 +7167,35 @@ func withRunTrace(ctx context.Context) (context.Context, string) {
 	id := uuid.New().String()
 	ctx = executor.WithTraceID(ctx, id)
 	return models.WithTraceStamp(ctx, models.TraceStamp{TraceID: id}), id
+}
+
+// recordBlockedRun records a run whose reply an output guardrail withheld. The run happened (the model
+// was called and paid for) and the guardrail's verdict is in the audit log under its trace ID, so the run
+// has to exist as a trace for the two to be read together. Until this existed a blocked run left no trace.
+//
+// The community edition does not keep the withheld reply: the trace carries no output text and the last
+// turn's response is blanked in its spans. A deployment that captures complete model calls (see
+// models.LLMCallCapturer) holds the reply in its capture, behind whatever access it gives captures.
+func (h *Handlers) recordBlockedRun(ctx context.Context, agent *models.Agent, input string, trace *executor.ExecutionTrace) {
+	if h.Store == nil || trace == nil {
+		return
+	}
+	usage := trace.Usage
+	tr := &models.Trace{
+		ID: trace.TraceID, AgentName: agent.Name, AgentVersion: agent.Version, Kitchen: agent.Kitchen,
+		Status: "blocked", DurationMs: trace.TotalMs, TotalTokens: usage.TotalTokens, CostUSD: usage.EstimatedCost,
+		InputText: input, SessionID: trace.SessionID, Usage: &usage,
+		Metadata:  map[string]interface{}{"mode": "managed", "turns": len(trace.Turns), "type": "invoke", "blocked_by": "output_guardrail"},
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := h.Store.CreateTrace(ctx, tr); err != nil {
+		log.Warn().Err(err).Str("trace_id", trace.TraceID).Msg("Failed to record the trace of a blocked run")
+		return
+	}
+	withheld := *trace
+	withheld.Turns = append([]executor.Turn(nil), trace.Turns...)
+	if n := len(withheld.Turns); n > 0 {
+		withheld.Turns[n-1].Response = ""
+	}
+	h.persistExecutorSpans(ctx, &withheld)
 }

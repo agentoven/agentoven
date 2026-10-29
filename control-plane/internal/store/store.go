@@ -37,6 +37,7 @@ type Store interface {
 	AgentDeploymentStore
 	ServiceAccountStore
 	CrossKitchenGrantStore
+	TraceViewStore
 
 	// Ping checks if the database is reachable.
 	Ping(ctx context.Context) error
@@ -494,6 +495,16 @@ func (e *ErrNotFound) Error() string {
 	return e.Entity + " not found: " + e.Key
 }
 
+// ErrConflict is returned when a create would duplicate something that must be unique.
+type ErrConflict struct {
+	Entity string
+	Key    string
+}
+
+func (e *ErrConflict) Error() string {
+	return e.Entity + " already exists: " + e.Key
+}
+
 // ── Filter helpers ──────────────────────────────────────────
 
 // ListFilter provides common pagination/filter options.
@@ -501,4 +512,17 @@ type ListFilter struct {
 	Limit  int
 	Offset int
 	Since  *time.Time
+}
+
+// TraceViewStore keeps saved views of the trace list (see models.TraceView).
+type TraceViewStore interface {
+	// CreateTraceView saves a view. A person cannot have two views of one name in a kitchen: the
+	// second is an *ErrConflict.
+	CreateTraceView(ctx context.Context, v *models.TraceView) error
+	// ListTraceViews returns the views a person may see in a kitchen: their own and the shared ones,
+	// newest first.
+	ListTraceViews(ctx context.Context, kitchen, owner string) ([]models.TraceView, error)
+	GetTraceView(ctx context.Context, kitchen, id string) (*models.TraceView, error)
+	UpdateTraceView(ctx context.Context, v *models.TraceView) error
+	DeleteTraceView(ctx context.Context, kitchen, id string) error
 }

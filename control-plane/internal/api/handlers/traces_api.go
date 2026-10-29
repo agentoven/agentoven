@@ -29,8 +29,9 @@ import (
 //	sort=created_at|cost|duration|tokens, order=asc|desc
 //	limit (default 500, at most 5000), offset
 //	include_archived=true            also show traces of archived recipes (hidden by default)
+//	view=<id>                        a saved view's filters; any parameter named as well wins over the view
 func (h *Handlers) traceFilterFrom(r *http.Request, kitchen string) store.TraceFilter {
-	q := r.URL.Query()
+	q := h.expandTraceView(r, kitchen, r.URL.Query())
 	f := store.TraceFilter{
 		AgentName: q.Get("agent"), RecipeName: q.Get("recipe"), Status: q.Get("status"),
 		Model: q.Get("model"), Provider: q.Get("provider"), Tag: q.Get("tag"),
