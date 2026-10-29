@@ -2112,6 +2112,8 @@ func (mr *ModelRouter) finishRoute(ctx context.Context, req *models.RouteRequest
 			trace.Tags = append(trace.Tags, v)
 		}
 	}
+	// A caller that makes several calls as one piece of work (a replayed run) says which trace they belong under.
+	trace.ParentTraceID = req.Labels["parent_trace_id"]
 	rootStatus, rootErr := "completed", ""
 	if routeErr != nil {
 		trace.Status, rootStatus, rootErr = "failed", "failed", routeErr.Error()

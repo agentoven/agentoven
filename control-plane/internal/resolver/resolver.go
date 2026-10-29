@@ -292,8 +292,20 @@ func (r *Resolver) resolveTool(ctx context.Context, kitchen string, ing models.I
 		Schema:     tool.Schema,
 		Version:    tool.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 		SchemaHash: schemaHash,
+		Idempotent: declaredSafeToRepeat(tool.Schema),
 		BakedAt:    time.Now().UTC(),
 	}, nil
+}
+
+// declaredSafeToRepeat reads the MCP tool annotations in a tool's schema: a tool is safe to repeat only if
+// it says it is read-only and idempotent. A tool that says nothing is not, so nothing is assumed: a run
+// that crashed mid-call reports such a tool's outcome as unknown instead of running it twice, and a replay
+// never runs it live.
+func declaredSafeToRepeat(schema map[string]interface{}) bool {
+	ann, _ := schema["annotations"].(map[string]interface{})
+	readOnly, _ := ann["readOnlyHint"].(bool)
+	idempotent, _ := ann["idempotentHint"].(bool)
+	return readOnly && idempotent
 }
 
 // resolveSkill resolves a skill ingredient. A skill must already be

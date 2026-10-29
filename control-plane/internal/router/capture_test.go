@@ -101,3 +101,16 @@ func TestACallerCanChooseTheRoutedTraceID(t *testing.T) {
 		t.Fatalf("trace by chosen id: %+v %v", tr, err)
 	}
 }
+
+// A call labelled with a parent trace is recorded under it, so work made of several calls reads as one tree.
+func TestACallCanBeRecordedUnderAParentTrace(t *testing.T) {
+	good := openAIServer(t, `{"choices":[{"message":{"content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`, nil)
+	mr, st := routerWith(t, nil, models.ModelProvider{Name: "only", Kind: "openai", Endpoint: good.URL, Models: []string{"gpt-4o"}, Config: map[string]interface{}{"api_key": "k"}})
+	if _, err := mr.Route(context.Background(), &models.RouteRequest{Kitchen: "default", Model: "gpt-4o", Labels: map[string]string{"parent_trace_id": "parent-1"}, Messages: []models.ChatMessage{{Role: "user", Content: "hi"}}}); err != nil {
+		t.Fatal(err)
+	}
+	traces, _ := st.ListTraces(context.Background(), "default", 10)
+	if len(traces) != 1 || traces[0].ParentTraceID != "parent-1" {
+		t.Fatalf("traces = %+v", traces)
+	}
+}
