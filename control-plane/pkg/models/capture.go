@@ -106,3 +106,18 @@ func (e *AuditEvent) StampTrace(ctx context.Context) {
 		e.Details["trace_id"] = e.TraceID
 	}
 }
+
+type routeTraceIDKey struct{}
+
+// WithRouteTraceID makes the trace the router records for the next routed request use id, so a caller that
+// must name that trace in its answer (a replay) knows it without searching. The ID must be one the server
+// generated, never one taken from a client.
+func WithRouteTraceID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, routeTraceIDKey{}, id)
+}
+
+// RouteTraceIDFrom returns the ID chosen by WithRouteTraceID, or "".
+func RouteTraceIDFrom(ctx context.Context) string {
+	id, _ := ctx.Value(routeTraceIDKey{}).(string)
+	return id
+}

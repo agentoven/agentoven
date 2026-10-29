@@ -101,7 +101,11 @@ type geminiRequest struct {
 
 // geminiGenConfig carries the generation settings the router sets.
 type geminiGenConfig struct {
-	ThinkingConfig *geminiThinkingConfig `json:"thinkingConfig,omitempty"`
+	ThinkingConfig  *geminiThinkingConfig `json:"thinkingConfig,omitempty"`
+	Temperature     *float64              `json:"temperature,omitempty"`
+	TopP            *float64              `json:"topP,omitempty"`
+	StopSequences   []string              `json:"stopSequences,omitempty"`
+	MaxOutputTokens *int                  `json:"maxOutputTokens,omitempty"`
 }
 
 // geminiThinkingConfig asks for thinking, and for its summary to be returned.
@@ -408,6 +412,14 @@ func (mr *ModelRouter) callGemini(ctx context.Context, provider *models.ModelPro
 
 	if req.ThinkingEnabled && mr.canThinkGemini(provider.Kind, model) {
 		gemReq.GenerationConfig = &geminiGenConfig{ThinkingConfig: &geminiThinkingConfig{IncludeThoughts: true, ThinkingBudget: thinkingBudget(req)}}
+	}
+	// Sampling and the output limit, only when the caller set them (see sampling.go).
+	if req.Temperature != nil || req.TopP != nil || len(req.StopSequences) > 0 || req.MaxTokens != nil {
+		if gemReq.GenerationConfig == nil {
+			gemReq.GenerationConfig = &geminiGenConfig{}
+		}
+		gemReq.GenerationConfig.Temperature, gemReq.GenerationConfig.TopP = req.Temperature, req.TopP
+		gemReq.GenerationConfig.StopSequences, gemReq.GenerationConfig.MaxOutputTokens = req.StopSequences, req.MaxTokens
 	}
 
 	body, _ := json.Marshal(gemReq)

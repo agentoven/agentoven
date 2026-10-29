@@ -88,3 +88,16 @@ func TestCaptureHookFailureDoesNotFailTheCall(t *testing.T) {
 		t.Fatalf("resp=%+v err=%v captured=%d", resp, err, len(rc.calls))
 	}
 }
+
+// A caller can choose the ID of the trace a routed call leaves, so it can name that trace in its answer.
+func TestACallerCanChooseTheRoutedTraceID(t *testing.T) {
+	good := openAIServer(t, `{"choices":[{"message":{"content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`, nil)
+	mr, st := routerWith(t, nil, models.ModelProvider{Name: "only", Kind: "openai", Endpoint: good.URL, Models: []string{"gpt-4o"}, Config: map[string]interface{}{"api_key": "k"}})
+	ctx := models.WithRouteTraceID(context.Background(), "11111111-2222-3333-4444-555555555555")
+	if _, err := mr.Route(ctx, &models.RouteRequest{Kitchen: "default", Model: "gpt-4o", Messages: []models.ChatMessage{{Role: "user", Content: "hi"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if tr, err := st.GetTrace(context.Background(), "11111111-2222-3333-4444-555555555555"); err != nil || tr.AgentName != "router" {
+		t.Fatalf("trace by chosen id: %+v %v", tr, err)
+	}
+}

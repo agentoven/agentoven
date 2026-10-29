@@ -1878,10 +1878,10 @@ type AuditFilter struct {
 	TraceIDs []string
 	// HasTraceID limits the list to events that belong to some trace.
 	HasTraceID bool
-	Since    *time.Time
-	Until    *time.Time
-	Limit    int
-	Offset   int
+	Since      *time.Time
+	Until      *time.Time
+	Limit      int
+	Offset     int
 
 	// Chain walking (ADR-0031 §2) — verification pages through events in
 	// sequence order, which offset-based paging cannot guarantee.

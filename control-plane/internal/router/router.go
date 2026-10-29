@@ -954,6 +954,12 @@ type openAIRequest struct {
 	Tools          []models.ToolDefinition `json:"tools,omitempty"`
 	ToolChoice     interface{}             `json:"tool_choice,omitempty"`
 	ResponseFormat *models.ResponseFormat  `json:"response_format,omitempty"`
+	// Sampling and the output limit, set only when the caller set them (see sampling.go).
+	Temperature         *float64 `json:"temperature,omitempty"`
+	TopP                *float64 `json:"top_p,omitempty"`
+	Stop                []string `json:"stop,omitempty"`
+	MaxTokens           *int     `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int     `json:"max_completion_tokens,omitempty"`
 	// ReasoningEffort asks a reasoning model to think ("low", "medium", "high"). Reasoning is
 	// OpenRouter's form of the same request.
 	ReasoningEffort string               `json:"reasoning_effort,omitempty"`
@@ -1046,6 +1052,7 @@ func (mr *ModelRouter) callOpenAI(ctx context.Context, provider *models.ModelPro
 		}
 	}
 	mr.applyOpenAIThinking(&oaiReq, provider, model, req)
+	mr.applyOpenAIParams(&oaiReq, provider, model, req)
 	body, _ := json.Marshal(oaiReq)
 
 	url := endpoint + "/chat/completions"
@@ -1137,6 +1144,10 @@ type anthropicRequest struct {
 	Tools      []anthropicTool    `json:"tools,omitempty"`
 	ToolChoice interface{}        `json:"tool_choice,omitempty"`
 	Thinking   *anthropicThinking `json:"thinking,omitempty"`
+	// Sampling, set only when the caller set it and not with extended thinking, which does not allow it.
+	Temperature   *float64 `json:"temperature,omitempty"`
+	TopP          *float64 `json:"top_p,omitempty"`
+	StopSequences []string `json:"stop_sequences,omitempty"`
 }
 
 // anthropicThinking turns on extended thinking with a token budget.
@@ -1340,6 +1351,9 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 	if mt, ok := provider.Config["max_tokens"].(float64); ok {
 		maxTokens = int(mt)
 	}
+	if req.MaxTokens != nil && *req.MaxTokens > 0 {
+		maxTokens = *req.MaxTokens // the caller's limit (the executor's budget headroom, a replay's ceiling)
+	}
 
 	// Anthropic Messages API requires system messages as a top-level "system"
 	// parameter, not as a message with role "system" in the messages array.
@@ -1379,6 +1393,11 @@ func (mr *ModelRouter) callAnthropic(ctx context.Context, provider *models.Model
 	anthReq := anthropicRequest{Model: model, System: systemText, Messages: anthMsgs, MaxTokens: maxTokens}
 	if thinkingOn {
 		anthReq.Thinking = &anthropicThinking{Type: "enabled", BudgetTokens: budget}
+	} else {
+		anthReq.Temperature, anthReq.TopP = req.Temperature, req.TopP
+		if len(req.StopSequences) > 0 {
+			anthReq.StopSequences = req.StopSequences
+		}
 	}
 	// Convert tool definitions to Anthropic format
 	if len(req.Tools) > 0 {
@@ -1543,6 +1562,7 @@ func (mr *ModelRouter) callOllama(ctx context.Context, provider *models.ModelPro
 	}
 	oaiReq := openAIRequest{Model: model, Messages: oaiMsgs, ResponseFormat: req.ResponseFormat}
 	mr.applyOpenAIThinking(&oaiReq, provider, model, req)
+	mr.applyOpenAIParams(&oaiReq, provider, model, req)
 
 	// Include tools if provided
 	if len(req.Tools) > 0 {
@@ -2061,6 +2081,9 @@ func (mr *ModelRouter) finishRoute(ctx context.Context, req *models.RouteRequest
 	now := time.Now().UTC()
 	total := now.Sub(started.UTC()).Milliseconds()
 	traceID := uuid.New().String()
+	if id := models.RouteTraceIDFrom(ctx); id != "" {
+		traceID = id
+	}
 	rootID := uuid.New().String()
 
 	strategy := req.Strategy
