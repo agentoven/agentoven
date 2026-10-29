@@ -6886,9 +6886,9 @@ func (h *Handlers) HandleDeleteScopedKey(w http.ResponseWriter, r *http.Request)
 func (h *Handlers) AdminRetireAllDeployments(w http.ResponseWriter, r *http.Request) {
 	kitchen := middleware.GetKitchen(r.Context())
 
-	// Admin-only: reject non-admin callers
-	if id := pkgmw.GetIdentity(r.Context()); id == nil || id.Role != "admin" {
-		respondError(w, http.StatusForbidden, "admin role required")
+	// Kitchen owners only (admin, or in Pro a head chef or restaurateur)
+	if id := pkgmw.GetIdentity(r.Context()); id == nil || !contracts.IsKitchenOwner(id.Role) {
+		respondError(w, http.StatusForbidden, "kitchen owner role required")
 		return
 	}
 
@@ -6929,8 +6929,8 @@ func (h *Handlers) AdminRetireAllDeployments(w http.ResponseWriter, r *http.Requ
 // GET /api/v1/admin/cross-kitchen-grants
 func (h *Handlers) HandleListCrossKitchenGrants(w http.ResponseWriter, r *http.Request) {
 	kitchen := middleware.GetKitchen(r.Context())
-	if id := pkgmw.GetIdentity(r.Context()); id == nil || id.Role != "admin" {
-		respondError(w, http.StatusForbidden, "admin role required")
+	if id := pkgmw.GetIdentity(r.Context()); id == nil || !contracts.IsKitchenOwner(id.Role) {
+		respondError(w, http.StatusForbidden, "kitchen owner role required")
 		return
 	}
 	grants, err := h.Store.ListCrossKitchenGrants(r.Context(), kitchen)
@@ -6948,8 +6948,8 @@ func (h *Handlers) HandleListCrossKitchenGrants(w http.ResponseWriter, r *http.R
 // POST /api/v1/admin/cross-kitchen-grants
 func (h *Handlers) HandleCreateCrossKitchenGrant(w http.ResponseWriter, r *http.Request) {
 	kitchen := middleware.GetKitchen(r.Context())
-	if id := pkgmw.GetIdentity(r.Context()); id == nil || id.Role != "admin" {
-		respondError(w, http.StatusForbidden, "admin role required")
+	if id := pkgmw.GetIdentity(r.Context()); id == nil || !contracts.IsPlatformAdmin(id.Role) {
+		respondError(w, http.StatusForbidden, "platform administrator role required")
 		return
 	}
 
@@ -6983,8 +6983,8 @@ func (h *Handlers) HandleCreateCrossKitchenGrant(w http.ResponseWriter, r *http.
 // HandleRevokeCrossKitchenGrant revokes (soft-deletes) a grant.
 // DELETE /api/v1/admin/cross-kitchen-grants/{grantId}
 func (h *Handlers) HandleRevokeCrossKitchenGrant(w http.ResponseWriter, r *http.Request) {
-	if id := pkgmw.GetIdentity(r.Context()); id == nil || id.Role != "admin" {
-		respondError(w, http.StatusForbidden, "admin role required")
+	if id := pkgmw.GetIdentity(r.Context()); id == nil || !contracts.IsPlatformAdmin(id.Role) {
+		respondError(w, http.StatusForbidden, "platform administrator role required")
 		return
 	}
 	grantID := chi.URLParam(r, "grantId")

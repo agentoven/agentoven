@@ -100,3 +100,25 @@ type AuthProviderChain interface {
 	// Providers are tried in registration order.
 	RegisterProvider(provider AuthProvider)
 }
+
+// Role names that mean an administrator. The community edition has one top role, "admin". Pro
+// splits it into the platform's Restaurateur and a kitchen's Head Chef (Pro ADR-0040). Code in the
+// community edition asks these helpers instead of comparing to "admin", so a Pro identity is
+// understood without the community edition knowing Pro's role list.
+const (
+	RoleAdmin        = "admin"
+	RoleRestaurateur = "restaurateur"
+	RoleHeadChef     = "head_chef"
+)
+
+// IsPlatformAdmin reports whether role administers the whole installation: "admin" here, or
+// "restaurateur" in Pro.
+func IsPlatformAdmin(role string) bool {
+	return role == RoleAdmin || role == RoleRestaurateur
+}
+
+// IsKitchenOwner reports whether role may administer the kitchen it acts in: an installation
+// administrator, or a Pro "head_chef".
+func IsKitchenOwner(role string) bool {
+	return IsPlatformAdmin(role) || role == RoleHeadChef
+}
