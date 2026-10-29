@@ -337,9 +337,9 @@ func (h *Handlers) approveSignedGate(w http.ResponseWriter, r *http.Request, run
 	if id := pkgmw.GetIdentity(r.Context()); id != nil {
 		issuer = id.Claims["iss"]
 	}
-	if channel == "" {
-		channel = "signature"
-	}
+	// The channel is where the decision was made, and it was made through the signing API: a label
+	// from the body (a bridge claiming "slack") is not believed.
+	channel = "signature"
 	found, err := h.Workflow.ApproveGateAs(runID, stepName, approved, workflow.Approver{
 		ID: sig.SignerID, Email: sig.SignerEmail, Issuer: issuer, Role: sig.SignerRole,
 	}, channel, comments)

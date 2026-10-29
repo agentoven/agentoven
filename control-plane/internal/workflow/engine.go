@@ -330,16 +330,18 @@ func (e *Engine) checkApproverConstraints(ctx context.Context, record *models.Ap
 	// Load the recipe run to find the kitchen and recipe name.
 	run, err := e.store.GetRecipeRun(ctx, record.RunID)
 	if err != nil {
-		// Can't load run — don't block approval, just log.
-		log.Warn().Err(err).Str("run_id", record.RunID).Msg("checkApproverConstraints: could not load run, skipping constraint check")
-		return nil
+		log.Warn().Err(err).Str("run_id", record.RunID).Msg("checkApproverConstraints: could not load run; the gate stays closed")
+		return fmt.Errorf("%w: the run behind this gate could not be loaded, so who may approve it could not be checked", ErrApproverUnauthorized)
 	}
 
-	// Load the recipe to find the step definition.
-	recipe, err := e.store.GetRecipe(ctx, run.Kitchen, run.RecipeID)
+	// Load the recipe to find the step definition. A run records the recipe's id, and a store may key
+	// recipes by name (PostgreSQL does), so look the id up by listing when the name lookup misses.
+	// If the recipe cannot be found the constraints cannot be checked, and a gate whose constraints
+	// cannot be checked stays closed: they used to be skipped, which let anyone approve.
+	recipe, err := e.recipeOfRun(ctx, record.Kitchen, run)
 	if err != nil {
-		log.Warn().Err(err).Str("recipe", run.RecipeID).Msg("checkApproverConstraints: could not load recipe, skipping constraint check")
-		return nil
+		log.Warn().Err(err).Str("recipe", run.RecipeID).Msg("checkApproverConstraints: could not load recipe; the gate stays closed")
+		return fmt.Errorf("%w: the recipe behind this gate could not be loaded, so who may approve it could not be checked", ErrApproverUnauthorized)
 	}
 
 	// Find the matching step.
@@ -351,8 +353,7 @@ func (e *Engine) checkApproverConstraints(ctx context.Context, record *models.Ap
 		}
 	}
 	if step == nil {
-		// Step not found in recipe (shouldn't happen, but don't block).
-		return nil
+		return fmt.Errorf("%w: step %q is not in the recipe, so who may approve it could not be checked", ErrApproverUnauthorized, record.StepName)
 	}
 
 	// No constraints declared — gate is open to any authenticated caller.
@@ -421,6 +422,28 @@ func (e *Engine) checkApproverConstraints(ctx context.Context, record *models.Ap
 		}
 	}
 	return nil
+}
+
+// recipeOfRun finds the recipe a run belongs to, by name or by id. kitchen is the kitchen's name as the
+// approval record has it: a run's own kitchen field may be the kitchen's id, which a store keyed by
+// name does not find.
+func (e *Engine) recipeOfRun(ctx context.Context, kitchen string, run *models.RecipeRun) (*models.Recipe, error) {
+	if kitchen == "" {
+		kitchen = run.Kitchen
+	}
+	if r, err := e.store.GetRecipe(ctx, kitchen, run.RecipeID); err == nil && r != nil {
+		return r, nil
+	}
+	all, err := e.store.ListRecipes(ctx, kitchen)
+	if err != nil {
+		return nil, err
+	}
+	for i := range all {
+		if all[i].ID == run.RecipeID || all[i].Name == run.RecipeID {
+			return &all[i], nil
+		}
+	}
+	return nil, fmt.Errorf("recipe %s not found in kitchen %s", run.RecipeID, kitchen)
 }
 
 // approverRoleListed reports whether role is one of the roles a step names. The retired "admin" in a
