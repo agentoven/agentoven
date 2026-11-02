@@ -57,6 +57,9 @@ type Handlers struct {
 	// traceContentGuard says whether the caller may read trace and span bodies (nil: everyone who reads a trace).
 	traceContentGuard func(*http.Request) bool
 
+	// bakes serialises the background step of bakes and re-cooks per agent (agent_bake_tail.go).
+	bakes bakeSerializer
+
 	// kitchenOwnerCheck says whether the caller administers the named kitchen (nil: the role alone
 	// decides, via contracts.IsKitchenOwner). Pro installs a membership-aware check (ADR-0040).
 	kitchenOwnerCheck func(r *http.Request, kitchen string) bool
@@ -87,6 +90,9 @@ type Handlers struct {
 	// an edition with roles can keep it to the roles that own that decision. An error refuses
 	// the resume with a 403. Nil allows any caller who may resume the run.
 	AuthorizeBudgetExtension func(r *http.Request) error
+	// Traffic, when set, is asked before a route that starts agent work lets the request in (see
+	// LimitTraffic). Nil (the community edition) limits nothing.
+	Traffic contracts.TrafficLimiter
 	// RunScopes accounts for the model calls hosted processes make while handling a call, so a
 	// budget can cap them. Nil (the community edition) leaves their spend reported but uncapped.
 	RunScopes      contracts.RunScopes
@@ -109,6 +115,15 @@ type Handlers struct {
 	// SkillRouteGuard, if set, wraps every /api/v1/skills route. An edition that has roles uses it
 	// to decide who may register, approve or delete a skill; with none, any authenticated caller may.
 	SkillRouteGuard func(next http.Handler) http.Handler
+	// RouteGuard, if set, wraps every route, after authentication and before the router picks a
+	// handler. An edition that has roles uses it to decide, from the method and route, which role may
+	// call it (Pro: internal/routeguard); with none, any caller the auth layer lets in may. It is read
+	// per request, so it can be set after the router is built.
+	RouteGuard func(next http.Handler) http.Handler
+	// ProviderRepoint, if set, decides whether the caller may point a provider that holds a credential at a
+	// different host without entering a new credential. An edition with roles installs a permission
+	// check (Pro: provider:manage); with none, any caller who may update a provider may repoint it.
+	ProviderRepoint func(r *http.Request) bool
 	// FetchSkillPlugin checks out a plugin; nil means skills.FetchPlugin.
 	FetchSkillPlugin func(ctx context.Context, spec skills.ImportSpec) (*skills.Plugin, string, func(), error)
 
@@ -275,11 +290,15 @@ func (h *Handlers) ListAgents(w http.ResponseWriter, r *http.Request) {
 		agents = []models.Agent{}
 	}
 
-	// Client-side status filter (applies on top of tag/env filter)
-	if statusFilter != "" {
+	// Client-side status filter (applies on top of tag/env filter). A retired agent (DELETE keeps the row
+	// for its history) is listed only when asked for: by status=retired or include_retired=true.
+	if statusFilter != "" || r.URL.Query().Get("include_retired") != "true" {
 		filtered := make([]models.Agent, 0, len(agents))
 		for _, a := range agents {
-			if string(a.Status) == statusFilter {
+			switch {
+			case statusFilter != "" && string(a.Status) != statusFilter:
+			case statusFilter == "" && a.Status == models.AgentStatusRetired:
+			default:
 				filtered = append(filtered, a)
 			}
 		}
@@ -323,7 +342,7 @@ func (h *Handlers) RegisterAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.Store.CreateAgent(r.Context(), &req); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondCreateError(w, err, "register the agent")
 		return
 	}
 
@@ -361,71 +380,41 @@ func (h *Handlers) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req models.Agent
+	// A retired agent is edited by registering it again (POST /agents brings it back under the same id),
+	// never by a PUT that would change it while it stays retired.
+	if agent.Status == models.AgentStatusRetired {
+		respondError(w, http.StatusConflict, "agent '"+agentName+"' is retired: register it again with POST /api/v1/agents to bring it back")
+		return
+	}
+
+	// The body is an edit (see models.AgentEdit) and the tags, which are labels and not behaviour.
+	var req struct {
+		models.AgentEdit
+		Tags map[string]string `json:"tags"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
+	edit := req.AgentEdit
 
-	if req.Description != "" {
-		agent.Description = req.Description
+	// Judge the agent as it would be with the edit before keeping any of it. An execution mode is
+	// only accepted for a bot, which must be able to move into a confined mode.
+	probe := agent.WithDraft()
+	edit.Apply(probe)
+	if !probe.IsAgenticBot() {
+		edit.ExecutionMode = ""
 	}
-	if req.Framework != "" {
-		agent.Framework = req.Framework
-	}
-	if req.ModelProvider != "" {
-		agent.ModelProvider = req.ModelProvider
-	}
-	if req.ModelName != "" {
-		agent.ModelName = req.ModelName
-	}
-	if req.Mode != "" {
-		agent.Mode = req.Mode
-	}
-	if req.MaxTurns > 0 {
-		agent.MaxTurns = req.MaxTurns
-	}
-	if len(req.Ingredients) > 0 {
-		agent.Ingredients = models.RestoreRedactedIngredients(req.Ingredients, agent.Ingredients)
-	}
-	if len(req.Skills) > 0 {
-		agent.Skills = req.Skills
-	}
-	if len(req.Tags) > 0 {
-		if agent.Tags == nil {
-			agent.Tags = map[string]string{}
-		}
-		for k, v := range req.Tags {
-			agent.Tags[k] = v
-		}
-	}
-	// Behavior and runtime
-	if req.Behavior != "" {
-		agent.Behavior = req.Behavior
-	}
-	if req.Runtime != "" {
-		agent.Runtime = req.Runtime
-	}
-	if req.Bot != nil {
-		agent.Bot = req.Bot
-	}
-	if agent.IsAgenticBot() && req.ExecutionMode != "" {
-		agent.ExecutionMode = req.ExecutionMode // a bot must be able to move into a confined mode
-	}
-	if status, err := h.checkBotAgent(agent); err != nil {
+	if status, err := h.checkBotAgent(probe); err != nil {
 		respondError(w, status, err.Error())
 		return
 	}
-	// R9 fields: backup provider and guardrails
-	if req.BackupProvider != "" {
-		agent.BackupProvider = req.BackupProvider
-	}
-	if req.BackupModel != "" {
-		agent.BackupModel = req.BackupModel
-	}
-	// nil means the field was left out (keep them); an empty list removes them all.
-	if req.Guardrails != nil {
-		agent.Guardrails = req.Guardrails
+	// An agent that has been baked runs what was baked: the edit waits in its draft for the next bake
+	// (ADR-0043), so the version a trace names is the configuration that served the call. One that has
+	// never been baked runs nothing yet and takes the edit at once.
+	agent.Edit(edit)
+	if len(req.Tags) > 0 {
+		agent.Tags = mergeTags(agent.Tags, req.Tags) // a copy: the map the store handed out is shared with its own
 	}
 	agent.UpdatedAt = time.Now().UTC()
 	// An edit is a draft: it does not change the version. The version moves when the agent is baked
@@ -486,6 +475,12 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Invalid request body: "+err.Error())
 		return
 	}
+	if req.Version != "" && !models.ValidVersion(req.Version) {
+		respondError(w, http.StatusBadRequest, "version must be MAJOR.MINOR.PATCH, digits only (for example 1.2.0)")
+		return
+	}
+	// A bake takes up the edits made since the last one: what runs is what was baked (ADR-0043).
+	agent.ApplyDraft()
 
 	// ── Validate & resolve ALL ingredients via the Resolver ──────
 	// This replaces the old manual checks with full ingredient resolution:
@@ -529,9 +524,11 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 	agent.Status = models.AgentStatusBaking
 	agent.UpdatedAt = time.Now().UTC()
 	if req.Version != "" {
-		// Caller explicitly set a version — use it directly
+		// The caller named a version. The store accepts it only as a new version above the latest,
+		// or the current one when the configuration is the one stored (models.DecideNamedVersion);
+		// it never runs a changed configuration under a label that already exists.
 		agent.Version = req.Version
-		agent.VersionBump = "" // no auto-bump, caller controls
+		agent.VersionBump = models.VersionBumpNamed
 	} else {
 		// The store decides: the first bake keeps the registered version (0.1.0), a bake whose
 		// configuration differs from the last one takes the next minor version and keeps the old
@@ -573,7 +570,7 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.Store.UpdateAgent(r.Context(), agent); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondStoreError(w, err)
 		return
 	}
 
@@ -602,125 +599,13 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	go func(kitchen, agentName, modelProvider string, mode models.AgentMode, k8sNamespace string) {
-		time.Sleep(1 * time.Second)
-
-		// Re-fetch the agent from the store to get the current state.
-		// Another request may have modified the agent since we released the
-		// HTTP response, so working from a fresh copy prevents stale overwrites.
-		fresh, err := h.Store.GetAgent(context.Background(), kitchen, agentName)
-		if err != nil {
-			log.Warn().Err(err).Str("agent", agentName).Msg("BakeAgent goroutine: cannot re-fetch agent")
-			return
-		}
-
-		// Guard: if the agent is no longer in "baking" status, someone else
-		// already touched it (cool, retire, another bake). Abort to prevent
-		// a stale status overwrite.
-		if fresh.Status != models.AgentStatusBaking {
-			log.Info().
-				Str("agent", agentName).
-				Str("status", string(fresh.Status)).
-				Msg("BakeAgent goroutine: agent no longer baking, aborting")
-			return
-		}
-
-		// Test the provider with a real credential-validating call
-		if modelProvider != "" {
-			provider, err := h.Store.GetProvider(context.Background(), kitchen, modelProvider)
-			if err == nil {
-				result := h.Router.TestProvider(context.Background(), provider)
-				if !result.Healthy {
-					fresh.Status = models.AgentStatusBurnt
-					if fresh.Tags == nil {
-						fresh.Tags = map[string]string{}
-					}
-					fresh.Tags["error"] = fmt.Sprintf("Provider '%s' test failed: %s", modelProvider, result.Error)
-					fresh.UpdatedAt = time.Now().UTC()
-					h.Store.UpdateAgent(context.Background(), fresh)
-					log.Warn().Str("agent", agentName).Msg("Agent burnt — provider test failed")
-					return
-				}
-			}
-		}
-
-		// ── Start the agent process ──────────────────────────────
-		// After provider validation passes, spawn the agent as a running
-		// process (local Python / Docker / K8s) so it can serve A2A tasks.
-		if h.ProcessManager != nil && mode != models.AgentModeExternal {
-			// Propagate kitchen-level K8s namespace into agent tags so the
-			// K8sExecutor can place the workload in the right namespace.
-			if k8sNamespace != "" {
-				if fresh.Tags == nil {
-					fresh.Tags = map[string]string{}
-				}
-				if _, alreadySet := fresh.Tags["k8s_namespace"]; !alreadySet {
-					fresh.Tags["k8s_namespace"] = k8sNamespace
-				}
-			}
-			procInfo, err := h.ProcessManager.Start(context.Background(), fresh)
-			if err != nil {
-				fresh.Status = models.AgentStatusBurnt
-				if fresh.Tags == nil {
-					fresh.Tags = map[string]string{}
-				}
-				fresh.Tags["error"] = fmt.Sprintf("Agent process failed to start: %s", err.Error())
-				fresh.UpdatedAt = time.Now().UTC()
-				h.Store.UpdateAgent(context.Background(), fresh)
-				log.Warn().Err(err).Str("agent", agentName).Msg("Agent burnt — process start failed")
-				return
-			}
-
-			// Store process info but keep a2a_endpoint stable.
-			// The control plane proxies /agents/{name}/a2a → process.endpoint
-			// so clients always use the stable URL (ADR-0007).
-			fresh.Process = procInfo
-			if procInfo.Endpoint != "" {
-				// Persist a durable backend endpoint alongside the transient process info.
-				// The Pro/Postgres store round-trips backend_endpoint, but not ProcessInfo,
-				// so later A2A lookups must not depend on the in-memory process field.
-				fresh.BackendEndpoint = procInfo.Endpoint
-			}
-			log.Info().
-				Str("agent", agentName).
-				Str("backend", procInfo.Endpoint).
-				Int("port", procInfo.Port).
-				Str("mode", string(procInfo.Mode)).
-				Msg("Agent process spawned — control plane will proxy A2A calls")
-		}
-
-		// A managed agent must not be marked ready unless the gateway can resolve
-		// some backend for A2A traffic. Otherwise recipe steps see a false-ready
-		// agent and fail later with "No backend available".
-		if mode != models.AgentModeExternal {
-			if backendURL, backendReason := h.ResolveBackendEndpoint(fresh); backendURL == "" {
-				fresh.Status = models.AgentStatusBurnt
-				if fresh.Tags == nil {
-					fresh.Tags = map[string]string{}
-				}
-				fresh.Tags["error"] = fmt.Sprintf("Agent has no backend after bake: %s", backendReason)
-				fresh.UpdatedAt = time.Now().UTC()
-				if err := h.Store.UpdateAgent(context.Background(), fresh); err != nil {
-					log.Warn().Err(err).Str("agent", agentName).Msg("Failed to update backend-less agent to burnt")
-				} else {
-					log.Warn().Str("agent", agentName).Str("reason", backendReason).Msg("Agent burnt — no backend after bake")
-				}
-				return
-			}
-		}
-
-		fresh.Status = models.AgentStatusReady
-		fresh.UpdatedAt = time.Now().UTC()
-		if fresh.Tags == nil {
-			fresh.Tags = map[string]string{}
-		}
-		delete(fresh.Tags, "error")
-		if err := h.Store.UpdateAgent(context.Background(), fresh); err != nil {
-			log.Warn().Err(err).Str("agent", agentName).Msg("Failed to update agent to ready")
-		} else {
-			log.Info().Str("agent", agentName).Msg("Agent is ready")
-		}
-	}(kitchen, agentName, agent.ModelProvider, agent.Mode, kitchenK8sNS)
+	// The background step records its outcome through UpdateAgentLifecycle only (never the whole
+	// agent), one at a time per agent and only for the newest bake (agent_bake_tail.go).
+	agentKey, version := kitchen+"/"+agentName, agent.Version
+	gen := h.bakes.begin(agentKey)
+	go h.bakes.run(agentKey, gen, func(superseded func() bool) {
+		h.finishBake(kitchen, agentName, version, kitchenK8sNS, false, superseded)
+	})
 
 	respondJSON(w, http.StatusAccepted, map[string]string{
 		"name":        agentName,
@@ -1084,66 +969,32 @@ func (h *Handlers) RecookAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Description    string              `json:"description"`
-		Framework      string              `json:"framework"`
-		ModelProvider  string              `json:"model_provider"`
-		ModelName      string              `json:"model_name"`
-		BackupProvider string              `json:"backup_provider"`
-		BackupModel    string              `json:"backup_model"`
-		Mode           models.AgentMode    `json:"mode"`
-		MaxTurns       int                 `json:"max_turns"`
-		Ingredients    []models.Ingredient `json:"ingredients"`
-		Guardrails     []models.Guardrail  `json:"guardrails"`
-		Skills         []string            `json:"skills"`
-		Tags           map[string]string   `json:"tags"`
-		Version        string              `json:"version"`
+		models.AgentEdit
+		Tags    map[string]string `json:"tags"`
+		Version string            `json:"version"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
 		respondError(w, http.StatusBadRequest, "Invalid request body: "+err.Error())
 		return
 	}
+	if req.Version != "" && !models.ValidVersion(req.Version) {
+		respondError(w, http.StatusBadRequest, "version must be MAJOR.MINOR.PATCH, digits only (for example 1.2.0)")
+		return
+	}
 
 	// ── Apply edits ──────────────────────────────────────────
-	if req.Description != "" {
-		agent.Description = req.Description
+	// The edits in the body join any draft already waiting, and the re-cook bakes the lot.
+	req.ExecutionMode = "" // as in an edit: only a bot may change it, and a re-cook never has
+	probe := agent.WithDraft()
+	req.AgentEdit.Apply(probe)
+	if status, err := h.checkBotAgent(probe); err != nil {
+		respondError(w, status, err.Error())
+		return
 	}
-	if req.Framework != "" {
-		agent.Framework = req.Framework
-	}
-	if req.ModelProvider != "" {
-		agent.ModelProvider = req.ModelProvider
-	}
-	if req.ModelName != "" {
-		agent.ModelName = req.ModelName
-	}
-	if req.BackupProvider != "" {
-		agent.BackupProvider = req.BackupProvider
-	}
-	if req.BackupModel != "" {
-		agent.BackupModel = req.BackupModel
-	}
-	if req.Mode != "" {
-		agent.Mode = req.Mode
-	}
-	if req.MaxTurns > 0 {
-		agent.MaxTurns = req.MaxTurns
-	}
-	if len(req.Ingredients) > 0 {
-		agent.Ingredients = models.RestoreRedactedIngredients(req.Ingredients, agent.Ingredients)
-	}
-	if len(req.Guardrails) > 0 {
-		agent.Guardrails = req.Guardrails
-	}
-	if len(req.Skills) > 0 {
-		agent.Skills = req.Skills
-	}
+	agent.Edit(req.AgentEdit)
+	agent.ApplyDraft()
 	if len(req.Tags) > 0 {
-		if agent.Tags == nil {
-			agent.Tags = map[string]string{}
-		}
-		for k, v := range req.Tags {
-			agent.Tags[k] = v
-		}
+		agent.Tags = mergeTags(agent.Tags, req.Tags) // a copy: the map the store handed out is shared with its own
 	}
 
 	// ── Resolve ingredients (same as BakeAgent) ──────────────
@@ -1185,13 +1036,13 @@ func (h *Handlers) RecookAgent(w http.ResponseWriter, r *http.Request) {
 	agent.UpdatedAt = time.Now().UTC()
 	if req.Version != "" {
 		agent.Version = req.Version
-		agent.VersionBump = ""
+		agent.VersionBump = models.VersionBumpNamed // see BakeAgent
 	} else {
 		agent.VersionBump = models.VersionBumpBake
 	}
 
 	if err := h.Store.UpdateAgent(r.Context(), agent); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondStoreError(w, err)
 		return
 	}
 
@@ -1203,89 +1054,12 @@ func (h *Handlers) RecookAgent(w http.ResponseWriter, r *http.Request) {
 		Str("version", agent.Version).
 		Msg("Agent re-cook started")
 
-	// ── Async provider test (same as BakeAgent) ──────────────
-	go func() {
-		time.Sleep(1 * time.Second)
-
-		if agent.ModelProvider != "" {
-			provider, err := h.Store.GetProvider(context.Background(), agent.Kitchen, agent.ModelProvider)
-			if err == nil {
-				result := h.Router.TestProvider(context.Background(), provider)
-				if !result.Healthy {
-					agent.Status = models.AgentStatusBurnt
-					if agent.Tags == nil {
-						agent.Tags = map[string]string{}
-					}
-					agent.Tags["error"] = fmt.Sprintf("Provider '%s' test failed: %s", agent.ModelProvider, result.Error)
-					agent.UpdatedAt = time.Now().UTC()
-					h.Store.UpdateAgent(context.Background(), agent)
-					log.Warn().Str("agent", agentName).Msg("Agent burnt on re-cook — provider test failed")
-					return
-				}
-			}
-		}
-
-		agent.Status = models.AgentStatusReady
-		agent.UpdatedAt = time.Now().UTC()
-		if agent.Tags != nil {
-			delete(agent.Tags, "error")
-		}
-		if err := h.Store.UpdateAgent(context.Background(), agent); err != nil {
-			log.Warn().Err(err).Str("agent", agentName).Msg("Failed to update agent to ready after re-cook")
-		} else {
-			log.Info().Str("agent", agentName).Msg("Agent re-cooked and ready")
-		}
-
-		// For managed agents (K8s / Docker / local process): stop the old process
-		// and start a fresh one so the pod is replaced with the current image.
-		pmNil := h.ProcessManager == nil
-		isExternal := agent.Mode == models.AgentModeExternal
-		log.Info().
-			Bool("pm_nil", pmNil).
-			Str("mode", string(agent.Mode)).
-			Bool("is_external", isExternal).
-			Str("agent", agentName).
-			Msg("RecookAgent: ProcessManager gate")
-		if !pmNil && !isExternal {
-			if stopErr := h.ProcessManager.Stop(context.Background(), kitchen, agentName); stopErr != nil {
-				log.Warn().Err(stopErr).Str("agent", agentName).Msg("RecookAgent: stop old process (non-fatal)")
-			}
-			// Re-fetch latest agent state before starting so process inherits updated config.
-			latest, fetchErr := h.Store.GetAgent(context.Background(), kitchen, agentName)
-			if fetchErr != nil {
-				latest = agent
-			}
-			procInfo, startErr := h.ProcessManager.Start(context.Background(), latest)
-			if startErr != nil {
-				latest.Status = models.AgentStatusBurnt
-				if latest.Tags == nil {
-					latest.Tags = map[string]string{}
-				}
-				latest.Tags["error"] = fmt.Sprintf("Process restart after recook failed: %s", startErr.Error())
-				latest.UpdatedAt = time.Now().UTC()
-				h.Store.UpdateAgent(context.Background(), latest)
-				log.Warn().Err(startErr).Str("agent", agentName).Msg("Agent burnt — process restart after recook failed")
-				return
-			}
-			latest.Process = procInfo
-			if procInfo.Endpoint != "" {
-				latest.BackendEndpoint = procInfo.Endpoint
-			}
-			h.Store.UpdateAgent(context.Background(), latest)
-			log.Info().Str("agent", agentName).Str("backend", procInfo.Endpoint).Msg("Agent process restarted after recook")
-		}
-
-		// Pro hook: bump k8s_workload.updated_at (and image if configured) so the
-		// operator emits a new pod-template annotation → Kubernetes rolling restart
-		// → pods pull the current image (imagePullPolicy: Always).
-		if h.WorkloadRestarter != nil {
-			if touchErr := h.WorkloadRestarter.TouchWorkloadForAgent(context.Background(), kitchen, agentName, h.K8sAgentImage); touchErr != nil {
-				log.Warn().Err(touchErr).Str("agent", agentName).Msg("Failed to touch workload for recook restart")
-			} else {
-				log.Info().Str("agent", agentName).Str("image", h.K8sAgentImage).Msg("Workload touched for recook restart")
-			}
-		}
-	}()
+	// ── Async provider test and process replacement (same step as BakeAgent) ──
+	agentKey, version := kitchen+"/"+agentName, agent.Version
+	gen := h.bakes.begin(agentKey)
+	go h.bakes.run(agentKey, gen, func(superseded func() bool) {
+		h.finishBake(kitchen, agentName, version, "", true, superseded)
+	})
 
 	respondJSON(w, http.StatusAccepted, map[string]interface{}{
 		"name":       agentName,
@@ -1499,7 +1273,7 @@ func (h *Handlers) CreateRecipe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.Store.CreateRecipe(r.Context(), &req); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondCreateError(w, err, "create the recipe")
 		return
 	}
 
@@ -1679,7 +1453,7 @@ func (h *Handlers) RerunRecipeRun(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusConflict, fmt.Sprintf("Recipe '%s' is archived: restore it to run it", recipeName))
 		return
 	}
-	prev, err := h.Store.GetRecipeRun(r.Context(), runID)
+	prev, err := h.runInKitchen(r, runID)
 	if err != nil || prev.RecipeID != recipe.ID {
 		respondError(w, http.StatusNotFound, fmt.Sprintf("Run '%s' not found for recipe '%s'", runID, recipeName))
 		return
@@ -1823,7 +1597,7 @@ func (h *Handlers) RecipeHistory(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) GetRecipeRun(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runId")
 
-	run, err := h.Store.GetRecipeRun(r.Context(), runID)
+	run, err := h.runInKitchen(r, runID)
 	if err != nil {
 		if _, ok := err.(*store.ErrNotFound); ok {
 			respondError(w, http.StatusNotFound, err.Error())
@@ -1848,11 +1622,18 @@ func (h *Handlers) GetRecipeRun(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) ReleaseWait(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runId")
 	stepName := chi.URLParam(r, "stepName")
+	kitchen := middleware.GetKitchen(r.Context())
+	// The run must be this kitchen's whether or not the decision is signed: the engine's release map is
+	// keyed by run id alone, and an id is not a secret (it is in traces and the audit trail).
+	if _, _, err := h.waitingStep(r.Context(), kitchen, runID, stepName); err != nil {
+		respondError(w, http.StatusNotFound, fmt.Sprintf("Step '%s' of run '%s' is not waiting", stepName, runID))
+		return
+	}
 	sig, ok := h.signDecision(w, r, contracts.GateWaitRelease, runID+":"+stepName, contracts.MeaningApproved, nil)
 	if !ok {
 		return
 	}
-	released := h.Workflow.ReleaseWait(runID, stepName)
+	released := h.Workflow.ReleaseWait(kitchen, runID, stepName)
 	var applyErr error
 	if !released {
 		applyErr = fmt.Errorf("step is not waiting")
@@ -1900,6 +1681,11 @@ func (h *Handlers) endLostRun(r *http.Request, runID string) bool {
 func (h *Handlers) CancelRecipeRun(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runId")
 
+	// The engine keys its live runs by id alone, so the run's kitchen is checked here, before anything is cancelled.
+	if _, err := h.runInKitchen(r, runID); err != nil {
+		respondError(w, http.StatusNotFound, "Run not found or already completed: "+runID)
+		return
+	}
 	if ok := h.Workflow.CancelRun(runID); !ok {
 		// No process holds this run. If the store still shows it as unfinished, the process that held it is
 		// gone (a restart): the person asked for it to end, so it ends in the record instead of staying
@@ -1930,6 +1716,10 @@ func (h *Handlers) ApproveGate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if _, err := h.runInKitchen(r, runID); err != nil {
+		respondError(w, http.StatusNotFound, fmt.Sprintf("No pending gate '%s' for run '%s'", stepName, runID))
+		return
+	}
 	if h.DecisionSigner != nil {
 		// This route records no approver and checks no constraint. With signatures on, it is the
 		// same decision as the route that does, so it takes the same path.
@@ -2078,7 +1868,7 @@ func (h *Handlers) CreateProvider(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.Store.CreateProvider(r.Context(), &req); err != nil {
 		h.dropProviderKeys(r.Context(), &req, sealed...)
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondCreateError(w, err, "create the provider")
 		return
 	}
 
@@ -2182,6 +1972,13 @@ func (h *Handlers) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 
 	if req.Kind != "" {
 		provider.Kind = req.Kind
+	}
+	if !h.mayRepoint(r, provider, &req) {
+		respondJSON(w, http.StatusForbidden, map[string]string{
+			"error":   "provider_endpoint_pinned",
+			"message": "This provider's credential is pinned to its current host. Enter a new credential in the same request, or ask someone who may manage providers to change the endpoint.",
+		})
+		return
 	}
 	if req.Endpoint != "" {
 		provider.Endpoint = req.Endpoint
@@ -2561,7 +2358,7 @@ func (h *Handlers) RegisterMCPTool(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.Store.CreateTool(r.Context(), &req); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondCreateError(w, err, "register the tool")
 		return
 	}
 
@@ -2732,10 +2529,7 @@ func (h *Handlers) GetTrace(w http.ResponseWriter, r *http.Request) {
 	if scores, err := h.Store.ListTraceScores(r.Context(), traceID); err == nil {
 		trace.Scores = scores
 	}
-	if !h.canReadTraceContent(r) {
-		trace.WithholdContent()
-	}
-	respondJSON(w, http.StatusOK, trace)
+	respondJSON(w, http.StatusOK, h.traceOut(r, trace))
 }
 
 // ListSpans returns all spans for a given trace, ordered by start_time.
@@ -2767,12 +2561,7 @@ func (h *Handlers) ListSpans(w http.ResponseWriter, r *http.Request) {
 	if spans == nil {
 		spans = []models.Span{}
 	}
-	if !h.canReadTraceContent(r) {
-		for i := range spans {
-			spans[i].WithholdContent()
-		}
-	}
-	respondJSON(w, http.StatusOK, spans)
+	respondJSON(w, http.StatusOK, h.spansOut(r, spans))
 }
 
 // GetSpan returns a single span by ID.
@@ -2802,10 +2591,7 @@ func (h *Handlers) GetSpan(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, "span not found")
 		return
 	}
-	if !h.canReadTraceContent(r) {
-		span.WithholdContent()
-	}
-	respondJSON(w, http.StatusOK, span)
+	respondJSON(w, http.StatusOK, h.spanOut(r, span))
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -2884,6 +2670,7 @@ func (h *Handlers) DeleteKitchen(w http.ResponseWriter, r *http.Request) {
 // ══════════════════════════════════════════════════════════════
 
 func (h *Handlers) A2AEndpoint(w http.ResponseWriter, r *http.Request) {
+	limitA2ABody(w, r)
 	var rpcReq struct {
 		Jsonrpc string          `json:"jsonrpc"`
 		Method  string          `json:"method"`
@@ -3001,6 +2788,8 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 				return
 			}
 			userParts = append(userParts, a2aFileToContentPart(part.File))
+			fileGuardText = joinNonEmpty([]string{fileGuardText, fileText(map[string]interface{}{
+				"name": part.File.Name, "uri": part.File.URI, "mimeType": part.File.MimeType, "bytes": part.File.Bytes})})
 		case "data":
 			if len(part.Data) > 0 {
 				userMessage += "\n" + string(part.Data)
@@ -3550,6 +3339,7 @@ func (h *Handlers) ServeAgentCard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) A2AAgentEndpoint(w http.ResponseWriter, r *http.Request) {
+	limitA2ABody(w, r)
 	agentName := chi.URLParam(r, "agentName")
 	kitchen := middleware.GetKitchen(r.Context())
 	envSlug := strings.TrimSpace(r.Header.Get("X-AO-Environment"))
@@ -3743,6 +3533,7 @@ func (h *Handlers) ResolveBackendEndpoint(agent *models.Agent) (string, string) 
 // It resolves the backend endpoint scoped to the given environment's active
 // K8s workload, falling back to the agent's global backend if no env workload exists.
 func (h *Handlers) A2AAgentEnvEndpoint(w http.ResponseWriter, r *http.Request) {
+	limitA2ABody(w, r)
 	agentName := chi.URLParam(r, "agentName")
 	envSlug := chi.URLParam(r, "envSlug")
 	kitchen := middleware.GetKitchen(r.Context())
@@ -4191,7 +3982,7 @@ func (h *Handlers) CreatePrompt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.Store.CreatePrompt(r.Context(), &req); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondCreateError(w, err, "create the prompt")
 		return
 	}
 
@@ -5717,6 +5508,7 @@ func (h *Handlers) persistExecutorSpans(ctx context.Context, execTrace *executor
 				"thinking_tokens": turn.Usage.ThinkingTokens,
 				"cached_tokens":   turn.Usage.CachedTokens,
 				"price_source":    turn.Usage.PriceSource,
+				"cache_hit":       turn.CacheHit,
 			},
 		}
 		// Providers that failed before this one answered are events on the span.
@@ -6064,7 +5856,7 @@ func (h *Handlers) ValidatePrompt(w http.ResponseWriter, r *http.Request) {
 
 // ListApprovals returns approval records for the current kitchen.
 func (h *Handlers) ListApprovals(w http.ResponseWriter, r *http.Request) {
-	kitchen := r.Header.Get("X-Kitchen")
+	kitchen := middleware.GetKitchen(r.Context())
 	status := r.URL.Query().Get("status")
 	approvals, err := h.Store.ListApprovals(r.Context(), kitchen, status, 100)
 	if err != nil {
@@ -6081,8 +5873,8 @@ func (h *Handlers) ListApprovals(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) GetApproval(w http.ResponseWriter, r *http.Request) {
 	gateKey := chi.URLParam(r, "gateKey")
 	record, err := h.Store.GetApproval(r.Context(), gateKey)
-	if err != nil {
-		respondError(w, http.StatusNotFound, err.Error())
+	if err != nil || !kitchenOwns(r, record.Kitchen) {
+		respondError(w, http.StatusNotFound, "approval not found: "+gateKey)
 		return
 	}
 	respondJSON(w, http.StatusOK, record)
@@ -6105,6 +5897,10 @@ func (h *Handlers) ApproveGateWithMetadata(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if _, err := h.runInKitchen(r, runID); err != nil {
+		respondError(w, http.StatusNotFound, fmt.Sprintf("No pending gate '%s' for run '%s'", stepName, runID))
+		return
+	}
 	// With signatures on, the approver is the verified signer; the fields in the body are ignored.
 	if h.DecisionSigner != nil {
 		h.approveSignedGate(w, r, runID, stepName, req.Approved, req.Channel, req.Comments)
@@ -6199,7 +5995,7 @@ func (h *Handlers) CreateChannel(w http.ResponseWriter, r *http.Request) {
 	ch.Active = true
 
 	if err := h.Store.CreateChannel(r.Context(), &ch); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondCreateError(w, err, "create the channel")
 		return
 	}
 	respondJSON(w, http.StatusCreated, ch)
@@ -6349,6 +6145,11 @@ func joinEnvSlugs(envs []models.Environment) string {
 }
 
 func respondJSON(w http.ResponseWriter, status int, data interface{}) {
+	body, ok := checkedBody(data) // trace content only goes out through h.traceOut and its siblings
+	if !ok {
+		status, body = http.StatusInternalServerError, map[string]string{"error": "response withheld: it carried content without an access check"}
+	}
+	data = body
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
@@ -6549,13 +6350,13 @@ func (h *Handlers) GetSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, err := h.Sessions.GetSession(r.Context(), sessionID)
+	session, err := h.sessionInKitchen(r, sessionID, chi.URLParam(r, "agentName"))
 	if err != nil {
 		respondError(w, http.StatusNotFound, err.Error())
 		return
 	}
 
-	respondJSON(w, http.StatusOK, session)
+	respondJSON(w, http.StatusOK, h.sessionOut(r, session))
 }
 
 // ListSessions lists all sessions for an agent.
@@ -6577,7 +6378,7 @@ func (h *Handlers) ListSessions(w http.ResponseWriter, r *http.Request) {
 		sessions = []models.Session{}
 	}
 
-	respondJSON(w, http.StatusOK, sessions)
+	respondJSON(w, http.StatusOK, h.sessionsOut(r, sessions))
 }
 
 // DeleteSession removes a session.
@@ -6589,6 +6390,10 @@ func (h *Handlers) DeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if _, err := h.sessionInKitchen(r, sessionID, chi.URLParam(r, "agentName")); err != nil {
+		respondError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	if err := h.Sessions.DeleteSession(r.Context(), sessionID); err != nil {
 		respondError(w, http.StatusNotFound, err.Error())
 		return
@@ -6620,7 +6425,7 @@ func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get existing session
-	session, err := h.Sessions.GetSession(r.Context(), sessionID)
+	session, err := h.sessionInKitchen(r, sessionID, agentName)
 	if err != nil {
 		respondError(w, http.StatusNotFound, err.Error())
 		return
@@ -7170,7 +6975,7 @@ func (h *Handlers) HandleCreateScopedKey(w http.ResponseWriter, r *http.Request)
 	}
 
 	if err := h.Store.CreateScopedKey(r.Context(), key); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondCreateError(w, err, "create the key")
 		return
 	}
 
@@ -7511,6 +7316,25 @@ func (h *Handlers) requireGuardrails(w http.ResponseWriter, r *http.Request, age
 func (h *Handlers) SetSubagentRuntime(rt contracts.SubagentRuntime) {
 	if h.Executor != nil {
 		h.Executor.SetSubagentRuntime(rt)
+	}
+}
+
+// SetNativeToolRunner installs the runner for tools of transport "native" (a tool pack's tools).
+// Without one such a tool fails with "this edition cannot run tool packs". Call it before serving.
+func (h *Handlers) SetNativeToolRunner(r contracts.NativeToolRunner) {
+	if h.MCPGateway != nil {
+		h.MCPGateway.SetNativeToolRunner(r)
+	}
+}
+
+// SetToolApprovalPolicy makes the tools the policy names wait for a person's approval in every
+// agent's run, and makes the MCP endpoint refuse them (it has no way to ask). Call it before serving.
+func (h *Handlers) SetToolApprovalPolicy(p contracts.ToolApprovalPolicy) {
+	if h.MCPGateway != nil {
+		h.MCPGateway.SetToolApprovalPolicy(p)
+	}
+	if h.Executor != nil {
+		h.Executor.SetToolApprovalPolicy(p)
 	}
 }
 
