@@ -178,6 +178,17 @@ describe('invoke (cascaded voice)', () => {
     expect((api.last.body as any).audio.mime_type).toBe('audio/flac');
   });
 
+  it('sends attachments as content_parts, and needs a message, audio or attachments', async () => {
+    api.reply('POST', '/api/v1/agents/support/invoke', { agent: 'support', response: 'a cat', turns: 1 });
+    await pro.invoke('support', { message: 'what is this', attachments: [Attachment.fromBytes(PNG)] });
+    const parts = (api.last.body as any).content_parts;
+    expect(parts).toHaveLength(1);
+    expect(parts[0].media.mime_type).toBe('image/png');
+    await pro.invoke('support', { attachments: [Attachment.fromBytes(PNG)] });
+    expect((api.last.body as any).message).toBeUndefined();
+    await expect(pro.invoke('support', {})).rejects.toThrow(/needs a message/);
+  });
+
   it('text only has no transcript or audio', async () => {
     api.reply('POST', '/api/v1/agents/support/invoke', { agent: 'support', response: 'hi', turns: 1 });
     const r = await pro.invoke('support', { message: 'hello', variables: { a: 'b' }, sessionId: 's' });

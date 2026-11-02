@@ -681,6 +681,47 @@ impl AgentOvenClient {
         body
     }
 
+    /// Create the agent, or update it when the kitchen already has one of that name.
+    fn register_blocking(&self, agent: &Agent) -> PyResult<String> {
+        let http = reqwest::blocking::Client::new();
+        let item_url = self.api_url(&format!("/agents/{}", agent.name));
+        let body = self.agent_to_json(agent);
+
+        let probe = self.authed_request(&http, reqwest::Method::GET, &item_url);
+        let (probe_status, probe_text) = self.send(probe)?;
+        let exists = match probe_status {
+            200..=299 => true,
+            404 => false,
+            _ => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "Register failed: could not look up '{}' ({probe_status}): {probe_text}",
+                    agent.name
+                )))
+            }
+        };
+
+        if !exists {
+            let url = self.api_url("/agents");
+            let req = self.authed_request(&http, reqwest::Method::POST, &url).json(&body);
+            let (status, text) = self.send(req)?;
+            if (200..300).contains(&status) {
+                return Ok(format!("✅ Agent '{}' registered — {text}", agent.name));
+            }
+            // Someone created it between the lookup and the create: fall through to an update.
+            if status != 409 {
+                return Err(PyRuntimeError::new_err(format!("Register failed ({status}): {text}")));
+            }
+        }
+
+        let req = self.authed_request(&http, reqwest::Method::PUT, &item_url).json(&body);
+        let (status, text) = self.send(req)?;
+        if (200..300).contains(&status) {
+            Ok(format!("✅ Agent '{}' updated — {text}", agent.name))
+        } else {
+            Err(PyRuntimeError::new_err(format!("Register (update) failed ({status}): {text}")))
+        }
+    }
+
     /// Serialize a Recipe into the control-plane JSON shape: the field names the engine reads
     /// (`timeout_secs`, `notify_tools`, a branch's `next_step`, `agent_ref` with its `agent` alias).
     /// A timeout it cannot read is an error, not a step that silently runs without one.
@@ -770,25 +811,25 @@ impl AgentOvenClient {
 
     // ── Register ─────────────────────────────────────────────
 
-    /// Register an agent with the control plane.
+    /// Register an agent with the control plane: create it when the kitchen has no agent of
+    /// that name, update it when it does.
     ///
     ///     client.register(agent)
-    fn register(&self, agent: &Agent) -> PyResult<String> {
-        let http = reqwest::blocking::Client::new();
-        let url = self.api_url(&format!("/agents/{}", agent.name));
-        let body = self.agent_to_json(agent);
-        let req = self.authed_request(&http, reqwest::Method::PUT, &url).json(&body);
-        let (status, text) = self.send(req)?;
-        if (200..300).contains(&status) || status == 409 {
-            Ok(format!("✅ Agent '{}' registered — {text}", agent.name))
-        } else {
-            Err(PyRuntimeError::new_err(format!("Register failed ({status}): {text}")))
-        }
+    ///
+    /// The control plane creates with `POST /agents` and updates with `PUT /agents/{name}`;
+    /// a `PUT` for a name that does not exist answers 404, and a `POST` for one that does
+    /// either fails (database store) or silently replaces the agent (in-memory store). So
+    /// this asks first (`GET /agents/{name}`) and then picks the one call that fits. An
+    /// update changes the fields sent and leaves the rest as they are.
+    fn register(&self, py: Python<'_>, agent: &Agent) -> PyResult<String> {
+        // Release the GIL while waiting on the network, so other Python threads (and a test
+        // server running in this same process) are not frozen for the length of the call.
+        py.allow_threads(|| self.register_blocking(agent))
     }
 
-    /// Backward-compatible alias for `register()`.
-    fn register_agent(&self, agent: &Agent) -> PyResult<String> {
-        self.register(agent)
+    /// Alias of `register()`; kept for callers written against the older name.
+    fn register_agent(&self, py: Python<'_>, agent: &Agent) -> PyResult<String> {
+        self.register(py, agent)
     }
 
     // ── Provider ─────────────────────────────────────────────

@@ -25,6 +25,8 @@
  * ```
  */
 
+import { Blobs } from './blobs.js';
+import { Tasks } from './tasks.js';
 import { Flow } from './flow.js';
 import { audioClipFromWire, audioFromBytes } from './media.js';
 import { resolveModalities, supportsModality, type AnyModality } from './modalities.js';
@@ -52,6 +54,7 @@ import type {
   Provider,
   RealtimeToken,
   Recipe,
+  RegisterToolRequest,
   RecipeRun,
   Schedule,
   Scenario,
@@ -65,12 +68,14 @@ import type {
   SessionMessageResponse,
   TestRun,
   TestSuite,
+  Tool,
   TraceabilityMatrix,
   UpdateProviderRequest,
   UpdateProviderResponse,
   UpsertAgentEnvironmentRequest,
   User,
   UserRole,
+  KitchenRole,
   Workload,
   WorldSchema,
 } from './types.js';
@@ -100,6 +105,81 @@ export class AudioModalityError extends AgentOvenAPIError {
   get reason(): string {
     return errorText(this.detail);
   }
+}
+
+/**
+ * This account signs through the identity provider (OIDC), which re-asks for the password in a browser. The SDK
+ * can sign with a local account's password only; sign in the dashboard, or use a local account.
+ */
+export class OidcSigningRequired extends AgentOvenAPIError {
+  constructor(statusCode: number, detail: unknown) {
+    super(statusCode, detail);
+    this.name = 'OidcSigningRequired';
+  }
+
+  /** The server's explanation. */
+  get reason(): string {
+    const d = this.detail as { message?: unknown } | null;
+    return d && typeof d === 'object' && d.message ? String(d.message) : errorText(this.detail);
+  }
+}
+
+/** The header that carries a signing token on a decision call (the control plane's `signatures.Header`). */
+export const SIGNING_TOKEN_HEADER = 'X-Signing-Token';
+
+/**
+ * The roles a person or credential can hold inside one kitchen. `restaurateur` is platform-wide, so it is a role of
+ * a person in the user directory, never of a kitchen member, binding or credential. The retired `admin` is no role:
+ * it was a Head Chef inside a kitchen and a Restaurateur across the installation.
+ */
+export const KITCHEN_ROLES: readonly KitchenRole[] = ['head_chef', 'chef', 'baker', 'taster', 'auditor', 'legal', 'finance', 'viewer'];
+/** The roles of a person in the user directory: the kitchen roles and the platform-wide `restaurateur`. */
+export const PERSON_ROLES: readonly UserRole[] = ['restaurateur', ...KITCHEN_ROLES];
+
+/**
+ * The gates a decision can be signed at (Pro, ADR-0041). `legal_hold_release` lifts a legal hold (a dataset's or the
+ * audit trail's) and is signed by the legal team; `approval_skip` runs a recipe on an environment that requires
+ * approval, without that approval.
+ */
+export const SIGNING_GATES = [
+  'tool_approval', 'budget_extension', 'resume_guidance', 'recipe_gate', 'wait_release',
+  'environment_promotion', 'skill_approval', 'bot_action', 'live_tool_replay',
+  'dataset_publish', 'dataset_purge', 'legal_hold_release', 'approval_skip',
+  'secret_binding', 'secret_migrate',
+] as const;
+
+const RETENTION_MODES = ['expire', 'persist', 'regulated'];
+const REPLAY_TOOL_MODES: ReplayToolMode[] = ['frozen', 'blocked', 'live'];
+
+/** Refuse a role the control plane does not have. */
+function checkRole(role: string, allowed: readonly string[], what: string): void {
+  if (role === 'admin') {
+    throw new Error(
+      `role 'admin' is retired (${what}): use 'head_chef' for a kitchen role` +
+        (allowed.includes('restaurateur') ? " or 'restaurateur' for a person across the installation" : ''),
+    );
+  }
+  if (!allowed.includes(role)) {
+    const hint = role === 'restaurateur' ? " ('restaurateur' is platform-wide: assign it in the user directory)" : '';
+    throw new Error(`unknown role ${JSON.stringify(role)} for ${what}: one of ${allowed.join(', ')}${hint}`);
+  }
+}
+
+function checkRetentionMode(mode: string | undefined): void {
+  if (mode !== undefined && !RETENTION_MODES.includes(mode)) throw new Error(`retention_mode is one of ${RETENTION_MODES.join(', ')}, not ${JSON.stringify(mode)}`);
+}
+
+function signingRequest(gate: string, recordId: string, meaning: string, payload?: Record<string, unknown>) {
+  if (meaning !== 'approved' && meaning !== 'rejected') throw new Error(`meaning is 'approved' or 'rejected', not ${JSON.stringify(meaning)}`);
+  return { gate, record_id: recordId, meaning, payload: payload ?? {} };
+}
+
+/** A query string (with its `?`) of the parameters that are set, or an empty one. */
+function queryString(params: Record<string, string | number | undefined>): string {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') q.set(k, String(v));
+  const qs = q.toString();
+  return qs ? `?${qs}` : '';
 }
 
 const NO_AUDIO = 'does not offer the audio modality';
@@ -181,7 +261,8 @@ export class ProClient {
     return this.get(`/api/v1/kitchens/${kitchenId}/members`);
   }
 
-  async addKitchenMember(kitchenId: string, userId: string, role: UserRole): Promise<KitchenMember> {
+  async addKitchenMember(kitchenId: string, userId: string, role: KitchenRole): Promise<KitchenMember> {
+    checkRole(role, KITCHEN_ROLES, 'a kitchen member');
     return this.post(`/api/v1/kitchens/${kitchenId}/members`, { user_id: userId, role });
   }
 
@@ -195,7 +276,9 @@ export class ProClient {
     return this.get(`/api/v1/users/${userId}`);
   }
 
+  /** `role` is one of `PERSON_ROLES`: `restaurateur` (the installation's owner) or a kitchen role. The retired `admin` is refused. */
   async createUser(email: string, role: UserRole, name?: string): Promise<User> {
+    checkRole(role, PERSON_ROLES, 'a user');
     return this.post('/api/v1/users', { email, role, name: name ?? '' });
   }
 
@@ -411,13 +494,33 @@ export class ProClient {
     );
   }
 
-  /** Start a run. Returns at once with `run_id` and `status`; see `waitForRecipeRun`. */
+  /**
+   * Start a run. Returns at once with `run_id` and `status`; see `waitForRecipeRun`.
+   *
+   * An environment can require approval before a recipe runs on it. A Head Chef or Restaurateur may skip that
+   * approval (never in a GxP kitchen), and on Pro the skip is a signed decision on the `approval_skip` gate: record
+   * id `<recipe>@<environment>`, payload `{ input }`, so a token for one run cannot start another. Pass `password`
+   * (the SDK signs it, `sign`) or a `signingToken` signed for exactly this recipe, environment and input; it needs
+   * `environment`. Leave both out when the environment needs no approval. A scheduled or automated run cannot skip
+   * an approval.
+   */
   async runRecipe(
     name: string,
     input: Record<string, unknown> = {},
-    opts?: { environment?: string; kitchen?: string },
+    opts?: { environment?: string; kitchen?: string } & Signing,
   ): Promise<Record<string, unknown>> {
-    return this.bakeRecipe(name, input, opts?.environment, { kitchen: opts?.kitchen });
+    if (opts?.password === undefined && !opts?.signingToken) {
+      return this.bakeRecipe(name, input, opts?.environment, { kitchen: opts?.kitchen });
+    }
+    if (!opts?.environment) throw new Error('skipping an approval is signed for one environment: pass environment');
+    const extra = await this.signingHeaders(opts, 'approval_skip', `${name}@${opts.environment}`, { input });
+    return this.request(
+      'POST',
+      `/api/v1/recipes/${encodeURIComponent(name)}/bake`,
+      { input, environment: opts.environment },
+      opts.kitchen,
+      extra,
+    );
   }
 
   /**
@@ -477,24 +580,83 @@ export class ProClient {
     return this.post(`/api/v1/channels/${encodeURIComponent(name)}/ws-ticket`, {}, opts?.kitchen);
   }
 
+  // ── Signed decisions (Pro, ADR-0041) ───────────────────────────────────────
+  // A decision at a gate is signed: you prove who you are again and the control plane gives you a single-use
+  // token bound to exactly that decision, which you send in the `X-Signing-Token` header (`SIGNING_TOKEN_HEADER`).
+  // `sign` does both steps. Every method below that takes a decision accepts `password` (the SDK signs it for
+  // you) or `signingToken` (a token you already hold), never both.
+
   /**
-   * Prove who you are again and get the single-use signing token for one decision (Pro, ADR-0041). `gate` is the
-   * kind of decision (`recipe_gate`, `tool_approval`, `budget_extension`, `wait_release`, `skill_approval`,
-   * `environment_promotion`, `bot_action`), `recordId` what is decided, `meaning` is `approved` or `rejected`, and
-   * `password` is the password of the local account you signed in with. The token is good for a minute and for
-   * exactly this decision; send it in the `X-Signing-Token` header. An API key or service account cannot sign. An
-   * account that signs in through an identity provider signs in the dashboard, not here.
+   * Sign one decision and return its single-use signing token: asks for the challenge, proves who you are with
+   * `password`, and returns the token (good for a minute and for exactly this decision).
+   *
+   * `gate` is the kind of decision (see `SIGNING_GATES`), `recordId` what is decided, `meaning` is `approved` or
+   * `rejected`, and `payload` is the content of the decision that is signed with it (a reason, an input). Send the
+   * token in the `X-Signing-Token` header, or pass it as `signingToken` to the method that takes the decision.
+   *
+   * Two gates are new with the roles. `legal_hold_release` (`recordId` `dataset:<id>` or `audit:<kitchen>`,
+   * payload `{ reason }`) lifts a legal hold; `liftDatasetLegalHold` and `liftAuditLegalHold` sign it for you.
+   * `approval_skip` (`recordId` `<recipe>@<environment>`, payload `{ input }`) runs a recipe on an environment that
+   * requires approval; `runRecipe` signs it for you when you pass `password`.
+   *
+   * An API key or service account cannot sign: it gets `signature_required`. An account that signs in through an
+   * identity provider (OIDC) signs in the browser, not here: this rejects with `OidcSigningRequired` before the
+   * password is sent anywhere.
    */
-  async signDecision(gate: string, recordId: string, meaning: 'approved' | 'rejected', password: string, payload?: Record<string, unknown>): Promise<string> {
-    const request = { gate, record_id: recordId, meaning, payload: payload ?? {} };
-    const challenge = await this.post<{ subject: { digest: string } }>('/api/v1/signatures/challenge', request);
-    const reply = await this.post<{ signing_token: string }>('/api/v1/signatures/token', { ...request, digest: challenge.subject.digest, password });
-    return reply.signing_token;
+  async sign(gate: string, recordId: string, meaning: 'approved' | 'rejected', payload: Record<string, unknown> | undefined, password: string): Promise<string> {
+    const challenge = await this.signatureChallenge(gate, recordId, meaning, payload);
+    if (challenge.reauth === 'oidc') {
+      throw new OidcSigningRequired(400, {
+        error: 'use_oidc',
+        message: 'this account signs through the identity provider: sign in the dashboard, or sign in with a local account (password) to sign from the SDK',
+      });
+    }
+    try {
+      const reply = await this.requestSigningToken(gate, recordId, meaning, challenge.subject.digest, password, payload);
+      return reply.signing_token;
+    } catch (err) {
+      if (err instanceof AgentOvenAPIError && (err.detail as { error?: string } | null)?.error === 'use_oidc') {
+        throw new OidcSigningRequired(err.statusCode, err.detail);
+      }
+      throw err;
+    }
+  }
+
+  /** Same as `sign` with the password before the payload (the older argument order). */
+  signDecision(gate: string, recordId: string, meaning: 'approved' | 'rejected', password: string, payload?: Record<string, unknown>): Promise<string> {
+    return this.sign(gate, recordId, meaning, payload, password);
+  }
+
+  /**
+   * The first half of signing: what would be signed (`subject`, with its `digest`, `title` and `display`), how you
+   * would prove who you are (`reauth`: `password` or `oidc`) and how long the token lives. Rejects with 403 if you
+   * may not sign this decision.
+   */
+  signatureChallenge(gate: string, recordId: string, meaning: 'approved' | 'rejected', payload?: Record<string, unknown>): Promise<SigningChallenge> {
+    return this.post('/api/v1/signatures/challenge', signingRequest(gate, recordId, meaning, payload));
+  }
+
+  /**
+   * The second half of signing: `password` re-authenticates a local account and, if the record is still what
+   * `digest` (from `signatureChallenge`) was computed over, returns the token. Prefer `sign`.
+   */
+  requestSigningToken(gate: string, recordId: string, meaning: 'approved' | 'rejected', digest: string, password: string, payload?: Record<string, unknown>): Promise<SigningTokenReply> {
+    return this.post('/api/v1/signatures/token', { ...signingRequest(gate, recordId, meaning, payload), digest, password });
+  }
+
+  /** Send any request with a signing token in the `X-Signing-Token` header, for a decision this SDK has no method for. */
+  signedRequest<T = unknown>(method: string, path: string, body: unknown, signingToken: string): Promise<T> {
+    return this.request<T>(method, path, body, undefined, { [SIGNING_TOKEN_HEADER]: signingToken });
   }
 
   /** Signed decisions of the kitchen: who signed (name and role), when, the meaning, and what became of the decision. */
   listSignatures(gate = '', recordId = ''): Promise<SignatureRecord[]> {
     return this.get(`/api/v1/signatures?gate=${encodeURIComponent(gate)}&record_id=${encodeURIComponent(recordId)}`);
+  }
+
+  /** One signed decision. */
+  getSignature(signatureId: string): Promise<SignatureRecord> {
+    return this.get(`/api/v1/signatures/${seg(signatureId)}`);
   }
 
   /** Check the kitchen's signature chain: `ok` is false, with where it breaks, if one was changed or removed. */
@@ -503,11 +665,48 @@ export class ProClient {
   }
 
   /**
-   * End a `wait` step early, so the run carries on now. Rejects with a 404 if it is not waiting. On Pro the
-   * decision is signed: pass `password`, the password of your local account.
+   * Who may approve what in this kitchen: `policy` maps `<gate>` or `<gate>:<scope>` to `{ roles, users }`, and
+   * `gates` lists the gates a rule can name.
    */
-  async releaseWait(name: string, runId: string, step: string, opts?: { kitchen?: string; password?: string }): Promise<unknown> {
-    const extra = opts?.password !== undefined ? { 'X-Signing-Token': await this.signDecision('wait_release', `${runId}:${step}`, 'approved', opts.password) } : undefined;
+  getApproverPolicy(): Promise<{ policy: ApproverPolicy; gates: string[] }> {
+    return this.get('/api/v1/approver-policy');
+  }
+
+  /**
+   * Replace the kitchen's approver rules (a Head Chef's; the whole policy is replaced, so send every rule). Keys are
+   * `<gate>` or `<gate>:<scope>` (an environment slug or an agent name, e.g. `environment_promotion:prod`). Roles are
+   * checked here against `PERSON_ROLES`; the retired `admin` is refused (name `head_chef` or `restaurateur`).
+   */
+  async setApproverPolicy(policy: Record<string, { roles?: string[]; users?: string[] }>): Promise<{ policy: ApproverPolicy }> {
+    const rules: ApproverPolicy = {};
+    for (const [key, rule] of Object.entries(policy)) {
+      const roles = [...(rule.roles ?? [])];
+      for (const role of roles) checkRole(role, PERSON_ROLES, `approver policy ${JSON.stringify(key)}`);
+      rules[key] = { roles, users: [...(rule.users ?? [])] };
+    }
+    return this.put('/api/v1/approver-policy', { policy: rules });
+  }
+
+  /** The header for one decision: the token passed, or one signed now with `password`, or none. */
+  private async signingHeaders(
+    opts: Signing | undefined,
+    gate: string,
+    recordId: string,
+    payload?: Record<string, unknown>,
+    meaning: 'approved' | 'rejected' = 'approved',
+  ): Promise<Record<string, string> | undefined> {
+    let token = opts?.signingToken;
+    if (opts?.password !== undefined && token) throw new Error('pass password or signingToken, not both');
+    if (opts?.password !== undefined) token = await this.sign(gate, recordId, meaning, payload, opts.password);
+    return token ? { [SIGNING_TOKEN_HEADER]: token } : undefined;
+  }
+
+  /**
+   * End a `wait` step early, so the run carries on now. Rejects with a 404 if it is not waiting. On Pro the
+   * decision is signed: pass `password`, the password of your local account, or a `signingToken` you hold.
+   */
+  async releaseWait(name: string, runId: string, step: string, opts?: { kitchen?: string } & Signing): Promise<unknown> {
+    const extra = await this.signingHeaders(opts, 'wait_release', `${runId}:${step}`);
     return this.request(
       'POST',
       `/api/v1/recipes/${encodeURIComponent(name)}/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(step)}/release`,
@@ -519,22 +718,20 @@ export class ProClient {
 
   /**
    * Approve a step that is waiting for a person. The decision is recorded with who made it. On Pro every decision
-   * is signed: pass `opts.password`, the password of your local account, and the SDK signs it (`signDecision`).
-   * Without one the call is unsigned, which Pro refuses with `signature_required`.
+   * is signed: pass `opts.password`, the password of your local account, and the SDK signs it (`sign`), or a
+   * `signingToken` you hold. Without either the call is unsigned, which Pro refuses with `signature_required`.
    */
-  approveGate(runId: string, step: string, comments?: string, opts?: { password?: string }): Promise<unknown> {
-    return this.decideGate(runId, step, true, comments, opts?.password);
+  approveGate(runId: string, step: string, comments?: string, opts?: Signing): Promise<unknown> {
+    return this.decideGate(runId, step, true, comments, opts);
   }
 
   /** Reject a waiting step. `reason` is recorded and passed to the step that follows the Rejected path. */
-  rejectGate(runId: string, step: string, reason?: string, opts?: { password?: string }): Promise<unknown> {
-    return this.decideGate(runId, step, false, reason, opts?.password);
+  rejectGate(runId: string, step: string, reason?: string, opts?: Signing): Promise<unknown> {
+    return this.decideGate(runId, step, false, reason, opts);
   }
 
-  private async decideGate(runId: string, step: string, approved: boolean, comments?: string, password?: string): Promise<unknown> {
-    const extra = password !== undefined
-      ? { 'X-Signing-Token': await this.signDecision('recipe_gate', `${runId}:${step}`, approved ? 'approved' : 'rejected', password) }
-      : undefined;
+  private async decideGate(runId: string, step: string, approved: boolean, comments?: string, opts?: Signing): Promise<unknown> {
+    const extra = await this.signingHeaders(opts, 'recipe_gate', `${runId}:${step}`, undefined, approved ? 'approved' : 'rejected');
     return this.request(
       'POST',
       `/api/v1/approvals/${encodeURIComponent(runId)}/${encodeURIComponent(step)}`,
@@ -580,9 +777,16 @@ export class ProClient {
     return this.get('/api/v1/service-accounts');
   }
 
-  /** Token is returned only once — store it securely immediately. */
-  async createServiceAccount(name: string, role: UserRole): Promise<CreateServiceAccountResponse> {
-    return this.post('/api/v1/service-accounts', { name, role });
+  /**
+   * Create a machine identity bound to this kitchen. The token is returned only once — store it securely
+   * immediately. `role` is a kitchen role (one of `KITCHEN_ROLES`; the retired `admin` is refused). Every credential
+   * belongs to a person (`ownerEmail`, you if left out): a member of this kitchen at a rank that covers the role.
+   * Creating one on someone else's behalf is a Head Chef's act. When the owner leaves the kitchen the credential
+   * stops; give it to someone with `setServiceAccountOwner`.
+   */
+  async createServiceAccount(name: string, role: KitchenRole, opts?: { ownerEmail?: string }): Promise<CreateServiceAccountResponse> {
+    checkRole(role, KITCHEN_ROLES, 'a service account');
+    return this.post('/api/v1/service-accounts', { name, role, ...(opts?.ownerEmail ? { owner_email: opts.ownerEmail } : {}) });
   }
 
   async deleteServiceAccount(saId: string): Promise<void> {
@@ -768,11 +972,16 @@ export class ProClient {
     return this.get('/api/v1/keys');
   }
 
+  /**
+   * Create a scoped API key. Like a service account it belongs to a person (`owner_email`, you if left out), who
+   * must be a member of this kitchen; see `setScopedKeyOwner`.
+   */
   async createScopedKey(req: {
     label: string;
     agent_names: string[];
     max_calls?: number;
     expires_in?: string;
+    owner_email?: string;
   }): Promise<Record<string, unknown>> {
     return this.post('/api/v1/keys', req);
   }
@@ -854,6 +1063,54 @@ export class ProClient {
     return this.put(`/api/v1/models/providers/${seg(name)}`, body);
   }
 
+  // ── Tools (MCP gateway) ────────────────────────────────────────────────────
+
+  /** The tools registered in this kitchen. A tool's `auth_config` is never returned. */
+  async listTools(): Promise<Tool[]> {
+    return (await this.get<Tool[] | null>('/api/v1/tools')) ?? [];
+  }
+
+  /** One tool by name. Rejects with an `AgentOvenAPIError` (404) if there is none. */
+  async getTool(name: string): Promise<Tool> {
+    return this.get(`/api/v1/tools/${seg(name)}`);
+  }
+
+  /**
+   * Register a tool agents can call, or update it if the name is taken.
+   *
+   * ```ts
+   * await pro.registerTool({
+   *   name: 'refunds',
+   *   endpoint: 'https://payments.internal/refund',
+   *   description: 'Pay a refund',
+   *   schema: { type: 'object', properties: { amount: { type: 'number' } } },
+   * });
+   * ```
+   *
+   * `transport` is `http` (default), `sse` or `stdio`. Registering an existing
+   * name updates that tool; the server's update replaces `enabled` every time,
+   * so it is always sent (`true` unless you pass `false`). The lookup is one
+   * extra GET. Resolves to the stored tool.
+   */
+  async registerTool(req: RegisterToolRequest): Promise<Tool> {
+    const { name, endpoint, description = '', transport = 'http', enabled = true, ...rest } = req;
+    const body = { name, endpoint, description, transport, enabled, ...rest };
+    try {
+      await this.getTool(name);
+    } catch (err) {
+      if (err instanceof AgentOvenAPIError && err.statusCode === 404) {
+        return this.post('/api/v1/tools', body);
+      }
+      throw err;
+    }
+    return this.put(`/api/v1/tools/${seg(name)}`, body);
+  }
+
+  /** Remove a tool from the kitchen. */
+  async deleteTool(name: string): Promise<void> {
+    await this.delete(`/api/v1/tools/${seg(name)}`);
+  }
+
   // ── Agent card ─────────────────────────────────────────────────────────────
 
   /** The agent's A2A card; `card.modalities` lists what its provider offers. */
@@ -885,7 +1142,10 @@ export class ProClient {
    * Rejects with {@link AudioModalityError} when the provider does not offer audio.
    */
   async invoke(agent: string, options: InvokeOptions): Promise<InvokeResult> {
-    if (!options.message && options.audio === undefined) throw new Error('invoke needs a message, audio, or both');
+    const attachments = options.attachments ?? [];
+    if (!options.message && options.audio === undefined && attachments.length === 0) {
+      throw new Error('invoke needs a message, audio, or both (or attachments)');
+    }
     if (options.voice && !options.voiceOutput) throw new Error('voice only applies with voiceOutput: true');
     const body: Record<string, unknown> = {};
     if (options.message) body.message = options.message;
@@ -896,6 +1156,7 @@ export class ProClient {
           : options.audio;
       body.audio = { data: a.data, mime_type: a.mimeType };
     }
+    if (attachments.length > 0) body.content_parts = attachments;
     if (options.voiceOutput) body.voice_output = true;
     if (options.voice) body.voice = options.voice;
     if (options.variables) body.variables = options.variables;
@@ -953,6 +1214,432 @@ export class ProClient {
     return this.post(`/api/v1/agents/${seg(agent)}/sessions/${seg(sessionId)}/messages`, body);
   }
 
+  // ── Replay (Pro, ADR-0039) ─────────────────────────────────────────────────
+  // Re-run a captured call or run with edits. A replay is an investigation, not a reproduction: models are not
+  // deterministic and the world has moved on, so a replay is a new trace named `replay:<agent>` and never
+  // evidence of what the original run did. The original is never changed. Needs `trace:replay` and
+  // `trace:read:content`.
+
+  /**
+   * Re-run one captured model call as up to five variants (the server's limit). Runs no tool: the tool calls the
+   * model asked for come back, unexecuted. Each variant is `{ label?, edits }`; the server refuses an edit it does
+   * not understand. With no variants the call is re-run as captured, which shows how much of the original answer
+   * was chance. `reason` is recorded, and is required for an archived agent's trace. The edited prompt goes
+   * through the agent's input guardrails and the reply through the output ones; the kitchen's spend gate counts the
+   * call. Each variant ends `completed`, `blocked`, `refused` or `failed`.
+   */
+  replayCall(traceId: string, spanId: string, opts: { variants?: ReplayVariant[]; reason?: string } = {}): Promise<ReplayCallResult> {
+    return this.post(`/api/v1/traces/${seg(traceId)}/spans/${seg(spanId)}/replay`, { variants: opts.variants ?? [], reason: opts.reason ?? '' });
+  }
+
+  /**
+   * Re-run an agent run from one of its model calls (`fromSpan`) with `edits` (the same keys as `replayCall`).
+   * `tools` says what the run's tool calls do:
+   *
+   * - `frozen` (the default): the captured result is returned for as long as the model asks for the same tool call
+   *   with the same arguments; when it asks for one with no captured result the replay stops, `diverged`, and shows
+   *   both. Nothing is invented and no tool is run.
+   * - `blocked`: the call is returned, not run, and the replay ends there.
+   * - `live`: only the tools named in `liveTools` run, and only if the agent marked them idempotent (tools with side
+   *   effects, the `agentoven_*` tools and calls to other agents never run live). It needs `trace:replay:live-tools`
+   *   and is a signed decision on the `live_tool_replay` gate, bound to the trace, the step, the tool list and the
+   *   edits: pass `password` (the SDK asks `prepareLiveReplay` what to sign and signs it) or a `signingToken`
+   *   signed from that preparation. Without either the server refuses with `signature_required`.
+   */
+  async replayRun(
+    traceId: string,
+    fromSpan: string,
+    opts: { edits?: ReplayEdits; tools?: ReplayToolMode; liveTools?: string[]; reason?: string } & Signing = {},
+  ): Promise<ReplayRunResult> {
+    const tools = opts.tools ?? 'frozen';
+    if (!REPLAY_TOOL_MODES.includes(tools)) throw new Error(`tools must be one of ${REPLAY_TOOL_MODES.join(', ')}, not ${JSON.stringify(tools)}`);
+    const liveTools = [...(opts.liveTools ?? [])];
+    if (tools === 'live' && liveTools.length === 0) throw new Error('tools "live" needs liveTools naming the tools that may run live');
+    if (tools !== 'live' && (liveTools.length > 0 || opts.password !== undefined || opts.signingToken)) {
+      throw new Error('liveTools, password and signingToken only go with tools "live"');
+    }
+    if (opts.password !== undefined && opts.signingToken) throw new Error('pass password or signingToken, not both');
+    let token = opts.signingToken;
+    if (opts.password !== undefined) {
+      const prep = await this.prepareLiveReplay(traceId, fromSpan, liveTools, { edits: opts.edits, reason: opts.reason });
+      token = await this.sign(prep.gate, prep.record_id, 'approved', prep.payload, opts.password);
+    }
+    return this.request(
+      'POST',
+      `/api/v1/traces/${seg(traceId)}/replay`,
+      { from_span: fromSpan, edits: opts.edits ?? {}, tools, live_tools: liveTools, reason: opts.reason ?? '' },
+      undefined,
+      token ? { [SIGNING_TOKEN_HEADER]: token } : undefined,
+    );
+  }
+
+  /**
+   * Check a live replay as far as it can be checked, and return what to sign: `{ gate, record_id, payload }`,
+   * computed by the server so you never reproduce the digest of the edits. Pass them to `sign`, then the token to
+   * `replayRun`. Needs `trace:replay:live-tools`.
+   */
+  prepareLiveReplay(traceId: string, fromSpan: string, liveTools: string[], opts: { edits?: ReplayEdits; reason?: string } = {}): Promise<PreparedLiveReplay> {
+    return this.post(`/api/v1/traces/${seg(traceId)}/replay/prepare`, {
+      from_span: fromSpan, edits: opts.edits ?? {}, live_tools: [...liveTools], reason: opts.reason ?? '',
+    });
+  }
+
+  /**
+   * A model call as it was captured, whole: the request (with the tools it offered) and the response. It is the
+   * most sensitive thing a trace holds, so reading it needs `trace:read:content` and is audited. A call recorded
+   * before complete capture existed answers 404 `not_captured`.
+   */
+  getSpanCapture(traceId: string, spanId: string): Promise<SpanCapture> {
+    return this.get(`/api/v1/traces/${seg(traceId)}/spans/${seg(spanId)}/capture`);
+  }
+
+  // ── Secrets (Pro, ADR-0035) ────────────────────────────────────────────────
+  // A secret is a name, a reference and metadata; its value lives in a provider (the built-in encrypted vault, or
+  // Vault and the like) and is write-only: no method here returns one. Approving or revoking a binding and a real
+  // migration are signed decisions: pass `password` (the SDK signs it) or a `signingToken`.
+
+  /** The built-in provider and the configured ones, with what each can do and whether it is healthy (`secret-provider:read`). */
+  listSecretProviders(): Promise<SecretProvider[]> {
+    return this.get('/api/v1/secret-providers');
+  }
+  /** Add a provider of a driver kind the platform enabled (`secret-provider:manage`). `config` can only narrow the platform's settings. */
+  createSecretProvider(req: { name: string; kind: string; config?: Record<string, unknown>; is_default?: boolean; platform?: boolean }): Promise<SecretProvider> {
+    return this.post('/api/v1/secret-providers', req);
+  }
+  /** Make a provider the default for new secrets (`dbvault` goes back to the built-in one). */
+  async setDefaultSecretProvider(name: string, opts: { platform?: boolean } = {}): Promise<void> {
+    await this.put(`/api/v1/secret-providers/${seg(name)}/default${queryString({ platform: opts.platform ? 'true' : undefined })}`, {});
+  }
+  /** Remove a provider no secret lives in (409 `in_use` otherwise). */
+  async deleteSecretProvider(name: string, opts: { platform?: boolean } = {}): Promise<void> {
+    await this.delete(`/api/v1/secret-providers/${seg(name)}${queryString({ platform: opts.platform ? 'true' : undefined })}`);
+  }
+
+  /** The kitchen's secrets: metadata, never values (`secret:read`). */
+  listSecrets(): Promise<Secret[]> {
+    return this.get('/api/v1/secrets');
+  }
+  getSecret(name: string): Promise<Secret> {
+    return this.get(`/api/v1/secrets/${seg(name)}`);
+  }
+  /**
+   * Create a secret (`secret:write`). With `value` it is written to the provider (which must be writable); with
+   * `ref` and no value it links a secret somebody else owns; with neither it adopts a credential made before
+   * secrets existed. The value is never returned.
+   */
+  createSecret(req: CreateSecretRequest): Promise<Secret> {
+    return this.post('/api/v1/secrets', req);
+  }
+  /** Change a secret's metadata; what you leave out stays as it is. */
+  updateSecret(name: string, patch: UpdateSecretRequest): Promise<Secret> {
+    return this.put(`/api/v1/secrets/${seg(name)}`, patch);
+  }
+  async deleteSecret(name: string): Promise<void> {
+    await this.delete(`/api/v1/secrets/${seg(name)}`);
+  }
+  /**
+   * Rotate to a new value. With `probe` the control plane checks the new value against an upstream first (a host the
+   * secret may go to); a value it rejects is not rotated in (422 `probe_rejected`). The previous version stays valid
+   * for the grace window.
+   */
+  rotateSecret(name: string, value: string, opts: { probe?: SecretProbe; grace_seconds?: number } = {}): Promise<RotateSecretResult> {
+    return this.put(`/api/v1/secrets/${seg(name)}/value`, { value, ...opts });
+  }
+  /** Pick up a rotation the secret's owner made (a linked secret). */
+  refreshSecret(name: string): Promise<{ changed: boolean; secret: Secret }> {
+    return this.post(`/api/v1/secrets/${seg(name)}/refresh`, {});
+  }
+  /** A secret's versions, without values. */
+  secretVersions(name: string): Promise<Array<{ Version: string; State: string; Length: number; CreatedBy: string; CreatedAt: string }>> {
+    return this.get(`/api/v1/secrets/${seg(name)}/versions`);
+  }
+  /** Bindings in the kitchen, or of one secret. */
+  listSecretBindings(secret?: string): Promise<SecretBinding[]> {
+    return this.get(`/api/v1/secret-bindings${queryString({ secret })}`);
+  }
+  /** Propose that `secret` be sent for `skill` to `server` (`secret:bind`). `skill: '-'` is a tool registered by hand. Nothing happens until a person approves. */
+  proposeSecretBinding(secret: string, req: { skill: string; server?: string; header_scheme?: string }): Promise<SecretBinding> {
+    return this.post(`/api/v1/secrets/${seg(secret)}/bindings`, req);
+  }
+  /**
+   * Approve (`approved`) or reject/revoke (`rejected`) a binding: a signed decision on the `secret_binding` gate, by
+   * someone other than the person who proposed it.
+   */
+  async decideSecretBinding(id: string, meaning: 'approved' | 'rejected', opts?: Signing): Promise<SecretBinding> {
+    const extra = await this.signingHeaders(opts, 'secret_binding', id, undefined, meaning);
+    return this.request('POST', `/api/v1/secret-bindings/${seg(id)}/decision`, { meaning }, undefined, extra);
+  }
+  /** Withdraw a binding that is still pending. */
+  async withdrawSecretBinding(id: string): Promise<void> {
+    await this.delete(`/api/v1/secret-bindings/${seg(id)}`);
+  }
+  /** What moving the kitchen's secrets from one provider to another would do. Nothing changes. */
+  planSecretMigration(from: string, to: string): Promise<SecretMigrationPlan> {
+    return this.post('/api/v1/secrets/migrate', { from, to, dry_run: true });
+  }
+  /**
+   * Move the kitchen's secrets from one provider to another (`secret:migrate`): copied, read back and compared, then
+   * repointed in one step; the source is untouched. A signed decision on the `secret_migrate` gate, record
+   * `<from>:<to>`, bound to the digest of the plan.
+   */
+  async migrateSecrets(from: string, to: string, opts?: Signing): Promise<SecretMigrationPlan & { moved: number }> {
+    const extra = await this.signingHeaders(opts, 'secret_migrate', `${from}:${to}`);
+    return this.request('POST', '/api/v1/secrets/migrate', { from, to }, undefined, extra);
+  }
+
+  // ── Governed datasets (Pro, ADR-0039) ──────────────────────────────────────
+  // A dataset is a named set of cases; a case is a snapshot with provenance and a keyed content hash; a version is
+  // an append-only manifest of case hashes. Retention is `expire` (with a TTL), `persist` (kept until purged,
+  // reviewed on a date) or `regulated` (kept for at least `min_retention_days`; a purge and any lowering of the
+  // minimum are signed).
+
+  /** The kitchen's datasets (`dataset:read`). */
+  listDatasets(): Promise<Dataset[]> {
+    return this.get('/api/v1/datasets');
+  }
+
+  /**
+   * Create a dataset (`dataset:write`). `name` is 1 to 120 characters. `retention_mode` is `expire`, `persist` or
+   * `regulated` (the server's default if left out); `ttl_days` is for `expire`, `review_by` (an RFC 3339 time) for
+   * `persist`, `min_retention_days` for `regulated` (default 90, never below 7). `purpose` is required for what
+   * keeps data beyond a TTL.
+   */
+  async createDataset(req: DatasetSettings & { name: string }): Promise<Dataset> {
+    checkRetentionMode(req.retention_mode);
+    return this.post('/api/v1/datasets', req);
+  }
+
+  getDataset(datasetId: string): Promise<Dataset> {
+    return this.get(`/api/v1/datasets/${seg(datasetId)}`);
+  }
+
+  /**
+   * Change a dataset's settings (`dataset:write`). The server takes the settings whole: what you leave out is
+   * cleared, so read `getDataset` and send back what should stay. Raising a regulated minimum is allowed; lowering
+   * it is `lowerDatasetMinimum` (signed); a regulated dataset cannot leave regulated mode; a change that makes a
+   * dataset expire sooner needs `dataset:purge`.
+   */
+  async updateDataset(datasetId: string, settings: DatasetSettings): Promise<Dataset> {
+    checkRetentionMode(settings.retention_mode);
+    return this.put(`/api/v1/datasets/${seg(datasetId)}`, settings);
+  }
+
+  /** The cases of a dataset's draft. `retired: true` shows the retired ones. */
+  listDatasetCases(datasetId: string, opts: { retired?: boolean; limit?: number; offset?: number } = {}): Promise<unknown> {
+    return this.get(`/api/v1/datasets/${seg(datasetId)}/cases${queryString({ retired: opts.retired ? 'true' : undefined, limit: opts.limit, offset: opts.offset })}`);
+  }
+
+  /**
+   * Add a case to the draft (`dataset:write`). `input` is required (any JSON); `metadata` must be an object.
+   * `provenance` may carry `source_trace_id`, `span_id`, `agent`, `agent_version`, `environment`, `provider`, `model`.
+   */
+  addDatasetCase(
+    datasetId: string,
+    c: { input: unknown; expected_output?: unknown; metadata?: Record<string, unknown>; provenance?: Record<string, unknown> },
+  ): Promise<DatasetCase> {
+    return this.post(`/api/v1/datasets/${seg(datasetId)}/cases`, {
+      input: c.input, expected_output: c.expected_output ?? null, metadata: c.metadata ?? null, ...(c.provenance ? { provenance: c.provenance } : {}),
+    });
+  }
+
+  /**
+   * Copy a span of a trace of this kitchen into a case, with the provenance the trace tells (agent, version,
+   * environment, model). The case is a copy: the trace is purged on its own schedule. The span's own output is the
+   * expected output unless `expected_output` is present (`null` included, which records none). To add a replay's
+   * result, pass the replay's trace and span here.
+   */
+  addDatasetCaseFromTrace(
+    datasetId: string,
+    c: { trace_id: string; span_id: string; expected_output?: unknown; metadata?: Record<string, unknown> },
+  ): Promise<DatasetCase> {
+    const body: Record<string, unknown> = { trace_id: c.trace_id, span_id: c.span_id };
+    if ('expected_output' in c) body.expected_output = c.expected_output ?? null;
+    if (c.metadata !== undefined) body.metadata = c.metadata;
+    return this.post(`/api/v1/datasets/${seg(datasetId)}/cases/from-trace`, body);
+  }
+
+  /** Take a case out of the draft. Published versions still list it. */
+  async retireDatasetCase(datasetId: string, caseId: string): Promise<void> {
+    await this.delete(`/api/v1/datasets/${seg(datasetId)}/cases/${seg(caseId)}`);
+  }
+
+  /**
+   * Erase a case's payload (`dataset:purge`): input, expected output and metadata go, the content hash and the
+   * version manifests stay. A legal hold refuses it.
+   */
+  eraseDatasetCase(datasetId: string, caseId: string, reason: string): Promise<{ case: DatasetCase; already_erased: boolean }> {
+    return this.post(`/api/v1/datasets/${seg(datasetId)}/cases/${seg(caseId)}/erase`, { reason });
+  }
+
+  listDatasetVersions(datasetId: string): Promise<Record<string, unknown>[]> {
+    return this.get(`/api/v1/datasets/${seg(datasetId)}/versions`);
+  }
+
+  /** One version with its manifest. */
+  getDatasetVersion(datasetId: string, version: number): Promise<Record<string, unknown>> {
+    return this.get(`/api/v1/datasets/${seg(datasetId)}/versions/${Math.trunc(version)}`);
+  }
+
+  /** Recompute a version: its manifest digest, the chain to the version before and the content hashes. */
+  verifyDatasetVersion(datasetId: string, version: number): Promise<Record<string, unknown>> {
+    return this.get(`/api/v1/datasets/${seg(datasetId)}/versions/${Math.trunc(version)}/verify`);
+  }
+
+  /**
+   * Publish the draft as the next version (`dataset:publish`). A regulated dataset's version is a signed decision
+   * (gate `dataset_publish`, record id the dataset's id): pass `password` or a `signingToken`; other datasets ignore
+   * it. Refused when the draft is empty (422 `empty_version`) or unchanged (409 `no_changes`).
+   */
+  async publishDataset(datasetId: string, opts?: Signing): Promise<{ version: Record<string, unknown>; signed: boolean }> {
+    const extra = await this.signingHeaders(opts, 'dataset_publish', datasetId);
+    return this.request('POST', `/api/v1/datasets/${seg(datasetId)}/versions`, {}, undefined, extra);
+  }
+
+  /**
+   * Export a version (the latest by default) as JSONL (`dataset:export`): a manifest line with its digests and the
+   * result of verifying it, then one line per case in manifest order. An erased case is exported as erased, with no
+   * payload. The export is audited. `text` is as received: write that to a file to keep it byte for byte.
+   */
+  async exportDataset(datasetId: string, version?: number): Promise<DatasetExport> {
+    const { text, headers } = await this.requestText('GET', `/api/v1/datasets/${seg(datasetId)}/export${queryString({ version })}`);
+    const lines = text.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l) as Record<string, unknown>);
+    const manifest = lines[0] ?? {};
+    return {
+      version: Number(manifest.version ?? 0),
+      manifest_digest: headers.get('x-manifest-digest') ?? String(manifest.manifest_digest ?? ''),
+      manifest,
+      cases: lines.slice(1),
+      text,
+    };
+  }
+
+  /**
+   * Lower a regulated dataset's minimum retention (`dataset:purge`). A signed decision on the `dataset_purge` gate
+   * (record id the dataset's id, payload `{ action: 'lower_minimum', new_minimum_days, reason }`): pass `password`
+   * or `signingToken`. The server refuses a minimum below its floor (7 days) or a missing reason before anyone is
+   * asked to sign.
+   */
+  async lowerDatasetMinimum(datasetId: string, minRetentionDays: number, reason: string, opts?: Signing): Promise<Dataset> {
+    const extra = await this.signingHeaders(opts, 'dataset_purge', datasetId, { action: 'lower_minimum', new_minimum_days: minRetentionDays, reason });
+    return this.request('POST', `/api/v1/datasets/${seg(datasetId)}/retention/lower-minimum`, { min_retention_days: minRetentionDays, reason }, undefined, extra);
+  }
+
+  /** Place a legal hold on a dataset. Placing only protects, so it takes no signature. While held, purge and erasure are refused. */
+  placeDatasetLegalHold(datasetId: string, reason: string): Promise<Dataset> {
+    return this.put(`/api/v1/datasets/${seg(datasetId)}/legal-hold`, { held: true, reason });
+  }
+
+  /**
+   * Lift a legal hold on a dataset. Only the Legal role may, with a stated reason, and the lift is a signed decision
+   * on the `legal_hold_release` gate: record id `dataset:<id>`, payload `{ reason }`. Pass `password` (the SDK signs
+   * it, `sign`) or a `signingToken` signed for exactly this.
+   */
+  async liftDatasetLegalHold(datasetId: string, reason: string, opts?: Signing): Promise<Dataset> {
+    const extra = await this.signingHeaders(opts, 'legal_hold_release', `dataset:${datasetId}`, { reason });
+    return this.request('PUT', `/api/v1/datasets/${seg(datasetId)}/legal-hold`, { held: false, reason }, undefined, extra);
+  }
+
+  /**
+   * Archive a dataset, then delete it, leaving a tombstone (`dataset:purge`). A regulated dataset's purge is a signed
+   * decision on the `dataset_purge` gate (record id the dataset's id, payload `{ action: 'purge', reason }`), refused
+   * inside its minimum before anyone is asked to sign; pass `password` or `signingToken` for it. Other datasets
+   * ignore them.
+   */
+  async purgeDataset(datasetId: string, reason: string, opts?: Signing): Promise<{ tombstone: Record<string, unknown>; signed: boolean }> {
+    const extra = await this.signingHeaders(opts, 'dataset_purge', datasetId, { action: 'purge', reason });
+    return this.request('POST', `/api/v1/datasets/${seg(datasetId)}/purge`, { reason }, undefined, extra);
+  }
+
+  /** The datasets the retention janitor removes within `days` (30 by default). */
+  listExpiringDatasets(days?: number): Promise<Dataset[]> {
+    return this.get(`/api/v1/datasets/expiring${queryString({ days })}`);
+  }
+
+  /** The `persist` datasets due for review within `days` (30 by default). */
+  listDatasetReviews(days?: number): Promise<Dataset[]> {
+    return this.get(`/api/v1/datasets/reviews${queryString({ days })}`);
+  }
+
+  /** What stays of purged datasets: who purged, when, why, and the final manifest digest. */
+  listDatasetTombstones(): Promise<Record<string, unknown>[]> {
+    return this.get('/api/v1/datasets/tombstones');
+  }
+
+  // ── Legal hold on the audit trail (Pro, ADR-0043) ──────────────────────────
+
+  /** Place a legal hold on the kitchen's audit trail (`audit:legalhold`). It only protects, so it takes no signature. */
+  placeAuditLegalHold(reason = ''): Promise<Record<string, unknown>> {
+    return this.post('/api/v1/audit/legal-hold', { hold: true, reason });
+  }
+
+  /**
+   * Lift the legal hold on the kitchen's audit trail. Only the Legal role may, with a stated reason, and the lift is
+   * a signed decision on the `legal_hold_release` gate: record id `audit:<kitchen>` (this client's kitchen), payload
+   * `{ reason }`. Pass `password` or a `signingToken`.
+   */
+  async liftAuditLegalHold(reason: string, opts?: Signing): Promise<Record<string, unknown>> {
+    const extra = await this.signingHeaders(opts, 'legal_hold_release', `audit:${this.kitchen}`, { reason });
+    return this.request('POST', '/api/v1/audit/legal-hold', { hold: false, reason }, undefined, extra);
+  }
+
+  // ── Identity-provider bindings, credential owners, my kitchens (Pro, ADR-0042) ──
+
+  /**
+   * Which group or app role of the identity provider is which role in this kitchen. A binding takes effect at a
+   * person's next login. Only the kitchen's Head Chef or a Restaurateur.
+   */
+  listKitchenBindings(kitchenId: string): Promise<KitchenBinding[]> {
+    return this.get(`/api/v1/kitchens/${seg(kitchenId)}/bindings`);
+  }
+
+  /**
+   * Bind an identity-provider group (its object id) or app role value to a kitchen `role` (one of `KITCHEN_ROLES`;
+   * `restaurateur` is platform-wide and `admin` is retired). Binding a group as `head_chef` is a Restaurateur's decision.
+   */
+  async createKitchenBinding(kitchenId: string, claimValue: string, role: KitchenRole, label = ''): Promise<KitchenBinding> {
+    checkRole(role, KITCHEN_ROLES, 'a kitchen binding');
+    if (!claimValue.trim()) throw new Error('claimValue is the group object id or app role value the identity provider puts in the token');
+    return this.post(`/api/v1/kitchens/${seg(kitchenId)}/bindings`, { claim_value: claimValue, role, label });
+  }
+
+  async deleteKitchenBinding(kitchenId: string, bindingId: string): Promise<void> {
+    await this.delete(`/api/v1/kitchens/${seg(kitchenId)}/bindings/${seg(bindingId)}`);
+  }
+
+  /**
+   * Give a service account to another person: a member of the kitchen at a rank that covers the account's role.
+   * Handing it to someone else is a Head Chef's act. It is how a credential whose owner left works again.
+   */
+  setServiceAccountOwner(saId: string, ownerEmail: string): Promise<ServiceAccount> {
+    return this.post(`/api/v1/service-accounts/${seg(saId)}/owner`, { owner_email: ownerEmail });
+  }
+
+  /** Give a scoped API key to another person (same rules as `setServiceAccountOwner`). */
+  setScopedKeyOwner(keyId: string, ownerEmail: string): Promise<ScopedAPIKey> {
+    return this.post(`/api/v1/keys/${seg(keyId)}/owner`, { owner_email: ownerEmail });
+  }
+
+  /** The kitchens you can enter and your role in each. */
+  myKitchens(): Promise<{ enforced: boolean; kitchens: { id: string; name: string; description?: string; role: UserRole }[] }> {
+    return this.get('/api/v1/me/kitchens');
+  }
+
+  // ── Agent versions ─────────────────────────────────────────────────────────
+  // An agent's version moves only on a bake whose configuration differs from the last bake's: the first bake keeps
+  // the registered version (0.1.0), a bake that changes nothing keeps its version, and a changed one takes the next
+  // minor version and keeps the old one. Editing a registered agent (`registerAgent`, `PUT`) does not bump it.
+  // Naming a `version` on `bake` sets that version as given.
+
+  /** The versions an agent has been baked at, each as the agent was configured then. */
+  listAgentVersions(name: string): Promise<Record<string, unknown>[]> {
+    return this.get(`/api/v1/agents/${seg(name)}/versions`);
+  }
+
+  /** One baked version of an agent (`0.1.0` is the first bake). */
+  getAgentVersion(name: string, version: string): Promise<Record<string, unknown>> {
+    return this.get(`/api/v1/agents/${seg(name)}/versions/${seg(version)}`);
+  }
+
   // ── Audit events ───────────────────────────────────────────────────────────
 
   async listAuditEvents(opts: { limit?: number; action?: string; agent?: string; environment?: string } = {}): Promise<AuditEvent[]> {
@@ -998,6 +1685,16 @@ export class ProClient {
     return connectRealtime({ url: this.baseUrl, apiKey: this.apiKey, kitchen: this.kitchen, agent, ...options });
   }
 
+  /** Long-running tasks: start, watch, resume and cancel (`pro.tasks.start(agent, input)`). */
+  get tasks(): Tasks {
+    return new Tasks({ url: this.baseUrl, apiKey: this.apiKey, kitchen: this.kitchen });
+  }
+
+  /** Upload a file once and name it in messages by `blob_ref` (`pro.blobs.upload(bytes)`). */
+  get blobs(): Blobs {
+    return new Blobs({ url: this.baseUrl, apiKey: this.apiKey, kitchen: this.kitchen });
+  }
+
   private headers(kitchenOverride?: string): Record<string, string> {
     const kitchen = kitchenOverride ?? this.kitchen;
     const h: Record<string, string> = {
@@ -1011,7 +1708,7 @@ export class ProClient {
     return h;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, kitchenOverride?: string, extraHeaders?: Record<string, string>): Promise<T> {
+  private async send(method: string, path: string, body: unknown, kitchenOverride?: string, extraHeaders?: Record<string, string>): Promise<Response> {
     const url = `${this.baseUrl}${path}`;
     const res = await fetch(url, {
       method,
@@ -1031,9 +1728,19 @@ export class ProClient {
       }
       throw new AgentOvenAPIError(res.status, detail);
     }
+    return res;
+  }
 
+  private async request<T>(method: string, path: string, body?: unknown, kitchenOverride?: string, extraHeaders?: Record<string, string>): Promise<T> {
+    const res = await this.send(method, path, body, kitchenOverride, extraHeaders);
     const text = await res.text();
     return text ? (JSON.parse(text) as T) : ({} as T);
+  }
+
+  /** A response that is not one JSON document (an export): its text and its headers. */
+  private async requestText(method: string, path: string): Promise<{ text: string; headers: Headers }> {
+    const res = await this.send(method, path, undefined);
+    return { text: await res.text(), headers: res.headers };
   }
 
   private get<T>(path: string, kitchenOverride?: string): Promise<T> {
@@ -1125,4 +1832,208 @@ export interface SignatureRecord {
   signed_at: string;
   outcome?: string;
   outcome_detail?: string;
+}
+
+/** How a decision is signed: `password` of your local account (the SDK signs it), or a `signingToken` you already hold. */
+export interface Signing {
+  password?: string;
+  signingToken?: string;
+}
+
+export interface SigningChallenge {
+  subject: { gate: string; record_id: string; kitchen: string; digest: string; title: string; display: Record<string, unknown>; meanings: string[]; scope?: string; requester?: string };
+  meaning: string;
+  /** How the person proves who they are: `password` (a local user) or `oidc` (their identity provider). */
+  reauth: 'password' | 'oidc';
+  token_valid_for_seconds: number;
+  printed_name: string;
+}
+
+export interface SigningTokenReply {
+  signing_token: string;
+  expires_at: string;
+  digest: string;
+  meaning: string;
+}
+
+export type ApproverPolicy = Record<string, { roles: string[]; users: string[] }>;
+
+export type ReplayToolMode = 'frozen' | 'blocked' | 'live';
+
+/** The changes a variant makes to the captured request; anything not named is as it was. The server refuses an edit it does not know. */
+export interface ReplayEdits {
+  model?: string; provider?: string; temperature?: number; max_tokens?: number; top_p?: number; stop?: string[];
+  thinking_enabled?: boolean; thinking_budget?: number; tool_choice?: 'auto' | 'none' | 'required' | Record<string, unknown>;
+  response_format?: Record<string, unknown>; messages?: { index: number; content: string }[];
+}
+
+export interface ReplayVariant {
+  label?: string;
+  edits: ReplayEdits;
+}
+
+export interface ReplayCallResult {
+  notice?: string;
+  variants: { index: number; label?: string; status: 'completed' | 'blocked' | 'refused' | 'failed'; reason?: string; trace_id?: string; content?: string; [k: string]: unknown }[];
+  [k: string]: unknown;
+}
+
+export interface ReplayRunResult {
+  notice?: string;
+  status?: string;
+  steps?: Record<string, unknown>[];
+  [k: string]: unknown;
+}
+
+export interface PreparedLiveReplay {
+  gate: string;
+  record_id: string;
+  payload: Record<string, unknown>;
+}
+
+export interface SpanCapture {
+  trace_id: string; span_id: string; agent: string; turn: number;
+  request: Record<string, unknown> | null; labels?: Record<string, string>; response?: Record<string, unknown> | null; error?: string;
+}
+
+export interface DatasetSettings {
+  description?: string;
+  retention_mode?: 'expire' | 'persist' | 'regulated';
+  ttl_days?: number;
+  review_by?: string;
+  min_retention_days?: number;
+  purpose?: string;
+}
+
+export interface Dataset extends DatasetSettings {
+  id: string;
+  name: string;
+  legal_hold?: boolean;
+  latest_version?: number;
+  retention?: Record<string, unknown>;
+  [k: string]: unknown;
+}
+
+export interface DatasetCase {
+  id: string;
+  content_hash?: string;
+  erased?: boolean;
+  [k: string]: unknown;
+}
+
+/** A dataset version exported as JSONL; `text` is as received. */
+export interface DatasetExport {
+  version: number;
+  manifest_digest: string;
+  manifest: Record<string, unknown>;
+  cases: Record<string, unknown>[];
+  text: string;
+}
+
+export interface KitchenBinding {
+  id: string;
+  kitchen_id: string;
+  kitchen_name?: string;
+  claim_value: string;
+  role: KitchenRole;
+  label: string;
+  created_by?: string;
+  created_at: string;
+}
+
+
+// ── Secrets (ADR-0035) ──────────────────────────────────────────────────────
+
+export interface SecretProvider {
+  name: string;
+  kind: string;
+  scope: 'builtin' | 'kitchen' | 'platform';
+  is_default: boolean;
+  writable: boolean;
+  healthy: boolean;
+  error?: string;
+  features: string[];
+}
+
+export interface Secret {
+  name: string;
+  provider: string;
+  ref?: string;
+  current_version: string;
+  label?: string;
+  owner?: string;
+  linked: boolean;
+  /** False for a credential made before secrets existed: it has no metadata yet. */
+  managed: boolean;
+  allowed_hosts: string[];
+  require_binding: boolean;
+  expires_at?: string;
+  expired?: boolean;
+  rotated_at?: string;
+  last_used_at?: string;
+  previous_version?: string;
+  previous_valid_until?: string;
+  grace_seconds: number;
+}
+
+export interface CreateSecretRequest {
+  name: string;
+  provider?: string;
+  /** Written to the provider. Never returned, logged or audited. */
+  value?: string;
+  /** Where the value lives in the provider; with no value it links a secret somebody else owns. */
+  ref?: string;
+  label?: string;
+  owner?: string;
+  allowed_hosts?: string[];
+  expires_at?: string;
+  require_binding?: boolean;
+  grace_seconds?: number;
+}
+
+export interface UpdateSecretRequest {
+  label?: string;
+  owner?: string;
+  allowed_hosts?: string[];
+  expires_at?: string;
+  clear_expiry?: boolean;
+  require_binding?: boolean;
+  grace_seconds?: number;
+}
+
+export interface SecretProbe {
+  url: string;
+  method?: 'GET' | 'HEAD' | 'POST';
+  /** `bearer` (default) or `api-key:<Header-Name>`. */
+  header_scheme?: string;
+  expect_status?: number;
+}
+
+export interface RotateSecretResult {
+  secret: Secret;
+  version: string;
+  previous_version?: string;
+  previous_valid_until?: string;
+  probed: boolean;
+}
+
+export interface SecretBinding {
+  id: string;
+  secret: string;
+  skill: string;
+  server: string;
+  header_scheme: string;
+  status: 'pending' | 'approved' | 'revoked';
+  requested_by: string;
+  decided_by?: string;
+  signature_id?: string;
+}
+
+export interface SecretMigrationPlan {
+  kitchen: string;
+  from: string;
+  to: string;
+  secrets: Array<{ name: string; ref: string; version: string; linked: boolean }>;
+  conflicts: string[];
+  digest: string;
 }

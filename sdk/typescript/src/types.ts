@@ -30,7 +30,13 @@ export type IngredientKind = 'model' | 'tool' | 'prompt' | 'data';
 export type GuardrailKind = 'keyword' | 'regex' | 'prompt-injection' | 'llamaguard' | 'custom';
 export type GuardrailStage = 'input' | 'output' | 'both';
 export type EnvironmentKind = 'dev' | 'qa' | 'staging' | 'prod';
-export type UserRole = 'admin' | 'chef' | 'baker' | 'auditor' | 'finance' | 'viewer';
+/**
+ * The roles a person or credential can hold inside one kitchen. The retired `admin` is gone: it was a Head Chef
+ * inside a kitchen and a Restaurateur across the installation.
+ */
+export type KitchenRole = 'head_chef' | 'chef' | 'baker' | 'taster' | 'auditor' | 'legal' | 'finance' | 'viewer';
+/** The role of a person in the user directory: the kitchen roles and the platform-wide `restaurateur`. */
+export type UserRole = 'restaurateur' | KitchenRole;
 
 export interface Ingredient {
   name: string;
@@ -127,7 +133,7 @@ export interface Kitchen {
 
 export interface KitchenMember {
   user_id: string;
-  role: UserRole;
+  role: KitchenRole;
   joined_at: string;
 }
 
@@ -223,8 +229,10 @@ export interface Session {
 export interface ServiceAccount {
   id: string;
   name: string;
-  role: UserRole;
+  role: KitchenRole;
   kitchen: string;
+  /** The person the account acts on behalf of (Pro): when they leave the kitchen it stops until it has a new owner. */
+  owner_email?: string;
   created_at: string;
 }
 
@@ -504,6 +512,8 @@ export interface ScopedAPIKey {
   max_calls: number;
   call_count: number;
   role?: string;
+  /** The person the key belongs to (Pro). */
+  owner_email?: string;
   expires_at?: string;
   revoked: boolean;
   created_by: string;
@@ -562,6 +572,43 @@ export interface ServerInfo {
     plan: string;
     license_id?: string;
   };
+}
+
+// ── Tools (MCP gateway) ───────────────────────────────────────────────────────
+
+/** A tool as the control plane reports it. `auth_config` is never returned. */
+export interface Tool {
+  id: string;
+  name: string;
+  description: string;
+  kitchen: string;
+  endpoint: string;
+  /** `http`, `sse` or `stdio` when registering through the tools route. */
+  transport: string;
+  /** JSON Schema of the tool's arguments. */
+  schema?: Record<string, unknown>;
+  capabilities: string[];
+  enabled: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface RegisterToolRequest {
+  /** The name agents list as a `tool` ingredient. */
+  name: string;
+  /** Where the gateway calls the tool. */
+  endpoint: string;
+  description?: string;
+  /** `http` (default), `sse` or `stdio`; the server answers 400 to anything else. */
+  transport?: string;
+  /** JSON Schema of the tool's arguments. */
+  schema?: Record<string, unknown>;
+  /** How the gateway authenticates to the tool. Stored by the server, never returned. */
+  auth_config?: Record<string, unknown>;
+  /** Default `["tool"]`. */
+  capabilities?: string[];
+  /** Default `true`. `false` registers the tool switched off. */
+  enabled?: boolean;
 }
 
 // ── Providers & modalities ────────────────────────────────────────────────────
@@ -653,6 +700,8 @@ export interface InvokeOptions {
   voiceOutput?: boolean;
   /** TTS voice, default `alloy`. Only with `voiceOutput`. */
   voice?: string;
+  /** Images, PDFs or video sent with the message (the server answers 422 when the model cannot take them). */
+  attachments?: ContentPart[];
   variables?: Record<string, string>;
   sessionId?: string;
   thinkingEnabled?: boolean;

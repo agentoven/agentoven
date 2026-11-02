@@ -220,3 +220,68 @@ The page opens the socket with the WebSocket subprotocols
 async with AgentOvenClient(url="http://localhost:8080").realtime("support-agent", token=minted.token) as call:
     ...
 ```
+
+## Roles
+
+`restaurateur` (platform-wide, a role of a person in the user directory) and, inside a kitchen, `head_chef`, `chef`,
+`baker`, `taster`, `auditor`, `legal`, `finance` and `viewer` (`KITCHEN_ROLES`, `PERSON_ROLES`). The retired `admin` is
+refused wherever a role is given (`create_user`, `create_service_account`, `create_kitchen_binding`,
+`set_approver_policy`): it was a Head Chef inside a kitchen and a Restaurateur across the installation.
+
+## Agent versions
+
+An agent's version moves only on a bake whose configuration differs from the last bake's. The first bake keeps the
+registered version (`0.1.0`), a bake that changes nothing keeps its version, a changed one takes the next minor
+version and keeps the old one, and editing a registered agent does not bump it.
+
+```python
+client.list_agent_versions("support-agent")          # [{"version": "0.1.0", ...}, {"version": "0.2.0", ...}]
+client.get_agent_version("support-agent", "0.1.0")   # the agent as it was when that version was baked
+```
+
+## Signed decisions (Pro)
+
+A decision at a gate is signed: you prove who you are again and get a single-use token bound to exactly that
+decision, sent in the `X-Signing-Token` header (`SIGNING_TOKEN_HEADER`). `sign` does both steps with the password of
+your local account; an account that signs in through an identity provider gets `OidcSigningRequired` (sign in the
+dashboard instead). Every method that takes a decision accepts `password=` (it signs for you) or `signing_token=`.
+
+```python
+token = client.sign("legal_hold_release", "dataset:ds-1", "approved", {"reason": "case closed"}, password)
+client.lift_dataset_legal_hold("ds-1", "case closed", signing_token=token)    # or: password=password
+
+client.run_recipe("refunds", {"order": 7}, environment="prod", password=password)   # gate approval_skip
+client.signed_request("POST", "/api/v1/promotions", body, signing_token=token)      # any other gate
+```
+
+Two gates came with the roles: `legal_hold_release` (a dataset's or the audit trail's legal hold, record id
+`dataset:<id>` or `audit:<kitchen>`, payload `{"reason"}`) and `approval_skip` (running a recipe on an environment that
+requires approval, record id `<recipe>@<environment>`, payload `{"input"}`). Also: `list_signatures`,
+`get_signature`, `verify_signatures`, `get_approver_policy`, `set_approver_policy`.
+
+## Replay (Pro)
+
+```python
+out = client.replay_call(trace_id, span_id, [{"label": "cooler", "edits": {"temperature": 0.1}}], reason="why")
+run = client.replay_run(trace_id, from_span, {"model": "claude-haiku"})                 # tools frozen
+run = client.replay_run(trace_id, from_span, tools="live", live_tools=["lookup"], password=password)   # signed
+capture = client.get_span_capture(trace_id, span_id)
+```
+
+A replay is an investigation, never evidence: models are not deterministic, and no simulated tool result is ever
+made up. `prepare_live_replay` returns what a live replay signs, computed by the server.
+
+## Governed datasets (Pro)
+
+`list_datasets`, `create_dataset`, `get_dataset`, `update_dataset`, `add_dataset_case`, `add_dataset_case_from_trace`,
+`list_dataset_cases`, `retire_dataset_case`, `erase_dataset_case`, `publish_dataset`, `list_dataset_versions`,
+`get_dataset_version`, `verify_dataset_version`, `export_dataset`, `lower_dataset_minimum`,
+`place_dataset_legal_hold`, `lift_dataset_legal_hold`, `purge_dataset`, `list_expiring_datasets`,
+`list_dataset_reviews`, `list_dataset_tombstones`, and `place_audit_legal_hold` / `lift_audit_legal_hold`. On a
+regulated dataset publishing, purging and lowering the minimum are signed (`password=` or `signing_token=`).
+
+## Identity-provider bindings and credential owners (Pro)
+
+`list_kitchen_bindings`, `create_kitchen_binding(kitchen_id, claim_value, role)`, `delete_kitchen_binding`,
+`set_service_account_owner`, `set_scoped_key_owner`, `my_kitchens`. A service account or scoped key belongs to a person
+(`owner_email=` when it is created); when the owner leaves the kitchen it stops until a Head Chef gives it to someone.

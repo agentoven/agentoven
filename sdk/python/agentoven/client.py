@@ -52,6 +52,7 @@ from agentoven._native import (
 )
 
 from agentoven.flow import Flow
+from agentoven.tasks import TaskMethods
 from agentoven.media import Attachment, AudioInput, InvokeResult
 from agentoven.modalities import (
     AgentCard,
@@ -69,7 +70,13 @@ __all__ = [
     "AgentOvenClient",
     "AgentOvenAPIError",
     "AudioModalityError",
+    "OidcSigningRequired",
+    "DatasetExport",
     "RealtimeToken",
+    "KITCHEN_ROLES",
+    "PERSON_ROLES",
+    "SIGNING_GATES",
+    "SIGNING_TOKEN_HEADER",
     # Re-export data types so callers only need to import from agentoven.client
     "Agent",
     "AgentStatus",
@@ -80,8 +87,32 @@ __all__ = [
     "Step",
 ]
 
+#: The header that carries a signing token on a decision call (the control plane's ``signatures.Header``).
+SIGNING_TOKEN_HEADER = "X-Signing-Token"
 
-class AgentOvenClient:
+#: The roles a person or credential can hold inside one kitchen. ``restaurateur`` is platform-wide, so it is
+#: a role of a person in the user directory, never of a kitchen member, binding or credential. The retired
+#: ``admin`` is no role: it was a Head Chef inside a kitchen and a Restaurateur across the installation.
+KITCHEN_ROLES = ("head_chef", "chef", "baker", "taster", "auditor", "legal", "finance", "viewer")
+#: The roles of a person in the user directory: the kitchen roles and the platform-wide ``restaurateur``.
+PERSON_ROLES = ("restaurateur",) + KITCHEN_ROLES
+
+#: The gates a decision can be signed at (Pro, ADR-0041). ``legal_hold_release`` lifts a legal hold (a dataset's
+#: or the audit trail's) and is signed by the legal team; ``approval_skip`` runs a recipe on an environment that
+#: requires approval, without that approval.
+SIGNING_GATES = (
+    "tool_approval", "budget_extension", "resume_guidance", "recipe_gate", "wait_release",
+    "environment_promotion", "skill_approval", "bot_action", "live_tool_replay",
+    "dataset_publish", "dataset_purge", "legal_hold_release", "approval_skip",
+    "secret_binding", "secret_migrate",
+)
+
+_RETENTION_MODES = ("expire", "persist", "regulated")
+_REPLAY_TOOLS = ("frozen", "blocked", "live")
+_UNSET: Any = object()
+
+
+class AgentOvenClient(TaskMethods):
     """Full AgentOven client — OSS + Pro operations.
 
     Parameters
@@ -108,10 +139,20 @@ class AgentOvenClient:
     # ── Delegation to native client (OSS operations) ──────────────────────
 
     def register(self, agent: Agent) -> str:
-        """Register an agent definition with the control plane."""
+        """Register an agent with the control plane: create it, or update it if it exists.
+
+        The control plane creates with ``POST /api/v1/agents`` and updates with
+        ``PUT /api/v1/agents/{name}``, which answers 404 for a name it does not
+        know. This asks first and sends the one that fits, so calling it twice
+        with an edited agent is safe: the second call updates. An update changes
+        the fields you set and leaves the others as they are; it does not change
+        the agent's version or bake it: the version moves only on a bake whose
+        configuration differs from the last one (the first bake is ``0.1.0``).
+        """
         return self._native.register(agent)
 
     def register_agent(self, agent: Agent) -> str:
+        """Same as :meth:`register`: create the agent, or update it if it exists."""
         return self._native.register_agent(agent)
 
     def get_agent(self, name: str) -> Agent:
@@ -149,7 +190,14 @@ class AgentOvenClient:
         environment: Optional[str] = None,
         input: Optional[str] = None,
     ) -> str:
-        """Start (bake) an agent."""
+        """Start (bake) an agent.
+
+        An agent's version moves only on a bake whose configuration differs from the last bake's. The first
+        bake keeps the version the agent was registered with (``0.1.0`` by default); a bake that changes
+        nothing keeps its version; a bake with a changed configuration takes the next minor version
+        (``0.2.0``) and the old version stays readable (:meth:`list_agent_versions`, :meth:`get_agent_version`).
+        Editing the agent with :meth:`register` does not bump it. Pass ``version`` to set one yourself.
+        """
         return self._native.bake(target, version=version, environment=environment, input=input)
 
     def cool(self, target: Any) -> str:
@@ -245,13 +293,30 @@ class AgentOvenClient:
         input: Optional[Mapping[str, Any]] = None,
         environment: Optional[str] = None,
         kitchen: Optional[str] = None,
+        *,
+        password: Optional[str] = None,
+        signing_token: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Start a run. Returns at once with ``run_id`` and ``status``; see :meth:`wait_for_recipe_run`."""
+        """Start a run. Returns at once with ``run_id`` and ``status``; see :meth:`wait_for_recipe_run`.
+
+        An environment can require approval before a recipe runs on it. A Head Chef or Restaurateur may skip that
+        approval (never in a GxP kitchen), and on Pro the skip is a signed decision on the ``approval_skip`` gate:
+        record id ``<recipe>@<environment>``, payload ``{"input": <the run's input>}``, so a token for one run
+        cannot start another. Pass ``password=`` (the SDK signs it, :meth:`sign`) or a ``signing_token=`` you
+        signed for exactly this recipe, environment and input; it needs ``environment``. Leave both out when the
+        environment needs no approval. A scheduled or automated run cannot skip an approval.
+        """
         client = self if kitchen is None else self.with_kitchen(kitchen)
-        body: dict[str, Any] = {"input": dict(input or {})}
+        run_input = dict(input or {})
+        body: dict[str, Any] = {"input": run_input}
         if environment:
             body["environment"] = environment
-        return client._post(f"/api/v1/recipes/{_seg(name)}/bake", body)
+        headers = None
+        if password is not None or signing_token:
+            if not environment:
+                raise ValueError("skipping an approval is signed for one environment: pass environment=")
+            headers = client._signing_headers(password, signing_token, "approval_skip", f"{name}@{environment}", {"input": run_input})
+        return client._request("POST", f"/api/v1/recipes/{_seg(name)}/bake", body, headers)
 
     def list_recipe_runs(self, name: str, kitchen: Optional[str] = None) -> list[dict[str, Any]]:
         """The runs of a recipe, as dicts."""
@@ -342,20 +407,69 @@ class AgentOvenClient:
             return NotificationConnection(url, {}, [WS_SUBPROTOCOL, TICKET_SUBPROTOCOL_PREFIX + token])
         return NotificationConnection(url, self._headers())
 
-    def sign_decision(self, gate: str, record_id: str, meaning: str, password: str, payload: Optional[dict[str, Any]] = None) -> str:
-        """Prove who you are again and get the single-use signing token for one decision (Pro, ADR-0041).
+    # ── Signed decisions (Pro, ADR-0041) ───────────────────────────────────
+    # A decision at a gate is signed: you prove who you are again and the control plane gives you a single-use
+    # token bound to exactly that decision, which you send in the ``X-Signing-Token`` header (the constant
+    # ``SIGNING_TOKEN_HEADER``). :meth:`sign` does both steps. Every method below that takes a decision accepts
+    # ``password=`` (the SDK signs it for you) or ``signing_token=`` (a token you already hold), never both.
 
-        ``gate`` is the kind of decision (``recipe_gate``, ``tool_approval``, ``budget_extension``, ``wait_release``,
-        ``skill_approval``, ``environment_promotion``, ``bot_action``), ``record_id`` what is decided, ``meaning`` is
-        ``"approved"`` or ``"rejected"``, and ``password`` is the password of the local account you signed in with.
-        The token is good for a minute and for exactly this decision; pass it as ``signing_token`` or send it in the
-        ``X-Signing-Token`` header. An API key or service account cannot sign: it gets ``signature_required``.
-        An account that signs in through an identity provider signs in the dashboard, not here.
+    def sign(self, gate: str, record_id: str, meaning: str, payload: Optional[Mapping[str, Any]], password: str) -> str:
+        """Sign one decision and return its single-use signing token: asks for the challenge, proves who you are
+        with ``password``, and returns the token (good for a minute and for exactly this decision).
+
+        ``gate`` is the kind of decision (see ``SIGNING_GATES``), ``record_id`` what is decided, ``meaning`` is
+        ``"approved"`` or ``"rejected"``, and ``payload`` is the content of the decision that is signed with it
+        (a reason, an input). Send the token in the ``X-Signing-Token`` header, or pass it as ``signing_token=``
+        to the method that takes the decision. Signing the same decision twice gives two tokens; each is used once.
+
+        Two gates are new with the roles: ``legal_hold_release`` (``record_id`` ``dataset:<id>`` or
+        ``audit:<kitchen>``, payload ``{"reason": ...}``) lifts a legal hold, and :meth:`lift_dataset_legal_hold` and
+        :meth:`lift_audit_legal_hold` sign it for you; ``approval_skip`` (``record_id`` ``<recipe>@<environment>``,
+        payload ``{"input": {...}}``) runs a recipe on an environment that requires approval, and
+        :meth:`run_recipe` signs it for you when you pass ``password=``.
+
+        An API key or service account cannot sign: it gets ``signature_required``. An account that signs in
+        through an identity provider (OIDC) signs in the browser, not here: this raises
+        :class:`OidcSigningRequired` before sending the password anywhere.
         """
-        request = {"gate": gate, "record_id": record_id, "meaning": meaning, "payload": payload or {}}
-        challenge = self._post("/api/v1/signatures/challenge", request)
-        reply = self._post("/api/v1/signatures/token", {**request, "digest": challenge["subject"]["digest"], "password": password})
+        challenge = self.signature_challenge(gate, record_id, meaning, payload)
+        if challenge.get("reauth") == "oidc":
+            raise OidcSigningRequired(
+                400,
+                {"error": "use_oidc", "message": "this account signs through the identity provider: sign in the dashboard, "
+                 "or sign in with a local account (password) to sign from the SDK"},
+            )
+        try:
+            reply = self.request_signing_token(gate, record_id, meaning, challenge["subject"]["digest"], password, payload)
+        except AgentOvenAPIError as exc:
+            if isinstance(exc.detail, dict) and exc.detail.get("error") == "use_oidc":
+                raise OidcSigningRequired(exc.status_code, exc.detail) from exc
+            raise
         return reply["signing_token"]
+
+    def sign_decision(self, gate: str, record_id: str, meaning: str, password: str, payload: Optional[dict[str, Any]] = None) -> str:
+        """Same as :meth:`sign` with the password before the payload (the older argument order)."""
+        return self.sign(gate, record_id, meaning, payload, password)
+
+    def signature_challenge(self, gate: str, record_id: str, meaning: str, payload: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
+        """The first half of signing: what would be signed (``subject``, with its ``digest``, ``title`` and
+        ``display``), how you would prove who you are (``reauth``: ``"password"`` or ``"oidc"``) and how long the
+        token lives. Refuses (403) if you may not sign this decision."""
+        return self._post("/api/v1/signatures/challenge", _signing_request(gate, record_id, meaning, payload))
+
+    def request_signing_token(
+        self, gate: str, record_id: str, meaning: str, digest: str, password: str, payload: Optional[Mapping[str, Any]] = None
+    ) -> dict[str, Any]:
+        """The second half of signing: ``password`` re-authenticates a local account and, if the record is still what
+        ``digest`` (from :meth:`signature_challenge`) was computed over, returns ``{"signing_token", "expires_at",
+        "digest", "meaning"}``. Prefer :meth:`sign`."""
+        body = {**_signing_request(gate, record_id, meaning, payload), "digest": digest, "password": password}
+        return self._post("/api/v1/signatures/token", body)
+
+    def signed_request(self, method: str, path: str, body: Optional[Mapping[str, Any]] = None, *, signing_token: str) -> Any:
+        """Send any request with a signing token in the ``X-Signing-Token`` header, for a decision this SDK has no
+        method for. ``signing_token`` comes from :meth:`sign`."""
+        return self._request(method, path, dict(body) if body is not None else None, {SIGNING_TOKEN_HEADER: signing_token})
 
     def list_signatures(self, gate: str = "", record_id: str = "") -> list[dict[str, Any]]:
         """Signed decisions of the kitchen: who signed (name and role), when, the meaning, and what became of the decision."""
@@ -363,44 +477,90 @@ class AgentOvenClient:
 
         return self._get(f"/api/v1/signatures?gate={quote(gate)}&record_id={quote(record_id)}")
 
+    def get_signature(self, signature_id: str) -> dict[str, Any]:
+        """One signed decision."""
+        return self._get(f"/api/v1/signatures/{_seg(signature_id)}")
+
     def verify_signatures(self) -> dict[str, Any]:
         """Check the kitchen's signature chain: ``ok`` is false, with where it breaks, if one was changed or removed."""
         return self._get("/api/v1/signatures/verify")
 
+    def get_approver_policy(self) -> dict[str, Any]:
+        """Who may approve what in this kitchen: ``{"policy": {"<gate>" or "<gate>:<scope>": {"roles": [...],
+        "users": [...]}}, "gates": [...]}``. ``gates`` lists the gates a rule can name."""
+        return self._get("/api/v1/approver-policy")
+
+    def set_approver_policy(self, policy: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+        """Replace the kitchen's approver rules (a Head Chef's; the whole policy is replaced, so send every rule).
+
+        ``policy`` maps ``"<gate>"`` or ``"<gate>:<scope>"`` (an environment slug or an agent name, e.g.
+        ``"environment_promotion:prod"``) to ``{"roles": [...], "users": [...]}``. Roles are checked here against
+        ``PERSON_ROLES``; the retired ``admin`` is refused (name ``head_chef`` or ``restaurateur``).
+        """
+        rules: dict[str, Any] = {}
+        for key, rule in policy.items():
+            roles = list(rule.get("roles") or [])
+            for role in roles:
+                _check_role(role, PERSON_ROLES, f"approver policy {key!r}")
+            rules[key] = {"roles": roles, "users": list(rule.get("users") or [])}
+        return self._put("/api/v1/approver-policy", {"policy": rules})
+
+    def _signing_headers(
+        self,
+        password: Optional[str],
+        signing_token: Optional[str],
+        gate: str,
+        record_id: str,
+        payload: Optional[Mapping[str, Any]] = None,
+        meaning: str = "approved",
+    ) -> Optional[dict[str, str]]:
+        """The header for one decision: the token you passed, or one signed now with ``password``, or none."""
+        if password is not None and signing_token:
+            raise ValueError("pass password= or signing_token=, not both")
+        if password is not None:
+            signing_token = self.sign(gate, record_id, meaning, payload, password)
+        return {SIGNING_TOKEN_HEADER: signing_token} if signing_token else None
+
     def release_wait(
-        self, name: str, run_id: str, step: str, kitchen: Optional[str] = None, *, password: Optional[str] = None
+        self, name: str, run_id: str, step: str, kitchen: Optional[str] = None, *, password: Optional[str] = None,
+        signing_token: Optional[str] = None,
     ) -> dict[str, Any]:
         """End a ``wait`` step early, so the run carries on now. Raises ``AgentOvenAPIError`` (404) if it is not waiting.
 
-        On Pro the decision is signed: pass the ``password`` of your local account (see :meth:`sign_decision`).
+        On Pro the decision is signed: pass the ``password`` of your local account (see :meth:`sign`) or a
+        ``signing_token`` you already hold.
         """
         client = self if kitchen is None else self.with_kitchen(kitchen)
-        headers = None
-        if password is not None:
-            token = client.sign_decision("wait_release", f"{run_id}:{step}", "approved", password)
-            headers = {"X-Signing-Token": token}
+        headers = client._signing_headers(password, signing_token, "wait_release", f"{run_id}:{step}")
         return client._request("POST", f"/api/v1/recipes/{_seg(name)}/runs/{_seg(run_id)}/steps/{_seg(step)}/release", {}, headers)
 
-    def approve_gate(self, run_id: str, step: str, comments: Optional[str] = None, *, password: Optional[str] = None) -> dict[str, Any]:
+    def approve_gate(
+        self, run_id: str, step: str, comments: Optional[str] = None, *, password: Optional[str] = None,
+        signing_token: Optional[str] = None,
+    ) -> dict[str, Any]:
         """Approve a step that is waiting for a person. The decision is recorded with who made it.
 
         On Pro every decision is signed: pass the ``password`` of your local account and the SDK signs it
-        (:meth:`sign_decision`). Without one the call is unsigned, which Pro refuses with ``signature_required``.
+        (:meth:`sign`), or a ``signing_token`` you already hold. Without either the call is unsigned, which Pro
+        refuses with ``signature_required``.
         """
-        return self._decide_gate(run_id, step, True, comments, password)
+        return self._decide_gate(run_id, step, True, comments, password, signing_token)
 
-    def reject_gate(self, run_id: str, step: str, reason: Optional[str] = None, *, password: Optional[str] = None) -> dict[str, Any]:
+    def reject_gate(
+        self, run_id: str, step: str, reason: Optional[str] = None, *, password: Optional[str] = None,
+        signing_token: Optional[str] = None,
+    ) -> dict[str, Any]:
         """Reject a waiting step. ``reason`` is recorded and passed to the step that follows the Rejected path."""
-        return self._decide_gate(run_id, step, False, reason, password)
+        return self._decide_gate(run_id, step, False, reason, password, signing_token)
 
-    def _decide_gate(self, run_id: str, step: str, approved: bool, comments: Optional[str], password: Optional[str] = None) -> dict[str, Any]:
+    def _decide_gate(
+        self, run_id: str, step: str, approved: bool, comments: Optional[str], password: Optional[str] = None,
+        signing_token: Optional[str] = None,
+    ) -> dict[str, Any]:
         body: dict[str, Any] = {"approved": approved}
         if comments:
             body["comments"] = comments
-        headers = None
-        if password is not None:
-            token = self.sign_decision("recipe_gate", f"{run_id}:{step}", "approved" if approved else "rejected", password)
-            headers = {"X-Signing-Token": token}
+        headers = self._signing_headers(password, signing_token, "recipe_gate", f"{run_id}:{step}", None, "approved" if approved else "rejected")
         return self._request("POST", f"/api/v1/approvals/{_seg(run_id)}/{_seg(step)}", body, headers)
 
     def bake_recipe(self, name: str, input: Optional[Any] = None, kitchen: Optional[str] = None) -> str:
@@ -449,6 +609,9 @@ class AgentOvenClient:
         return self._get(f"/api/v1/users/{user_id}")
 
     def create_user(self, email: str, role: str, name: str = "") -> dict[str, Any]:
+        """Add a person to the user directory. ``role`` is one of ``PERSON_ROLES``: ``restaurateur`` (the
+        installation's owner) or a kitchen role. The retired ``admin`` is refused."""
+        _check_role(role, PERSON_ROLES, "a user")
         return self._post("/api/v1/users", {"email": email, "role": role, "name": name})
 
     def update_user(self, user_id: str, **fields: Any) -> dict[str, Any]:
@@ -560,9 +723,19 @@ class AgentOvenClient:
     def list_service_accounts(self) -> list[dict[str, Any]]:
         return self._get("/api/v1/service-accounts")
 
-    def create_service_account(self, name: str, role: str) -> dict[str, Any]:
-        """Create a machine identity. Returns token (shown once — store securely)."""
-        return self._post("/api/v1/service-accounts", {"name": name, "role": role})
+    def create_service_account(self, name: str, role: str, owner_email: Optional[str] = None) -> dict[str, Any]:
+        """Create a machine identity bound to this kitchen. Returns token (shown once — store securely).
+
+        ``role`` is a kitchen role (one of ``KITCHEN_ROLES``; the retired ``admin`` is refused). Every credential
+        belongs to a person (``owner_email``, you if left out): a member of this kitchen at a rank that covers the
+        role. Creating one on someone else's behalf is a Head Chef's act. When the owner leaves the kitchen the
+        credential stops; give it to someone with :meth:`set_service_account_owner`.
+        """
+        _check_role(role, KITCHEN_ROLES, "a service account")
+        body: dict[str, Any] = {"name": name, "role": role}
+        if owner_email:
+            body["owner_email"] = owner_email
+        return self._post("/api/v1/service-accounts", body)
 
     def delete_service_account(self, sa_id: str) -> dict[str, Any]:
         return self._delete(f"/api/v1/service-accounts/{sa_id}")
@@ -792,16 +965,19 @@ class AgentOvenClient:
         agent_names: list[str],
         max_calls: int = 0,
         expires_in: str = "",
+        owner_email: Optional[str] = None,
     ) -> dict[str, Any]:
-        return self._post(
-            "/api/v1/keys",
-            {
-                "label": label,
-                "agent_names": agent_names,
-                "max_calls": max_calls,
-                "expires_in": expires_in,
-            },
-        )
+        """Create a scoped API key. Like a service account it belongs to a person (``owner_email``, you if left
+        out), who must be a member of this kitchen; see :meth:`set_scoped_key_owner`."""
+        body: dict[str, Any] = {
+            "label": label,
+            "agent_names": agent_names,
+            "max_calls": max_calls,
+            "expires_in": expires_in,
+        }
+        if owner_email:
+            body["owner_email"] = owner_email
+        return self._post("/api/v1/keys", body)
 
     def get_scoped_key(self, key_id: str) -> dict[str, Any]:
         return self._get(f"/api/v1/keys/{key_id}")
@@ -888,6 +1064,472 @@ class AgentOvenClient:
 
     def delete_trace_view(self, view_id: str) -> None:
         self._delete(f"/api/v1/trace-views/{_seg(view_id)}")
+
+    # ── Replay (Pro, ADR-0039) ────────────────────────────────────────────
+    # Re-run a captured call or run with edits. A replay is an investigation, not a reproduction: models are
+    # not deterministic and the world has moved on, so a replay is a new trace named ``replay:<agent>`` and never
+    # evidence of what the original run did. The original is never changed. Needs ``trace:replay`` and
+    # ``trace:read:content`` (a Chef and above, and the Auditor for the content).
+
+    def replay_call(
+        self,
+        trace_id: str,
+        span_id: str,
+        variants: Optional[Sequence[Mapping[str, Any]]] = None,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        """Re-run one captured model call as up to five variants (the server's limit). Runs no tool: the tool calls
+        the model asked for come back, unexecuted.
+
+        Each variant is ``{"label": "cooler", "edits": {...}}``; ``edits`` may hold ``model``, ``provider`` (one of
+        the kitchen's), ``temperature``, ``max_tokens``, ``top_p``, ``stop``, ``thinking_enabled``,
+        ``thinking_budget``, ``tool_choice`` (``"auto"``, ``"none"``, ``"required"`` or an object),
+        ``response_format`` and ``messages`` (``[{"index": 1, "content": "..."}]``). The server refuses an edit it
+        does not understand. With no variants the call is re-run as captured, which shows how much of the original
+        answer was chance. ``reason`` is recorded, and is required for an archived agent's trace.
+
+        The edited prompt goes through the agent's input guardrails and the reply through the output ones; the
+        kitchen's spend gate counts the call. Each variant ends ``completed``, ``blocked``, ``refused`` or ``failed``.
+        """
+        body: dict[str, Any] = {"variants": [dict(v) for v in (variants or [])], "reason": reason}
+        return self._post(f"/api/v1/traces/{_seg(trace_id)}/spans/{_seg(span_id)}/replay", body)
+
+    def replay_run(
+        self,
+        trace_id: str,
+        from_span: str,
+        edits: Optional[Mapping[str, Any]] = None,
+        tools: str = "frozen",
+        live_tools: Optional[Sequence[str]] = None,
+        reason: str = "",
+        *,
+        password: Optional[str] = None,
+        signing_token: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Re-run an agent run from one of its model calls (``from_span``) with ``edits`` (the same keys as
+        :meth:`replay_call`). ``tools`` says what the run's tool calls do:
+
+        - ``"frozen"`` (the default): the captured result is returned for as long as the model asks for the same
+          tool call with the same arguments; when it asks for one with no captured result the replay stops,
+          ``diverged``, and shows both. Nothing is invented and no tool is run.
+        - ``"blocked"``: the call is returned, not run, and the replay ends there.
+        - ``"live"``: only the tools named in ``live_tools`` run, and only if the agent marked them idempotent
+          (tools with side effects, the ``agentoven_*`` tools and calls to other agents never run live). It needs
+          the ``trace:replay:live-tools`` permission and is a signed decision on the ``live_tool_replay`` gate,
+          bound to the trace, the step, the tool list and the edits: pass ``password=`` (the SDK asks
+          :meth:`prepare_live_replay` what to sign and signs it) or a ``signing_token=`` signed from that
+          preparation. Without either the server refuses with ``signature_required``.
+        """
+        if tools not in _REPLAY_TOOLS:
+            raise ValueError(f"tools must be one of {', '.join(_REPLAY_TOOLS)}, not {tools!r}")
+        names = list(live_tools or [])
+        if tools == "live" and not names:
+            raise ValueError('tools="live" needs live_tools naming the tools that may run live')
+        if tools != "live" and (names or password is not None or signing_token):
+            raise ValueError('live_tools, password and signing_token only go with tools="live"')
+        body = {"from_span": from_span, "edits": dict(edits or {}), "tools": tools, "live_tools": names, "reason": reason}
+        headers = None
+        if tools == "live" and (password is not None or signing_token):
+            if password is not None and signing_token:
+                raise ValueError("pass password= or signing_token=, not both")
+            if password is not None:
+                prep = self.prepare_live_replay(trace_id, from_span, names, edits, reason)
+                signing_token = self.sign(prep["gate"], prep["record_id"], "approved", prep.get("payload"), password)
+            headers = {SIGNING_TOKEN_HEADER: signing_token}
+        return self._request("POST", f"/api/v1/traces/{_seg(trace_id)}/replay", body, headers)
+
+    def prepare_live_replay(
+        self,
+        trace_id: str,
+        from_span: str,
+        live_tools: Sequence[str],
+        edits: Optional[Mapping[str, Any]] = None,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        """Check a live replay as far as it can be checked, and return what to sign: ``{"gate", "record_id",
+        "payload"}``, computed by the server so you never reproduce the digest of the edits. Pass them to
+        :meth:`sign`, then the token to :meth:`replay_run`. Needs ``trace:replay:live-tools``."""
+        body = {"from_span": from_span, "edits": dict(edits or {}), "live_tools": list(live_tools), "reason": reason}
+        return self._post(f"/api/v1/traces/{_seg(trace_id)}/replay/prepare", body)
+
+    def get_span_capture(self, trace_id: str, span_id: str) -> dict[str, Any]:
+        """A model call as it was captured, whole: the request (with the tools it offered) and the response. It is
+        the most sensitive thing a trace holds, so reading it needs ``trace:read:content`` and is audited. A call
+        recorded before complete capture existed answers 404 ``not_captured``."""
+        return self._get(f"/api/v1/traces/{_seg(trace_id)}/spans/{_seg(span_id)}/capture")
+
+    # ── Governed datasets (Pro, ADR-0039) ─────────────────────────────────
+    # A dataset is a named set of cases; a case is a snapshot with provenance and a keyed content hash; a
+    # version is an append-only manifest of case hashes. Retention is ``expire`` (the default, with a TTL),
+    # ``persist`` (kept until purged, reviewed on a date) or ``regulated`` (kept for at least
+    # ``min_retention_days``; a purge and any lowering of the minimum are signed).
+
+    def list_datasets(self) -> list[dict[str, Any]]:
+        """The kitchen's datasets (``dataset:read``)."""
+        return self._get("/api/v1/datasets")
+
+    def create_dataset(
+        self,
+        name: str,
+        description: str = "",
+        retention_mode: Optional[str] = None,
+        ttl_days: Optional[int] = None,
+        review_by: Optional[str] = None,
+        min_retention_days: Optional[int] = None,
+        purpose: str = "",
+    ) -> dict[str, Any]:
+        """Create a dataset (``dataset:write``). ``name`` is 1 to 120 characters. ``retention_mode`` is ``"expire"``,
+        ``"persist"`` or ``"regulated"`` (the server's default if left out); ``ttl_days`` is for ``expire``,
+        ``review_by`` (an RFC 3339 time) for ``persist``, ``min_retention_days`` for ``regulated`` (default 90, never
+        below 7). ``purpose`` is required for what keeps data beyond a TTL."""
+        _check_retention_mode(retention_mode)
+        body: dict[str, Any] = {"name": name, "description": description, "purpose": purpose}
+        _put_if(body, retention_mode=retention_mode, ttl_days=ttl_days, review_by=review_by, min_retention_days=min_retention_days)
+        return self._post("/api/v1/datasets", body)
+
+    def get_dataset(self, dataset_id: str) -> dict[str, Any]:
+        """One dataset with its retention state."""
+        return self._get(f"/api/v1/datasets/{_seg(dataset_id)}")
+
+    def update_dataset(
+        self,
+        dataset_id: str,
+        description: str = "",
+        retention_mode: Optional[str] = None,
+        ttl_days: Optional[int] = None,
+        review_by: Optional[str] = None,
+        min_retention_days: Optional[int] = None,
+        purpose: str = "",
+    ) -> dict[str, Any]:
+        """Change a dataset's settings (``dataset:write``). The server takes the settings whole: what you leave out
+        is cleared, so read :meth:`get_dataset` and send back what should stay. Raising a regulated minimum is
+        allowed; lowering it is :meth:`lower_dataset_minimum` (signed); a regulated dataset cannot leave regulated
+        mode; a change that makes a dataset expire sooner needs ``dataset:purge``."""
+        _check_retention_mode(retention_mode)
+        body: dict[str, Any] = {"description": description, "purpose": purpose}
+        _put_if(body, retention_mode=retention_mode, ttl_days=ttl_days, review_by=review_by, min_retention_days=min_retention_days)
+        return self._put(f"/api/v1/datasets/{_seg(dataset_id)}", body)
+
+    def list_dataset_cases(self, dataset_id: str, retired: bool = False, limit: Optional[int] = None, offset: Optional[int] = None) -> Any:
+        """The cases of a dataset's draft. ``retired=True`` shows the retired ones."""
+        return self._get(f"/api/v1/datasets/{_seg(dataset_id)}/cases" + _query(retired="true" if retired else None, limit=limit, offset=offset))
+
+    def add_dataset_case(
+        self,
+        dataset_id: str,
+        input: Any,
+        expected_output: Any = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+        provenance: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Add a case to the draft (``dataset:write``). ``input`` is required (any JSON); ``metadata`` must be an
+        object. ``provenance`` may carry ``source_trace_id``, ``span_id``, ``agent``, ``agent_version``,
+        ``environment``, ``provider`` and ``model``."""
+        body: dict[str, Any] = {"input": input, "expected_output": expected_output, "metadata": dict(metadata) if metadata is not None else None}
+        if provenance:
+            body["provenance"] = dict(provenance)
+        return self._post(f"/api/v1/datasets/{_seg(dataset_id)}/cases", body)
+
+    def add_dataset_case_from_trace(
+        self,
+        dataset_id: str,
+        trace_id: str,
+        span_id: str,
+        expected_output: Any = _UNSET,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Copy a span of a trace of this kitchen into a case, with the provenance the trace tells (agent, version,
+        environment, model). The case is a copy: the trace is purged on its own schedule. The span's own output is
+        the expected output unless you pass ``expected_output`` (``None`` included, which records none). Only the
+        messages of the call are copied, not the whole capture. To add a replay's result, pass the replay's trace
+        and span here."""
+        body: dict[str, Any] = {"trace_id": trace_id, "span_id": span_id}
+        if expected_output is not _UNSET:
+            body["expected_output"] = expected_output
+        if metadata is not None:
+            body["metadata"] = dict(metadata)
+        return self._post(f"/api/v1/datasets/{_seg(dataset_id)}/cases/from-trace", body)
+
+    def retire_dataset_case(self, dataset_id: str, case_id: str) -> None:
+        """Take a case out of the draft. Published versions still list it."""
+        self._delete(f"/api/v1/datasets/{_seg(dataset_id)}/cases/{_seg(case_id)}")
+
+    def erase_dataset_case(self, dataset_id: str, case_id: str, reason: str) -> dict[str, Any]:
+        """Erase a case's payload (``dataset:purge``): input, expected output and metadata go, the content hash and
+        the version manifests stay. Returns ``{"case", "already_erased"}``. A legal hold refuses it."""
+        return self._post(f"/api/v1/datasets/{_seg(dataset_id)}/cases/{_seg(case_id)}/erase", {"reason": reason})
+
+    def list_dataset_versions(self, dataset_id: str) -> list[dict[str, Any]]:
+        """The published versions of a dataset."""
+        return self._get(f"/api/v1/datasets/{_seg(dataset_id)}/versions")
+
+    def get_dataset_version(self, dataset_id: str, version: int) -> dict[str, Any]:
+        """One version with its manifest."""
+        return self._get(f"/api/v1/datasets/{_seg(dataset_id)}/versions/{int(version)}")
+
+    def verify_dataset_version(self, dataset_id: str, version: int) -> dict[str, Any]:
+        """Recompute a version: its manifest digest, the chain to the version before and the content hashes."""
+        return self._get(f"/api/v1/datasets/{_seg(dataset_id)}/versions/{int(version)}/verify")
+
+    # ── Secrets (Pro, ADR-0035) ──────────────────────────────────────────────────
+    # A secret is a name, a reference and metadata; its value lives in a provider (the built-in encrypted vault, or
+    # Vault and the like) and is write-only: no method here returns one. Approving or revoking a binding and a real
+    # migration are signed decisions: pass ``password=`` (the SDK signs it) or ``signing_token=``.
+
+    def list_secret_providers(self) -> list[dict[str, Any]]:
+        """The built-in provider and the configured ones, with what each can do and whether it is healthy."""
+        return self._get("/api/v1/secret-providers")
+
+    def create_secret_provider(
+        self, name: str, kind: str, config: Optional[Mapping[str, Any]] = None, *, is_default: bool = False,
+        platform: bool = False,
+    ) -> dict[str, Any]:
+        """Add a provider of a driver kind the platform enabled (``secret-provider:manage``). ``config`` can only
+        narrow the platform's settings for the kind."""
+        return self._post("/api/v1/secret-providers", {"name": name, "kind": kind, "config": dict(config or {}),
+                                                       "is_default": is_default, "platform": platform})
+
+    def set_default_secret_provider(self, name: str, *, platform: bool = False) -> None:
+        """Make a provider the default for new secrets (``dbvault`` goes back to the built-in one)."""
+        self._put(f"/api/v1/secret-providers/{_seg(name)}/default{'?platform=true' if platform else ''}", {})
+
+    def delete_secret_provider(self, name: str, *, platform: bool = False) -> None:
+        """Remove a provider no secret lives in (409 ``in_use`` otherwise)."""
+        self._delete(f"/api/v1/secret-providers/{_seg(name)}{'?platform=true' if platform else ''}")
+
+    def list_secrets(self) -> list[dict[str, Any]]:
+        """The kitchen's secrets: metadata, never values (``secret:read``)."""
+        return self._get("/api/v1/secrets")
+
+    def get_secret(self, name: str) -> dict[str, Any]:
+        return self._get(f"/api/v1/secrets/{_seg(name)}")
+
+    def create_secret(
+        self, name: str, *, value: Optional[str] = None, provider: Optional[str] = None, ref: Optional[str] = None,
+        label: str = "", owner: str = "", allowed_hosts: Optional[list[str]] = None, expires_at: Optional[str] = None,
+        require_binding: bool = False, grace_seconds: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Create a secret (``secret:write``). With ``value`` it is written to the provider (which must be writable);
+        with ``ref`` and no value it links a secret somebody else owns; with neither it adopts a credential made
+        before secrets existed. The value is never returned."""
+        body: dict[str, Any] = {"name": name, "label": label, "owner": owner, "allowed_hosts": list(allowed_hosts or []),
+                                "require_binding": require_binding}
+        _put_if(body, value=value, provider=provider, ref=ref, expires_at=expires_at, grace_seconds=grace_seconds)
+        return self._post("/api/v1/secrets", body)
+
+    def update_secret(self, name: str, **patch: Any) -> dict[str, Any]:
+        """Change a secret's metadata: ``label``, ``owner``, ``allowed_hosts``, ``expires_at``, ``clear_expiry``,
+        ``require_binding``, ``grace_seconds``. What you leave out stays as it is."""
+        return self._put(f"/api/v1/secrets/{_seg(name)}", patch)
+
+    def delete_secret(self, name: str) -> None:
+        self._delete(f"/api/v1/secrets/{_seg(name)}")
+
+    def rotate_secret(
+        self, name: str, value: str, *, probe: Optional[Mapping[str, Any]] = None, grace_seconds: Optional[int] = None
+    ) -> dict[str, Any]:
+        """Rotate to a new value. With ``probe`` (``{"url", "method", "header_scheme", "expect_status"}``) the control
+        plane checks the new value against an upstream first; a value it rejects is not rotated in (422
+        ``probe_rejected``). The previous version stays valid for the grace window."""
+        body: dict[str, Any] = {"value": value}
+        _put_if(body, probe=dict(probe) if probe else None, grace_seconds=grace_seconds)
+        return self._put(f"/api/v1/secrets/{_seg(name)}/value", body)
+
+    def refresh_secret(self, name: str) -> dict[str, Any]:
+        """Pick up a rotation the secret's owner made (a linked secret). Returns ``{"changed", "secret"}``."""
+        return self._post(f"/api/v1/secrets/{_seg(name)}/refresh", {})
+
+    def secret_versions(self, name: str) -> list[dict[str, Any]]:
+        """A secret's versions, without values."""
+        return self._get(f"/api/v1/secrets/{_seg(name)}/versions")
+
+    def list_secret_bindings(self, secret: Optional[str] = None) -> list[dict[str, Any]]:
+        """Bindings in the kitchen, or of one secret."""
+        return self._get("/api/v1/secret-bindings" + (f"?secret={_seg(secret)}" if secret else ""))
+
+    def propose_secret_binding(self, secret: str, skill: str, server: str = "", header_scheme: str = "bearer") -> dict[str, Any]:
+        """Propose that ``secret`` be sent for ``skill`` to ``server`` (``secret:bind``). ``skill="-"`` is a tool
+        registered by hand. Nothing happens until a person approves."""
+        return self._post(f"/api/v1/secrets/{_seg(secret)}/bindings",
+                          {"skill": skill, "server": server, "header_scheme": header_scheme})
+
+    def decide_secret_binding(
+        self, binding_id: str, meaning: str, *, password: Optional[str] = None, signing_token: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Approve (``approved``) or reject/revoke (``rejected``) a binding: a signed decision on the
+        ``secret_binding`` gate, by someone other than the person who proposed it."""
+        if meaning not in ("approved", "rejected"):
+            raise ValueError("meaning is 'approved' or 'rejected'")
+        headers = self._signing_headers(password, signing_token, "secret_binding", binding_id, None, meaning)
+        return self._request("POST", f"/api/v1/secret-bindings/{_seg(binding_id)}/decision", {"meaning": meaning}, headers)
+
+    def withdraw_secret_binding(self, binding_id: str) -> None:
+        """Withdraw a binding that is still pending."""
+        self._delete(f"/api/v1/secret-bindings/{_seg(binding_id)}")
+
+    def plan_secret_migration(self, from_provider: str, to_provider: str) -> dict[str, Any]:
+        """What moving the kitchen's secrets from one provider to another would do. Nothing changes."""
+        return self._post("/api/v1/secrets/migrate", {"from": from_provider, "to": to_provider, "dry_run": True})
+
+    def migrate_secrets(
+        self, from_provider: str, to_provider: str, *, password: Optional[str] = None, signing_token: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Move the kitchen's secrets from one provider to another (``secret:migrate``): copied, read back and
+        compared, then repointed in one step; the source is untouched. A signed decision on the ``secret_migrate``
+        gate, record ``<from>:<to>``, bound to the digest of the plan."""
+        headers = self._signing_headers(password, signing_token, "secret_migrate", f"{from_provider}:{to_provider}")
+        return self._request("POST", "/api/v1/secrets/migrate", {"from": from_provider, "to": to_provider}, headers)
+
+    def publish_dataset(
+        self, dataset_id: str, *, password: Optional[str] = None, signing_token: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Publish the draft as the next version (``dataset:publish``). Returns ``{"version", "signed"}``. A
+        regulated dataset's version is a signed decision (gate ``dataset_publish``, record id the dataset's id):
+        pass ``password=`` or a ``signing_token=``; other datasets ignore it. Refused when the draft is empty
+        (422 ``empty_version``) or unchanged (409 ``no_changes``)."""
+        headers = self._signing_headers(password, signing_token, "dataset_publish", dataset_id)
+        return self._request("POST", f"/api/v1/datasets/{_seg(dataset_id)}/versions", {}, headers)
+
+    def export_dataset(self, dataset_id: str, version: Optional[int] = None) -> "DatasetExport":
+        """Export a version (the latest by default) as JSONL (``dataset:export``): a manifest line with its digests
+        and the result of verifying it, then one line per case in manifest order. An erased case is exported as
+        erased, with no payload. The export is audited."""
+        text, headers = self._request_text("GET", f"/api/v1/datasets/{_seg(dataset_id)}/export" + _query(version=version))
+        lines = [json.loads(line) for line in text.splitlines() if line.strip()]
+        manifest = lines[0] if lines else {}
+        return DatasetExport(
+            version=int(manifest.get("version") or 0),
+            manifest_digest=headers.get("x-manifest-digest", manifest.get("manifest_digest", "")),
+            manifest=manifest,
+            cases=lines[1:],
+            text=text,
+        )
+
+    def lower_dataset_minimum(
+        self,
+        dataset_id: str,
+        min_retention_days: int,
+        reason: str,
+        *,
+        password: Optional[str] = None,
+        signing_token: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Lower a regulated dataset's minimum retention (``dataset:purge``). A signed decision on the
+        ``dataset_purge`` gate (record id the dataset's id, payload ``{"action": "lower_minimum",
+        "new_minimum_days", "reason"}``): pass ``password=`` or ``signing_token=``. The server refuses a minimum
+        below its floor (7 days) or a missing reason before anyone is asked to sign."""
+        payload = {"action": "lower_minimum", "new_minimum_days": min_retention_days, "reason": reason}
+        headers = self._signing_headers(password, signing_token, "dataset_purge", dataset_id, payload)
+        return self._request(
+            "POST", f"/api/v1/datasets/{_seg(dataset_id)}/retention/lower-minimum",
+            {"min_retention_days": min_retention_days, "reason": reason}, headers,
+        )
+
+    def place_dataset_legal_hold(self, dataset_id: str, reason: str) -> dict[str, Any]:
+        """Place a legal hold on a dataset (``dataset:purge`` or ``audit:legalhold``). Placing only protects, so it
+        takes no signature. While it is held, purge and erasure are refused."""
+        return self._put(f"/api/v1/datasets/{_seg(dataset_id)}/legal-hold", {"held": True, "reason": reason})
+
+    def lift_dataset_legal_hold(
+        self, dataset_id: str, reason: str, *, password: Optional[str] = None, signing_token: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Lift a legal hold on a dataset. Only the Legal role may, with a stated reason, and the lift is a signed
+        decision on the ``legal_hold_release`` gate: record id ``dataset:<id>``, payload ``{"reason": reason}``.
+        Pass ``password=`` (the SDK signs it, :meth:`sign`) or a ``signing_token=`` signed for exactly this."""
+        headers = self._signing_headers(password, signing_token, "legal_hold_release", f"dataset:{dataset_id}", {"reason": reason})
+        return self._request("PUT", f"/api/v1/datasets/{_seg(dataset_id)}/legal-hold", {"held": False, "reason": reason}, headers)
+
+    def purge_dataset(
+        self, dataset_id: str, reason: str, *, password: Optional[str] = None, signing_token: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Archive a dataset, then delete it, leaving a tombstone (``dataset:purge``). Returns ``{"tombstone",
+        "signed"}``. A regulated dataset's purge is a signed decision on the ``dataset_purge`` gate (record id the
+        dataset's id, payload ``{"action": "purge", "reason"}``), refused inside its minimum before anyone is asked
+        to sign; pass ``password=`` or ``signing_token=`` for it. Other datasets ignore them."""
+        headers = self._signing_headers(password, signing_token, "dataset_purge", dataset_id, {"action": "purge", "reason": reason})
+        return self._request("POST", f"/api/v1/datasets/{_seg(dataset_id)}/purge", {"reason": reason}, headers)
+
+    def list_expiring_datasets(self, days: Optional[int] = None) -> list[dict[str, Any]]:
+        """The datasets the retention janitor removes within ``days`` (30 by default)."""
+        return self._get("/api/v1/datasets/expiring" + _query(days=days))
+
+    def list_dataset_reviews(self, days: Optional[int] = None) -> list[dict[str, Any]]:
+        """The ``persist`` datasets due for review within ``days`` (30 by default)."""
+        return self._get("/api/v1/datasets/reviews" + _query(days=days))
+
+    def list_dataset_tombstones(self) -> list[dict[str, Any]]:
+        """What stays of purged datasets: who purged, when, why, and the final manifest digest."""
+        return self._get("/api/v1/datasets/tombstones")
+
+    # ── Legal hold on the audit trail (Pro, ADR-0043) ─────────────────────
+
+    def place_audit_legal_hold(self, reason: str = "") -> dict[str, Any]:
+        """Place a legal hold on the kitchen's audit trail (``audit:legalhold``). It only protects, so it takes no
+        signature. While it is in force retention purge and GDPR erasure are refused."""
+        return self._post("/api/v1/audit/legal-hold", {"hold": True, "reason": reason})
+
+    def lift_audit_legal_hold(
+        self, reason: str, *, password: Optional[str] = None, signing_token: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Lift the legal hold on the kitchen's audit trail. Only the Legal role may, with a stated reason, and the
+        lift is a signed decision on the ``legal_hold_release`` gate: record id ``audit:<kitchen>`` (this client's
+        kitchen), payload ``{"reason": reason}``. Pass ``password=`` or a ``signing_token=``."""
+        headers = self._signing_headers(password, signing_token, "legal_hold_release", f"audit:{self._kitchen}", {"reason": reason})
+        return self._request("POST", "/api/v1/audit/legal-hold", {"hold": False, "reason": reason}, headers)
+
+    # ── Identity-provider bindings, credential owners, my kitchens (Pro, ADR-0042) ──
+
+    def list_kitchen_bindings(self, kitchen_id: str) -> list[dict[str, Any]]:
+        """Which group or app role of the identity provider is which role in this kitchen. A binding takes effect
+        at a person's next login. Only the kitchen's Head Chef or a Restaurateur."""
+        return self._get(f"/api/v1/kitchens/{_seg(kitchen_id)}/bindings")
+
+    def create_kitchen_binding(self, kitchen_id: str, claim_value: str, role: str, label: str = "") -> dict[str, Any]:
+        """Bind an identity-provider group (its object id) or app role value to a kitchen ``role`` (one of
+        ``KITCHEN_ROLES``; ``restaurateur`` is platform-wide and ``admin`` is retired). Binding a group as
+        ``head_chef`` is a Restaurateur's decision."""
+        _check_role(role, KITCHEN_ROLES, "a kitchen binding")
+        if not claim_value.strip():
+            raise ValueError("claim_value is the group object id or app role value the identity provider puts in the token")
+        return self._post(f"/api/v1/kitchens/{_seg(kitchen_id)}/bindings", {"claim_value": claim_value, "role": role, "label": label})
+
+    def delete_kitchen_binding(self, kitchen_id: str, binding_id: str) -> None:
+        """Remove a binding."""
+        self._delete(f"/api/v1/kitchens/{_seg(kitchen_id)}/bindings/{_seg(binding_id)}")
+
+    def set_service_account_owner(self, sa_id: str, owner_email: str) -> dict[str, Any]:
+        """Give a service account to another person: a member of the kitchen at a rank that covers the account's
+        role. Handing it to someone else is a Head Chef's act. It is how a credential whose owner left works again."""
+        return self._post(f"/api/v1/service-accounts/{_seg(sa_id)}/owner", {"owner_email": owner_email})
+
+    def set_scoped_key_owner(self, key_id: str, owner_email: str) -> dict[str, Any]:
+        """Give a scoped API key to another person (same rules as :meth:`set_service_account_owner`)."""
+        return self._post(f"/api/v1/keys/{_seg(key_id)}/owner", {"owner_email": owner_email})
+
+    @property
+    def blobs(self) -> "Blobs":
+        """Upload a file once and name it in messages by ``blob_ref`` (``client.blobs.upload(path)``)."""
+        from agentoven.blobs import Blobs
+
+        return Blobs(self)
+
+    def my_kitchens(self) -> dict[str, Any]:
+        """The kitchens you can enter and your role in each: ``{"enforced", "kitchens": [{"id", "name", "role"}]}``."""
+        return self._get("/api/v1/me/kitchens")
+
+    # ── Agent versions ─────────────────────────────────────────────────────
+    # An agent's version moves only on a bake whose configuration differs from the last bake's: the first bake
+    # keeps the registered version (0.1.0), a bake that changes nothing keeps its version, and a changed one takes
+    # the next minor version and keeps the old one. Editing a registered agent (``register``, ``PUT``) does not
+    # bump it. Naming a ``version`` on ``bake`` sets that version as given.
+
+    def list_agent_versions(self, name: str) -> list[dict[str, Any]]:
+        """The versions an agent has been baked at, each as the agent was configured then."""
+        return self._get(f"/api/v1/agents/{_seg(name)}/versions")
+
+    def get_agent_version(self, name: str, version: str) -> dict[str, Any]:
+        """One baked version of an agent (``0.1.0`` is the first bake)."""
+        return self._get(f"/api/v1/agents/{_seg(name)}/versions/{_seg(version)}")
 
     # ── Server info ───────────────────────────────────────────────────────
 
@@ -990,6 +1632,76 @@ class AgentOvenClient:
             agents_burnt=int(data.get("agents_burnt", 0) or 0),
         )
 
+    # ── Tools (MCP gateway) ───────────────────────────────────────────────
+
+    def list_tools(self) -> list[dict[str, Any]]:
+        """The tools registered in this kitchen. A tool's authentication
+        (``auth_config``) is never returned."""
+        return self._get("/api/v1/tools") or []
+
+    def get_tool(self, name: str) -> dict[str, Any]:
+        """One tool by name. Raises :class:`AgentOvenAPIError` (404) if there is none."""
+        return self._get(f"/api/v1/tools/{_seg(name)}")
+
+    def register_tool(
+        self,
+        name: str,
+        endpoint: str,
+        *,
+        description: str = "",
+        transport: str = "http",
+        schema: Optional[Mapping[str, Any]] = None,
+        auth_config: Optional[Mapping[str, Any]] = None,
+        capabilities: Optional[Sequence[str]] = None,
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        """Register a tool agents can call, or update it if the name is taken.
+
+        An HTTP tool::
+
+            client.register_tool(
+                "refunds",
+                "https://payments.internal/refund",
+                description="Pay a refund",
+                schema={"type": "object", "properties": {"amount": {"type": "number"}}},
+            )
+
+        ``transport`` is ``"http"`` (the default), ``"sse"`` or ``"stdio"``; the
+        server rejects anything else with a 400. ``schema`` is the JSON Schema of
+        the tool's arguments. ``auth_config`` holds how the gateway
+        authenticates to the tool (the server stores it and never returns it).
+        ``capabilities`` defaults to ``["tool"]``.
+
+        Registering a name that exists updates that tool (the server's update
+        replaces ``enabled`` every time, so it is always sent: ``enabled=True``
+        by default, ``enabled=False`` registers the tool switched off). The
+        lookup is one extra GET. Returns the stored tool.
+        """
+        body: dict[str, Any] = {
+            "name": name,
+            "endpoint": endpoint,
+            "description": description,
+            "transport": transport,
+            "enabled": enabled,
+        }
+        if schema is not None:
+            body["schema"] = dict(schema)
+        if auth_config is not None:
+            body["auth_config"] = dict(auth_config)
+        if capabilities is not None:
+            body["capabilities"] = list(capabilities)
+        try:
+            self.get_tool(name)
+        except AgentOvenAPIError as exc:
+            if exc.status_code != 404:
+                raise
+            return self._post("/api/v1/tools", body)
+        return self._put(f"/api/v1/tools/{_seg(name)}", body)
+
+    def delete_tool(self, name: str) -> None:
+        """Remove a tool from the kitchen."""
+        self._delete(f"/api/v1/tools/{_seg(name)}")
+
     # ── Agent card ────────────────────────────────────────────────────────
 
     def agent_card(self, name: str) -> AgentCard:
@@ -1012,6 +1724,7 @@ class AgentOvenClient:
         audio_mime_type: Optional[str] = None,
         voice_output: bool = False,
         voice: Optional[str] = None,
+        attachments: Optional[Sequence[Attachment]] = None,
         variables: Optional[Mapping[str, str]] = None,
         session_id: Optional[str] = None,
         thinking_enabled: bool = False,
@@ -1034,9 +1747,13 @@ class AgentOvenClient:
         the message). For raw ``bytes`` of a format the SDK cannot recognise,
         pass ``audio_mime_type``. Raises :class:`AudioModalityError` when the
         agent's provider does not offer audio.
+
+        ``attachments`` send images, PDFs or video with the message (build them
+        with :meth:`Attachment.from_path`, ``from_bytes`` or ``from_url``); the
+        server answers 422 when the agent's model cannot take that kind of input.
         """
-        if not message and audio is None:
-            raise ValueError("invoke needs a message, audio, or both")
+        if not message and audio is None and not attachments:
+            raise ValueError("invoke needs a message, audio, or both (or attachments)")
         if voice and not voice_output:
             raise ValueError("voice only applies with voice_output=True")
         body: dict[str, Any] = {}
@@ -1044,6 +1761,8 @@ class AgentOvenClient:
             body["message"] = message
         if audio is not None:
             body["audio"] = AudioInput.coerce(audio, audio_mime_type).to_wire()
+        if attachments:
+            body["content_parts"] = [a.to_content_part() for a in attachments]
         if voice_output:
             body["voice_output"] = True
         if voice:
@@ -1172,13 +1891,23 @@ class AgentOvenClient:
         return h
 
     def _request(self, method: str, path: str, body: Optional[dict[str, Any]] = None, headers: Optional[dict[str, str]] = None) -> Any:
+        raw, _ = self._send(method, path, body, headers)
+        return json.loads(raw) if raw else {}
+
+    def _request_text(self, method: str, path: str, headers: Optional[dict[str, str]] = None) -> tuple[str, dict[str, str]]:
+        """A response that is not one JSON document (an export): its text and its headers, lower-cased."""
+        raw, response_headers = self._send(method, path, None, headers)
+        return raw.decode("utf-8"), response_headers
+
+    def _send(
+        self, method: str, path: str, body: Optional[dict[str, Any]], headers: Optional[dict[str, str]]
+    ) -> tuple[bytes, dict[str, str]]:
         url = self._url + path
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(url, data=data, headers={**self._headers(), **(headers or {})}, method=method)
         try:
             with urllib.request.urlopen(req) as resp:
-                raw = resp.read()
-                return json.loads(raw) if raw else {}
+                return resp.read(), {k.lower(): v for k, v in resp.headers.items()}
         except urllib.error.HTTPError as exc:
             raw = exc.read()
             try:
@@ -1221,6 +1950,40 @@ def _seg(value: str) -> str:
     return urllib.parse.quote(value, safe="")
 
 
+def _query(**params: Any) -> str:
+    """A query string (with its ``?``) of the parameters that are set, or an empty one."""
+    q = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None and v != ""})
+    return f"?{q}" if q else ""
+
+
+def _put_if(body: dict[str, Any], **fields: Any) -> None:
+    body.update({k: v for k, v in fields.items() if v is not None})
+
+
+def _signing_request(gate: str, record_id: str, meaning: str, payload: Optional[Mapping[str, Any]]) -> dict[str, Any]:
+    if meaning not in ("approved", "rejected"):
+        raise ValueError(f"meaning is 'approved' or 'rejected', not {meaning!r}")
+    return {"gate": gate, "record_id": record_id, "meaning": meaning, "payload": dict(payload or {})}
+
+
+def _check_role(role: str, allowed: Sequence[str], what: str) -> None:
+    """Refuse a role the control plane does not have. ``admin`` is retired: it was a Head Chef inside a kitchen
+    and a Restaurateur across the installation."""
+    if role == "admin":
+        raise ValueError(
+            f"role 'admin' is retired ({what}): use 'head_chef' for a kitchen role"
+            + (" or 'restaurateur' for a person across the installation" if "restaurateur" in allowed else "")
+        )
+    if role not in allowed:
+        hint = " ('restaurateur' is platform-wide: assign it in the user directory)" if role == "restaurateur" else ""
+        raise ValueError(f"unknown role {role!r} for {what}: one of {', '.join(allowed)}{hint}")
+
+
+def _check_retention_mode(mode: Optional[str]) -> None:
+    if mode is not None and mode not in _RETENTION_MODES:
+        raise ValueError(f"retention_mode is one of {', '.join(_RETENTION_MODES)}, not {mode!r}")
+
+
 def _error_text(detail: Any) -> str:
     if isinstance(detail, dict):
         return str(detail.get("error") or detail.get("message") or detail)
@@ -1252,6 +2015,30 @@ class AgentOvenAPIError(Exception):
         self.status_code = status_code
         self.detail = detail
         super().__init__(f"AgentOven API error {status_code}: {detail}")
+
+
+class OidcSigningRequired(AgentOvenAPIError):
+    """This account signs through the identity provider (OIDC), which re-asks for the password in a browser.
+    The SDK can sign with a local account's password only; sign in the dashboard, or use a local account."""
+
+    @property
+    def message(self) -> str:
+        if isinstance(self.detail, dict) and self.detail.get("message"):
+            return str(self.detail["message"])
+        return _error_text(self.detail)
+
+
+@dataclass
+class DatasetExport:
+    """A dataset version exported as JSONL: the ``manifest`` line (digests, verification), the ``cases`` that
+    follow it in manifest order, the ``manifest_digest`` the server sent in ``X-Manifest-Digest``, and the
+    exported ``text`` as received (write that to a file to keep the export byte for byte)."""
+
+    version: int
+    manifest_digest: str
+    manifest: dict[str, Any]
+    cases: list[dict[str, Any]]
+    text: str
 
 
 class AudioModalityError(AgentOvenAPIError):

@@ -28,7 +28,19 @@ from agentoven._native import (
 )
 from agentoven import flow
 from agentoven.flow import Flow, FlowError
-from agentoven.client import AgentOvenClient, AgentOvenAPIError, AudioModalityError, RealtimeToken
+from agentoven.blobs import Blob, Blobs
+from agentoven.client import (
+    KITCHEN_ROLES,
+    PERSON_ROLES,
+    SIGNING_GATES,
+    SIGNING_TOKEN_HEADER,
+    AgentOvenAPIError,
+    AgentOvenClient,
+    AudioModalityError,
+    DatasetExport,
+    OidcSigningRequired,
+    RealtimeToken,
+)
 from agentoven.media import Attachment, AudioClip, AudioInput, InvokeResult
 from agentoven.modalities import (
     CLEAR,
@@ -45,11 +57,19 @@ from agentoven.modalities import (
 from agentoven.realtime import RealtimeError, RealtimeEvent, RealtimeSession
 
 __all__ = [
+    "Blob",
+    "Blobs",
     # Full client (OSS + Pro REST coverage) — use this in new code
     "AgentOvenClient",
     "AgentOvenAPIError",
     "AudioModalityError",
+    "OidcSigningRequired",
+    "DatasetExport",
     "RealtimeToken",
+    "KITCHEN_ROLES",
+    "PERSON_ROLES",
+    "SIGNING_GATES",
+    "SIGNING_TOKEN_HEADER",
     "RealtimeError",
     "RealtimeEvent",
     "RealtimeSession",

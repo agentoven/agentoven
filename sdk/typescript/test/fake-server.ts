@@ -11,11 +11,17 @@ export interface Recorded {
 export class FakeControlPlane {
   requests: Recorded[] = [];
   private routes = new Map<string, { status: number; body: unknown }>();
+  private rawRoutes = new Map<string, { status: number; text: string; headers: Record<string, string> }>();
   private server!: Server;
   url = '';
 
   reply(method: string, path: string, body: unknown, status = 200): void {
     this.routes.set(`${method} ${path}`, { status, body });
+  }
+
+  /** A reply that is not one JSON document (an NDJSON export), with the headers it carries. */
+  replyRaw(method: string, path: string, text: string, headers: Record<string, string> = {}, status = 200): void {
+    this.rawRoutes.set(`${method} ${path}`, { status, text, headers });
   }
 
   get last(): Recorded {
@@ -34,6 +40,12 @@ export class FakeControlPlane {
           headers: req.headers,
           body: raw ? JSON.parse(raw) : undefined,
         });
+        const raw_ = this.rawRoutes.get(`${req.method} ${req.url}`);
+        if (raw_) {
+          res.writeHead(raw_.status, { 'Content-Type': 'application/x-ndjson', ...raw_.headers });
+          res.end(raw_.text);
+          return;
+        }
         const hit = this.routes.get(`${req.method} ${req.url}`) ?? { status: 404, body: { error: 'no route' } };
         const payload = JSON.stringify(hit.body);
         res.writeHead(hit.status, { 'Content-Type': 'application/json' });

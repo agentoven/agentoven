@@ -94,8 +94,14 @@ export {
 export type { AttachmentOptions, AudioClip, AudioInput, ContentPart, ContentPartType, MediaRef } from './media.js';
 
 // Pro REST client
-export { ProClient, AgentOvenAPIError, AudioModalityError } from './pro-client.js';
-export type { TraceListFilters, TraceView, TraceTimeline, TimelineSpan, TraceAudit } from './pro-client.js';
+export { ProClient, AgentOvenAPIError, AudioModalityError, OidcSigningRequired, SIGNING_TOKEN_HEADER, SIGNING_GATES, KITCHEN_ROLES, PERSON_ROLES } from './pro-client.js';
+export type {
+  TraceListFilters, TraceView, TraceTimeline, TimelineSpan, TraceAudit,
+  Signing, SigningChallenge, SigningTokenReply, SignatureRecord, ApproverPolicy,
+  ReplayEdits, ReplayVariant, ReplayToolMode, ReplayCallResult, ReplayRunResult, PreparedLiveReplay, SpanCapture,
+  Dataset, DatasetSettings, DatasetCase, DatasetExport, KitchenBinding,
+  SecretProvider, Secret, CreateSecretRequest, UpdateSecretRequest, SecretProbe, RotateSecretResult, SecretBinding, SecretMigrationPlan,
+} from './pro-client.js';
 
 // Re-export all types
 export type {
@@ -121,12 +127,14 @@ export type {
   Ingredient as IngredientType,
   Kitchen,
   KitchenMember,
+  KitchenRole,
   NotificationChannel,
   Promotion,
   Provider,
   RealtimeToken,
   Recipe as RecipeType,
   RegisterAgentOptions,
+  RegisterToolRequest,
   SendSessionMessageOptions,
   Schedule,
   Scenario,
@@ -144,6 +152,7 @@ export type {
   TestRun,
   TestRunSummary,
   TestSuite,
+  Tool,
   TraceabilityMatrix,
   UpdateProviderRequest,
   UpdateProviderResponse,
@@ -156,3 +165,8 @@ export type {
   IngredientKind as IngredientKindType,
 } from './types.js';
 
+
+export { Blobs, blobPart } from './blobs.js';
+export type { Blob, BlobPart, BlobsOptions, UploadOptions } from './blobs.js';
+export { Tasks, TASK_PAUSE_GATES } from './tasks.js';
+export type { Task, TaskStatus, PauseKind, StartedTask, StartTaskOptions, ResumeTaskOptions, BudgetExtension, TaskEvent, WaitOptions, TasksOptions } from './tasks.js';
