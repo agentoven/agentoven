@@ -180,6 +180,15 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 			})
 		})
 
+		// Blobs — upload a file once, name it in messages by blob_ref. Kitchen-scoped: another
+		// kitchen's ref answers 404. Storing bytes costs disk, so every route needs an identity.
+		r.Route("/blobs", func(r chi.Router) {
+			r.Use(middleware.RequireIdentity)
+			r.Post("/", h.UploadBlob)
+			r.Get("/{ref}", h.GetBlob)
+			r.Delete("/{ref}", h.DeleteBlob)
+		})
+
 		// Model Router
 		r.Route("/models", func(r chi.Router) {
 			r.Post("/route", h.RouteModel)
@@ -436,8 +445,8 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 	lfSecretKey := os.Getenv("LANGFUSE_SECRET_KEY")
 	lfBridge := langfuse.NewBridge(h.Store, lfBaseURL, lfPublicKey, lfSecretKey)
 	r.Route("/langfuse", func(r chi.Router) {
-		r.Post("/ingest", lfBridge.HandleIngest) // import LangFuse traces
-		r.Post("/export", lfBridge.HandleExport) // export AgentOven traces
+		r.Post("/ingest", lfBridge.HandleIngest)                             // import LangFuse traces
+		r.With(h.RequireTraceContent).Post("/export", lfBridge.HandleExport) // export AgentOven traces (their bodies)
 	})
 
 	// PicoClaw adapter — IoT agent management, A2A relay, chat gateways, heartbeat

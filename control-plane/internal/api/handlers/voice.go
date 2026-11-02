@@ -50,6 +50,18 @@ func (h *Handlers) speechEngineFor(ctx context.Context, agent *models.Agent) (au
 	return d.SpeechEngine(prov)
 }
 
+// audioPassesThrough reports whether an audio part should go to the model as
+// audio: the agent's provider offers no speech-to-text, and its model takes
+// audio input itself. A provider with a speech engine always transcribes, so
+// every model on it can take a voice turn.
+func (h *Handlers) audioPassesThrough(ctx context.Context, agent *models.Agent) bool {
+	prov, model, err := h.agentProvider(ctx, agent)
+	if err != nil || h.Router.SpeechFor(prov) != nil {
+		return false
+	}
+	return h.Router.AcceptsAudio(prov, model)
+}
+
 func transcribeAudioInput(ctx context.Context, engine audio.Engine, in *audioInput) (string, error) {
 	if in.Data == "" {
 		return "", fmt.Errorf("audio.data is required")
@@ -77,8 +89,22 @@ func (h *Handlers) transcribeAudioParts(ctx context.Context, agent *models.Agent
 			rest = append(rest, p)
 			continue
 		}
-		if p.Media.Data == "" {
-			return "", nil, fmt.Errorf("audio parts must carry inline data (base64) for transcription")
+		if h.audioPassesThrough(ctx, agent) {
+			// The provider has no speech-to-text, but its model takes audio itself (Gemini):
+			// the part goes to the model as audio.
+			rest = append(rest, p)
+			continue
+		}
+		data := p.Media.Data
+		if data == "" && p.Media.BlobRef != "" && h.Router != nil && h.Router.Blobs() != nil {
+			blob, err := h.Router.Blobs().Get(ctx, agent.Kitchen, p.Media.BlobRef)
+			if err != nil {
+				return "", nil, fmt.Errorf("blob not found: %s", p.Media.BlobRef)
+			}
+			data = base64.StdEncoding.EncodeToString(blob.Data)
+		}
+		if data == "" {
+			return "", nil, fmt.Errorf("audio parts must carry inline data (base64) or a blob_ref for transcription")
 		}
 		if engine == nil {
 			var err error
@@ -87,7 +113,7 @@ func (h *Handlers) transcribeAudioParts(ctx context.Context, agent *models.Agent
 				return "", nil, err
 			}
 		}
-		text, err := transcribeAudioInput(ctx, engine, &audioInput{Data: p.Media.Data, MimeType: p.Media.MimeType})
+		text, err := transcribeAudioInput(ctx, engine, &audioInput{Data: data, MimeType: p.Media.MimeType})
 		if err != nil {
 			return "", nil, fmt.Errorf("could not transcribe audio: %w", err)
 		}
@@ -123,4 +149,21 @@ func (h *Handlers) addSpeech(w http.ResponseWriter, ctx context.Context, agent *
 		"mime_type": mime,
 	}
 	return true
+}
+
+// audioExt is the file extension for a synthesized audio MIME type.
+func audioExt(mime string) string {
+	switch strings.ToLower(mime) {
+	case "audio/mpeg", "audio/mp3":
+		return ".mp3"
+	case "audio/wav", "audio/x-wav", "audio/wave":
+		return ".wav"
+	case "audio/ogg", "audio/opus":
+		return ".ogg"
+	case "audio/flac":
+		return ".flac"
+	case "audio/aac":
+		return ".aac"
+	}
+	return ".bin"
 }

@@ -148,6 +148,9 @@ type Executor struct {
 	subagents contracts.SubagentRuntime
 	// hostedInvoke runs a message on a hosted agent's own process (see SetHostedInvoker).
 	hostedInvoke func(ctx context.Context, agent *models.Agent, message string) (string, error)
+	// boundary holds a delegation to the target's own guardrails and reaches framework-native
+	// agents (see SetDelegationBoundary).
+	boundary *DelegationBoundary
 	// audit, when set, is told about the events of a run that someone accountable for its
 	// spend would want on record: it paused at its budget, a person raised the budget, it
 	// stopped for repeating itself. See SetAudit.
@@ -425,7 +428,7 @@ func (e *Executor) buildSlidingContext(ctx context.Context, agent *models.Agent,
 
 	// Over budget — compress older messages into a summary
 	systemTokens := ctxwindow.EstimateTokens(systemMsg.Content)
-	userTokens := ctxwindow.EstimateTokens(userMsg.Content)
+	userTokens := ctxwindow.EstimateMessageTokens(userMsg)
 	reservedTokens := systemTokens + userTokens + 500 // 500 tokens buffer for summary overhead
 
 	// Find how many recent messages we can keep within budget
@@ -435,7 +438,7 @@ func (e *Executor) buildSlidingContext(ctx context.Context, agent *models.Agent,
 
 	// Walk backwards through session.Messages to keep recent ones
 	for i := len(session.Messages) - 1; i >= 0; i-- {
-		msgTokens := ctxwindow.EstimateTokens(session.Messages[i].Content)
+		msgTokens := ctxwindow.EstimateMessageTokens(session.Messages[i])
 		if recentTokens+msgTokens > availableForRecent {
 			break
 		}
@@ -851,6 +854,18 @@ func (e *Executor) executeDelegation(ctx context.Context, agent *models.Agent, t
 		}
 	}
 
+	// The target is held to its own rules: what the delegating agent's model wrote is input to it.
+	if b := e.boundary; b != nil && b.Input != nil {
+		if err := b.Input(ctx, target, message); err != nil {
+			return ToolResult{
+				ToolCallID: tc.ID,
+				Name:       tc.Name,
+				Content:    fmt.Sprintf("Error delegating to '%s': %s", targetAgent, err.Error()),
+				IsError:    true,
+			}
+		}
+	}
+
 	// For managed agents, resolve and execute directly
 	if target.IsManaged() {
 		resolved := target.ResolvedConfig
@@ -894,6 +909,16 @@ func (e *Executor) executeDelegation(ctx context.Context, agent *models.Agent, t
 			} else {
 				response, delegateErr = e.hostedInvoke(delegateCtx, target, message)
 			}
+		} else if target.IsFrameworkNative() {
+			// Likewise a LangChain, LangGraph or Deep Agents agent: its loop is its process. Running
+			// its definition on the Go loop would answer from the raw model and skip the agent.
+			// What its process spends is not charged to the delegating run here; the metered model
+			// gateway counts it against the process's own run.
+			if e.boundary == nil || e.boundary.Native == nil {
+				delegateErr = fmt.Errorf("agents that run in their own framework process cannot be delegated to here")
+			} else {
+				response, delegateErr = e.boundary.Native(delegateCtx, target, message)
+			}
 		} else {
 			response, childTrace, delegateErr = e.Execute(delegateCtx, target, message, resolved, nil, false)
 		}
@@ -909,6 +934,20 @@ func (e *Executor) executeDelegation(ctx context.Context, agent *models.Agent, t
 				IsError:    true,
 				ChildUsage: childUsage,
 			}
+		}
+
+		if b := e.boundary; b != nil && b.Output != nil {
+			out, oerr := b.Output(ctx, target, response)
+			if oerr != nil {
+				return ToolResult{
+					ToolCallID: tc.ID,
+					Name:       tc.Name,
+					Content:    fmt.Sprintf("Error delegating to '%s': %s", targetAgent, oerr.Error()),
+					IsError:    true,
+					ChildUsage: childUsage,
+				}
+			}
+			response = out
 		}
 
 		log.Info().

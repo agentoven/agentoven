@@ -97,6 +97,7 @@ type Manager struct {
 	gateway         ModelGateway // optional: fronts the model providers a pod calls
 	keys            ProviderKeys // reads a provider's key when a process starts
 	bots            contracts.BotControl
+	holdsKey        map[string]string // processKey -> provider whose own key the process was started with (guarded by mu)
 }
 
 // NewManager creates a new ProcessManager with all executors initialized.
@@ -270,6 +271,10 @@ func (m *Manager) Start(ctx context.Context, agent *models.Agent) (*models.Proce
 		return nil, fmt.Errorf("unknown execution mode: %s", mode)
 	}
 
+	if err == nil && mode == models.ExecModeDocker {
+		err = m.confineDockerBot(ctx, info)
+	}
+
 	if err != nil {
 		m.ports.Release(port)
 		if launch != nil {
@@ -286,6 +291,7 @@ func (m *Manager) Start(ctx context.Context, agent *models.Agent) (*models.Proce
 	info.Status = models.ProcessRunning
 	m.mu.Lock()
 	m.processes[key] = info
+	m.noteKeyHolderLocked(key, agent, env)
 	m.mu.Unlock()
 
 	log.Info().
@@ -296,6 +302,38 @@ func (m *Manager) Start(ctx context.Context, agent *models.Agent) (*models.Proce
 		Msg("Agent process started")
 
 	return info, nil
+}
+
+// noteKeyHolderLocked remembers whether the process just started was given its provider's own key
+// (as opposed to a model-gateway credential, or nothing), so that a rotation of that key can find it.
+func (m *Manager) noteKeyHolderLocked(key string, agent *models.Agent, env map[string]string) {
+	if env["AGENT_API_KEY"] == "" || env["AGENT_MODEL_GATEWAY"] != "" {
+		delete(m.holdsKey, key)
+		return
+	}
+	if m.holdsKey == nil {
+		m.holdsKey = map[string]string{}
+	}
+	provider, _, _ := modelOf(agent)
+	m.holdsKey[key] = provider
+}
+
+// RunningOnProvider lists the running processes that were started with the given provider's own key
+// in their environment, and so keep using the key they started with after the provider's key changes.
+// A process that talks to the model gateway holds no provider key and is not listed. The returned
+// values are copies.
+func (m *Manager) RunningOnProvider(kitchen, provider string) []models.ProcessInfo {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []models.ProcessInfo
+	for key, p := range m.holdsKey {
+		info, ok := m.processes[key]
+		if p != provider || !ok || info.Kitchen != kitchen || info.Status != models.ProcessRunning {
+			continue
+		}
+		out = append(out, *info)
+	}
+	return out
 }
 
 // Stop terminates a running agent process.
@@ -337,6 +375,7 @@ func (m *Manager) Stop(ctx context.Context, kitchen, agentName string) error {
 
 	m.mu.Lock()
 	info.Status = models.ProcessStopped
+	delete(m.holdsKey, key)
 	if err != nil {
 		info.Error = err.Error()
 	}

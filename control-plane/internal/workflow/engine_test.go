@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/agentoven/agentoven/control-plane/internal/store"
+	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 )
 
@@ -1469,6 +1470,12 @@ func TestApproverRoles(t *testing.T) {
 	for i, c := range cases {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
+			// The pre-signature check an edition runs (contracts.ApproverConstraints.Admits) must give the
+			// engine's answer for the same step and approver.
+			pre := &contracts.ApproverConstraints{Emails: c.step.ApproverEmails, Roles: c.step.ApproverRoles, Domain: c.step.ApproverDomain, SameTenant: c.step.RequireSameTenant}
+			if got, why := pre.Admits(c.who.Email, c.who.Role); got != c.allow {
+				t.Fatalf("contracts.Admits = %v (%s), the engine says %v", got, why, c.allow)
+			}
 			eng := setupTestEngine(t, nil)
 			ctx := context.Background()
 			id := fmt.Sprintf("gate-roles-%d", i)

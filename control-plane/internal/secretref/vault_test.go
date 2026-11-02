@@ -69,3 +69,15 @@ func TestVaultRefWithoutAVaultOrAName(t *testing.T) {
 		t.Error("nil resolver has no vault")
 	}
 }
+
+func TestResolveForReadsTheNamedKitchenNotTheDefault(t *testing.T) {
+	v := fakeVault{"default/key": "default-value", "acme/key": "acme-value"}
+	r := New()
+	r.SetVault(v)
+	if got, err := r.ResolveFor(context.Background(), "acme", "vault://key"); err != nil || got != "acme-value" {
+		t.Fatalf("acme: %q %v", got, err)
+	}
+	if _, err := r.ResolveFor(context.Background(), "other", "vault://key"); err == nil {
+		t.Fatal("a kitchen without the credential fell back to another kitchen's")
+	}
+}

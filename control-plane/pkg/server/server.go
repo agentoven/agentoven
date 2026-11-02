@@ -278,10 +278,15 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 	if blobDir == "" {
 		blobDir = os.TempDir() + "/agentoven-blobs"
 	}
-	if bs, bErr := blobstore.NewLocalStore(blobDir); bErr != nil {
+	// Size and retention: AGENTOVEN_BLOB_MAX_BYTES (default 25 MB per blob and per upload) and
+	// AGENTOVEN_BLOB_TTL_DAYS (default 7; a blob nobody reads or writes for that long is removed,
+	// 0 keeps blobs forever). Pro, which can swap the store through Router.SetBlobStore, starts
+	// the same sweeper for its own store with blobstore.StartJanitorFromEnv.
+	if bs, bErr := blobstore.NewLocalStore(blobDir, blobstore.WithMaxBlobBytes(blobstore.MaxBytesFromEnv())); bErr != nil {
 		log.Warn().Err(bErr).Str("dir", blobDir).Msg("Blob store unavailable — blob_ref media parts will be refused")
 	} else {
 		mr.SetBlobStore(bs)
+		blobstore.StartJanitorFromEnv(ctx, bs)
 	}
 	log.Info().Msg("✅ Model catalog initialized")
 

@@ -1,6 +1,7 @@
 package process
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -238,4 +239,24 @@ func hostCIDR(ip net.IP) string {
 		return v4.String() + "/32"
 	}
 	return ip.String() + "/128"
+}
+
+// confineDockerBot applies the bot manager's network confinement to a container that just started.
+// It does nothing for a sandbox that did not ask for it. If the confinement cannot be applied the
+// container is removed and the start fails: a bot is never left running with the egress it was
+// supposed to lose.
+func (m *Manager) confineDockerBot(ctx context.Context, info *models.ProcessInfo) error {
+	if info.Sandbox == nil || !info.Sandbox.NetworkLockdown {
+		return nil
+	}
+	c, ok := m.bots.(contracts.ContainerConfiner)
+	if !ok {
+		_ = m.docker.Stop(ctx, info)
+		return fmt.Errorf("the sandbox asks for network confinement but the bot manager cannot apply it")
+	}
+	if err := c.ConfineContainer(ctx, info.ContainerID, *info.Sandbox); err != nil {
+		_ = m.docker.Stop(ctx, info)
+		return fmt.Errorf("could not confine the sandbox's network, so it was removed: %w", err)
+	}
+	return nil
 }

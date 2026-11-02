@@ -109,3 +109,67 @@ func TestRedactionKeepsTheCredentialNameAndHidesEverythingElse(t *testing.T) {
 		t.Error("redaction must return a copy and never alter the stored tool")
 	}
 }
+
+type policyCreds struct {
+	creds
+	deny  error
+	got   toolauth.Use
+	reads int
+}
+
+func (p *policyCreds) GetKitchenCredential(ctx context.Context, k, n string) (*models.KitchenCredential, error) {
+	p.reads++
+	return p.creds.GetKitchenCredential(ctx, k, n)
+}
+func (p *policyCreds) CheckUse(_ context.Context, _, _ string, u toolauth.Use) error {
+	p.got = u
+	return p.deny
+}
+
+func TestResolveForAsksThePolicyBeforeReadingTheValue(t *testing.T) {
+	p := &policyCreds{creds: creds{"kit/k": "tok"}}
+	cfg := map[string]interface{}{"type": "bearer", "credential_ref": "k"}
+	got, err := toolauth.ResolveFor(context.Background(), p, "kit", toolauth.Use{Skill: "s", Endpoint: "https://api.example/x"}, cfg)
+	if err != nil || got["token"] != "tok" || p.got.Skill != "s" || p.got.Endpoint != "https://api.example/x" {
+		t.Fatalf("%v %v %+v", got, err, p.got)
+	}
+	p.deny, p.reads = errors.New("host not allowed"), 0
+	if _, err := toolauth.ResolveFor(context.Background(), p, "kit", toolauth.Use{}, cfg); err == nil || p.reads != 0 {
+		t.Errorf("a refused use must not load the value: err %v reads %d", err, p.reads)
+	}
+	// A store with no policy allows the use, and a literal token needs no policy.
+	if _, err := toolauth.ResolveFor(context.Background(), creds{"kit/k": "tok"}, "kit", toolauth.Use{}, cfg); err != nil {
+		t.Error(err)
+	}
+	if got, err := toolauth.ResolveFor(context.Background(), p, "kit", toolauth.Use{}, map[string]interface{}{"type": "bearer", "token": "lit"}); err != nil || got["token"] != "lit" {
+		t.Errorf("literal: %v %v", got, err)
+	}
+}
+
+func TestAServerThatEchoesTheCredentialDoesNotHandItToTheModel(t *testing.T) {
+	resolved := map[string]interface{}{"type": "bearer", "token": "tok-SECRET-123456"}
+	res := &models.MCPToolResult{Content: []models.MCPContent{
+		{Type: "text", Text: "echo: Authorization: Bearer tok-SECRET-123456 and again tok-SECRET-123456"},
+		{Type: "text", Text: "nothing to see"},
+	}}
+	out, err := toolauth.ScrubResult(res, errors.New("401 for token tok-SECRET-123456"), resolved)
+	if strings.Contains(out.Content[0].Text, "tok-SECRET") || strings.Contains(err.Error(), "tok-SECRET") {
+		t.Fatalf("the credential survived: %q / %v", out.Content[0].Text, err)
+	}
+	if out.Content[0].Text != "echo: Authorization: Bearer [redacted] and again [redacted]" || out.Content[1].Text != "nothing to see" {
+		t.Errorf("%q", out.Content[0].Text)
+	}
+	// An api-key credential too; a short value is left alone (it would mangle ordinary text); no credential, no change.
+	out, _ = toolauth.ScrubResult(&models.MCPToolResult{Content: []models.MCPContent{{Text: "k=abcdefghij"}}}, nil, map[string]interface{}{"type": "api-key", "key": "abcdefghij"})
+	if out.Content[0].Text != "k=[redacted]" {
+		t.Errorf("api key: %q", out.Content[0].Text)
+	}
+	short, _ := toolauth.ScrubResult(&models.MCPToolResult{Content: []models.MCPContent{{Text: "ab is fine"}}}, nil, map[string]interface{}{"token": "ab"})
+	if short.Content[0].Text != "ab is fine" {
+		t.Errorf("short: %q", short.Content[0].Text)
+	}
+	same, e := toolauth.ScrubResult(nil, nil, nil)
+	if same != nil || e != nil {
+		t.Error("nil in, nil out")
+	}
+}

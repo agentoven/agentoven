@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +39,7 @@ import (
 	"github.com/agentoven/agentoven/control-plane/internal/store"
 	inttelemetry "github.com/agentoven/agentoven/control-plane/internal/telemetry"
 	"github.com/agentoven/agentoven/control-plane/internal/workflow"
+	"github.com/agentoven/agentoven/control-plane/pkg/audio"
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	pkgmw "github.com/agentoven/agentoven/control-plane/pkg/middleware"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
@@ -52,6 +54,13 @@ var recipeNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,62}$`)
 
 // Handlers holds all handler dependencies.
 type Handlers struct {
+	// traceContentGuard says whether the caller may read trace and span bodies (nil: everyone who reads a trace).
+	traceContentGuard func(*http.Request) bool
+
+	// kitchenOwnerCheck says whether the caller administers the named kitchen (nil: the role alone
+	// decides, via contracts.IsKitchenOwner). Pro installs a membership-aware check (ADR-0040).
+	kitchenOwnerCheck func(r *http.Request, kitchen string) bool
+
 	Store      store.Store
 	Router     *router.ModelRouter
 	MCPGateway *mcpgw.Gateway
@@ -69,6 +78,10 @@ type Handlers struct {
 	// SecretResolver resolves secret references and, when a vault is installed (Pro), is where
 	// provider keys are kept instead of in the provider record. Nil-safe: no vault means none.
 	SecretResolver *secretref.Resolver
+	// KeyRotation, when set, is told after a provider's key has changed, so a hosted process that
+	// started with the old one can be restarted (Pro installs one). Nil leaves such a process on the
+	// key it started with until it is next started, which is the community behaviour.
+	KeyRotation ProviderKeyObserver
 	// AuthorizeBudgetExtension, when set, decides whether the caller may raise a run's budget
 	// (a resume that carries an extension). Raising a cap is spending someone else's money, so
 	// an edition with roles can keep it to the roles that own that decision. An error refuses
@@ -218,6 +231,7 @@ func New(s store.Store, mr *router.ModelRouter, gw *mcpgw.Gateway, wf *workflow.
 		SkillUploads:    skills.NewUploadStore(),
 	}
 	exec.SetAudit(h.auditRun)
+	h.InstallDelegationBoundary()
 	h.startTaskRecovery()
 	h.RegisterOwnDecisionGates()
 	return h
@@ -414,7 +428,8 @@ func (h *Handlers) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		agent.Guardrails = req.Guardrails
 	}
 	agent.UpdatedAt = time.Now().UTC()
-	agent.VersionBump = "patch" // config edit → bump patch version
+	// An edit is a draft: it does not change the version. The version moves when the agent is baked
+	// with a configuration that differs from the one baked before (models.VersionBumpBake).
 
 	if err := h.Store.UpdateAgent(r.Context(), agent); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
@@ -518,9 +533,10 @@ func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
 		agent.Version = req.Version
 		agent.VersionBump = "" // no auto-bump, caller controls
 	} else {
-		// Bake is a status transition only — do not bump the version.
-		// Version bumps happen on UpdateAgent (patch) and RecookAgent (minor).
-		agent.VersionBump = ""
+		// The store decides: the first bake keeps the registered version (0.1.0), a bake whose
+		// configuration differs from the last one takes the next minor version and keeps the old
+		// one, and a bake that changes nothing keeps its version.
+		agent.VersionBump = models.VersionBumpBake
 	}
 
 	// ── Resolve target environment ──────────────────────────────────────────
@@ -1150,7 +1166,7 @@ func (h *Handlers) RecookAgent(w http.ResponseWriter, r *http.Request) {
 		agent.Version = req.Version
 		agent.VersionBump = ""
 	} else {
-		agent.VersionBump = "minor"
+		agent.VersionBump = models.VersionBumpBake
 	}
 
 	if err := h.Store.UpdateAgent(r.Context(), agent); err != nil {
@@ -1616,7 +1632,9 @@ func recipeExecContext(r *http.Request) context.Context {
 	if id := pkgmw.GetIdentity(r.Context()); id != nil && id.Subject != "" {
 		execCtx = workflow.WithTriggeredBy(execCtx, id.Subject)
 	}
-	return execCtx
+	// The request is there for the synchronous start of the run, where a decision that needs the
+	// caller's signature (skipping an approval gate) is taken. The run itself does not use it.
+	return contracts.WithRequest(execCtx, r)
 }
 
 // RerunRecipeRun starts a recipe again with the input (and environment) of an earlier run: "run again".
@@ -1826,13 +1844,50 @@ func (h *Handlers) ReleaseWait(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]interface{}{"run_id": runID, "step": stepName, "released": true})
 }
 
+// endLostRun marks an unfinished run that no process holds as canceled. It reports whether it did.
+func (h *Handlers) endLostRun(r *http.Request, runID string) bool {
+	run, err := h.Store.GetRecipeRun(r.Context(), runID)
+	if err != nil || run == nil {
+		return false
+	}
+	if kitchen := middleware.GetKitchen(r.Context()); run.Kitchen != "" && run.Kitchen != kitchen {
+		return false
+	}
+	switch run.Status {
+	case models.RecipeRunSubmitted, models.RecipeRunRunning, models.RecipeRunPaused:
+	default:
+		return false
+	}
+	now := time.Now().UTC()
+	run.Status, run.CompletedAt = models.RecipeRunCanceled, &now
+	if !run.StartedAt.IsZero() {
+		run.DurationMs = now.Sub(run.StartedAt).Milliseconds()
+	}
+	run.Error = "canceled by a person; no process was holding this run (it was most likely lost when the server restarted)"
+	for i := range run.StepResults {
+		if run.StepResults[i].Status == "running" || run.StepResults[i].Status == "waiting" {
+			run.StepResults[i].Status = "canceled"
+		}
+	}
+	if err := h.Store.UpdateRecipeRun(r.Context(), run); err != nil {
+		return false
+	}
+	return true
+}
+
 // CancelRecipeRun cancels a running recipe execution.
 func (h *Handlers) CancelRecipeRun(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runId")
 
 	if ok := h.Workflow.CancelRun(runID); !ok {
-		respondError(w, http.StatusNotFound, "Run not found or already completed: "+runID)
-		return
+		// No process holds this run. If the store still shows it as unfinished, the process that held it is
+		// gone (a restart): the person asked for it to end, so it ends in the record instead of staying
+		// "waiting" for good. A run another replica is still executing would also be marked; cancelling is
+		// the person's explicit act.
+		if !h.endLostRun(r, runID) {
+			respondError(w, http.StatusNotFound, "Run not found or already completed: "+runID)
+			return
+		}
 	}
 
 	respondJSON(w, http.StatusOK, map[string]string{
@@ -2096,9 +2151,13 @@ func (h *Handlers) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	// is_default is a plain bool on the model, so "false" and "not sent" look
 	// the same there; only change it when the caller actually sent it.
 	var sent struct {
-		IsDefault *bool `json:"is_default"`
+		IsDefault        *bool   `json:"is_default"`
+		TLSSkipVerify    *bool   `json:"tls_skip_verify"`
+		RotationStrategy *string `json:"rotation_strategy"`
 	}
 	_ = json.Unmarshal(body, &sent)
+	keysBefore := providerKeySignature(provider)
+	oldOwned := ownedKeyNames(provider) // before a pool in the request replaces the stored one
 
 	if req.Kind != "" {
 		provider.Kind = req.Kind
@@ -2132,9 +2191,27 @@ func (h *Handlers) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	if sent.IsDefault != nil {
 		provider.IsDefault = *sent.IsDefault
 	}
+	if sent.TLSSkipVerify != nil {
+		provider.TLSSkipVerify = *sent.TLSSkipVerify
+	}
+	if sent.RotationStrategy != nil {
+		if !validRotationStrategy(*sent.RotationStrategy) {
+			respondError(w, http.StatusBadRequest, "rotation_strategy must be round-robin, random or weighted")
+			return
+		}
+		provider.RotationStrategy = *sent.RotationStrategy
+	}
+	// A key pool sent in full replaces the stored one; entries read back masked keep their stored key.
+	if req.APIKeys != nil {
+		pool, err := mergePoolUpdate(req.APIKeys, provider.APIKeys)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		provider.APIKeys = pool
+	}
 	// Point the provider at an external secret (k8s:// or env://) instead of keeping a key in the
 	// database. Sending nothing leaves it as it is.
-	oldOwned := ownedKeyNames(provider)
 	if req.SecretRef != "" {
 		if err := h.checkVaultRef(r.Context(), kitchen, req.SecretRef); err != nil {
 			respondError(w, http.StatusBadRequest, err.Error())
@@ -2191,6 +2268,11 @@ func (h *Handlers) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 		if !kept[n] {
 			h.dropProviderKeys(r.Context(), provider, n)
 		}
+	}
+	// A new key value was written (including a rotation in place, which leaves the reference as it
+	// was), or the keys the provider reads were changed: processes holding the old one need telling.
+	if h.KeyRotation != nil && (len(sealedAll) > 0 || providerKeySignature(provider) != keysBefore) {
+		h.KeyRotation.ProviderKeyChanged(context.WithoutCancel(r.Context()), kitchen, name)
 	}
 
 	// If the model list shrank, burn any ready/active agents whose model was removed.
@@ -2629,6 +2711,9 @@ func (h *Handlers) GetTrace(w http.ResponseWriter, r *http.Request) {
 	if scores, err := h.Store.ListTraceScores(r.Context(), traceID); err == nil {
 		trace.Scores = scores
 	}
+	if !h.canReadTraceContent(r) {
+		trace.WithholdContent()
+	}
 	respondJSON(w, http.StatusOK, trace)
 }
 
@@ -2661,6 +2746,11 @@ func (h *Handlers) ListSpans(w http.ResponseWriter, r *http.Request) {
 	if spans == nil {
 		spans = []models.Span{}
 	}
+	if !h.canReadTraceContent(r) {
+		for i := range spans {
+			spans[i].WithholdContent()
+		}
+	}
 	respondJSON(w, http.StatusOK, spans)
 }
 
@@ -2690,6 +2780,9 @@ func (h *Handlers) GetSpan(w http.ResponseWriter, r *http.Request) {
 	if trace.Kitchen != "" && trace.Kitchen != kitchen {
 		respondError(w, http.StatusNotFound, "span not found")
 		return
+	}
+	if !h.canReadTraceContent(r) {
+		span.WithholdContent()
 	}
 	respondJSON(w, http.StatusOK, span)
 }
@@ -2820,6 +2913,7 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 			Role  string `json:"role"`
 			Parts []struct {
 				Type string          `json:"type"`
+				Kind string          `json:"kind"` // later A2A revisions name the part type "kind"
 				Text string          `json:"text"`
 				File *a2aFilePart    `json:"file,omitempty"`
 				Data json.RawMessage `json:"data,omitempty"`
@@ -2838,6 +2932,10 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 		// configuration.blocking=false asks for the task back at once, not its answer.
 		Configuration struct {
 			Blocking *bool `json:"blocking"`
+			// VoiceOutput asks for the reply spoken as well: it comes back as an audio FilePart
+			// artifact (cascaded TTS on the agent's own provider). Voice picks the TTS voice.
+			VoiceOutput bool   `json:"voice_output"`
+			Voice       string `json:"voice"`
 		} `json:"configuration"`
 	}
 	if err := json.Unmarshal(params, &taskReq); err != nil {
@@ -2864,18 +2962,32 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 	var userMessage string
 	var userParts []models.ContentPart
 	for _, part := range taskReq.Message.Parts {
-		switch part.Type {
+		ptype := part.Type
+		if ptype == "" {
+			ptype = part.Kind
+		}
+		switch ptype {
 		case "text", "":
 			userMessage += part.Text
 		case "file":
-			if part.File == nil {
-				continue
+			if part.File == nil || (part.File.Bytes == "" && part.File.URI == "" && part.File.BlobRef == "") {
+				a2aRPCError(w, rpcID, -32602, "A file part needs file.bytes (base64), file.uri or file.blob_ref (from POST /api/v1/blobs)", nil)
+				return
+			}
+			if part.File.MimeType == "" {
+				a2aRPCError(w, rpcID, -32602, "A file part needs file.mimeType", nil)
+				return
 			}
 			userParts = append(userParts, a2aFileToContentPart(part.File))
 		case "data":
 			if len(part.Data) > 0 {
 				userMessage += "\n" + string(part.Data)
 			}
+		default:
+			// A part the gateway does not understand is refused, not dropped: the agent
+			// would otherwise answer a different question than the one asked.
+			a2aRPCError(w, rpcID, -32602, "Unsupported message part type \""+ptype+"\"; use text, file or data", nil)
+			return
 		}
 	}
 
@@ -2998,6 +3110,24 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 			}
 			userParts = rest
 		}
+		if msg, ok := h.checkBlobRefs(r, kitchen, userParts); !ok {
+			a2aRPCError(w, rpcID, -32602, msg, nil)
+			return
+		}
+		var speaker audio.Speaker
+		if taskReq.Configuration.VoiceOutput {
+			if taskReq.Configuration.Blocking != nil && !*taskReq.Configuration.Blocking {
+				a2aRPCError(w, rpcID, -32602, "voice_output is only available on a blocking task", nil)
+				return
+			}
+			// Ask for the speech engine now, so an agent that cannot speak is refused before it runs.
+			eng, engErr := h.speechEngineFor(r.Context(), agent)
+			if engErr != nil {
+				a2aRPCError(w, rpcID, -32602, engErr.Error(), nil)
+				return
+			}
+			speaker = eng
+		}
 
 		// Guardrails: the workspace rules on top of the agent's own, on what comes in and
 		// (below) on what goes out — the same whether the agent runs in-process or in a
@@ -3062,16 +3192,24 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 
 		var response string
 		var status string
+		var failure string // why a failed task failed, so the caller is not left with a bare "failed"
+		var mediaRefused bool
 		var totalTokens int64
 		var costUSD float64
 		var usage *models.TokenUsage
 		var execTrace *executor.ExecutionTrace
 
 		if agent.IsFrameworkNative() {
-			// Framework-native: proxy to the running process
+			// Framework-native: proxy to the running process. It is sent text only, so a
+			// file part is refused rather than dropped.
+			if len(userParts) > 0 {
+				a2aRPCError(w, rpcID, -32602, "This agent runs its own framework and takes text only; send files to an agent that runs on AgentOven's own loop", nil)
+				return
+			}
 			resp, traceRecord, proxyErr := h.proxyToProcess(execCtx, agent, userMessage, nil, providerTLS, kitchen)
 			if proxyErr != nil {
 				status = "failed"
+				failure = proxyErr.Error()
 				log.Warn().Err(proxyErr).Str("agent", agentName).Str("task_id", taskID).Msg("A2A framework-native execution failed")
 			} else {
 				response = resp
@@ -3091,7 +3229,9 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 			execTrace = et
 			if execErr != nil {
 				status = "failed"
+				failure = execErr.Error()
 				log.Warn().Err(execErr).Str("agent", agentName).Str("task_id", taskID).Msg("A2A agent execution failed")
+				mediaRefused = router.IsMediaError(execErr)
 			} else {
 				status = "completed"
 				if execTrace != nil {
@@ -3133,6 +3273,9 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 			},
 			CreatedAt: initialTrace.CreatedAt,
 		}
+		if failure != "" {
+			trace.Metadata["error"] = failure
+		}
 		if execTrace != nil {
 			thinkingBlocks, thinkingTokens := summarizeThinking(execTrace)
 			if len(thinkingBlocks) > 0 {
@@ -3153,6 +3296,12 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 			a2aRPCError(w, rpcID, -32001, "Output blocked by guardrails", outputBlocked.Results)
 			return
 		}
+		if mediaRefused {
+			// The caller sent something the model cannot take: an invalid request, not a failed
+			// run, and the reason is the answer.
+			a2aRPCError(w, rpcID, -32602, failure, nil)
+			return
+		}
 
 		// Build result with artifacts and usage so callers get the full response
 		// in one round-trip — no poll cycle needed.
@@ -3168,19 +3317,36 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 				taskMeta["exec_trace"] = json.RawMessage(traceJSON)
 			}
 		}
+		taskStatus := map[string]interface{}{"state": status}
+		if status == "failed" && failure != "" {
+			taskStatus["message"] = map[string]interface{}{
+				"role":  "agent",
+				"parts": []map[string]string{{"type": "text", "text": failure}},
+			}
+		}
 		taskResult := map[string]interface{}{
 			"id":       taskID,
-			"status":   map[string]string{"state": status},
+			"status":   taskStatus,
 			"metadata": taskMeta,
 		}
 		if status == "completed" && response != "" {
-			taskResult["artifacts"] = []map[string]interface{}{
-				{
-					"parts": []map[string]interface{}{
-						{"type": "text", "text": response},
+			parts := []map[string]interface{}{{"type": "text", "text": response}}
+			if speaker != nil {
+				// The reply spoken, as a FilePart: the same cascaded TTS /invoke uses.
+				speech, mime, sErr := speaker.Speak(r.Context(), response, taskReq.Configuration.Voice)
+				if sErr != nil {
+					a2aRPCError(w, rpcID, -32603, "could not synthesize speech: "+sErr.Error(), nil)
+					return
+				}
+				parts = append(parts, map[string]interface{}{
+					"type": "file", "kind": "file",
+					"file": map[string]interface{}{
+						"name": "reply" + audioExt(mime), "mimeType": mime,
+						"bytes": base64.StdEncoding.EncodeToString(speech),
 					},
-				},
+				})
 			}
+			taskResult["artifacts"] = []map[string]interface{}{{"parts": parts}}
 		}
 		if totalTokens > 0 || costUSD > 0 {
 			taskResult["usage"] = map[string]interface{}{
@@ -4729,13 +4895,15 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		Audio           *audioInput       `json:"audio,omitempty"`            // spoken input, transcribed before the turn
 		VoiceOutput     bool              `json:"voice_output,omitempty"`     // also return the reply as speech
 		Voice           string            `json:"voice,omitempty"`            // TTS voice name, default "alloy"
+		// ContentParts attach images, PDFs, video or audio to the message (see models.ContentPart).
+		ContentParts []models.ContentPart `json:"content_parts,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.Message == "" && req.Audio == nil {
-		respondError(w, http.StatusBadRequest, "Request must include a non-empty 'message' or 'audio' field")
+	if req.Message == "" && req.Audio == nil && len(req.ContentParts) == 0 {
+		respondError(w, http.StatusBadRequest, "Request must include a non-empty 'message', 'audio' or 'content_parts' field")
 		return
 	}
 
@@ -4757,6 +4925,30 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 			req.Message = transcript
 		} else {
 			req.Message = req.Message + "\n" + transcript
+		}
+	}
+
+	// Attached media: spoken parts become text like req.Audio does, the rest (images,
+	// documents, video) goes to the model with the message.
+	var mediaParts []models.ContentPart
+	if len(req.ContentParts) > 0 {
+		spoken, rest, err := h.transcribeAudioParts(r.Context(), agent, req.ContentParts)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if spoken != "" {
+			transcript = strings.TrimSpace(transcript + " " + spoken)
+			req.Message = strings.TrimSpace(req.Message + "\n" + spoken)
+		}
+		mediaParts = rest
+		if msg, ok := h.checkBlobRefs(r, kitchen, mediaParts); !ok {
+			respondError(w, http.StatusNotFound, msg)
+			return
+		}
+		if len(mediaParts) > 0 && agent.IsFrameworkNative() {
+			respondError(w, http.StatusUnprocessableEntity, "this agent runs its own framework and takes text only; images, documents and other media can be sent to agents that run on AgentOven's own loop")
+			return
 		}
 	}
 
@@ -4842,7 +5034,9 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if agent.Process != nil && agent.Process.Status == models.ProcessRunning {
+	// A running pod is sent text only, so a message with media is answered by the in-process
+	// executor instead (as A2A does for these agents).
+	if agent.Process != nil && agent.Process.Status == models.ProcessRunning && len(mediaParts) == 0 {
 		hostedCtx, endRun := h.beginHostedRun(withThinking(withCallerSession(r.Context(), req.SessionID), req.ThinkingEnabled), agent)
 		response, traceRecord, err := h.proxyToProcess(hostedCtx, agent, req.Message, sanitizedVars, nil, kitchen)
 		outcome := endRun()
@@ -4893,11 +5087,16 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	// Execute the agentic loop
 	runCtx, _ := withRunTrace(r.Context())
 	r = r.WithContext(runCtx)
-	response, trace, err := h.Executor.Execute(r.Context(), agent, req.Message, resolved, sanitizedVars, req.ThinkingEnabled, req.SessionID)
+	response, trace, err := h.Executor.ExecuteMessage(r.Context(), agent,
+		models.ChatMessage{Role: "user", Content: req.Message, ContentParts: mediaParts}, resolved, sanitizedVars, req.ThinkingEnabled, req.SessionID)
 	if h.respondRunStopped(w, agentName, trace, err) {
 		return
 	}
 	if err != nil {
+		if router.IsMediaError(err) {
+			respondError(w, http.StatusUnprocessableEntity, "Execution failed: "+err.Error())
+			return
+		}
 		respondError(w, http.StatusBadGateway, "Execution failed: "+err.Error())
 		return
 	}
@@ -4995,8 +5194,10 @@ func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 		Variables       map[string]string `json:"variables,omitempty"`
 		ThinkingEnabled bool              `json:"thinking_enabled,omitempty"`
 		SessionID       string            `json:"session_id,omitempty"`
+		// ContentParts attach images, PDFs, video or audio to the message.
+		ContentParts []models.ContentPart `json:"content_parts,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Message == "" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.Message == "" && len(req.ContentParts) == 0) {
 		respondError(w, http.StatusBadRequest, "Request must include a non-empty 'message' field")
 		return
 	}
@@ -5019,6 +5220,28 @@ func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest,
 			fmt.Sprintf("Agent '%s' is in '%s' mode — use the A2A endpoint for external agents", agentName, agent.Mode))
 		return
+	}
+
+	// Attached media: spoken parts become text, the rest goes to the model with the message.
+	var mediaParts []models.ContentPart
+	if len(req.ContentParts) > 0 {
+		spoken, rest, err := h.transcribeAudioParts(r.Context(), agent, req.ContentParts)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if spoken != "" {
+			req.Message = strings.TrimSpace(req.Message + "\n" + spoken)
+		}
+		mediaParts = rest
+		if msg, ok := h.checkBlobRefs(r, kitchen, mediaParts); !ok {
+			respondError(w, http.StatusNotFound, msg)
+			return
+		}
+		if len(mediaParts) > 0 && agent.IsFrameworkNative() {
+			respondError(w, http.StatusUnprocessableEntity, "this agent runs its own framework and takes text only; images, documents and other media can be sent to agents that run on AgentOven's own loop")
+			return
+		}
 	}
 
 	gr, grOK := h.requireGuardrails(w, r, agent, agent.Guardrails)
@@ -5052,7 +5275,9 @@ func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if agent.Process != nil && agent.Process.Status == models.ProcessRunning {
+	// A running pod is sent text only, so a message with media is streamed from the
+	// in-process executor instead.
+	if agent.Process != nil && agent.Process.Status == models.ProcessRunning && len(mediaParts) == 0 {
 		sanitizedVars := req.Variables
 		if sanitizedVars == nil {
 			sanitizedVars = map[string]string{}
@@ -5130,7 +5355,8 @@ func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 
 	runCtx, _ := withRunTrace(r.Context())
 	r = r.WithContext(runCtx)
-	response, trace, err := h.Executor.ExecuteStream(r.Context(), agent, req.Message, resolved, sanitizedVars, req.ThinkingEnabled, writeEvent, req.SessionID)
+	response, trace, err := h.Executor.ExecuteStreamMessage(r.Context(), agent,
+		models.ChatMessage{Role: "user", Content: req.Message, ContentParts: mediaParts}, resolved, sanitizedVars, req.ThinkingEnabled, writeEvent, req.SessionID)
 	if held != nil && !h.releaseHeld(w, r, agent, gr, held, response) {
 		h.recordBlockedRun(r.Context(), agent, req.Message, trace)
 		return // blocked: the caller got a 403 and none of the reply
@@ -6347,11 +6573,17 @@ func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
 	if transcript != "" {
 		content = strings.TrimSpace(content + " " + transcript)
 	}
-	userMsg := models.ChatMessage{
+	// Media bytes live in the blob store; the session keeps a reference, so a long
+	// conversation about a PDF does not carry the PDF in every stored message.
+	if msg, ok := h.checkBlobRefs(r, kitchen, parts); !ok {
+		respondError(w, http.StatusNotFound, msg)
+		return
+	}
+	userMsg := h.Router.ExternalizeMedia(r.Context(), kitchen, models.ChatMessage{
 		Role:         "user",
 		Content:      content,
 		ContentParts: parts,
-	}
+	})
 	session.Messages = append(session.Messages, userMsg)
 
 	// ── Input Guardrails (Session) ──────────────────────────
@@ -6380,6 +6612,13 @@ func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
 	// A hosted framework agent (LangChain, LangGraph, Deep Agents, ...) answers with its
 	// own code. Never fall through to the raw model router for one.
 	if agent.IsFrameworkNative() {
+		if len(parts) > 0 {
+			// The hosted process is sent text only. Dropping the attachment would answer a
+			// different question than the one asked, so refuse it.
+			session.Messages = session.Messages[:len(session.Messages)-1]
+			respondError(w, http.StatusUnprocessableEntity, "this agent runs its own framework and takes text only; images, documents and other media can be sent to agents that run on AgentOven's own loop")
+			return
+		}
 		h.sendNativeSessionMessage(w, r, agent, session, content, gr)
 		return
 	}
@@ -6464,6 +6703,13 @@ func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
 		routeResp, err = h.Router.Route(r.Context(), routeReq)
 	}
 	if err != nil {
+		// The turn did not happen, so it must not stay in the history: a message the model
+		// refused (an image sent to a text-only model) would otherwise fail every later turn.
+		session.Messages = session.Messages[:len(session.Messages)-1]
+		if router.IsMediaError(err) {
+			respondError(w, http.StatusUnprocessableEntity, "model routing failed: "+err.Error())
+			return
+		}
 		respondError(w, http.StatusInternalServerError, "model routing failed: "+err.Error())
 		return
 	}
@@ -6961,6 +7207,34 @@ func (h *Handlers) HandleDeleteScopedKey(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// SetKitchenOwnerCheck installs the rule that decides whether the caller administers a given kitchen.
+// Without one the caller's role decides (contracts.IsKitchenOwner and IsPlatformAdmin), which in the
+// community edition means "admin". Pro installs a check that also requires a person to head the
+// kitchen they name, so a Head Chef of one kitchen holds no authority in another (ADR-0040).
+func (h *Handlers) SetKitchenOwnerCheck(fn func(r *http.Request, kitchen string) bool) {
+	h.kitchenOwnerCheck = fn
+}
+
+// callerOwnsKitchen reports whether the authenticated caller may administer kitchen: a kitchen-owner
+// role and, when a check is installed, that check. Nobody authenticated is refused.
+func (h *Handlers) callerOwnsKitchen(r *http.Request, kitchen string) bool {
+	id := pkgmw.GetIdentity(r.Context())
+	if id == nil || !contracts.IsKitchenOwner(id.Role) {
+		return false
+	}
+	return h.kitchenOwnerCheck == nil || h.kitchenOwnerCheck(r, kitchen)
+}
+
+// callerAdminsPlatformFor reports whether the caller is a platform administrator who may act on
+// kitchen (a grant reaches a second kitchen, so it is the platform's decision).
+func (h *Handlers) callerAdminsPlatformFor(r *http.Request, kitchen string) bool {
+	id := pkgmw.GetIdentity(r.Context())
+	if id == nil || !contracts.IsPlatformAdmin(id.Role) {
+		return false
+	}
+	return h.kitchenOwnerCheck == nil || h.kitchenOwnerCheck(r, kitchen)
+}
+
 // AdminRetireAllDeployments stops every active agent process in the current kitchen
 // and marks them cooled. Requires admin identity.
 // DELETE /api/v1/admin/deployments
@@ -6968,7 +7242,7 @@ func (h *Handlers) AdminRetireAllDeployments(w http.ResponseWriter, r *http.Requ
 	kitchen := middleware.GetKitchen(r.Context())
 
 	// Kitchen owners only (admin, or in Pro a head chef or restaurateur)
-	if id := pkgmw.GetIdentity(r.Context()); id == nil || !contracts.IsKitchenOwner(id.Role) {
+	if !h.callerOwnsKitchen(r, kitchen) {
 		respondError(w, http.StatusForbidden, "kitchen owner role required")
 		return
 	}
@@ -7010,7 +7284,7 @@ func (h *Handlers) AdminRetireAllDeployments(w http.ResponseWriter, r *http.Requ
 // GET /api/v1/admin/cross-kitchen-grants
 func (h *Handlers) HandleListCrossKitchenGrants(w http.ResponseWriter, r *http.Request) {
 	kitchen := middleware.GetKitchen(r.Context())
-	if id := pkgmw.GetIdentity(r.Context()); id == nil || !contracts.IsKitchenOwner(id.Role) {
+	if !h.callerOwnsKitchen(r, kitchen) {
 		respondError(w, http.StatusForbidden, "kitchen owner role required")
 		return
 	}
@@ -7029,7 +7303,7 @@ func (h *Handlers) HandleListCrossKitchenGrants(w http.ResponseWriter, r *http.R
 // POST /api/v1/admin/cross-kitchen-grants
 func (h *Handlers) HandleCreateCrossKitchenGrant(w http.ResponseWriter, r *http.Request) {
 	kitchen := middleware.GetKitchen(r.Context())
-	if id := pkgmw.GetIdentity(r.Context()); id == nil || !contracts.IsPlatformAdmin(id.Role) {
+	if !h.callerAdminsPlatformFor(r, kitchen) {
 		respondError(w, http.StatusForbidden, "platform administrator role required")
 		return
 	}
@@ -7064,7 +7338,7 @@ func (h *Handlers) HandleCreateCrossKitchenGrant(w http.ResponseWriter, r *http.
 // HandleRevokeCrossKitchenGrant revokes (soft-deletes) a grant.
 // DELETE /api/v1/admin/cross-kitchen-grants/{grantId}
 func (h *Handlers) HandleRevokeCrossKitchenGrant(w http.ResponseWriter, r *http.Request) {
-	if id := pkgmw.GetIdentity(r.Context()); id == nil || !contracts.IsPlatformAdmin(id.Role) {
+	if !h.callerAdminsPlatformFor(r, middleware.GetKitchen(r.Context())) {
 		respondError(w, http.StatusForbidden, "platform administrator role required")
 		return
 	}
@@ -7087,13 +7361,19 @@ type a2aFilePart struct {
 	MimeType string `json:"mimeType"`
 	Bytes    string `json:"bytes,omitempty"` // base64
 	URI      string `json:"uri,omitempty"`
+	// BlobRef names a file uploaded with POST /api/v1/blobs: an AgentOven extension, so a large
+	// file is sent once and referenced after that. Only the kitchen that uploaded it can use it.
+	BlobRef string `json:"blob_ref,omitempty"`
 }
 
 func a2aFileToContentPart(f *a2aFilePart) models.ContentPart {
 	media := &models.MediaRef{MimeType: f.MimeType, Name: f.Name}
-	if f.Bytes != "" {
+	switch {
+	case f.BlobRef != "":
+		media.BlobRef = f.BlobRef
+	case f.Bytes != "":
 		media.Data = f.Bytes
-	} else {
+	default:
 		media.URL = f.URI
 	}
 	kind := "file"

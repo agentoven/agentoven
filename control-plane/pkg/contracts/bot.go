@@ -41,6 +41,14 @@ type BotControl interface {
 	Stopped(ctx context.Context, kitchen, agentName string)
 }
 
+// ContainerConfiner is implemented by a BotControl that confines a bot's Docker container once it
+// is running. The process manager calls it for a sandbox whose profile sets NetworkLockdown, after
+// the container has started and before the process is reported running. An error stops the bot and
+// removes the container: a sandbox whose confinement could not be applied is never left running.
+type ContainerConfiner interface {
+	ConfineContainer(ctx context.Context, containerID string, sb models.SandboxProfile) error
+}
+
 // CommunityBotControl refuses every bot: the community edition does not manage computer-use agents.
 type CommunityBotControl struct{}
 

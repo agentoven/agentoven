@@ -339,7 +339,11 @@ func (h *Handlers) ResumeTask(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "this task is paused: say whether to continue ('approved') and, at a budget pause, by how much ('extend')")
 		return
 	}
-	if snap.Status == executor.TaskPaused && snap.PauseKind == string(executor.PauseBudget) && decision.Approved &&
+	// A pause at a budget outside the task (the kitchen's, a provider's) is raised or reset
+	// elsewhere, so resuming it needs no extension: the task tries again and pauses again if the
+	// budget is still used up.
+	sharedBudget := snap.BudgetPause != nil && snap.BudgetPause.Scope != "" && snap.BudgetPause.Scope != "run"
+	if snap.Status == executor.TaskPaused && snap.PauseKind == string(executor.PauseBudget) && decision.Approved && !sharedBudget &&
 		(decision.Extend == nil || decision.Extend.IsZero()) {
 		respondError(w, http.StatusBadRequest, "approving a budget pause needs an extension that grants something")
 		return
@@ -506,4 +510,51 @@ func (h *Handlers) startTask(ctx context.Context, agent *models.Agent, resolved 
 		Redact: h.outputFilter(context.WithoutCancel(ctx), agent, gr),
 	})
 	return snap, merged, err
+}
+
+// ── multi-replica seams (Pro) ─────────────────────────────────
+
+// SetJournal replaces the execution journal. The community edition keeps it in files on the
+// machine; an edition that runs several control-plane replicas keeps it in a database all of them
+// share (see executor.NewLogJournal). It also makes background tasks available if there was no
+// journal to begin with.
+func (h *Handlers) SetJournal(j executor.Journal) {
+	if h.Executor == nil || j == nil {
+		return
+	}
+	h.Executor.SetJournal(j)
+	if h.Tasks == nil {
+		h.Tasks = executor.NewTaskManager(h.Executor, executor.TaskManagerOptions{
+			PerKitchen: envInt("AGENTOVEN_TASKS_PER_KITCHEN", 4),
+			Global:     envInt("AGENTOVEN_TASKS_GLOBAL", 16),
+			QueueMax:   envInt("AGENTOVEN_TASKS_QUEUE", 64),
+		})
+		h.startTaskRecovery()
+	}
+}
+
+// SetTaskLeases makes the replicas that share a journal agree on who runs each task: a replica takes
+// a lease before it runs a task and renews it while it does, a task whose replica died can be taken
+// over, and a task running on another replica is shown as running there and cannot be resumed here.
+// owner names this replica (unique among them; empty picks one). With AGENTOVEN_TASK_RECOVERY=auto
+// this replica also looks for dead replicas' tasks every ttl and resumes them.
+func (h *Handlers) SetTaskLeases(l executor.TaskLeases, owner string, ttl time.Duration) {
+	if h.Tasks == nil || l == nil {
+		return
+	}
+	h.Tasks.SetLeases(l, owner, ttl)
+	if strings.ToLower(osGetenv("AGENTOVEN_TASK_RECOVERY")) == "auto" {
+		if ttl <= 0 {
+			ttl = executor.DefaultLeaseTTL
+		}
+		h.Tasks.StartAdoption(context.Background(), ttl, 3, 5*time.Second)
+	}
+}
+
+// SetTaskPauseHook registers f to be told when a background task stops for a person (a budget
+// extension, a tool approval, a stall). The task it gets never carries an answer.
+func (h *Handlers) SetTaskPauseHook(f func(executor.TaskSnapshot)) {
+	if h.Tasks != nil {
+		h.Tasks.SetOnPause(f)
+	}
 }

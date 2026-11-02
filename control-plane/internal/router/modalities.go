@@ -118,3 +118,10 @@ func (mr *ModelRouter) CheckModalities(p *models.ModelProvider) error {
 	}
 	return nil
 }
+
+// AcceptsAudio reports whether the model takes audio as a message part (Gemini,
+// OpenAI's audio models). That is separate from the audio modality, which means
+// the provider has speech-to-text and text-to-speech endpoints.
+func (mr *ModelRouter) AcceptsAudio(p *models.ModelProvider, model string) bool {
+	return mr.mediaCapsFor(p, model).Audio
+}

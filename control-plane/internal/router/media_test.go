@@ -136,7 +136,7 @@ func TestOpenAIPDFByURLIsRefused(t *testing.T) {
 
 func TestBlobRefIsLoadedFromTheBlobStore(t *testing.T) {
 	mr := newMapperRouter(t)
-	ref, err := mr.blobs.Put(context.Background(), "image/jpeg", "p.jpg", []byte("jpegbytes"))
+	ref, err := mr.blobs.Put(context.Background(), "k", "image/jpeg", "p.jpg", []byte("jpegbytes"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestVideoRefusedForAModelWithoutVideo(t *testing.T) {
 }
 
 func testProv(kind string) *models.ModelProvider {
-	return &models.ModelProvider{Name: kind + "-p", Kind: kind}
+	return &models.ModelProvider{Name: kind + "-p", Kind: kind, Kitchen: "k"}
 }
 
 func TestOpenAIPDFIsUploadedOnceAndReferencedByFileID(t *testing.T) {
@@ -239,11 +239,11 @@ func TestOpenAIPDFIsUploadedOnceAndReferencedByFileID(t *testing.T) {
 	defer srv.Close()
 
 	mr := newMapperRouter(t)
-	ref, err := mr.blobs.Put(context.Background(), "application/pdf", "report.pdf", []byte("%PDF-1.7 body"))
+	ref, err := mr.blobs.Put(context.Background(), "k", "application/pdf", "report.pdf", []byte("%PDF-1.7 body"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	prov := &models.ModelProvider{Name: "oai", Kind: "openai", Endpoint: srv.URL, Config: map[string]interface{}{"api_key": "sk"}}
+	prov := &models.ModelProvider{Name: "oai", Kind: "openai", Kitchen: "k", Endpoint: srv.URL, Config: map[string]interface{}{"api_key": "sk"}}
 	msg := models.ChatMessage{Role: "user", ContentParts: []models.ContentPart{
 		{Type: "file", Media: &models.MediaRef{MimeType: "application/pdf", BlobRef: ref, Name: "report.pdf"}},
 	}}
@@ -322,11 +322,11 @@ func TestAnthropicPDFIsUploadedOnceAndReferencedByFileID(t *testing.T) {
 	defer srv.Close()
 
 	mr := newMapperRouter(t)
-	ref, err := mr.blobs.Put(context.Background(), "application/pdf", "contract.pdf", []byte("%PDF-1.7 contract"))
+	ref, err := mr.blobs.Put(context.Background(), "k", "application/pdf", "contract.pdf", []byte("%PDF-1.7 contract"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	prov := &models.ModelProvider{Name: "claude", Kind: "anthropic", Endpoint: srv.URL, Config: map[string]interface{}{"api_key": "k"}}
+	prov := &models.ModelProvider{Name: "claude", Kind: "anthropic", Kitchen: "k", Endpoint: srv.URL, Config: map[string]interface{}{"api_key": "k"}}
 	msg := models.ChatMessage{Role: "user", ContentParts: []models.ContentPart{
 		{Type: "file", Media: &models.MediaRef{MimeType: "application/pdf", BlobRef: ref, Name: "contract.pdf"}},
 	}}

@@ -147,6 +147,9 @@ func (b *bufferedResponse) replay(w http.ResponseWriter) {
 // output rules, so such an agent does not stream token by token; with no output rules the
 // stream is relayed as it arrives.
 func (h *Handlers) proxyA2AGuarded(w http.ResponseWriter, r *http.Request, backendURL string, agent *models.Agent, own []models.Guardrail, envSlug string) {
+	if h.a2aFilesInProcess(w, r, agent, envSlug) {
+		return
+	}
 	// The call to the process is accounted to a run, so its model calls can be held to a budget.
 	hostedCtx, endRun := h.beginHostedRun(r.Context(), agent)
 	defer endRun()
@@ -241,4 +244,68 @@ func (h *Handlers) proxyA2AGuarded(w http.ResponseWriter, r *http.Request, backe
 		}
 	}
 	rec.replay(w)
+}
+
+// a2aFilesInProcess answers a tasks/send that carries file parts for an agent on AgentOven's
+// own loop. The pod that agent runs in reads the text of a message and nothing else, so
+// forwarding the files would drop them without a word. The control plane's own executor
+// takes them (the same path POST /a2a with metadata.agent_name uses). It reports whether it
+// answered; false means the request has no files, or the agent is not one of these, and the
+// proxy goes ahead as before.
+func (h *Handlers) a2aFilesInProcess(w http.ResponseWriter, r *http.Request, agent *models.Agent, envSlug string) bool {
+	if !agent.IsManaged() || agent.IsFrameworkNative() || agent.IsAgenticBot() || r.Body == nil {
+		return false
+	}
+	raw, err := io.ReadAll(r.Body)
+	r.Body = io.NopCloser(bytes.NewReader(raw))
+	if err != nil {
+		return false
+	}
+	var env struct {
+		ID     interface{}            `json:"id"`
+		Method string                 `json:"method"`
+		Params map[string]interface{} `json:"params"`
+	}
+	if json.Unmarshal(raw, &env) != nil || !a2aHasFileParts(env.Params) {
+		return false
+	}
+	if env.Method != "tasks/send" {
+		a2aRPCError(w, env.ID, -32602, "File parts are accepted on tasks/send", nil)
+		return true
+	}
+	if envSlug != "" {
+		// The environment's workload reads text only and the control plane's executor is not
+		// that workload: say so rather than answer from a different deployment.
+		a2aRPCError(w, env.ID, -32602, "File parts are not supported on environment-scoped endpoints; call /agents/"+agent.Name+"/a2a", nil)
+		return true
+	}
+	// The route named the agent: a caller cannot use it to reach another one.
+	meta, _ := env.Params["metadata"].(map[string]interface{})
+	if meta == nil {
+		meta = map[string]interface{}{}
+	}
+	meta["agent_name"] = agent.Name
+	env.Params["metadata"] = meta
+	params, err := json.Marshal(env.Params)
+	if err != nil {
+		return false
+	}
+	h.handleA2ATaskSend(w, r, params, env.ID)
+	return true
+}
+
+// a2aHasFileParts reports whether an A2A message's parts include a file part.
+func a2aHasFileParts(params map[string]interface{}) bool {
+	msg, _ := params["message"].(map[string]interface{})
+	parts, _ := msg["parts"].([]interface{})
+	for _, p := range parts {
+		pm, _ := p.(map[string]interface{})
+		if t, _ := pm["type"].(string); t == "file" {
+			return true
+		}
+		if k, _ := pm["kind"].(string); k == "file" {
+			return true
+		}
+	}
+	return false
 }

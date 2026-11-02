@@ -539,12 +539,30 @@ func (m *MemoryStore) UpdateAgent(_ context.Context, agent *models.Agent) error 
 		copy.Version = models.MigrateLegacyVersion(copy.Version)
 	}
 
-	// Only bump version and record history when the caller explicitly
-	// requests it via VersionBump. Status-only updates (bake background
-	// goroutine setting ready/burnt) do NOT create phantom version entries.
+	// A version is written only when something that shapes behaviour was baked differently, or
+	// when the caller asks for a bump or names a version. Edits and status changes (the bake's
+	// background goroutine setting ready/burnt) never change a stored version: versions are immutable.
 	vk := key(agent.Kitchen, agent.Name)
 	recordHistory := false
+	refreshLatest := false
 	switch copy.VersionBump {
+	case models.VersionBumpBake:
+		var latest *models.Agent
+		if vs := m.agentVersions[vk]; len(vs) > 0 {
+			latest = vs[len(vs)-1]
+			for _, v := range vs {
+				if v.Version == copy.Version {
+					latest = v
+				}
+			}
+		}
+		version, isNew, _ := models.DecideBakeVersion(copy.Version, latest, &copy)
+		copy.Version = version
+		if isNew {
+			recordHistory = true
+		} else if latest != nil && latest.ResolvedConfig == nil {
+			refreshLatest = true // the first bake fills in the registered version
+		}
 	case "patch":
 		copy.Version = models.BumpPatch(copy.Version)
 		recordHistory = true
@@ -554,23 +572,30 @@ func (m *MemoryStore) UpdateAgent(_ context.Context, agent *models.Agent) error 
 	case "major":
 		copy.Version = models.BumpMajor(copy.Version)
 		recordHistory = true
+	default:
+		// A caller that names a version not yet in the history starts it; one that names an old
+		// version leaves the history alone.
+		if copy.Version != "" {
+			recordHistory = true
+			for _, v := range m.agentVersions[vk] {
+				if v.Version == copy.Version {
+					recordHistory = false
+				}
+			}
+		}
 	}
 	copy.VersionBump = "" // never persist the signal
 	copy.UpdatedAt = time.Now().UTC()
 
 	m.agents[key(agent.Kitchen, agent.Name)] = &copy
 
-	// Append to version history only for meaningful changes
 	if recordHistory {
 		vCopy := copy
 		m.agentVersions[vk] = append(m.agentVersions[vk], &vCopy)
-	} else {
-		// Update the latest version entry in-place (status/tags changes)
+	} else if refreshLatest {
 		versions := m.agentVersions[vk]
-		if len(versions) > 0 {
-			latest := *&copy
-			*versions[len(versions)-1] = latest
-		}
+		latest := copy
+		*versions[len(versions)-1] = latest
 	}
 
 	m.mu.Unlock()

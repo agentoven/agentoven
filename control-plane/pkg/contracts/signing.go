@@ -30,8 +30,20 @@ const (
 	GateLiveToolReplay  = "live_tool_replay"
 	GateDatasetPublish  = "dataset_publish"
 	GateDatasetPurge    = "dataset_purge"
-	MeaningApproved     = "approved"
-	MeaningRejected     = "rejected"
+	// GateLegalHoldRelease lifts a legal hold, on a dataset or on a kitchen's audit trail. Placing a
+	// hold is not a gate: it only protects. Lifting one is signed by the legal team (ADR-0043).
+	GateLegalHoldRelease = "legal_hold_release"
+	// GateApprovalSkip runs a recipe on an environment that requires approval without that approval.
+	// A Head Chef or Restaurateur may, outside a GxP kitchen, and the skip is signed like any decision.
+	GateApprovalSkip = "approval_skip"
+	// GateSecretBinding approves or revokes letting a secret be sent on behalf of a skill to a server
+	// (ADR-0035): the person is shown the secret, the skill, the host and the header it goes in.
+	GateSecretBinding = "secret_binding"
+	// GateSecretMigrate moves secrets from one secret provider to another (ADR-0035): the person is shown
+	// exactly which secrets move, and the digest covers that list.
+	GateSecretMigrate = "secret_migrate"
+	MeaningApproved   = "approved"
+	MeaningRejected   = "rejected"
 )
 
 // DecisionSubject is what a person is shown and what a signature is bound to.
@@ -51,6 +63,10 @@ type DecisionSubject struct {
 	// Scope narrows who may decide: an environment slug, an agent name. It selects the approver
 	// policy that applies.
 	Scope string `json:"scope,omitempty"`
+	// Approvers are the constraints the record itself declares on who may decide it (a recipe step's
+	// approver_roles, approver_emails and approver_domain). They apply on top of the kitchen's
+	// approver policy; nil means the record declares none.
+	Approvers *ApproverConstraints `json:"approvers,omitempty"`
 	// Meanings are the signatures this gate accepts.
 	Meanings []string `json:"meanings"`
 }
@@ -130,4 +146,19 @@ func canonicalJSON(v interface{}) []byte {
 		b, _ := json.Marshal(t)
 		return b
 	}
+}
+
+type requestKey struct{}
+
+// WithRequest carries the request that started something into the code it calls, for the part of that
+// code that runs before the request ends and must take a signature from it (the recipe runner's
+// approval skip). Do not keep the request beyond the call.
+func WithRequest(ctx context.Context, r *http.Request) context.Context {
+	return context.WithValue(ctx, requestKey{}, r)
+}
+
+// RequestFrom returns the request WithRequest stored, nil when there is none (a scheduled run).
+func RequestFrom(ctx context.Context) *http.Request {
+	r, _ := ctx.Value(requestKey{}).(*http.Request)
+	return r
 }

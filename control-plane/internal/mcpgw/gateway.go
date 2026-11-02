@@ -238,10 +238,18 @@ func (gw *Gateway) handleToolsCall(ctx context.Context, kitchen string, req *mod
 func (gw *Gateway) executeTool(ctx context.Context, tool *models.MCPTool, params *models.MCPToolCallParams) (*models.MCPToolResult, error) {
 	// The tool names a credential; its value is read now, for this call only. A credential
 	// that cannot be read fails the call: it is never made without its authentication.
-	auth, err := toolauth.Resolve(ctx, gw.store, tool.Kitchen, tool.AuthConfig)
+	auth, err := toolauth.ResolveFor(ctx, gw.store, tool.Kitchen, toolauth.Use{Skill: tool.Skill, Endpoint: tool.Endpoint}, tool.AuthConfig)
 	if err != nil {
 		return nil, fmt.Errorf("tool %q: %w", tool.Name, err)
 	}
+	result, err := gw.dispatchTool(ctx, tool, params, auth)
+	// What the tool sends back is for the model to read. A server that echoes the credential it was
+	// given (in an error, a debug field) must not hand it to the model: the value is scrubbed here.
+	return toolauth.ScrubResult(result, err, auth)
+}
+
+// dispatchTool runs a tool over its transport with the authentication already resolved.
+func (gw *Gateway) dispatchTool(ctx context.Context, tool *models.MCPTool, params *models.MCPToolCallParams, auth map[string]interface{}) (*models.MCPToolResult, error) {
 	switch tool.Transport {
 	case "http":
 		return gw.executeHTTPTool(ctx, tool, params, auth)

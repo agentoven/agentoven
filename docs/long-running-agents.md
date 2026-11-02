@@ -88,9 +88,39 @@ Statuses: `queued`, `running`, `paused`, `completed`, `max_turns`, `failed`, `ca
   or set `AGENTOVEN_TASK_RECOVERY=auto` and it resumes itself with backoff, up to 3 times. A call that was
   running when the process died is repeated only if its tool is marked idempotent; otherwise the model is
   told its outcome is unknown.
-- Tasks are single-node: the registry, the queue and the event history are in the process (the journal,
-  and so each task's state, is on its disk). Agents that run their own loop (framework-native or
-  process-backed) are refused with a 422, because their spend cannot be capped.
+- Tasks are single-node by default: the registry, the queue and the event history are in the process (the
+  journal, and so each task's state, is on its disk). Agents that run their own loop (framework-native or
+  process-backed) are refused with a 422, because their spend cannot be capped. An edition that keeps the
+  journal in a shared database can run several replicas: see "Several replicas" below.
+- A resume of a pause at a budget outside the task (the kitchen's, set by an edition that has one) needs
+  no extension: it tries again and pauses again if that budget is still used up.
+
+### From the command line and the SDKs
+
+```bash
+agentoven task start researcher "find why checkout latency doubled" --max-cost 5 --wait
+agentoven task list --status paused
+agentoven task events <id>            # follow it; --after N to carry on from a sequence number
+agentoven task resume <id> --add-cost 5 --reason "close to done"   # --approve / --deny --note ... for tool approvals
+agentoven task cancel <id>
+```
+
+Python (`agentoven.tasks.TaskMethods`) and TypeScript (`Tasks`) have the same operations (`start_task`,
+`list_tasks`, `get_task`, `task_events`, `cancel_task`, `resume_task`, `wait_for_task`). Where the server signs
+human decisions (Pro), `--sign` / `password=` signs a resume for the gate the pause is waiting at.
+
+### Several replicas
+
+The task manager can be given a lease table (`TaskManager.SetLeases`, `executor.TaskLeases`) and the executor a
+journal in a shared store (`executor.NewLogJournal` over a `RecordLog`). Then a replica takes a lease before it
+runs a task and renews it while it does; a replica that cannot renew stops the task before anyone else can take
+it; a task running on another replica is shown as `running` with its `owner` and cannot be resumed or recovered
+elsewhere; a cancel sent to any replica reaches the owner; and `StartAdoption` resumes the tasks a dead replica
+left (with `AGENTOVEN_TASK_RECOVERY=auto`). A task's event stream and metadata stay in the memory of the replica
+that runs it. `MemoryLeases` is a single-process table for tests. Pro supplies the PostgreSQL implementations.
+
+`TaskManager.SetOnPause` tells a deployment when a task stops for a person (budget, approval, stall), which is
+what a webhook or a chat message is built on.
 
 Over A2A, `tasks/send` with `"configuration": {"blocking": false}` returns a task at once; `tasks/get` and
 `tasks/cancel` work on it. A paused or interrupted task is `input-required`.

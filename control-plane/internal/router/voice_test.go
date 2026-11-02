@@ -129,11 +129,16 @@ func TestAProviderCanSwitchAModalityOffButNotOnBeyondItsDriver(t *testing.T) {
 	}
 }
 
-func TestAProviderCanWidenMediaForAGatewayTheCatalogDoesNotKnow(t *testing.T) {
+func TestAProviderCanNarrowMediaForAGatewayTheCatalogDoesNotKnow(t *testing.T) {
 	mr := voiceRouter(t)
+	// The operator chose the model behind a gateway, so an alias the catalog does not know is trusted.
 	plain := provider("litellm", "http://gw/v1", map[string]interface{}{"api_key": "k"})
-	if mr.Supports(plain, "my-vision-alias", "image") {
-		t.Fatal("an unknown LiteLLM alias is conservatively text-only")
+	if !mr.Supports(plain, "my-vision-alias", "image") {
+		t.Fatal("an unknown LiteLLM alias gets images unless the operator switches them off")
+	}
+	off := provider("litellm", "http://gw/v1", modalities(map[string]interface{}{"image": map[string]interface{}{"enabled": false}}))
+	if mr.Supports(off, "my-vision-alias", "image") {
+		t.Fatal("image: enabled=false must switch image input off for the gateway")
 	}
 	widened := provider("litellm", "http://gw/v1", modalities(map[string]interface{}{"image": map[string]interface{}{"enabled": true}}))
 	if !mr.Supports(widened, "my-vision-alias", "image") {

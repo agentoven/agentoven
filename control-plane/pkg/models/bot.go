@@ -278,4 +278,8 @@ type SandboxProfile struct {
 	// AllowEgressTo lists host:port destinations a Kubernetes NetworkPolicy leaves open (the
 	// control plane's gate and egress proxy). Everything else is closed.
 	AllowEgressTo []string `json:"allow_egress_to,omitempty"`
+	// NetworkLockdown asks the docker executor's caller to confine the started container's network
+	// to AllowEgressTo, through contracts.ContainerConfiner. Without it a container's egress is only
+	// as confined as the Docker network it runs on, and the proxy is advisory.
+	NetworkLockdown bool `json:"network_lockdown,omitempty"`
 }

@@ -13,6 +13,10 @@ type SpendQuery struct {
 	Model    string
 	// MaxOutputTokens is the output cap the call carries, 0 for none.
 	MaxOutputTokens int
+	// EstimatedInputTokens is a rough count of the prompt (about four characters a token), for a
+	// gate that reserves the worst-case cost of a call before it is made. It is an estimate, never
+	// a bill: the usage a call reports afterwards is.
+	EstimatedInputTokens int
 }
 
 // SpendRecord describes a model call that was made.

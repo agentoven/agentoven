@@ -88,10 +88,12 @@ type TaskSnapshot struct {
 	Result string `json:"result,omitempty"`
 	Error  string `json:"error,omitempty"`
 
-	Attempts  int               `json:"attempts"`
-	Metadata  map[string]string `json:"metadata,omitempty"`
-	CreatedAt time.Time         `json:"created_at"`
-	UpdatedAt time.Time         `json:"updated_at"`
+	Attempts int               `json:"attempts"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+	// Owner is the replica running the task, when replicas share tasks (see TaskLeases).
+	Owner     string    `json:"owner,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // TaskEvent is one entry in a task's event log.
@@ -147,6 +149,13 @@ type TaskManager struct {
 	running   int
 	waiting   int
 	byKitchen map[string]int
+
+	// leases, owner and leaseTTL are set by SetLeases; onPause by SetOnPause (see task_lease.go).
+	leases     TaskLeases
+	recovering map[string]bool // tasks this process is in the middle of recovering (see Recover)
+	owner      string
+	leaseTTL   time.Duration
+	onPause    func(TaskSnapshot)
 }
 
 type task struct {
@@ -157,6 +166,9 @@ type task struct {
 	cancel   context.CancelFunc
 	canceled bool
 	hasSlot  bool
+	// hold is the task's lease while this replica has it; leaseLost is set when it was taken away.
+	hold      *leaseHold
+	leaseLost bool
 
 	events  []TaskEvent
 	nextSeq int64
@@ -221,7 +233,11 @@ func (m *TaskManager) Submit(reqCtx context.Context, spec TaskSpec) (TaskSnapsho
 			Metadata: spec.Metadata, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		},
 	}
+	if err := m.takeLease(reqCtx, t); err != nil {
+		return TaskSnapshot{}, err
+	}
 	if err := m.admit(t); err != nil {
+		m.dropLease(t)
 		return TaskSnapshot{}, err
 	}
 	m.mu.Lock()
@@ -289,6 +305,7 @@ func (m *TaskManager) acquire(t *task) bool {
 
 // attempt runs one stretch of a task (its first, or one resume) to wherever it stops.
 func (m *TaskManager) attempt(t *task, run func(ctx context.Context, onEvent func(Event) error) (string, *ExecutionTrace, error)) {
+	defer m.dropLease(t)
 	if !m.acquire(t) {
 		m.finishCancelled(t, false)
 		m.scheduleEviction(t)
@@ -298,6 +315,12 @@ func (m *TaskManager) attempt(t *task, run func(ctx context.Context, onEvent fun
 
 	ctx, cancel := context.WithCancel(WithTaskMode(t.baseCtx))
 	t.mu.Lock()
+	if t.leaseLost { // another replica took the task while it waited for a slot
+		t.mu.Unlock()
+		cancel()
+		m.abandonLocal(t)
+		return
+	}
 	if t.canceled { // cancelled between getting the slot and starting
 		t.mu.Unlock()
 		cancel()
@@ -340,9 +363,14 @@ func (m *TaskManager) settle(t *task, resp string, trace *ExecutionTrace, err er
 	var paused *PausedError
 	t.mu.Lock()
 	cancelled := t.canceled
+	lost := t.leaseLost
 	t.mu.Unlock()
 
 	switch {
+	case lost && err != nil:
+		// The task is another replica's now: record nothing about it here, not even a failure.
+		m.abandonLocal(t)
+		return
 	case err == nil:
 		t.mu.Lock()
 		t.snap.Result = resp
@@ -357,6 +385,7 @@ func (m *TaskManager) settle(t *task, resp string, trace *ExecutionTrace, err er
 		t.snap.PauseKind, t.snap.BudgetPause, t.snap.Stall, t.snap.Pending = string(paused.Kind), paused.Budget, paused.Stall, nil
 		t.mu.Unlock()
 		t.setStatus(TaskPaused, "")
+		defer m.firePause(t)
 	case errors.Is(err, ErrPausedForApproval):
 		t.mu.Lock()
 		t.snap.PauseKind, t.snap.BudgetPause = string(PauseApproval), nil
@@ -365,6 +394,7 @@ func (m *TaskManager) settle(t *task, resp string, trace *ExecutionTrace, err er
 		}
 		t.mu.Unlock()
 		t.setStatus(TaskPaused, "")
+		defer m.firePause(t)
 	case cancelled:
 		m.finishCancelled(t, true)
 	case errors.Is(err, ErrBudgetExhausted):
@@ -398,6 +428,16 @@ func (m *TaskManager) finishCancelled(t *task, _ bool) {
 		}
 	}
 	t.setStatus(TaskCancelled, "")
+}
+
+// abandonLocal forgets a task that another replica owns now. Its state stays in the journal.
+func (m *TaskManager) abandonLocal(t *task) {
+	t.setStatus(TaskInterrupted, "the task moved to another replica")
+	m.mu.Lock()
+	if m.tasks[t.snap.ID] == t {
+		delete(m.tasks, t.snap.ID)
+	}
+	m.mu.Unlock()
 }
 
 func (t *task) snapshot() TaskSnapshot {
@@ -494,7 +534,15 @@ func (m *TaskManager) fromJournal(ctx context.Context, kitchen, id string) (Task
 	if err != nil {
 		return TaskSnapshot{}, ErrTaskNotFound
 	}
-	return snapshotOf(id, js), nil
+	s := snapshotOf(id, js)
+	if s.Status == TaskInterrupted {
+		// A run the journal calls running that no replica is running is interrupted; one a
+		// replica holds the lease on is running there.
+		if holder := m.holderOf(ctx, id); holder != "" {
+			s.Status, s.Owner = TaskRunning, holder
+		}
+	}
+	return s, nil
 }
 
 func snapshotOf(id string, js *JournalState) TaskSnapshot {
@@ -599,6 +647,19 @@ func (m *TaskManager) Cancel(ctx context.Context, kitchen, id string) (TaskSnaps
 	if err != nil {
 		return TaskSnapshot{}, ErrTaskNotFound
 	}
+	if js.Status == RunRunning {
+		// Another replica may be running it. It cannot be stopped from here, but the owner can be
+		// asked: it sees the request on its next lease renewal and cancels the task itself.
+		if leases, _, _ := m.leaseConfig(); leases != nil {
+			if holder := m.holderOf(ctx, id); holder != "" {
+				if ok, _ := leases.RequestCancel(ctx, id); ok {
+					s := snapshotOf(id, js)
+					s.Status, s.Owner = TaskRunning, holder
+					return s, nil
+				}
+			}
+		}
+	}
 	if js.Status != RunDone {
 		_ = m.e.journal.MarkOutcome(ctx, id, OutcomeCancelled, "", errors.New("cancelled"))
 		js, _ = m.e.RunState(ctx, kitchen, id)
@@ -611,6 +672,7 @@ func (m *TaskManager) Cancel(ctx context.Context, kitchen, id string) (TaskSnaps
 // redact filters what viewers see of the resumed stretch; nil keeps the task's own filter.
 func (m *TaskManager) Resume(ctx context.Context, kitchen, agentName, id string, decision *ResumeDecision, redact func(Event) Event) (TaskSnapshot, error) {
 	t := m.find(kitchen, id)
+	adopted := false
 	if t == nil {
 		js, err := m.e.RunState(ctx, kitchen, id)
 		if err != nil || js.Header.Agent == nil || js.Header.Agent.Name != agentName {
@@ -630,16 +692,31 @@ func (m *TaskManager) Resume(ctx context.Context, kitchen, agentName, id string,
 			t = existing
 		} else {
 			m.tasks[id] = t
+			adopted = true
 		}
 		m.mu.Unlock()
 	}
+	// A task adopted from the journal only to be refused (it is running on another replica, or
+	// finished) must not stay in the registry as if this process had it.
+	forget := func() {
+		if adopted {
+			m.mu.Lock()
+			if m.tasks[id] == t {
+				delete(m.tasks, id)
+			}
+			m.mu.Unlock()
+		}
+	}
 	if t.snap.Agent != agentName {
+		forget()
 		return TaskSnapshot{}, ErrTaskNotFound
 	}
+	m.refreshIfShared(ctx, kitchen, t)
 
 	t.mu.Lock()
 	if t.snap.Status != TaskPaused && t.snap.Status != TaskInterrupted {
 		t.mu.Unlock()
+		forget()
 		return t.snapshot(), ErrTaskNotResumable
 	}
 	if redact != nil {
@@ -651,7 +728,17 @@ func (m *TaskManager) Resume(ctx context.Context, kitchen, agentName, id string,
 	t.snap.PauseKind, t.snap.BudgetPause, t.snap.Stall, t.snap.Pending, t.snap.Error = "", nil, nil, nil, ""
 	t.mu.Unlock()
 
+	if err := m.takeLease(ctx, t); err != nil {
+		// Another replica holds the task: put it back as the journal has it.
+		m.refreshIfShared(ctx, kitchen, t)
+		forget()
+		if errors.Is(err, ErrTaskOwned) {
+			return t.snapshot(), ErrTaskNotResumable
+		}
+		return t.snapshot(), err
+	}
 	if err := m.admit(t); err != nil {
+		m.dropLease(t)
 		// Put it back as it was so the caller can try again.
 		if js, jerr := m.e.RunState(ctx, kitchen, id); jerr == nil {
 			s := snapshotOf(id, js)
@@ -665,6 +752,35 @@ func (m *TaskManager) Resume(ctx context.Context, kitchen, agentName, id string,
 		return m.e.ResumeStream(ctx, kitchen, agentName, id, decision, onEvent)
 	})
 	return t.snapshot(), nil
+}
+
+// refreshIfShared brings a task this process remembers as paused or interrupted back in line with
+// the journal when replicas share tasks: another replica may have resumed, finished or cancelled it
+// since. A task running here is never touched.
+func (m *TaskManager) refreshIfShared(ctx context.Context, kitchen string, t *task) {
+	if leases, _, _ := m.leaseConfig(); leases == nil {
+		return
+	}
+	t.mu.Lock()
+	st, active := t.snap.Status, t.hold != nil
+	t.mu.Unlock()
+	if active || (st != TaskPaused && st != TaskInterrupted && st != TaskRunning) {
+		return // running (or about to run) here: this process knows better than the journal
+	}
+	js, err := m.e.RunState(ctx, kitchen, t.snap.ID)
+	if err != nil {
+		return
+	}
+	s := snapshotOf(t.snap.ID, js)
+	if s.Status == TaskInterrupted {
+		if holder := m.holderOf(ctx, t.snap.ID); holder != "" && holder != m.Owner() {
+			s.Status, s.Owner = TaskRunning, holder
+		}
+	}
+	t.mu.Lock()
+	t.snap.Status, t.snap.PauseKind, t.snap.Pending, t.snap.BudgetPause, t.snap.Stall = s.Status, s.PauseKind, s.Pending, s.BudgetPause, s.Stall
+	t.snap.Owner, t.snap.Turns, t.snap.Usage, t.snap.Result, t.snap.Error = s.Owner, s.Turns, s.Usage, s.Result, s.Error
+	t.mu.Unlock()
 }
 
 // Events returns the task's events after afterSeq, whether the task has finished (so the
@@ -685,10 +801,14 @@ func (m *TaskManager) Events(kitchen, id string, afterSeq int64) (events []TaskE
 	return events, t.snap.Status.Terminal(), t.notify, nil
 }
 
-// Recover resumes, one at a time and with growing delays, the tasks that were running when
-// the process last stopped. Each run is resumed at most maxRecoveries times, counted in its
-// journal so a run that keeps killing the process is given up on. Without auto recovery
-// (the default) interrupted tasks are only listed, and a person resumes them.
+// Recover resumes, one at a time and with growing delays, the tasks that were running when their
+// process stopped. Each run is resumed at most maxRecoveries times, counted in its journal so a run
+// that keeps killing the process is given up on. Without auto recovery (the default) interrupted
+// tasks are only listed, and a person resumes them.
+//
+// When replicas share tasks (SetLeases) a task that another replica is running, or has live here, is
+// left alone, and the lease is taken before the recovery is counted, so of several replicas looking
+// at the same dead task exactly one recovers it.
 func (m *TaskManager) Recover(ctx context.Context, maxRecoveries int, baseDelay time.Duration) {
 	if m.e.journal == nil {
 		return
@@ -697,27 +817,69 @@ func (m *TaskManager) Recover(ctx context.Context, maxRecoveries int, baseDelay 
 	if err != nil {
 		return
 	}
+	leases, owner, ttl := m.leaseConfig()
 	for _, u := range un {
 		if u.Status != RunRunning {
 			continue // paused runs wait for a person; only interrupted ones are recovered
 		}
+		if leases != nil {
+			if t := m.find(u.Kitchen, u.TraceID); t != nil {
+				t.mu.Lock()
+				here := t.hold != nil
+				t.mu.Unlock()
+				if here {
+					continue // running right here
+				}
+			}
+			if holder := m.holderOf(ctx, u.TraceID); holder != "" {
+				continue // running on a replica, or already being recovered by one (this one included)
+			}
+			if !m.beginRecovery(u.TraceID) {
+				continue // a concurrent Recover in this process has it
+			}
+		}
+		giveUp := func() {
+			if leases != nil {
+				m.endRecovery(u.TraceID)
+			}
+		}
 		js, err := m.e.journal.Load(ctx, u.TraceID)
 		if err != nil {
+			giveUp()
 			continue
 		}
 		if js.Recoveries >= maxRecoveries {
 			log.Warn().Str("trace_id", u.TraceID).Int("attempts", js.Recoveries).Msg("Task keeps failing across restarts; leaving it interrupted for a person to look at")
+			giveUp()
 			continue
+		}
+		var claimed bool
+		if leases != nil {
+			// Hold the task through the backoff delay; Resume takes the lease again (it already is ours).
+			ok, aerr := leases.Acquire(ctx, u.TraceID, owner, ttl+baseDelay<<uint(maxRecoveries))
+			if aerr != nil || !ok {
+				giveUp()
+				continue
+			}
+			claimed = true
 		}
 		n, err := m.e.journal.NoteRecovery(ctx, u.TraceID)
 		if err != nil {
+			if claimed {
+				_ = leases.Release(ctx, u.TraceID, owner)
+			}
+			giveUp()
 			continue
 		}
 		delay := baseDelay << uint(n-1)
 		u := u
 		time.AfterFunc(delay, func() {
+			defer giveUp()
 			if _, err := m.Resume(context.Background(), u.Kitchen, u.AgentName, u.TraceID, nil, nil); err != nil {
 				log.Warn().Err(err).Str("trace_id", u.TraceID).Msg("Automatic task recovery did not start")
+				if claimed {
+					_ = leases.Release(context.Background(), u.TraceID, owner)
+				}
 			}
 		})
 	}

@@ -440,6 +440,11 @@ func (j *Janitor) purgeTraces(ctx context.Context, traces []models.Trace, stats 
 // the hot table is an index, and the archived copy remains the system of record.
 func (j *Janitor) purgeAuditEvents(ctx context.Context, events []models.AuditEvent, stats *CycleStats) {
 	for _, e := range events {
+		// A hash-chained event (Enterprise) leaves the hot table only as part of an archived range that
+		// the purge records on the chain; deleting it one at a time would break the chain.
+		if e.Seq != 0 {
+			continue
+		}
 		if err := j.store.DeleteAuditEvent(ctx, e.ID); err != nil {
 			log.Warn().Err(err).Str("event_id", e.ID).Msg("Failed to delete expired audit event")
 			stats.Errors = append(stats.Errors, err)

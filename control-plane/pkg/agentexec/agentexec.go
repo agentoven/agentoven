@@ -42,7 +42,36 @@ type (
 	Store = store.Store
 	// PausedError is returned when a run stopped for a person's decision at its budget.
 	PausedError = executor.PausedError
+
+	// The journal and what is needed to keep one somewhere other than a local directory (see
+	// NewLogJournal). A database-backed edition implements RecordLog and TaskLeases.
+	Journal         = executor.Journal
+	JournalHeader   = executor.JournalHeader
+	JournalState    = executor.JournalState
+	JournalSummary  = executor.JournalSummary
+	PendingApproval = executor.PendingApproval
+	StallInfo       = executor.StallInfo
+	RecordLog       = executor.RecordLog
+	RecordTx        = executor.RecordTx
+	RunMeta         = executor.RunMeta
+	LogJournal      = executor.LogJournal
+	TaskLeases      = executor.TaskLeases
+	LeaseState      = executor.LeaseState
+	// TaskSnapshot is a background task as a caller sees it; TaskManager runs them.
+	TaskSnapshot = executor.TaskSnapshot
+	TaskManager  = executor.TaskManager
 )
+
+// ErrRunNotFound is what a RecordLog returns for a run it does not hold.
+var ErrRunNotFound = executor.ErrRunNotFound
+
+// NewLogJournal returns an execution journal that keeps its records in log. With a log that several
+// control-plane replicas share (a database table), the replicas share their runs and can take over
+// each other's; see TaskLeases for who runs a task.
+func NewLogJournal(log RecordLog) *LogJournal { return executor.NewLogJournal(log) }
+
+// NewMemoryLeases returns an in-memory task lease table, for tests and single-process use.
+func NewMemoryLeases() TaskLeases { return executor.NewMemoryLeases(nil) }
 
 // Errors a caller may need to tell apart from an ordinary failure.
 var (

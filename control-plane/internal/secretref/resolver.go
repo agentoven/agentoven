@@ -216,3 +216,11 @@ func (r *Resolver) InvalidateCache(ref string) {
 func (r *Resolver) InvalidateAll() {
 	r.cache = sync.Map{}
 }
+
+// ResolveFor resolves a reference on behalf of one kitchen: a vault:// reference reads that kitchen's
+// credential. It exists so code outside this module, which cannot name WithKitchen, can resolve a
+// reference without it silently falling back to the default kitchen (the agentic-bot gate releases
+// credentials this way).
+func (r *Resolver) ResolveFor(ctx context.Context, kitchen, ref string) (string, error) {
+	return r.Resolve(WithKitchen(ctx, kitchen), ref)
+}

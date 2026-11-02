@@ -25,9 +25,33 @@ func EstimateTokens(text string) int {
 func EstimateTokensForMessages(messages []models.ChatMessage) int {
 	total := 0
 	for _, msg := range messages {
-		total += EstimateTokens(msg.Content) + 4
+		total += EstimateMessageTokens(msg)
 	}
 	return total
+}
+
+// EstimateMessageTokens returns the rough token count of one message: its text, a few tokens
+// of framing, and an allowance for each attached image, document, audio or video part.
+func EstimateMessageTokens(msg models.ChatMessage) int {
+	total := EstimateTokens(msg.Content) + 4
+	for _, p := range msg.ContentParts {
+		total += estimatePartTokens(p)
+	}
+	return total
+}
+
+// MediaPartTokens is the flat allowance for one image, document, audio or video part. The real
+// cost depends on the provider and the file (an image is a few hundred to a few thousand
+// tokens, a PDF page about as many), but a part must never count as free: a conversation
+// that keeps attaching files would otherwise never be trimmed until the provider refused it.
+const MediaPartTokens = 1000
+
+func estimatePartTokens(p models.ContentPart) int {
+	n := EstimateTokens(p.Text) + EstimateTokens(p.Content)
+	if p.Media != nil || p.ImageURL != nil {
+		n += MediaPartTokens
+	}
+	return n
 }
 
 // EffectiveBudget returns the context budget to use for an agent.

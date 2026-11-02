@@ -766,12 +766,34 @@ func (mr *ModelRouter) RouteStream(ctx context.Context, req *models.RouteRequest
 
 		// Check if driver supports streaming
 		if sd, ok := driver.(StreamingProviderDriver); ok {
-			err := sd.StreamCall(ctx, &provider, req, callback)
+			// A streamed call is held to the same spend gate as any other: refused before it goes
+			// out, charged with the usage its last chunk reports.
+			endSpend, serr := mr.spendBegin(ctx, &provider, req)
+			if serr != nil {
+				lastErr = serr
+				continue
+			}
+			var streamed *models.TokenUsage
+			err := sd.StreamCall(ctx, &provider, req, func(c *models.StreamChunk) error {
+				if c != nil && c.Usage != nil {
+					streamed = c.Usage
+				}
+				return callback(c)
+			})
 			if err != nil {
+				endSpend(nil)
 				log.Warn().Str("provider", provider.Name).Err(err).Msg("Streaming call failed, trying next")
 				lastErr = err
 				continue
 			}
+			done := &models.RouteResponse{}
+			if streamed != nil {
+				done.Usage = *streamed
+				if done.Usage.PriceSource == "" && done.Usage.EstimatedCost == 0 && (done.Usage.InputTokens > 0 || done.Usage.OutputTokens > 0) {
+					mr.settle(&provider, req.Model, &done.Usage)
+				}
+			}
+			endSpend(done)
 			return nil
 		}
 
@@ -907,11 +929,13 @@ func (mr *ModelRouter) callProvider(ctx context.Context, provider *models.ModelP
 	driverReq := *req
 	driverReq.Model = model
 
-	if err := mr.spendAllow(ctx, provider, &driverReq); err != nil {
+	endSpend, err := mr.spendBegin(ctx, provider, &driverReq)
+	if err != nil {
 		return nil, err
 	}
 	resp, err := driver.Call(ctx, provider, &driverReq)
 	if err != nil {
+		endSpend(nil)
 		return nil, err
 	}
 	// A driver that did not price its own call (one registered from outside, Pro's cloud drivers)
@@ -923,7 +947,7 @@ func (mr *ModelRouter) callProvider(ctx context.Context, provider *models.ModelP
 		}
 		mr.settle(provider, priced, &resp.Usage)
 	}
-	mr.spendRecord(ctx, provider, &driverReq, resp)
+	endSpend(resp)
 
 	latencyMs := time.Since(start).Milliseconds()
 	resp.LatencyMs = latencyMs

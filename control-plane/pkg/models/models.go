@@ -775,6 +775,9 @@ type Trace struct {
 	Environment  string `json:"environment,omitempty"`
 	AgentVersion string `json:"agent_version,omitempty"`
 
+	// ContentWithheld is set when the reader may see this trace but not its bodies (ADR-0043).
+	ContentWithheld bool `json:"content_withheld,omitempty" db:"-"`
+
 	// Spans are loaded eagerly by GetTrace (with spans=true) or ListSpansByTrace.
 	// Not persisted on the Trace row itself — stored in the spans table/map.
 	Spans []Span `json:"spans,omitempty" db:"-"`
@@ -845,6 +848,9 @@ type Span struct {
 	Provider     string                 `json:"provider,omitempty" db:"provider"` // provider name (LLM spans)
 	Error        string                 `json:"error,omitempty" db:"error"`       // error message if status=failed
 	Events       []SpanEvent            `json:"events,omitempty"`                 // timed events within the span
+
+	// ContentWithheld is set when the reader may see this span but not its bodies (ADR-0043).
+	ContentWithheld bool `json:"content_withheld,omitempty" db:"-"`
 }
 
 // SpanEvent is a timestamped event within a span (e.g. "first token", "tool selected").
@@ -1865,6 +1871,9 @@ type AuditEvent struct {
 	Seq       int64  `json:"seq,omitempty" db:"seq"`
 	PrevHash  string `json:"prev_hash,omitempty" db:"prev_hash"`
 	EntryHash string `json:"entry_hash,omitempty" db:"entry_hash"`
+	// PayloadVersion selects the canonical form the entry hash covers: 0 or 1 is the original, 2
+	// hashes the pseudonymous references in place of user_id and owner_user_id (ADR-0031 section 6).
+	PayloadVersion int `json:"payload_version,omitempty" db:"payload_version"`
 }
 
 // AuditFilter provides query options for listing audit events.

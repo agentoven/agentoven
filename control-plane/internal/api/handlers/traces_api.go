@@ -30,6 +30,29 @@ import (
 //	limit (default 500, at most 5000), offset
 //	include_archived=true            also show traces of archived recipes (hidden by default)
 //	view=<id>                        a saved view's filters; any parameter named as well wins over the view
+//
+// SetTraceContentGuard installs the rule that decides whether the caller may read the bodies of traces and
+// spans. Without one everyone who reads a trace reads its bodies, as in the community edition. Pro installs
+// trace:read:content (ADR-0043).
+func (h *Handlers) SetTraceContentGuard(fn func(*http.Request) bool) { h.traceContentGuard = fn }
+
+// canReadTraceContent reports whether the caller may read trace and span bodies.
+func (h *Handlers) canReadTraceContent(r *http.Request) bool {
+	return h.traceContentGuard == nil || h.traceContentGuard(r)
+}
+
+// RequireTraceContent refuses a caller who may not read trace bodies, for a route that returns them
+// whole (the export to another tracing system).
+func (h *Handlers) RequireTraceContent(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !h.canReadTraceContent(r) {
+			respondError(w, http.StatusForbidden, "exporting traces copies their content, which this role may not read")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (h *Handlers) traceFilterFrom(r *http.Request, kitchen string) store.TraceFilter {
 	q := h.expandTraceView(r, kitchen, r.URL.Query())
 	f := store.TraceFilter{
@@ -46,6 +69,9 @@ func (h *Handlers) traceFilterFrom(r *http.Request, kitchen string) store.TraceF
 	}
 	if n, err := strconv.Atoi(q.Get("offset")); err == nil && n > 0 {
 		f.Offset = n
+	}
+	if !h.canReadTraceContent(r) {
+		f.Search = "" // a search over the bodies would let a reader find out what they hold
 	}
 	f.MinCostUSD, _ = strconv.ParseFloat(q.Get("min_cost"), 64)
 	f.MaxCostUSD, _ = strconv.ParseFloat(q.Get("max_cost"), 64)
@@ -91,6 +117,11 @@ func (h *Handlers) ListTraces(w http.ResponseWriter, r *http.Request) {
 	if st, err := h.Store.TraceStats(r.Context(), kitchen, filter); err == nil {
 		w.Header().Set("X-Total-Count", strconv.Itoa(st.Count))
 		w.Header().Set("Access-Control-Expose-Headers", "X-Total-Count")
+	}
+	if !h.canReadTraceContent(r) {
+		for i := range traces {
+			traces[i].WithholdContent()
+		}
 	}
 	respondJSON(w, http.StatusOK, traces)
 }

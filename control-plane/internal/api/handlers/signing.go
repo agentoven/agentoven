@@ -230,8 +230,56 @@ func (h *Handlers) describeRecipeGate(ctx context.Context, kitchen, gateKey stri
 		Display:   map[string]interface{}{"run": rec.RunID, "step": rec.StepName, "inputs": rec.Metadata, "requested_at": rec.RequestedAt},
 		Requester: requester,
 		Scope:     rec.StepName,
+		Approvers: h.stepApprovers(ctx, rec),
 		Meanings:  []string{contracts.MeaningApproved, contracts.MeaningRejected},
 	}, nil
+}
+
+// stepApprovers reads the approver constraints the recipe step behind a gate declares, so an edition
+// that verifies the signer first can refuse an unlisted person before a signature is spent. It is
+// best effort: when the run, the recipe or the step cannot be found it returns nil and the workflow
+// engine, which fails closed, decides when the decision lands.
+func (h *Handlers) stepApprovers(ctx context.Context, rec *models.ApprovalRecord) *contracts.ApproverConstraints {
+	if h.Store == nil {
+		return nil
+	}
+	run, err := h.Store.GetRecipeRun(ctx, rec.RunID)
+	if err != nil || run == nil {
+		return nil
+	}
+	kitchen := rec.Kitchen
+	if kitchen == "" {
+		kitchen = run.Kitchen
+	}
+	recipe, err := h.Store.GetRecipe(ctx, kitchen, run.RecipeID)
+	if err != nil || recipe == nil {
+		all, lerr := h.Store.ListRecipes(ctx, kitchen)
+		if lerr != nil {
+			return nil
+		}
+		recipe = nil
+		for i := range all {
+			if all[i].ID == run.RecipeID || all[i].Name == run.RecipeID {
+				recipe = &all[i]
+				break
+			}
+		}
+		if recipe == nil {
+			return nil
+		}
+	}
+	for i := range recipe.Steps {
+		st := &recipe.Steps[i]
+		if st.Name != rec.StepName {
+			continue
+		}
+		c := &contracts.ApproverConstraints{Emails: st.ApproverEmails, Roles: st.ApproverRoles, Domain: st.ApproverDomain, SameTenant: st.RequireSameTenant}
+		if c.Empty() {
+			return nil
+		}
+		return c
+	}
+	return nil
 }
 
 func (h *Handlers) describeWaitRelease(ctx context.Context, kitchen, key string, _ map[string]interface{}) (*contracts.DecisionSubject, error) {

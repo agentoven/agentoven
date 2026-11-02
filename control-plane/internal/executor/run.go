@@ -182,6 +182,9 @@ func (e *Executor) ExecuteMessage(ctx context.Context, agent *models.Agent, user
 		return "", nil, err
 	}
 	ctx = ensureDelegationRoot(ctx, agent.Name)
+	// Media bytes go to the blob store before anything records the message: the
+	// session, the run journal and the trace then hold a blob_ref, not the bytes.
+	userMsg = e.router.ExternalizeMedia(ctx, agent.Kitchen, userMsg)
 	userMessage := userMsg.Content
 	base := baseBudget(ctx, agent)
 	bud, err := e.buildBudget(ctx, agent, resolved, base, nil, models.TokenUsage{}, 0, 0)
@@ -219,6 +222,9 @@ func (e *Executor) ExecuteStreamMessage(ctx context.Context, agent *models.Agent
 		return "", nil, err
 	}
 	ctx = ensureDelegationRoot(ctx, agent.Name)
+	// Media bytes go to the blob store before anything records the message: the
+	// session, the run journal and the trace then hold a blob_ref, not the bytes.
+	userMsg = e.router.ExternalizeMedia(ctx, agent.Kitchen, userMsg)
 	userMessage := userMsg.Content
 	base := baseBudget(ctx, agent)
 	bud, err := e.buildBudget(ctx, agent, resolved, base, nil, models.TokenUsage{}, 0, 0)
