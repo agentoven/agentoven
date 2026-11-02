@@ -809,7 +809,7 @@ func (e *Executor) runLoop(ctx context.Context, st *runState, thinkingEnabled bo
 		// results to correlate to a preceding assistant tool_calls message.
 		messagesWithAssistant := append(append([]models.ChatMessage{}, st.messages...), assistantMsg)
 
-		if gated := mergeNames(e.gatedNames(agent, toolCalls), guardHeld); len(gated) > 0 {
+		if gated := mergeNames(e.gatedNames(ctx, agent, toolCalls), guardHeld); len(gated) > 0 {
 			pending := PendingApproval{Turn: turn, ToolCalls: toolCalls, GatedNames: gated, GuardrailHolds: guardHolds,
 				Usage: routeResp.Usage, LatencyMs: time.Since(turnStart).Milliseconds()}
 			trace.Turns = appendTurn(trace.Turns, turnRecord) // tool results not yet known
@@ -1041,8 +1041,8 @@ func appendToolResults(messages []models.ChatMessage, results []ToolResult) []mo
 }
 
 // gatedNames returns, in call order, the names from toolCalls that appear in
-// agent.ApprovalTools. Empty when none do.
-func (e *Executor) gatedNames(agent *models.Agent, toolCalls []ToolCall) []string {
+// agent.ApprovalTools or that the installed tool-approval policy holds. Empty when none do.
+func (e *Executor) gatedNames(ctx context.Context, agent *models.Agent, toolCalls []ToolCall) []string {
 	var runtimeGated map[string]bool
 	if e.subagents != nil {
 		for _, n := range e.subagents.GatedTools(agent) {
@@ -1054,7 +1054,7 @@ func (e *Executor) gatedNames(agent *models.Agent, toolCalls []ToolCall) []strin
 	}
 	var out []string
 	for _, tc := range toolCalls {
-		if requiresApproval(agent, tc.Name) || runtimeGated[tc.Name] {
+		if requiresApproval(agent, tc.Name) || runtimeGated[tc.Name] || e.policyGates(ctx, agent.Kitchen, tc.Name) {
 			out = append(out, tc.Name)
 		}
 	}

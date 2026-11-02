@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/agentoven/agentoven/control-plane/internal/store"
+	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/agentoven/agentoven/control-plane/pkg/toolauth"
 	"github.com/google/uuid"
@@ -33,7 +34,21 @@ type Gateway struct {
 	// SSE subscribers: kitchen → channel
 	subsMu sync.RWMutex
 	subs   map[string][]chan models.MCPResponse
+
+	// native runs tools of transport "native" and approval says which tools need a person's
+	// approval first (ADR-0031). Both are set once at start-up, before the gateway serves; the
+	// community edition sets neither.
+	native   contracts.NativeToolRunner
+	approval contracts.ToolApprovalPolicy
 }
+
+// SetNativeToolRunner installs the runner for tools of transport "native". Call it before serving.
+func (gw *Gateway) SetNativeToolRunner(r contracts.NativeToolRunner) { gw.native = r }
+
+// SetToolApprovalPolicy installs the policy that marks tools as needing approval. A call to such a
+// tool is served only when it comes through the executor's approval gate (see
+// contracts.WithToolApproved); any other caller is refused. Call it before serving.
+func (gw *Gateway) SetToolApprovalPolicy(p contracts.ToolApprovalPolicy) { gw.approval = p }
 
 // NewGateway creates a new MCP gateway.
 func NewGateway(s store.Store) *Gateway {
@@ -211,6 +226,21 @@ func (gw *Gateway) handleToolsCall(ctx context.Context, kitchen string, req *mod
 		}
 	}
 
+	// A tool that needs a person's approval is run only for a call that went through the executor's
+	// gate. The MCP endpoint and anything else that reaches the gateway directly has no way to ask a
+	// person, so it is refused rather than allowed to skip the approval.
+	if gw.approval != nil && !contracts.ToolApproved(ctx) && gw.approval.RequiresApproval(ctx, kitchen, params.Name) {
+		return &models.MCPResponse{
+			Jsonrpc: "2.0",
+			Error: &models.MCPError{
+				Code:    -32004,
+				Message: "Approval required",
+				Data:    fmt.Sprintf("Tool '%s' needs a person's approval, which only an agent run can ask for; it cannot be called directly", params.Name),
+			},
+			ID: req.ID,
+		}
+	}
+
 	// Execute the tool based on transport
 	result, err := gw.executeTool(ctx, tool, &params)
 	if err != nil {
@@ -257,6 +287,11 @@ func (gw *Gateway) dispatchTool(ctx context.Context, tool *models.MCPTool, param
 		return gw.executeSSETool(ctx, tool, params, auth)
 	case TransportMCP:
 		return gw.executeMCPTool(ctx, tool, params, auth)
+	case models.MCPTransportNative:
+		if gw.native == nil {
+			return nil, fmt.Errorf("tool %q is a tool-pack tool, and this edition cannot run tool packs", tool.Name)
+		}
+		return gw.native.RunNativeTool(ctx, tool, params.Arguments)
 	default:
 		return gw.executeHTTPTool(ctx, tool, params, auth)
 	}

@@ -544,7 +544,8 @@ func (h *Handlers) reviewSkill(w http.ResponseWriter, r *http.Request, approve b
 		respondError(w, http.StatusInternalServerError, "approved, but failed to register tools: "+err.Error())
 		return
 	}
-	skill.RegisteredTools = registered
+	// Tools the skill already owns (a tool pack registers its own, see ADR-0031) stay on the record.
+	skill.RegisteredTools = mergeNames(skill.RegisteredTools, registered)
 	skill.Status = models.SkillStatusAccepted
 	if err := h.Store.UpdateSkill(r.Context(), skill); err != nil {
 		finish(err)
@@ -625,4 +626,19 @@ func (h *Handlers) CommitSkillUpload(w http.ResponseWriter, r *http.Request) {
 	// idempotently is NOT guaranteed, since Commit only checks the byte count,
 	// not re-enterability; a client should commit exactly once per upload.
 	respondJSON(w, http.StatusOK, map[string]interface{}{"upload_id": uploadID, "status": "committed"})
+}
+
+// mergeNames returns have followed by the names in add that it does not hold.
+func mergeNames(have, add []string) []string {
+	seen := make(map[string]bool, len(have))
+	for _, n := range have {
+		seen[n] = true
+	}
+	out := append([]string(nil), have...)
+	for _, n := range add {
+		if !seen[n] {
+			out = append(out, n)
+		}
+	}
+	return out
 }

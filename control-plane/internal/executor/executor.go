@@ -160,6 +160,9 @@ type Executor struct {
 	// hostedInvoke runs a message on a hosted agent's own process (see SetHostedInvoker).
 	hostedInvoke func(ctx context.Context, agent *models.Agent, message string) (string, error)
 	// boundary holds a delegation to the target's own guardrails and reaches framework-native
+	// toolApproval, when set, names more tools that need a person's approval than the agent's own
+	// ApprovalTools do (see SetToolApprovalPolicy).
+	toolApproval contracts.ToolApprovalPolicy
 	// agents (see SetDelegationBoundary).
 	boundary *DelegationBoundary
 	// audit, when set, is told about the events of a run that someone accountable for its
@@ -750,7 +753,9 @@ func (e *Executor) executeTool(ctx context.Context, agent *models.Agent, tc Tool
 		ID:      tc.ID,
 	}
 
-	mcpResp := e.gateway.HandleJSONRPC(ctx, agent.Kitchen, mcpReq)
+	// Every call that reaches here has passed the approval gate (a gated call runs only after a
+	// person approved it), which is what the gateway checks for a tool that needs approval.
+	mcpResp := e.gateway.HandleJSONRPC(contracts.WithToolApproved(ctx), agent.Kitchen, mcpReq)
 
 	if mcpResp.Error != nil {
 		return ToolResult{

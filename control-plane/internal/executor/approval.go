@@ -1,8 +1,10 @@
 package executor
 
 import (
+	"context"
 	"errors"
 
+	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 )
 
@@ -61,4 +63,33 @@ func requiresApproval(agent *models.Agent, name string) bool {
 		}
 	}
 	return false
+}
+
+// SetToolApprovalPolicy installs a policy that gates tools in every agent, beyond the ones an
+// agent lists in ApprovalTools: an installed tool pack's write tools are held for a person by
+// default. The policy is asked on each call, so changing it needs no re-bake. Pass nil to remove it.
+func (e *Executor) SetToolApprovalPolicy(p contracts.ToolApprovalPolicy) {
+	e.toolApproval = p
+}
+
+// policyGates reports whether the installed policy holds the tool for approval.
+func (e *Executor) policyGates(ctx context.Context, kitchen, name string) bool {
+	return e.toolApproval != nil && e.toolApproval.RequiresApproval(ctx, kitchen, name)
+}
+
+// withPolicyGated returns agent as it is for approval purposes: its own ApprovalTools plus every
+// tool in resolved that the policy gates. A subagent cannot pause for a person, so the pool it may
+// draw tools from is built from this, and a gated tool is never handed to one.
+func (e *Executor) withPolicyGated(ctx context.Context, agent *models.Agent, resolved *models.ResolvedIngredients) *models.Agent {
+	if e.toolApproval == nil || resolved == nil {
+		return agent
+	}
+	cp := *agent
+	cp.ApprovalTools = append([]string(nil), agent.ApprovalTools...)
+	for _, t := range allResolvedTools(resolved) {
+		if e.policyGates(ctx, agent.Kitchen, t.Name) {
+			cp.ApprovalTools = append(cp.ApprovalTools, t.Name)
+		}
+	}
+	return &cp
 }

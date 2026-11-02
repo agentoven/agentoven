@@ -1027,6 +1027,11 @@ func SortProvidersForSelection(ps []ModelProvider) {
 // MCPTransportStreamableHTTP is the MCPTool.Transport of a tool served by a
 // remote MCP server over streamable HTTP (see internal/mcpgw).
 const MCPTransportStreamableHTTP = "mcp"
+// MCPTransportNative is the MCPTool.Transport of a tool the control plane runs itself through an
+// installed contracts.NativeToolRunner (a tool pack's tool). The community edition has no runner,
+// so such a tool fails with a clear error there.
+const MCPTransportNative = "native"
+
 
 type MCPTool struct {
 	ID           string                 `json:"id" db:"id"`
@@ -1034,7 +1039,7 @@ type MCPTool struct {
 	Description  string                 `json:"description" db:"description"`
 	Kitchen      string                 `json:"kitchen" db:"kitchen"`
 	Endpoint     string                 `json:"endpoint" db:"endpoint"`
-	Transport    string                 `json:"transport" db:"transport"`               // http, sse, mcp (remote MCP server over streamable HTTP), stdio
+	Transport    string                 `json:"transport" db:"transport"`               // http, sse, mcp (remote MCP server over streamable HTTP), native (run by the control plane, see MCPTransportNative), stdio
 	RemoteName   string                 `json:"remote_name,omitempty" db:"remote_name"` // mcp transport: the tool's name on the remote server (Name is what agents see)
 	Skill        string                 `json:"skill,omitempty" db:"skill"`             // the skill that registered this tool; the gateway serves it only while that skill is active
 	Schema       map[string]interface{} `json:"schema,omitempty"`

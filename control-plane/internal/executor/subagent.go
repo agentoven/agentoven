@@ -228,7 +228,7 @@ func (h *subagentHost) Run(ctx context.Context, spec models.SubagentSpec) (model
 	if isSubagent(ctx) {
 		return models.SubagentResult{}, fmt.Errorf("a subagent cannot spawn subagents")
 	}
-	child, resolved, err := buildSubagent(h.scope.agent, h.scope.resolved, spec)
+	child, resolved, err := buildSubagent(h.e.withPolicyGated(ctx, h.scope.agent, h.scope.resolved), h.scope.resolved, spec)
 	if err != nil {
 		return models.SubagentResult{Name: spec.Name}, err
 	}
@@ -253,7 +253,7 @@ func (h *subagentHost) RunMany(ctx context.Context, specs []models.SubagentSpec)
 	children := make([]*models.Agent, len(specs))
 	resolved := make([]*models.ResolvedIngredients, len(specs))
 	for i, spec := range specs {
-		c, r, err := buildSubagent(h.scope.agent, h.scope.resolved, spec)
+		c, r, err := buildSubagent(h.e.withPolicyGated(ctx, h.scope.agent, h.scope.resolved), h.scope.resolved, spec)
 		if err != nil {
 			results[i] = models.SubagentResult{Name: spec.Name, IsError: true, Error: err.Error()}
 			continue

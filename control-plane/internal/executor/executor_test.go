@@ -16,6 +16,7 @@ import (
 	"github.com/agentoven/agentoven/control-plane/internal/router"
 	"github.com/agentoven/agentoven/control-plane/internal/sessions"
 	"github.com/agentoven/agentoven/control-plane/internal/store"
+	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 )
 
@@ -81,6 +82,8 @@ type fakeGateway struct {
 	calls []string
 	tools map[string]func(args map[string]interface{}) (string, bool)
 	delay time.Duration
+	// approvedCalls records, per call, whether the context carried contracts.WithToolApproved.
+	approvedCalls []bool
 }
 
 func newFakeGateway() *fakeGateway {
@@ -97,6 +100,7 @@ func (g *fakeGateway) HandleJSONRPC(ctx context.Context, kitchen string, req *mo
 
 	g.mu.Lock()
 	g.calls = append(g.calls, params.Name)
+	g.approvedCalls = append(g.approvedCalls, contracts.ToolApproved(ctx))
 	g.mu.Unlock()
 
 	if g.delay > 0 {

@@ -25,7 +25,7 @@ func (e *Executor) RealtimeSetup(ctx context.Context, agent *models.Agent, resol
 // A tool the agent lists in ApprovalTools is refused: approval pauses a run
 // until a human decides, and a live voice call has no way to wait that long.
 func (e *Executor) RunTool(ctx context.Context, agent *models.Agent, resolved *models.ResolvedIngredients, callID, name, argsJSON string) (string, bool) {
-	if requiresApproval(agent, name) {
+	if requiresApproval(agent, name) || e.policyGates(ctx, agent.Kitchen, name) {
 		return fmt.Sprintf("the %s tool needs human approval and cannot run during a live voice session", name), true
 	}
 	args := map[string]interface{}{}

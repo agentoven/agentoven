@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/agentoven/agentoven/control-plane/internal/api/handlers"
 	"github.com/agentoven/agentoven/control-plane/internal/mcpgw"
@@ -526,5 +527,30 @@ func TestAToolsAuthIsNeverReturnedByTheAPI(t *testing.T) {
 	// The stored tool is untouched: the gateway still has what it needs.
 	if got, _ := s.GetTool(ctx, "default", "legacy"); got.AuthConfig["token"] != "literal-secret-value" {
 		t.Error("redaction must not alter what is stored")
+	}
+}
+
+// A tool pack registers its own tools against a skill that has no MCP servers (ADR-0031); approving
+// that skill must not forget them, or attaching the skill would give an agent nothing.
+func TestApproveSkillKeepsToolsTheSkillAlreadyOwns(t *testing.T) {
+	h, s, _ := newSkillTestHandlers(t, `{"verdict":"accept","reasoning":"unused"}`)
+	now := time.Now().UTC()
+	if err := s.CreateSkill(context.Background(), &models.Skill{
+		ID: "pack-1", Kitchen: "default", Name: "pack-x", Source: models.SkillSourceInline,
+		Manifest: &models.SkillManifest{Name: "pack-x", Description: "a pack"}, Status: models.SkillStatusNeedsReview,
+		RegisteredTools: []string{"x_read", "x_write"}, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/skills/pack-x/approve", nil)
+	req = withChiParam(withKitchen(req, "default"), "name", "pack-x")
+	rec := httptest.NewRecorder()
+	h.ApproveSkill(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	skill, _ := s.GetSkill(context.Background(), "default", "pack-x")
+	if skill.Status != models.SkillStatusAccepted || len(skill.RegisteredTools) != 2 {
+		t.Fatalf("approval must keep the skill's own tools: %+v", skill)
 	}
 }
