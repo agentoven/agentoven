@@ -104,8 +104,14 @@ SIGNING_GATES = (
     "tool_approval", "budget_extension", "resume_guidance", "recipe_gate", "wait_release",
     "environment_promotion", "skill_approval", "bot_action", "live_tool_replay",
     "dataset_publish", "dataset_purge", "legal_hold_release", "approval_skip",
-    "secret_binding", "secret_migrate",
+    "secret_binding", "secret_migrate", "budget_raise",
 )
+
+#: What a budget is measured in, the periods it resets on, and what a rate limit can count (Pro, ADR-0051).
+BUDGET_UNITS = ("usd", "tokens")
+BUDGET_PERIODS = ("daily", "weekly", "monthly", "lifetime")
+LIMIT_SCOPES = ("kitchen", "agent", "api_key", "provider")
+CACHE_MODES = ("off", "deterministic", "always")
 
 _RETENTION_MODES = ("expire", "persist", "regulated")
 _REPLAY_TOOLS = ("frozen", "blocked", "live")
@@ -1518,6 +1524,153 @@ class AgentOvenClient(TaskMethods):
         return self._get("/api/v1/me/kitchens")
 
     # ── Agent versions ─────────────────────────────────────────────────────
+    # ── Budgets, rate limits and the response cache (Pro, ADR-0051) ───────
+
+    def list_budgets(self) -> list[dict[str, Any]]:
+        """The kitchen's period budgets with what is left: ``scope`` (``kitchen``, ``provider``, ``agent`` or
+        ``api_key``), ``unit`` (``usd`` or ``tokens``), ``amount``, ``period``, ``consumed``, ``reserved``,
+        ``remaining``, ``used_pct``, ``exhausted``, ``reset_at`` and the ``thresholds``. Needs ``cost:read``."""
+        return self._get("/api/v1/spend/budgets")["budgets"]
+
+    def set_budget(
+        self,
+        amount: float,
+        *,
+        unit: str = "usd",
+        period: Optional[str] = None,
+        provider: Optional[str] = None,
+        agent: Optional[str] = None,
+        api_key: Optional[str] = None,
+        thresholds: Optional[Sequence[Mapping[str, Any]]] = None,
+        password: Optional[str] = None,
+        signing_token: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Create or change a period budget (``budget:extend``, the finance decision). With none of ``provider``,
+        ``agent`` and ``api_key`` it caps the whole kitchen; with one, only that provider's, agent's or credential's
+        calls (``api_key`` is the credential's subject, for example ``scopedkey:<id>``). ``unit`` is ``"usd"`` or
+        ``"tokens"`` (a whole number), ``period`` one of ``BUDGET_PERIODS`` (monthly when left out).
+        ``thresholds`` is a list of ``{"pct": 80, "action": "alert" | "block"}``; the default warns at 50 and 80
+        percent and stops at 100.
+
+        Creating a budget or lowering one is not a decision. **Raising** one (a higher amount, a different period,
+        a stop that moves up or goes away) is a signed decision on the ``budget_raise`` gate: record id
+        ``<scope>:<name>:<unit>`` (see :func:`budget_record_id`), payload this request's body. Pass ``password=``
+        (the SDK signs it, :meth:`sign`) or a ``signing_token=`` signed for exactly this; without one the server
+        answers ``signature_required`` when signing is on. Returns the budget as :meth:`list_budgets` shows it."""
+        ref = _budget_ref(provider, agent, api_key, unit)
+        if period is not None and period not in BUDGET_PERIODS:
+            raise ValueError(f"period must be one of {', '.join(BUDGET_PERIODS)}")
+        body: dict[str, Any] = {**ref, "amount": amount}
+        if period is not None:
+            body["period"] = period
+        if thresholds is not None:
+            for t in thresholds:
+                if t.get("action") not in ("alert", "block"):
+                    raise ValueError('a threshold\'s action is "alert" or "block"')
+            body["thresholds"] = [{"pct": t["pct"], "action": t["action"]} for t in thresholds]
+        headers = self._signing_headers(password, signing_token, "budget_raise", budget_record_id(provider, agent, api_key, unit), body)
+        return self._request("PUT", "/api/v1/spend/budgets", body, headers)
+
+    def remove_budget(
+        self,
+        *,
+        unit: str = "usd",
+        provider: Optional[str] = None,
+        agent: Optional[str] = None,
+        api_key: Optional[str] = None,
+        password: Optional[str] = None,
+        signing_token: Optional[str] = None,
+    ) -> None:
+        """Remove a budget (``budget:extend``). Removing lifts its limit, so it is signed like a raise: the
+        ``budget_raise`` gate, payload ``{"delete": true}``; pass ``password=`` or ``signing_token=``. Its ledger
+        entries stay. Raises :class:`AgentOvenAPIError` (404) if there is no such budget."""
+        ref = _budget_ref(provider, agent, api_key, unit)
+        headers = self._signing_headers(password, signing_token, "budget_raise", budget_record_id(provider, agent, api_key, unit), {"delete": True})
+        self._request("DELETE", "/api/v1/spend/budgets" + _query(**ref), None, headers)
+
+    def list_budget_ledger(
+        self, budget_id: Optional[str] = None, since: Optional[str] = None, before: Optional[int] = None, limit: Optional[int] = None
+    ) -> list[dict[str, Any]]:
+        """The ledger, newest first: one entry per model call per budget it was charged to (agent, API key,
+        provider, model, tokens, cost). ``since`` is an RFC 3339 time, ``before`` an entry id to page from."""
+        return self._get("/api/v1/spend/ledger" + _query(budget_id=budget_id, since=since, before=before, limit=limit))["entries"]
+
+    def list_budget_alerts(self, limit: Optional[int] = None) -> list[dict[str, Any]]:
+        """The thresholds the kitchen's budgets have crossed, newest first. ``notified`` is false for an alert the
+        notification channels were not told about (the kitchen was throttled); it is on record all the same."""
+        return self._get("/api/v1/spend/alerts" + _query(limit=limit))["alerts"]
+
+    def budget_usage(self, group: str = "agent", days: Optional[int] = None, limit: Optional[int] = None) -> list[dict[str, Any]]:
+        """What the kitchen's model calls amounted to over the last ``days`` (30 by default), by ``group``
+        (``"agent"``, ``"model"``, ``"provider"`` or ``"day"``): calls, tokens, ``cost_usd`` and the response
+        cache's ``cache_hits``, ``cache_misses`` and ``cache_saved_usd``. Biggest spender first."""
+        if group not in ("agent", "model", "provider", "day"):
+            raise ValueError('group is "agent", "model", "provider" or "day"')
+        return self._get("/api/v1/spend/usage" + _query(group=group, days=days, limit=limit))["usage"]
+
+    def list_limits(self) -> list[dict[str, Any]]:
+        """The kitchen's rate limits: ``scope``, ``ref``, ``requests_per_minute``, ``tokens_per_minute``,
+        ``invocations_per_minute`` (0 is not limited) and ``rejected`` (requests it refused since the server
+        process started). Needs ``cost:read``."""
+        return self._get("/api/v1/limits")["limits"]
+
+    def set_limit(
+        self,
+        scope: str,
+        ref: str = "",
+        *,
+        requests_per_minute: int = 0,
+        tokens_per_minute: int = 0,
+        invocations_per_minute: int = 0,
+    ) -> dict[str, Any]:
+        """Create or replace a rate limit (``limit:manage``). ``scope`` is one of ``LIMIT_SCOPES``; ``ref`` names the
+        agent, credential subject or provider (``"*"`` gives each its own bucket) and is empty for the kitchen.
+        ``requests_per_minute`` counts model calls, ``tokens_per_minute`` the tokens they use and
+        ``invocations_per_minute`` agent invocations at the API (not for a provider). A caller over a limit gets
+        429 with ``Retry-After`` (:class:`RateLimitedError`)."""
+        if scope not in LIMIT_SCOPES:
+            raise ValueError(f"scope must be one of {', '.join(LIMIT_SCOPES)}")
+        if not (requests_per_minute or tokens_per_minute or invocations_per_minute):
+            raise ValueError("a limit sets at least one of requests_per_minute, tokens_per_minute and invocations_per_minute (remove_limit removes it)")
+        return self._put("/api/v1/limits", {
+            "scope": scope, "ref": ref, "requests_per_minute": requests_per_minute,
+            "tokens_per_minute": tokens_per_minute, "invocations_per_minute": invocations_per_minute,
+        })
+
+    def remove_limit(self, scope: str, ref: str = "") -> None:
+        """Remove a rate limit (``limit:manage``). Raises :class:`AgentOvenAPIError` (404) if there is none."""
+        self._delete("/api/v1/limits" + _query(scope=scope, ref=ref))
+
+    def get_cache(self) -> dict[str, Any]:
+        """The response cache of this kitchen: ``policies`` (the kitchen's own has an empty ``agent``) and
+        ``stats`` (entries, bytes, hits, misses, stores and why requests were not cached, for the server process
+        you reached). The hit rate over time is in :meth:`budget_usage`."""
+        return self._get("/api/v1/cache")
+
+    def set_cache_policy(
+        self, mode: str, *, agent: str = "", ttl_seconds: Optional[int] = None, share_across_principals: bool = False
+    ) -> dict[str, Any]:
+        """Turn the response cache on, off or deterministic for the kitchen (``agent=""``) or one agent
+        (``cache:manage``). ``mode`` is one of ``CACHE_MODES``: ``"deterministic"`` caches requests that ask for
+        ``temperature`` 0, ``"always"`` any eligible request. An agent's policy replaces the kitchen's for that
+        agent. Entries are kept per caller unless ``share_across_principals`` is true. Setting a policy forgets
+        what was stored under the old one."""
+        if mode not in CACHE_MODES:
+            raise ValueError(f"mode must be one of {', '.join(CACHE_MODES)}")
+        body: dict[str, Any] = {"agent": agent, "mode": mode, "share_across_principals": share_across_principals}
+        if ttl_seconds is not None:
+            body["ttl_seconds"] = ttl_seconds
+        return self._put("/api/v1/cache/policy", body)
+
+    def remove_cache_policy(self, agent: str = "") -> None:
+        """Remove a cache policy (back to the kitchen's, or to no caching) (``cache:manage``)."""
+        self._delete("/api/v1/cache/policy" + _query(agent=agent))
+
+    def purge_cache(self, agent: str = "") -> dict[str, Any]:
+        """Forget everything stored for the kitchen, or for one agent, on every replica (``cache:manage``).
+        Returns ``{"purged_at": ...}``."""
+        return self._post("/api/v1/cache/purge", {"agent": agent} if agent else {})
+
     # An agent's version moves only on a bake whose configuration differs from the last bake's: the first bake
     # keeps the registered version (0.1.0), a bake that changes nothing keeps its version, and a changed one takes
     # the next minor version and keeps the old one. Editing a registered agent (``register``, ``PUT``) does not
@@ -1916,7 +2069,7 @@ class AgentOvenClient(TaskMethods):
                 detail = raw.decode(errors="replace")
             if exc.code == 400 and _NO_AUDIO in _error_text(detail):
                 raise AudioModalityError(exc.code, detail) from exc
-            raise AgentOvenAPIError(exc.code, detail) from exc
+            raise _api_error(exc.code, detail, {k.lower(): v for k, v in exc.headers.items()}) from exc
 
     def _get(self, path: str) -> Any:
         return self._request("GET", path)
@@ -2049,3 +2202,114 @@ class AudioModalityError(AgentOvenAPIError):
     @property
     def message(self) -> str:
         return _error_text(self.detail)
+def _budget_ref(provider: Optional[str], agent: Optional[str], api_key: Optional[str], unit: str) -> dict[str, str]:
+    """The fields that say which budget: at most one of provider, agent and api_key, and the unit."""
+    named = {k: v for k, v in (("provider", provider), ("agent", agent), ("api_key", api_key)) if v}
+    if len(named) > 1:
+        raise ValueError("a budget counts the kitchen or one provider, one agent or one API key, not a mix")
+    if unit not in BUDGET_UNITS:
+        raise ValueError(f"unit must be one of {', '.join(BUDGET_UNITS)}")
+    return {**named, "unit": unit}
+
+
+def budget_record_id(provider: Optional[str] = None, agent: Optional[str] = None, api_key: Optional[str] = None, unit: str = "usd") -> str:
+    """The record id a signature on a budget change covers: ``<scope>:<name>:<unit>``, for example
+    ``provider:openai:usd``, ``agent:triage:tokens`` or ``kitchen::usd`` (the name is empty for the kitchen)."""
+    _budget_ref(provider, agent, api_key, unit)
+    for scope, name in (("provider", provider), ("agent", agent), ("api_key", api_key)):
+        if name:
+            return f"{scope}:{name}:{unit}"
+    return f"kitchen::{unit}"
+
+
+class RateLimitedError(AgentOvenAPIError):
+    """A rate limit refused the request (HTTP 429, Pro ADR-0051): nothing was done, and the same request is
+    expected to be admitted after ``retry_after`` seconds (from the ``Retry-After`` header). ``scope`` is what is
+    limited (``kitchen``, ``agent``, ``api_key`` or ``provider``) and ``limit`` the dimension that ran out. The
+    SDK does not retry for you."""
+
+    def __init__(self, status_code: int, detail: Any, retry_after: Optional[int] = None) -> None:
+        super().__init__(status_code, detail)
+        self._retry_after = retry_after
+
+    @property
+    def _fields(self) -> dict[str, Any]:
+        return _refusal_fields(self.detail)
+
+    @property
+    def retry_after(self) -> Optional[int]:
+        """Seconds to wait: the ``Retry-After`` header, else the body's ``retry_after``."""
+        if self._retry_after is not None:
+            return self._retry_after
+        v = self._fields.get("retry_after")
+        return int(v) if isinstance(v, (int, float)) else None
+
+    @property
+    def scope(self) -> Optional[str]:
+        return self._fields.get("scope")
+
+    @property
+    def limit(self) -> Optional[str]:
+        return self._fields.get("limit")
+
+    @property
+    def message(self) -> str:
+        return str(self._fields.get("message") or _error_text(self.detail))
+
+
+class BudgetExceededError(AgentOvenAPIError):
+    """A budget is used up (HTTP 402): the call was not sent. Raised for the gateway's ``budget_exceeded`` and for a
+    run that stopped at a budget (``run_budget_exhausted``). ``scope`` names the budget (``run``, ``kitchen``,
+    ``provider``, ``agent`` or ``api_key``), ``unit`` is ``usd`` or ``tokens``, ``period`` and ``resets_at`` say when a
+    period budget starts again (a person can raise it sooner: :meth:`AgentOvenClient.set_budget`)."""
+
+    @property
+    def _fields(self) -> dict[str, Any]:
+        return _refusal_fields(self.detail)
+
+    @property
+    def scope(self) -> Optional[str]:
+        return self._fields.get("scope")
+
+    @property
+    def unit(self) -> Optional[str]:
+        f = self._fields
+        if f.get("unit"):
+            return f["unit"]
+        return {"cost": "usd", "tokens": "tokens"}.get(f.get("dimension", ""))
+
+    @property
+    def period(self) -> Optional[str]:
+        return self._fields.get("period")
+
+    @property
+    def resets_at(self) -> Optional[str]:
+        return self._fields.get("resets_at")
+
+    @property
+    def message(self) -> str:
+        return str(self._fields.get("message") or _error_text(self.detail))
+
+
+def _refusal_fields(detail: Any) -> dict[str, Any]:
+    """The fields of a refusal, from either shape the server uses: the API's flat object, or the OpenAI-compatible
+    gateway's ``{"error": {...}}``."""
+    if isinstance(detail, dict):
+        inner = detail.get("error")
+        return inner if isinstance(inner, dict) else detail
+    return {}
+
+
+def _api_error(status: int, detail: Any, headers: Mapping[str, str]) -> AgentOvenAPIError:
+    """The error for a non-2xx reply: a typed one for a rate limit and for a budget that is used up."""
+    f = _refusal_fields(detail)
+    if status == 429 and (f.get("error") == "rate_limited" or f.get("code") == "rate_limit_exceeded" or "retry-after" in headers):
+        try:
+            return RateLimitedError(status, detail, int(headers["retry-after"]))
+        except (KeyError, ValueError):
+            return RateLimitedError(status, detail)
+    if status == 402 and ("budget_exceeded" in (f.get("type"), f.get("code"), f.get("error")) or f.get("error") == "run_budget_exhausted"):
+        return BudgetExceededError(status, detail)
+    return AgentOvenAPIError(status, detail)
+
+

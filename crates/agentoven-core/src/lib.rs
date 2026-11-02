@@ -46,6 +46,10 @@ pub mod testing;
 
 // Re-exports
 pub use agent::{Agent, AgentBuilder, AgentMode, AgentStatus, Guardrail};
+pub use client::controls::{
+    budget_record_id, BudgetScope, BUDGET_PERIODS, BUDGET_UNITS, CACHE_MODES, LIMIT_SCOPES,
+    USAGE_GROUPS,
+};
 pub use client::pro::{
     check_role, check_retention_mode, ApiError, DatasetExport, OidcSigningRequired, Signature,
     KITCHEN_ROLES, PERSON_ROLES, SIGNING_GATES, SIGNING_TOKEN_HEADER,

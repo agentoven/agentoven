@@ -285,3 +285,24 @@ regulated dataset publishing, purging and lowering the minimum are signed (`pass
 `list_kitchen_bindings`, `create_kitchen_binding(kitchen_id, claim_value, role)`, `delete_kitchen_binding`,
 `set_service_account_owner`, `set_scoped_key_owner`, `my_kitchens`. A service account or scoped key belongs to a person
 (`owner_email=` when it is created); when the owner leaves the kitchen it stops until a Head Chef gives it to someone.
+
+## Budgets, rate limits and the response cache (Pro)
+
+```python
+client.set_budget(500, period="monthly")                                    # the kitchen, dollars
+client.set_budget(2_000_000, unit="tokens", agent="triage", period="daily")  # one agent (or provider=, api_key=)
+client.set_budget(800, period="monthly", password=pw)                        # a raise is a signed decision (gate budget_raise)
+client.list_budgets(); client.list_budget_ledger(); client.list_budget_alerts(); client.budget_usage("agent", days=7)
+client.remove_budget(agent="triage", unit="tokens", password=pw)
+
+client.set_limit("agent", "triage", requests_per_minute=60, tokens_per_minute=200_000)   # "*" for each on its own
+client.list_limits(); client.remove_limit("agent", "triage")
+
+client.set_cache_policy("always", agent="faq-bot", ttl_seconds=900)
+client.get_cache(); client.purge_cache("faq-bot"); client.remove_cache_policy("faq-bot")
+```
+
+`RateLimitedError` (HTTP 429: `retry_after` from `Retry-After`, `scope`, `limit`) and `BudgetExceededError` (HTTP 402:
+`scope`, `unit`, `period`, `resets_at`) are `AgentOvenAPIError`s; the SDK does not retry for you. Lowering a budget or
+creating one needs no signature; raising or removing one needs `password=` or `signing_token=` (record id from
+`budget_record_id`). See [docs/budgets-limits-cache.md](../../docs/budgets-limits-cache.md).

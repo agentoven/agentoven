@@ -10,6 +10,9 @@ use crate::recipe::Recipe;
 
 /// Pro surfaces: replay, governed datasets, signed decisions, bindings and owners.
 pub mod pro;
+/// Budgets, rate limits and the response cache (Pro, ADR-0051).
+pub mod controls;
+pub mod guardrails;
 pub mod secrets;
 
 /// Client for interacting with the AgentOven control plane.

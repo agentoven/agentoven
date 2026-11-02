@@ -30,16 +30,23 @@ from agentoven import flow
 from agentoven.flow import Flow, FlowError
 from agentoven.blobs import Blob, Blobs
 from agentoven.client import (
+    BUDGET_PERIODS,
+    BUDGET_UNITS,
+    CACHE_MODES,
     KITCHEN_ROLES,
+    LIMIT_SCOPES,
     PERSON_ROLES,
     SIGNING_GATES,
     SIGNING_TOKEN_HEADER,
     AgentOvenAPIError,
     AgentOvenClient,
     AudioModalityError,
+    BudgetExceededError,
     DatasetExport,
     OidcSigningRequired,
+    RateLimitedError,
     RealtimeToken,
+    budget_record_id,
 )
 from agentoven.media import Attachment, AudioClip, AudioInput, InvokeResult
 from agentoven.modalities import (
@@ -64,6 +71,13 @@ __all__ = [
     "AgentOvenAPIError",
     "AudioModalityError",
     "OidcSigningRequired",
+    "RateLimitedError",
+    "BudgetExceededError",
+    "budget_record_id",
+    "BUDGET_UNITS",
+    "BUDGET_PERIODS",
+    "LIMIT_SCOPES",
+    "CACHE_MODES",
     "DatasetExport",
     "RealtimeToken",
     "KITCHEN_ROLES",

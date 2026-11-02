@@ -23,7 +23,10 @@ pub mod dataset;
 pub mod key;
 pub mod legal_hold;
 pub mod secret;
+pub mod budgets;
+pub mod cache;
 pub mod signing;
+pub mod limits;
 pub mod eval;
 pub mod judge;
 pub mod scenario;
@@ -193,6 +196,18 @@ pub enum Commands {
 
     /// ⏳ Background tasks: start, follow, extend, resume and cancel long-running agent work.
     #[command(subcommand)]
+    /// 💰 Period budgets for the kitchen, an agent, a provider or an API key, in dollars or tokens (Pro).
+    #[command(subcommand)]
+    Budgets(budgets::BudgetsCommands),
+
+    /// 🚦 Rate limits: requests, tokens and invocations per minute (Pro).
+    #[command(subcommand)]
+    Limits(limits::LimitsCommands),
+
+    /// 🧊 The response cache: policy per kitchen or agent, and purge (Pro).
+    #[command(subcommand)]
+    Cache(cache::CacheCommands),
+
     Task(task::TaskCommands),
 
     /// 📊 Show control plane status and health.
@@ -268,6 +283,15 @@ async fn status() -> anyhow::Result<()> {
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
 
+        Commands::Budgets(cmd) => {
+            budgets::execute(cmd, signing::client_with(url, api_key, kitchen)?, matches!(output, OutputFormat::Json)).await
+        }
+        Commands::Limits(cmd) => {
+            limits::execute(cmd, signing::client_with(url, api_key, kitchen)?, matches!(output, OutputFormat::Json)).await
+        }
+        Commands::Cache(cmd) => {
+            cache::execute(cmd, signing::client_with(url, api_key, kitchen)?, matches!(output, OutputFormat::Json)).await
+        }
     // Try to get server info
     print!("  Control plane: checking...");
     match client.server_info().await {
@@ -318,7 +342,7 @@ mod tests {
     #[test]
     fn the_new_commands_are_well_formed() {
         let root = Cli::command();
-        for name in ["dataset", "signature", "legal-hold", "key", "secret", "trace", "kitchen", "service-account", "recipe"] {
+        for name in ["dataset", "signature", "legal-hold", "key", "secret", "trace", "kitchen", "service-account", "recipe", "budgets", "limits", "cache"] {
             let sub = root.find_subcommand(name).unwrap_or_else(|| panic!("no {name}")).clone();
             sub.debug_assert();
         }

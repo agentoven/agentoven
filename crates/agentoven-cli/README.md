@@ -72,6 +72,9 @@ agentoven status
 | `agentoven kitchen mine` | The kitchens you can enter and your role in each |
 | `agentoven service-account create --owner <email>` / `service-account owner <id> <email>` | Credentials belong to a person |
 | `agentoven key ls\|owner <id> <email>` | Scoped API keys and their owners |
+| `agentoven budgets list\|set\|rm\|ledger\|alerts\|usage` | Period budgets for the kitchen, an agent, a provider or an API key, in dollars or tokens (Pro). Raising or removing one is signed (`--sign`) |
+| `agentoven limits list\|set\|rm` | Rate limits: requests, tokens and invocations per minute (Pro) |
+| `agentoven cache show\|set\|rm\|purge` | The response cache: policy per kitchen or agent, and purge (Pro) |
 
 ### Roles
 

@@ -50,6 +50,10 @@ only one of several concurrent resumes runs. Raising a cap is recorded in the au
 (`run.budget_extended`, with who and why), as is the pause (`run.budget_paused`). In Pro, raising a cap
 needs the `budget:extend` permission.
 
+A budget that is shared beyond one run (the kitchen's, an agent's, a provider's or an API key's, per day, week
+or month) is Pro: a run that meets it pauses the same way, with `scope` saying which budget ran out. See
+[Budgets, rate limits and the response cache](budgets-limits-cache.md).
+
 ### Subagents
 
 A subagent a run delegates to is charged to its parent as it spends, out of a share reserved for it

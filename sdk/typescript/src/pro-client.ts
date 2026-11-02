@@ -127,6 +127,70 @@ export class OidcSigningRequired extends AgentOvenAPIError {
 /** The header that carries a signing token on a decision call (the control plane's `signatures.Header`). */
 export const SIGNING_TOKEN_HEADER = 'X-Signing-Token';
 
+/** The fields of a refusal, from either shape the server uses: the API's flat object or the gateway's `{ error: {...} }`. */
+function refusalFields(detail: unknown): Record<string, unknown> {
+  if (detail && typeof detail === 'object') {
+    const inner = (detail as { error?: unknown }).error;
+    return inner && typeof inner === 'object' ? (inner as Record<string, unknown>) : (detail as Record<string, unknown>);
+  }
+  return {};
+}
+
+/**
+ * A rate limit refused the request (HTTP 429, Pro ADR-0051): nothing was done, and the same request is expected to
+ * be admitted after `retryAfter` seconds (the `Retry-After` header). `scope` is what is limited (`kitchen`, `agent`,
+ * `api_key` or `provider`) and `limit` the dimension that ran out. The SDK does not retry for you.
+ */
+export class RateLimitedError extends AgentOvenAPIError {
+  /** Seconds to wait: the `Retry-After` header, else the body's `retry_after`. */
+  readonly retryAfter?: number;
+  constructor(statusCode: number, detail: unknown, retryAfterHeader?: number) {
+    super(statusCode, detail);
+    this.name = 'RateLimitedError';
+    const body = refusalFields(detail).retry_after;
+    this.retryAfter = retryAfterHeader ?? (typeof body === 'number' ? body : undefined);
+  }
+  get scope(): string | undefined { return refusalFields(this.detail).scope as string | undefined; }
+  get limit(): string | undefined { return refusalFields(this.detail).limit as string | undefined; }
+  get reason(): string { return String(refusalFields(this.detail).message ?? errorText(this.detail)); }
+}
+
+/**
+ * A budget is used up (HTTP 402): the call was not sent. Raised for the gateway's `budget_exceeded` and for a run
+ * that stopped at a budget (`run_budget_exhausted`). `scope` names the budget (`run`, `kitchen`, `provider`, `agent`,
+ * `api_key`), `unit` is `usd` or `tokens`, and `period` with `resetsAt` say when a period budget starts again (a
+ * person can raise it sooner: `setBudget`).
+ */
+export class BudgetExceededError extends AgentOvenAPIError {
+  constructor(statusCode: number, detail: unknown) {
+    super(statusCode, detail);
+    this.name = 'BudgetExceededError';
+  }
+  get scope(): string | undefined { return refusalFields(this.detail).scope as string | undefined; }
+  get unit(): string | undefined {
+    const f = refusalFields(this.detail);
+    if (f.unit) return String(f.unit);
+    return ({ cost: 'usd', tokens: 'tokens' } as Record<string, string>)[String(f.dimension ?? '')];
+  }
+  get period(): string | undefined { return refusalFields(this.detail).period as string | undefined; }
+  get resetsAt(): string | undefined { return refusalFields(this.detail).resets_at as string | undefined; }
+  get reason(): string { return String(refusalFields(this.detail).message ?? errorText(this.detail)); }
+}
+
+/** The error for a non-2xx reply: a typed one for a rate limit and for a budget that is used up. */
+function apiError(status: number, detail: unknown, headers: Headers): AgentOvenAPIError {
+  const f = refusalFields(detail);
+  const retryAfter = headers.get('retry-after');
+  if (status === 429 && (f.error === 'rate_limited' || f.code === 'rate_limit_exceeded' || retryAfter !== null)) {
+    const n = retryAfter === null ? NaN : Number.parseInt(retryAfter, 10);
+    return new RateLimitedError(status, detail, Number.isNaN(n) ? undefined : n);
+  }
+  if (status === 402 && (f.type === 'budget_exceeded' || f.code === 'budget_exceeded' || f.error === 'budget_exceeded' || f.error === 'run_budget_exhausted')) {
+    return new BudgetExceededError(status, detail);
+  }
+  return new AgentOvenAPIError(status, detail);
+}
+
 /**
  * The roles a person or credential can hold inside one kitchen. `restaurateur` is platform-wide, so it is a role of
  * a person in the user directory, never of a kitchen member, binding or credential. The retired `admin` is no role:
@@ -145,11 +209,17 @@ export const SIGNING_GATES = [
   'tool_approval', 'budget_extension', 'resume_guidance', 'recipe_gate', 'wait_release',
   'environment_promotion', 'skill_approval', 'bot_action', 'live_tool_replay',
   'dataset_publish', 'dataset_purge', 'legal_hold_release', 'approval_skip',
-  'secret_binding', 'secret_migrate',
+  'secret_binding', 'secret_migrate', 'budget_raise',
 ] as const;
 
 const RETENTION_MODES = ['expire', 'persist', 'regulated'];
 const REPLAY_TOOL_MODES: ReplayToolMode[] = ['frozen', 'blocked', 'live'];
+
+/** What a budget is measured in, the periods it resets on, what a rate limit counts, and the cache's modes (Pro, ADR-0051). */
+export const BUDGET_UNITS = ['usd', 'tokens'] as const;
+export const BUDGET_PERIODS = ['daily', 'weekly', 'monthly', 'lifetime'] as const;
+export const LIMIT_SCOPES = ['kitchen', 'agent', 'api_key', 'provider'] as const;
+export const CACHE_MODES = ['off', 'deterministic', 'always'] as const;
 
 /** Refuse a role the control plane does not have. */
 function checkRole(role: string, allowed: readonly string[], what: string): void {
@@ -185,6 +255,28 @@ function queryString(params: Record<string, string | number | undefined>): strin
 const NO_AUDIO = 'does not offer the audio modality';
 
 function errorText(detail: unknown): string {
+/** The fields that say which budget: at most one of provider, agent and apiKey, and the unit. */
+function budgetRef(o: BudgetScope): Record<string, string> {
+  const named: Record<string, string> = {};
+  if (o.provider) named.provider = o.provider;
+  if (o.agent) named.agent = o.agent;
+  if (o.apiKey) named.api_key = o.apiKey;
+  if (Object.keys(named).length > 1) throw new Error('a budget counts the kitchen or one provider, one agent or one API key, not a mix');
+  const unit = o.unit ?? 'usd';
+  if (!(BUDGET_UNITS as readonly string[]).includes(unit)) throw new Error(`unit must be one of ${BUDGET_UNITS.join(', ')}`);
+  return { ...named, unit };
+}
+
+/**
+ * The record id a signature on a budget change covers: `<scope>:<name>:<unit>`, for example `provider:openai:usd`,
+ * `agent:triage:tokens` or `kitchen::usd` (the name is empty for the kitchen).
+ */
+export function budgetRecordId(o: BudgetScope = {}): string {
+  const ref = budgetRef(o);
+  for (const scope of ['provider', 'agent', 'api_key']) if (ref[scope]) return `${scope}:${ref[scope]}:${ref.unit}`;
+  return `kitchen::${ref.unit}`;
+}
+
   if (typeof detail === 'object' && detail !== null) {
     const d = detail as { error?: unknown; message?: unknown };
     return String(d.error ?? d.message ?? JSON.stringify(detail));
@@ -1688,6 +1780,145 @@ export class ProClient {
   /** Long-running tasks: start, watch, resume and cancel (`pro.tasks.start(agent, input)`). */
   get tasks(): Tasks {
     return new Tasks({ url: this.baseUrl, apiKey: this.apiKey, kitchen: this.kitchen });
+  // ── Budgets, rate limits and the response cache (Pro, ADR-0051) ────────────
+
+  /**
+   * The kitchen's period budgets with what is left: `scope` (`kitchen`, `provider`, `agent`, `api_key`), `unit`
+   * (`usd`, `tokens`), `amount`, `period`, `consumed`, `reserved`, `remaining`, `used_pct`, `exhausted`, `reset_at`
+   * and the `thresholds`. Needs `cost:read`.
+   */
+  async listBudgets(): Promise<Budget[]> {
+    return (await this.get<{ budgets: Budget[] }>('/api/v1/spend/budgets')).budgets;
+  }
+
+  /**
+   * Create or change a period budget (`budget:extend`, the finance decision). With none of `provider`, `agent` and
+   * `apiKey` it caps the whole kitchen; with one, only that provider's, agent's or credential's calls (`apiKey` is the
+   * credential's subject, for example `scopedkey:<id>`). `unit` is `usd` (the default) or `tokens` (a whole number),
+   * `period` one of `BUDGET_PERIODS` (monthly when left out). `thresholds` is a list of `{ pct, action: 'alert' |
+   * 'block' }`; the default warns at 50 and 80 percent and stops at 100.
+   *
+   * Creating a budget or lowering one is not a decision. **Raising** one (a higher amount, a different period, a stop
+   * that moves up or goes away) is a signed decision on the `budget_raise` gate: record id `<scope>:<name>:<unit>`
+   * (see `budgetRecordId`), payload this request's body. Pass `password` (the SDK signs it, `sign`) or a
+   * `signingToken` signed for exactly this; without one the server answers `signature_required` when signing is on.
+   */
+  async setBudget(amount: number, opts: SetBudgetOptions & Signing = {}): Promise<Budget> {
+    const ref = budgetRef(opts);
+    if (opts.period !== undefined && !(BUDGET_PERIODS as readonly string[]).includes(opts.period)) {
+      throw new Error(`period must be one of ${BUDGET_PERIODS.join(', ')}`);
+    }
+    const body: Record<string, unknown> = { ...ref, amount };
+    if (opts.period !== undefined) body.period = opts.period;
+    if (opts.thresholds !== undefined) {
+      for (const t of opts.thresholds) if (t.action !== 'alert' && t.action !== 'block') throw new Error("a threshold's action is 'alert' or 'block'");
+      body.thresholds = opts.thresholds.map((t) => ({ pct: t.pct, action: t.action }));
+    }
+    const extra = await this.signingHeaders(opts, 'budget_raise', budgetRecordId(opts), body);
+    return this.request('PUT', '/api/v1/spend/budgets', body, undefined, extra);
+  }
+
+  /**
+   * Remove a budget (`budget:extend`). Removing lifts its limit, so it is signed like a raise: the `budget_raise`
+   * gate, payload `{ delete: true }`; pass `password` or `signingToken`. Its ledger entries stay. Rejects with a 404
+   * if there is no such budget.
+   */
+  async removeBudget(opts: BudgetScope & Signing = {}): Promise<void> {
+    const ref = budgetRef(opts);
+    const extra = await this.signingHeaders(opts, 'budget_raise', budgetRecordId(opts), { delete: true });
+    await this.request('DELETE', `/api/v1/spend/budgets${queryString(ref)}`, undefined, undefined, extra);
+  }
+
+  /**
+   * The ledger, newest first: one entry per model call per budget it was charged to (agent, API key, provider, model,
+   * tokens, cost). `since` is an RFC 3339 time, `before` an entry id to page from.
+   */
+  async listBudgetLedger(opts: { budgetId?: string; since?: string; before?: number; limit?: number } = {}): Promise<BudgetLedgerEntry[]> {
+    const q = queryString({ budget_id: opts.budgetId, since: opts.since, before: opts.before, limit: opts.limit });
+    return (await this.get<{ entries: BudgetLedgerEntry[] }>(`/api/v1/spend/ledger${q}`)).entries;
+  }
+
+  /**
+   * The thresholds the kitchen's budgets have crossed, newest first. `notified` is false for an alert the
+   * notification channels were not told about (the kitchen was throttled); it is on record all the same.
+   */
+  async listBudgetAlerts(limit?: number): Promise<BudgetAlert[]> {
+    return (await this.get<{ alerts: BudgetAlert[] }>(`/api/v1/spend/alerts${queryString({ limit })}`)).alerts;
+  }
+
+  /**
+   * What the kitchen's model calls amounted to over the last `days` (30 by default), by `group` (`agent`, `model`,
+   * `provider` or `day`): calls, tokens, `cost_usd` and the response cache's `cache_hits`, `cache_misses` and
+   * `cache_saved_usd`. Biggest spender first.
+   */
+  async budgetUsage(group: UsageGroup = 'agent', opts: { days?: number; limit?: number } = {}): Promise<UsageRow[]> {
+    if (!['agent', 'model', 'provider', 'day'].includes(group)) throw new Error("group is 'agent', 'model', 'provider' or 'day'");
+    return (await this.get<{ usage: UsageRow[] }>(`/api/v1/spend/usage${queryString({ group, days: opts.days, limit: opts.limit })}`)).usage;
+  }
+
+  /**
+   * The kitchen's rate limits: `scope`, `ref`, `requests_per_minute`, `tokens_per_minute`, `invocations_per_minute`
+   * (0 is not limited) and `rejected` (requests it refused since the server process started). Needs `cost:read`.
+   */
+  async listLimits(): Promise<RateLimit[]> {
+    return (await this.get<{ limits: RateLimit[] }>('/api/v1/limits')).limits;
+  }
+
+  /**
+   * Create or replace a rate limit (`limit:manage`). `scope` is one of `LIMIT_SCOPES`; `ref` names the agent,
+   * credential subject or provider (`'*'` gives each its own bucket) and is empty for the kitchen.
+   * `requestsPerMinute` counts model calls, `tokensPerMinute` the tokens they use and `invocationsPerMinute` agent
+   * invocations at the API (not for a provider). A caller over a limit gets 429 with `Retry-After`
+   * (`RateLimitedError`).
+   */
+  async setLimit(scope: LimitScope, ref: string, rates: { requestsPerMinute?: number; tokensPerMinute?: number; invocationsPerMinute?: number }): Promise<RateLimit> {
+    if (!(LIMIT_SCOPES as readonly string[]).includes(scope)) throw new Error(`scope must be one of ${LIMIT_SCOPES.join(', ')}`);
+    const { requestsPerMinute = 0, tokensPerMinute = 0, invocationsPerMinute = 0 } = rates;
+    if (!requestsPerMinute && !tokensPerMinute && !invocationsPerMinute) {
+      throw new Error('a limit sets at least one of requestsPerMinute, tokensPerMinute and invocationsPerMinute (removeLimit removes it)');
+    }
+    return this.put('/api/v1/limits', {
+      scope, ref, requests_per_minute: requestsPerMinute, tokens_per_minute: tokensPerMinute, invocations_per_minute: invocationsPerMinute,
+    });
+  }
+
+  /** Remove a rate limit (`limit:manage`). Rejects with a 404 if there is none. */
+  removeLimit(scope: LimitScope, ref = ''): Promise<void> {
+    return this.delete(`/api/v1/limits${queryString({ scope, ref })}`);
+  }
+
+  /**
+   * The response cache of this kitchen: `policies` (the kitchen's own has an empty `agent`) and `stats` (entries,
+   * bytes, hits, misses, stores and why requests were not cached, for the server process you reached). The hit rate
+   * over time is in `budgetUsage`.
+   */
+  getCache(): Promise<CacheState> {
+    return this.get('/api/v1/cache');
+  }
+
+  /**
+   * Turn the response cache on, off or deterministic for the kitchen (`agent` empty) or one agent (`cache:manage`).
+   * `mode` is one of `CACHE_MODES`: `deterministic` caches requests that ask for `temperature` 0, `always` any
+   * eligible request. An agent's policy replaces the kitchen's for that agent. Entries are kept per caller unless
+   * `shareAcrossPrincipals` is true. Setting a policy forgets what was stored under the old one.
+   */
+  async setCachePolicy(mode: CacheMode, opts: { agent?: string; ttlSeconds?: number; shareAcrossPrincipals?: boolean } = {}): Promise<CachePolicy> {
+    if (!(CACHE_MODES as readonly string[]).includes(mode)) throw new Error(`mode must be one of ${CACHE_MODES.join(', ')}`);
+    const body: Record<string, unknown> = { agent: opts.agent ?? '', mode, share_across_principals: opts.shareAcrossPrincipals ?? false };
+    if (opts.ttlSeconds !== undefined) body.ttl_seconds = opts.ttlSeconds;
+    return this.put('/api/v1/cache/policy', body);
+  }
+
+  /** Remove a cache policy (back to the kitchen's, or to no caching) (`cache:manage`). */
+  removeCachePolicy(agent = ''): Promise<void> {
+    return this.delete(`/api/v1/cache/policy${queryString({ agent })}`);
+  }
+
+  /** Forget everything stored for the kitchen, or for one agent, on every replica (`cache:manage`). */
+  purgeCache(agent = ''): Promise<{ purged_at: string }> {
+    return this.post('/api/v1/cache/purge', agent ? { agent } : {});
+  }
+
   }
 
   /** Upload a file once and name it in messages by `blob_ref` (`pro.blobs.upload(bytes)`). */
@@ -1726,7 +1957,7 @@ export class ProClient {
       if (res.status === 400 && errorText(detail).includes(NO_AUDIO)) {
         throw new AudioModalityError(res.status, detail);
       }
-      throw new AgentOvenAPIError(res.status, detail);
+      throw apiError(res.status, detail, res.headers);
     }
     return res;
   }
@@ -1940,6 +2171,68 @@ export interface KitchenBinding {
   created_by?: string;
   created_at: string;
 }
+/** Which budget: the kitchen's (none of the three), or one provider's, agent's or credential's, in dollars or tokens. */
+export interface BudgetScope {
+  provider?: string;
+  agent?: string;
+  /** The credential's subject, for example `scopedkey:<id>`. */
+  apiKey?: string;
+  unit?: BudgetUnit;
+}
+export type BudgetUnit = (typeof BUDGET_UNITS)[number];
+export type BudgetPeriod = (typeof BUDGET_PERIODS)[number];
+export type LimitScope = (typeof LIMIT_SCOPES)[number];
+export type CacheMode = (typeof CACHE_MODES)[number];
+export type UsageGroup = 'agent' | 'model' | 'provider' | 'day';
+
+export interface SetBudgetOptions extends BudgetScope {
+  period?: BudgetPeriod;
+  thresholds?: { pct: number; action: 'alert' | 'block' }[];
+}
+
+/** A period budget as the server reports it. Amounts are in `unit`. */
+export interface Budget {
+  id: string; kitchen: string; scope: 'kitchen' | 'provider' | 'agent' | 'api_key'; unit: BudgetUnit;
+  provider?: string; agent?: string; api_key?: string;
+  amount: number; period: BudgetPeriod; period_start: string; reset_at?: string;
+  consumed: number; reserved: number; remaining: number; used_pct: number; exhausted: boolean;
+  thresholds: { pct: number; action: 'alert' | 'block' }[]; block_pct: number; updated_by?: string; updated_at: string;
+}
+
+export interface BudgetLedgerEntry {
+  id: number; budget_id: string; kitchen: string; period_start: string; at: string;
+  agent?: string; api_key?: string; provider?: string; model?: string; input_tokens: number; output_tokens: number; cost_usd: number;
+}
+
+export interface BudgetAlert {
+  id: number; budget_id: string; kitchen: string; provider?: string; agent?: string; api_key?: string; unit: BudgetUnit; period?: string;
+  period_start: string; threshold_pct: number; action: 'alert' | 'block'; consumed: number; amount: number; fired_at: string;
+  /** False when the notification channels were not told (the kitchen was throttled). */
+  notified: boolean;
+}
+
+export interface UsageRow {
+  group: string; calls: number; input_tokens: number; output_tokens: number; cost_usd: number;
+  cache_hits: number; cache_misses: number; cache_saved_usd: number;
+}
+
+export interface RateLimit {
+  id: string; kitchen: string; scope: LimitScope; ref: string;
+  requests_per_minute: number; tokens_per_minute: number; invocations_per_minute: number;
+  updated_by?: string; updated_at: string;
+  /** Requests it refused since the server process started (each replica counts alone). */
+  rejected?: number;
+}
+
+export interface CachePolicy {
+  kitchen: string; agent: string; mode: CacheMode; ttl_seconds: number; share_across_principals: boolean; updated_by?: string; updated_at: string;
+}
+
+export interface CacheState {
+  policies: CachePolicy[];
+  stats: { entries: number; bytes: number; max_bytes: number; hits: number; misses: number; stores: number; bypassed: Record<string, number> };
+}
+
 
 
 // ── Secrets (ADR-0035) ──────────────────────────────────────────────────────

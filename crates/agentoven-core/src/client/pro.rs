@@ -49,7 +49,7 @@ pub const PERSON_ROLES: [&str; 9] = [
 /// The gates a decision can be signed at. `legal_hold_release` lifts a legal hold (a dataset's or the
 /// audit trail's) and is signed by the legal team; `approval_skip` runs a recipe on an environment that
 /// requires approval, without that approval.
-pub const SIGNING_GATES: [&str; 15] = [
+pub const SIGNING_GATES: [&str; 16] = [
     "tool_approval",
     "budget_extension",
     "resume_guidance",
@@ -65,6 +65,7 @@ pub const SIGNING_GATES: [&str; 15] = [
     "approval_skip",
     "secret_binding",
     "secret_migrate",
+    "budget_raise",
 ];
 
 /// Retention modes of a dataset.
@@ -111,15 +112,24 @@ pub fn check_retention_mode(mode: &str) -> anyhow::Result<()> {
 }
 
 /// A refusal from the control plane: the HTTP status and the server's `error` code and `message`.
+///
+/// A rate limit (429, `rate_limited`) carries `retry_after` seconds, and a budget that is used up (402,
+/// `run_budget_exhausted`) says whose budget it was: both are in `detail`, the reply's own JSON, and
+/// have accessors below. Nothing here retries for the caller.
 #[derive(Debug, Clone)]
 pub struct ApiError {
     pub status: u16,
     pub code: String,
     pub message: String,
+    /// Seconds to wait before the same request is admitted: the `Retry-After` header, else the body's
+    /// `retry_after`. Set for a rate limit.
+    pub retry_after: Option<u64>,
+    /// The reply's JSON (`Null` when it was not JSON).
+    pub detail: Value,
 }
 
 impl ApiError {
-    fn from_response(status: u16, text: &str) -> Self {
+    fn from_response(status: u16, text: &str, headers: &reqwest::header::HeaderMap) -> Self {
         let v: Value = serde_json::from_str(text).unwrap_or(Value::Null);
         let code = v["error"].as_str().unwrap_or_default().to_string();
         let message = v["message"].as_str().unwrap_or_default().to_string();
@@ -128,11 +138,50 @@ impl ApiError {
         } else {
             message
         };
+        let retry_after = headers
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|h| h.trim().parse::<u64>().ok())
+            .or_else(|| v["retry_after"].as_u64());
         Self {
             status,
             code,
             message,
+            retry_after,
+            detail: v,
         }
+    }
+
+    /// A rate limit refused the request (HTTP 429, `rate_limited`).
+    pub fn is_rate_limited(&self) -> bool {
+        self.status == 429 && self.code == "rate_limited"
+    }
+
+    /// A budget is used up (HTTP 402, `run_budget_exhausted` or `budget_exceeded`).
+    pub fn is_budget_exceeded(&self) -> bool {
+        self.status == 402 && (self.code == "run_budget_exhausted" || self.code == "budget_exceeded")
+    }
+
+    /// What is limited or whose budget it is: `kitchen`, `agent`, `api_key`, `provider` (or `run`).
+    pub fn scope(&self) -> Option<&str> {
+        self.detail["scope"].as_str()
+    }
+
+    /// The unit of a budget refusal: `usd` or `tokens`.
+    pub fn unit(&self) -> Option<&str> {
+        match self.detail["unit"].as_str() {
+            Some(u) => Some(u),
+            None => match self.detail["dimension"].as_str() {
+                Some("cost") => Some("usd"),
+                Some("tokens") => Some("tokens"),
+                _ => None,
+            },
+        }
+    }
+
+    /// When a period budget starts again, if the reply says.
+    pub fn resets_at(&self) -> Option<&str> {
+        self.detail["resets_at"].as_str()
     }
 }
 
@@ -206,7 +255,7 @@ pub fn seg(value: &str) -> String {
 }
 
 /// `path` with the pairs whose value is set, as a query string.
-fn with_query(path: &str, pairs: &[(&str, Option<String>)]) -> String {
+pub(super) fn with_query(path: &str, pairs: &[(&str, Option<String>)]) -> String {
     let mut ser = url::form_urlencoded::Serializer::new(String::new());
     let mut any = false;
     for (k, v) in pairs {
@@ -261,7 +310,7 @@ impl AgentOvenClient {
         let headers = resp.headers().clone();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(ApiError::from_response(status.as_u16(), &text).into());
+            return Err(ApiError::from_response(status.as_u16(), &text, &headers).into());
         }
         Ok((text, headers))
     }

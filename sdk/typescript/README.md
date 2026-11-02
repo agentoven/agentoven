@@ -242,3 +242,24 @@ signed (`{ password }` or `{ signingToken }`).
 `setServiceAccountOwner`, `setScopedKeyOwner`, `myKitchens`. A service account or scoped key belongs to a person
 (`ownerEmail` / `owner_email` when it is created); when the owner leaves the kitchen it stops until a Head Chef gives it
 to someone.
+
+## Budgets, rate limits and the response cache (Pro)
+
+```ts
+await pro.setBudget(500, { period: 'monthly' });                                      // the kitchen, dollars
+await pro.setBudget(2_000_000, { unit: 'tokens', agent: 'triage', period: 'daily' });  // one agent (or provider, apiKey)
+await pro.setBudget(800, { period: 'monthly', password });                            // a raise is signed (gate budget_raise)
+await pro.listBudgets(); await pro.listBudgetLedger(); await pro.listBudgetAlerts(); await pro.budgetUsage('agent', { days: 7 });
+await pro.removeBudget({ agent: 'triage', unit: 'tokens', password });
+
+await pro.setLimit('agent', 'triage', { requestsPerMinute: 60, tokensPerMinute: 200_000 });   // '*' for each on its own
+await pro.listLimits(); await pro.removeLimit('agent', 'triage');
+
+await pro.setCachePolicy('always', { agent: 'faq-bot', ttlSeconds: 900 });
+await pro.getCache(); await pro.purgeCache('faq-bot'); await pro.removeCachePolicy('faq-bot');
+```
+
+`RateLimitedError` (HTTP 429: `retryAfter` from `Retry-After`, `scope`, `limit`) and `BudgetExceededError` (HTTP 402:
+`scope`, `unit`, `period`, `resetsAt`) extend `AgentOvenAPIError`; the SDK does not retry for you. Lowering a budget or
+creating one needs no signature; raising or removing one needs `password` or `signingToken` (record id from
+`budgetRecordId`). See [docs/budgets-limits-cache.md](../../docs/budgets-limits-cache.md).

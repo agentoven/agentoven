@@ -94,13 +94,19 @@ export {
 export type { AttachmentOptions, AudioClip, AudioInput, ContentPart, ContentPartType, MediaRef } from './media.js';
 
 // Pro REST client
-export { ProClient, AgentOvenAPIError, AudioModalityError, OidcSigningRequired, SIGNING_TOKEN_HEADER, SIGNING_GATES, KITCHEN_ROLES, PERSON_ROLES } from './pro-client.js';
+export {
+  ProClient, AgentOvenAPIError, AudioModalityError, OidcSigningRequired, RateLimitedError, BudgetExceededError, SIGNING_TOKEN_HEADER, SIGNING_GATES,
+  KITCHEN_ROLES, PERSON_ROLES, BUDGET_UNITS, BUDGET_PERIODS, LIMIT_SCOPES, CACHE_MODES, budgetRecordId,
+} from './pro-client.js';
 export type {
   TraceListFilters, TraceView, TraceTimeline, TimelineSpan, TraceAudit,
   Signing, SigningChallenge, SigningTokenReply, SignatureRecord, ApproverPolicy,
   ReplayEdits, ReplayVariant, ReplayToolMode, ReplayCallResult, ReplayRunResult, PreparedLiveReplay, SpanCapture,
   Dataset, DatasetSettings, DatasetCase, DatasetExport, KitchenBinding,
   SecretProvider, Secret, CreateSecretRequest, UpdateSecretRequest, SecretProbe, RotateSecretResult, SecretBinding, SecretMigrationPlan,
+  Budget, BudgetScope, BudgetUnit, BudgetPeriod, SetBudgetOptions, BudgetLedgerEntry, BudgetAlert, UsageGroup, UsageRow,
+  RateLimit, LimitScope, CacheMode, CachePolicy, CacheState,
+  ToolPackSwitch, ToolPackManifest, ToolPackTool, ToolPackInstall, InstallToolPackRequest, OpenApiPreview, ImportOpenApiRequest,
 } from './pro-client.js';
 
 // Re-export all types
