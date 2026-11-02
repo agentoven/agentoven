@@ -777,6 +777,7 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 	if !grOK {
 		return
 	}
+	var tally guardTally // what the rules redacted or warned about, recorded on the trace
 	if h.Guardrails != nil && len(gr) > 0 {
 		eval, gErr := h.Guardrails.EvaluateInput(r.Context(), gr, req.Message)
 		if gErr != nil {
@@ -787,6 +788,10 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 				"guardrails": eval.Results,
 			})
 			return
+		} else {
+			req.Message = eval.Apply(req.Message)
+			h.noteGuardrails(r.Context(), kitchen, agentName, "input", eval)
+			tally.add(eval)
 		}
 	}
 
@@ -840,6 +845,12 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 					"guardrails": eval.Results,
 				})
 				return
+			} else {
+				original := response
+				response = eval.Apply(response)
+				redactedTurn(trace, original, response)
+				h.noteGuardrails(r.Context(), kitchen, agentName, "output", eval)
+				tally.add(eval)
 			}
 		}
 
@@ -865,6 +876,8 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 			},
 			CreatedAt: time.Now().UTC(),
 		}
+		tally.addRun(trace)
+		withGuardrailMeta(traceRecord.Metadata, tally)
 		h.Store.CreateTrace(r.Context(), traceRecord)
 
 		// Persist executor turns as hierarchical spans (includes tool spans)
@@ -903,6 +916,9 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 					"guardrails": eval.Results,
 				})
 				return
+			} else {
+				response = eval.Apply(response)
+				h.noteGuardrails(r.Context(), kitchen, agentName, "output", eval)
 			}
 		}
 		respondJSON(w, http.StatusOK, map[string]interface{}{
@@ -968,6 +984,10 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 				"guardrails": eval.Results,
 			})
 			return
+		} else {
+			resp.Content = eval.Apply(resp.Content)
+			h.noteGuardrails(r.Context(), kitchen, agentName, "output", eval)
+			tally.add(eval)
 		}
 	}
 
@@ -994,6 +1014,7 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 		},
 		CreatedAt: time.Now().UTC(),
 	}
+	withGuardrailMeta(trace.Metadata, tally)
 	h.Store.CreateTrace(r.Context(), trace)
 	h.emitThinkingAudit(r.Context(), kitchen, agentName, "test", req.ThinkingEnabled, resp.ThinkingBlocks, resp.Usage.ThinkingTokens)
 
@@ -2961,6 +2982,7 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 	// never silently dropped.
 	var userMessage string
 	var userParts []models.ContentPart
+	var fileGuardText string // what the file parts say to a guardrail (a2a_parts.go)
 	for _, part := range taskReq.Message.Parts {
 		ptype := part.Type
 		if ptype == "" {
@@ -3139,6 +3161,19 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 			a2aRPCError(w, rpcID, -32004, "The guardrail policy for this agent could not be applied, so the agent was not run", nil)
 			return
 		}
+		var tally guardTally // what the rules redacted or warned about, recorded on the trace
+		if h.Guardrails != nil && len(gr) > 0 && fileGuardText != "" {
+			// A file's name, location and (for a text file) content reach the agent as well. They are judged on
+			// their own and cannot be redacted in place, so a rule that would change them refuses the message.
+			if eval, gErr := h.Guardrails.EvaluateInput(r.Context(), gr, fileGuardText); gErr != nil {
+				log.Warn().Err(gErr).Str("agent", agentName).Msg("Input guardrail evaluation error (A2A file parts)")
+				h.emitGuardrailAudit(r.Context(), agent.Kitchen, agentName, "input", nil, gErr)
+			} else if !eval.Passed || eval.Redacted > 0 {
+				h.emitGuardrailAudit(r.Context(), agent.Kitchen, agentName, "input", eval, nil)
+				a2aRPCError(w, rpcID, -32001, "Input blocked by guardrails", eval.Results)
+				return
+			}
+		}
 		if h.Guardrails != nil && len(gr) > 0 {
 			if eval, gErr := h.Guardrails.EvaluateInput(r.Context(), gr, userMessage); gErr != nil {
 				log.Warn().Err(gErr).Str("agent", agentName).Msg("Input guardrail evaluation error (A2A task)")
@@ -3147,6 +3182,10 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 				h.emitGuardrailAudit(r.Context(), agent.Kitchen, agentName, "input", eval, nil)
 				a2aRPCError(w, rpcID, -32001, "Input blocked by guardrails", eval.Results)
 				return
+			} else {
+				userMessage = eval.Apply(userMessage)
+				h.noteGuardrails(r.Context(), agent.Kitchen, agentName, "input", eval)
+				tally.add(eval)
 			}
 		}
 
@@ -3253,6 +3292,12 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 				outputBlocked = eval
 				status = "blocked"
 				response = "" // never stored or returned
+			} else {
+				original := response
+				response = eval.Apply(response)
+				redactedTurn(execTrace, original, response)
+				h.noteGuardrails(r.Context(), agent.Kitchen, agentName, "output", eval)
+				tally.add(eval)
 			}
 		}
 
@@ -3276,6 +3321,8 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 		if failure != "" {
 			trace.Metadata["error"] = failure
 		}
+		tally.addRun(execTrace)
+		withGuardrailMeta(trace.Metadata, tally)
 		if execTrace != nil {
 			thinkingBlocks, thinkingTokens := summarizeThinking(execTrace)
 			if len(thinkingBlocks) > 0 {
@@ -3881,8 +3928,7 @@ func (h *Handlers) emitGuardrailAuditEnv(ctx context.Context, kitchen, agentName
 		return
 	}
 	userID, userEmail, displayName, provider, actorType := auditActorFromIdentity(ctx)
-	action := "guardrail." + stage + "_blocked"
-	status := http.StatusForbidden
+	action, status := guardrailOutcome(stage, eval)
 	details := map[string]interface{}{"agent": agentName, "env": envSlug, "stage": stage, "provider": provider}
 	if guardrailErr != nil {
 		action = "guardrail." + stage + "_error"
@@ -3892,6 +3938,7 @@ func (h *Handlers) emitGuardrailAuditEnv(ctx context.Context, kitchen, agentName
 	if eval != nil {
 		details["results"] = eval.Results
 		details["passed"] = eval.Passed
+		details["redacted"], details["warned"] = eval.Redacted, eval.Warned
 	}
 	_ = h.Store.CreateAuditEvent(ctx, &models.AuditEvent{
 		ID:                 uuid.New().String(),
@@ -4742,7 +4789,7 @@ func (h *Handlers) proxyToProcess(
 		TotalTokens:  usage.TotalTokens,
 		CostUSD:      usage.EstimatedCost,
 		InputText:    message,
-		OutputText:   proxyResp.Response,
+		OutputText:   h.scrubForStorage(ctx, agent, models.GuardrailStageOutput, proxyResp.Response),
 		Usage:        &usage,
 		Metadata: map[string]interface{}{
 			"mode":    "managed",
@@ -4959,6 +5006,7 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	if !grOK {
 		return
 	}
+	var tally guardTally // what the rules redacted or warned about, recorded on the trace
 	if h.Guardrails != nil && len(gr) > 0 {
 		eval, gErr := h.Guardrails.EvaluateInput(r.Context(), gr, req.Message)
 		if gErr != nil {
@@ -4971,6 +5019,10 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 				"guardrails": eval.Results,
 			})
 			return
+		} else {
+			req.Message = eval.Apply(req.Message)
+			h.noteGuardrails(r.Context(), kitchen, agentName, "input", eval)
+			tally.add(eval)
 		}
 	}
 
@@ -5066,8 +5118,13 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 					"guardrails": eval.Results,
 				})
 				return
+			} else {
+				response = eval.Apply(response)
+				h.noteGuardrails(r.Context(), kitchen, agentName, "output", eval)
+				tally.add(eval)
 			}
 		}
+		h.recordGuardrailsOnTrace(r.Context(), traceRecord, response, tally)
 
 		out := map[string]interface{}{
 			"agent":      agentName,
@@ -5115,6 +5172,13 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 				"guardrails": eval.Results,
 			})
 			return
+		} else {
+			original := response
+			response = eval.Apply(response)
+			redactedTurn(trace, original, response)
+			h.redactSessionReply(r.Context(), trace, original, response)
+			h.noteGuardrails(r.Context(), kitchen, agentName, "output", eval)
+			tally.add(eval)
 		}
 	}
 
@@ -5140,6 +5204,8 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		},
 		CreatedAt: time.Now().UTC(),
 	}
+	tally.addRun(trace)
+	withGuardrailMeta(traceRecord.Metadata, tally)
 	thinkingBlocks, thinkingTokens := summarizeThinking(trace)
 	if len(thinkingBlocks) > 0 {
 		traceRecord.Metadata["thinking_blocks"] = thinkingBlocks
@@ -5260,6 +5326,9 @@ func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 				"guardrails": eval.Results,
 			})
 			return
+		} else {
+			req.Message = eval.Apply(req.Message)
+			h.noteGuardrails(r.Context(), kitchen, agentName, "input", eval)
 		}
 	}
 
@@ -5491,10 +5560,14 @@ func (h *Handlers) ResumeRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if pass, eval := h.outputVerdict(r.Context(), agent, gr, response); !pass {
+	out, pass, eval := h.outputText(r.Context(), agent, gr, response)
+	if !pass {
 		respondOutputBlocked(w, eval)
 		return
 	}
+	redactedTurn(trace, response, out)
+	h.redactSessionReply(r.Context(), trace, response, out)
+	response = out
 
 	traceUsage := trace.Usage
 	traceRecord := &models.Trace{
@@ -5817,9 +5890,11 @@ func (h *Handlers) ListGuardrailKinds(w http.ResponseWriter, r *http.Request) {
 		{
 			"kind":        "pii_detection",
 			"label":       "PII Detection",
-			"description": "Detect and block personally identifiable information",
+			"description": "Detect personally identifiable information and secrets, and block, redact, mask or warn",
 			"config_schema": map[string]interface{}{
-				"patterns": "string[]  — PII types to check: email, phone, ssn, credit_card (default: all)",
+				"patterns":      "string[]  — detectors or groups to run (default: email, phone, ssn, credit_card); see detectors",
+				"allowlist":     "string[]  — exact values never flagged",
+				"allow_domains": "string[]  — email domains never flagged",
 			},
 		},
 		{
@@ -5845,8 +5920,9 @@ func (h *Handlers) ListGuardrailKinds(w http.ResponseWriter, r *http.Request) {
 			"label":       "Regex Filter",
 			"description": "Match messages against a custom regex pattern",
 			"config_schema": map[string]interface{}{
-				"pattern":        "string   — regex pattern to match against",
-				"block_on_match": "boolean  — block when pattern matches (default: true)",
+				"pattern":        "string   — regex pattern to match against (RE2, linear time)",
+				"block_on_match": "boolean  — block when pattern matches (default: true); must be true to redact",
+				"label":          "string   — placeholder name when redacting, [LABEL] (default: REDACTED)",
 			},
 		},
 		{
@@ -5860,7 +5936,7 @@ func (h *Handlers) ListGuardrailKinds(w http.ResponseWriter, r *http.Request) {
 		{
 			"kind":        "custom",
 			"label":       "Custom",
-			"description": "Custom guardrail (Pro: webhook/LLM-judge, OSS: no-op pass-through)",
+			"description": "Custom guardrail (Pro: signed webhook, OSS: no-op pass-through)",
 			"config_schema": map[string]interface{}{
 				"webhook_url": "string  — (Pro only) URL to call for custom evaluation",
 			},
@@ -5868,8 +5944,10 @@ func (h *Handlers) ListGuardrailKinds(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"kinds":  kinds,
-		"stages": []string{"input", "output", "both"},
+		"kinds":     kinds,
+		"stages":    []string{"input", "output", "both", "retrieval", "all"},
+		"actions":   []string{"block", "redact", "mask", "warn", "require_approval"},
+		"detectors": grails.DetectorNames(),
 	})
 }
 
@@ -6606,6 +6684,13 @@ func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
 				"guardrails": eval.Results,
 			})
 			return
+		} else {
+			if eval.Redacted > 0 {
+				// The session is stored, so the message in it is the redacted one.
+				content = eval.Apply(content)
+				session.Messages[len(session.Messages)-1].Content = content
+			}
+			h.noteGuardrails(r.Context(), kitchen, agentName, "input", eval)
 		}
 	}
 
@@ -6730,6 +6815,9 @@ func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
 				"guardrails": eval.Results,
 			})
 			return
+		} else {
+			routeResp.Content = eval.Apply(routeResp.Content)
+			h.noteGuardrails(r.Context(), kitchen, agentName, "output", eval)
 		}
 	}
 
@@ -6839,8 +6927,7 @@ func (h *Handlers) emitGuardrailAudit(ctx context.Context, kitchen, agentName, s
 
 	userID, userEmail, displayName, provider, actorType := auditActorFromIdentity(ctx)
 
-	action := "guardrail." + stage + "_blocked"
-	status := http.StatusForbidden
+	action, status := guardrailOutcome(stage, eval)
 	details := map[string]interface{}{
 		"agent":    agentName,
 		"stage":    stage,
@@ -6855,6 +6942,7 @@ func (h *Handlers) emitGuardrailAudit(ctx context.Context, kitchen, agentName, s
 	if eval != nil {
 		details["results"] = eval.Results
 		details["passed"] = eval.Passed
+		details["redacted"], details["warned"] = eval.Redacted, eval.Warned
 	}
 
 	if err := h.Store.CreateAuditEvent(ctx, &models.AuditEvent{
@@ -7438,6 +7526,19 @@ func (h *Handlers) SetGuardrailPolicy(src contracts.WorkspaceGuardrailSource) {
 	if h.Executor != nil {
 		h.Executor.SetGuardrailPolicy(src)
 	}
+}
+
+// SetCustomGuardrails installs the evaluator that judges guardrails of kind custom (Pro: a signed
+// webhook to an endpoint the kitchen configured). Without one a custom rule passes, as it always
+// has in the community edition. It reports false when the guardrail service in use takes none.
+func (h *Handlers) SetCustomGuardrails(ev contracts.CustomGuardrailEvaluator) bool {
+	svc, ok := h.Guardrails.(interface {
+		SetCustom(contracts.CustomGuardrailEvaluator)
+	})
+	if ok {
+		svc.SetCustom(ev)
+	}
+	return ok
 }
 
 // withRunTrace chooses the trace ID of the run about to start and records it on the context. The

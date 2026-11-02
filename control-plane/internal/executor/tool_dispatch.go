@@ -2,7 +2,6 @@ package executor
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -94,12 +93,13 @@ func (e *Executor) dispatchToolCall(ctx context.Context, agent *models.Agent, tc
 		return ToolResult{ToolCallID: tc.ID, Name: tc.Name, IsError: true, Content: "Error: tool call not run, the guardrail policy could not be applied"}
 	}
 	if e.guardrails != nil && len(guards) > 0 {
-		argsJSON, _ := json.Marshal(tc.Arguments)
-		if eval, gErr := e.guardrails.EvaluateOutput(ctx, guards, string(argsJSON)); gErr == nil && eval != nil && !eval.Passed {
+		args, refusal := e.checkToolArgs(ctx, agent, guards, tc)
+		if refusal != "" {
 			toolSpan.SetStatus(codes.Error, "tool call arguments blocked by guardrails")
 			toolSpan.SetAttributes(attribute.Bool("tool.is_error", true), attribute.Bool("tool.guardrail_blocked", true))
-			return ToolResult{ToolCallID: tc.ID, Name: tc.Name, IsError: true, Content: "Error: tool call arguments blocked by guardrails"}
+			return ToolResult{ToolCallID: tc.ID, Name: tc.Name, IsError: true, Content: refusal}
 		}
+		tc.Arguments = args // with any redaction applied
 	}
 
 	timeout := e.toolTimeout
@@ -112,9 +112,7 @@ func (e *Executor) dispatchToolCall(ctx context.Context, agent *models.Agent, tc
 	result := e.executeTool(callCtx, agent, tc)
 
 	if !result.IsError && e.guardrails != nil && len(guards) > 0 {
-		if eval, gErr := e.guardrails.EvaluateInput(ctx, guards, result.Content); gErr == nil && eval != nil && !eval.Passed {
-			result = ToolResult{ToolCallID: tc.ID, Name: tc.Name, IsError: true, Content: "Error: tool result blocked by guardrails"}
-		}
+		result = e.checkToolResult(ctx, agent, guards, result)
 	}
 
 	if result.IsError {

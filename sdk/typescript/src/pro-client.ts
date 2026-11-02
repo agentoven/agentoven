@@ -45,6 +45,9 @@ import type {
   EpisodeRecord,
   Guardrail,
   GuardrailException,
+  GuardrailKinds,
+  GuardrailTestResult,
+  TestGuardrailsOptions,
   InvokeOptions,
   InvokeResult,
   Kitchen,
@@ -124,9 +127,6 @@ export class OidcSigningRequired extends AgentOvenAPIError {
   }
 }
 
-/** The header that carries a signing token on a decision call (the control plane's `signatures.Header`). */
-export const SIGNING_TOKEN_HEADER = 'X-Signing-Token';
-
 /** The fields of a refusal, from either shape the server uses: the API's flat object or the gateway's `{ error: {...} }`. */
 function refusalFields(detail: unknown): Record<string, unknown> {
   if (detail && typeof detail === 'object') {
@@ -191,6 +191,9 @@ function apiError(status: number, detail: unknown, headers: Headers): AgentOvenA
   return new AgentOvenAPIError(status, detail);
 }
 
+/** The header that carries a signing token on a decision call (the control plane's `signatures.Header`). */
+export const SIGNING_TOKEN_HEADER = 'X-Signing-Token';
+
 /**
  * The roles a person or credential can hold inside one kitchen. `restaurateur` is platform-wide, so it is a role of
  * a person in the user directory, never of a kitchen member, binding or credential. The retired `admin` is no role:
@@ -212,14 +215,14 @@ export const SIGNING_GATES = [
   'secret_binding', 'secret_migrate', 'budget_raise',
 ] as const;
 
-const RETENTION_MODES = ['expire', 'persist', 'regulated'];
-const REPLAY_TOOL_MODES: ReplayToolMode[] = ['frozen', 'blocked', 'live'];
-
 /** What a budget is measured in, the periods it resets on, what a rate limit counts, and the cache's modes (Pro, ADR-0051). */
 export const BUDGET_UNITS = ['usd', 'tokens'] as const;
 export const BUDGET_PERIODS = ['daily', 'weekly', 'monthly', 'lifetime'] as const;
 export const LIMIT_SCOPES = ['kitchen', 'agent', 'api_key', 'provider'] as const;
 export const CACHE_MODES = ['off', 'deterministic', 'always'] as const;
+
+const RETENTION_MODES = ['expire', 'persist', 'regulated'];
+const REPLAY_TOOL_MODES: ReplayToolMode[] = ['frozen', 'blocked', 'live'];
 
 /** Refuse a role the control plane does not have. */
 function checkRole(role: string, allowed: readonly string[], what: string): void {
@@ -252,9 +255,6 @@ function queryString(params: Record<string, string | number | undefined>): strin
   return qs ? `?${qs}` : '';
 }
 
-const NO_AUDIO = 'does not offer the audio modality';
-
-function errorText(detail: unknown): string {
 /** The fields that say which budget: at most one of provider, agent and apiKey, and the unit. */
 function budgetRef(o: BudgetScope): Record<string, string> {
   const named: Record<string, string> = {};
@@ -277,6 +277,9 @@ export function budgetRecordId(o: BudgetScope = {}): string {
   return `kitchen::${ref.unit}`;
 }
 
+const NO_AUDIO = 'does not offer the audio modality';
+
+function errorText(detail: unknown): string {
   if (typeof detail === 'object' && detail !== null) {
     const d = detail as { error?: unknown; message?: unknown };
     return String(d.error ?? d.message ?? JSON.stringify(detail));
@@ -388,36 +391,68 @@ export class ProClient {
     return this.get('/api/v1/guardrails');
   }
 
-  async getGuardrail(guardrailId: string): Promise<Guardrail> {
-    return this.get(`/api/v1/guardrails/${guardrailId}`);
+  /** The kinds, stages, actions and PII/secret detectors a rule can use. */
+  async guardrailKinds(): Promise<GuardrailKinds> {
+    return this.get('/api/v1/guardrails/kinds');
   }
 
+  /** One rule; rejects when the kitchen has no such rule. */
+  async getGuardrail(guardrailId: string): Promise<Guardrail> {
+    const rule = (await this.listGuardrails()).find((g) => g.id === guardrailId);
+    if (!rule) throw new Error(`no guardrail ${guardrailId} in this kitchen`);
+    return rule;
+  }
+
+  /**
+   * Create a rule. `action` says what happens when it fires (default `block`); the rule is checked when it is saved and one
+   * that could not work is refused. Example: `{ name: 'no-pii-out', kind: 'pii_detection', stage: 'all', action: 'redact',
+   * config: { patterns: ['pii', 'secrets'] } }`.
+   */
   async createGuardrail(req: CreateGuardrailRequest): Promise<Guardrail> {
     return this.post('/api/v1/guardrails', req);
   }
 
   async updateGuardrail(guardrailId: string, req: Partial<CreateGuardrailRequest>): Promise<Guardrail> {
-    return this.put(`/api/v1/guardrails/${guardrailId}`, req);
+    return this.put(`/api/v1/guardrails/${seg(guardrailId)}`, req);
   }
 
-  async toggleGuardrail(guardrailId: string, enabled: boolean): Promise<Guardrail> {
-    return this.put(`/api/v1/guardrails/${guardrailId}/toggle`, { enabled });
+  /** Switch a rule on or off: set to `enabled` when given, flipped otherwise. */
+  async toggleGuardrail(guardrailId: string, enabled?: boolean): Promise<Guardrail> {
+    if (enabled !== undefined) return this.updateGuardrail(guardrailId, { enabled });
+    return this.request('PATCH', `/api/v1/guardrails/${seg(guardrailId)}/toggle`, {});
   }
 
   async deleteGuardrail(guardrailId: string): Promise<void> {
-    await this.delete(`/api/v1/guardrails/${guardrailId}`);
+    await this.delete(`/api/v1/guardrails/${seg(guardrailId)}`);
+  }
+
+  /**
+   * What rules would do to `text`, without running an agent or storing anything. With no `rules` the kitchen's workspace
+   * rules are used (disabled ones too); custom endpoint rules are skipped unless `includeCustom`.
+   */
+  async testGuardrails(text: string, opts: TestGuardrailsOptions = {}): Promise<GuardrailTestResult> {
+    const body: Record<string, unknown> = { text, stage: opts.stage ?? 'input' };
+    if (opts.rules?.length) body.rules = opts.rules;
+    if (opts.includeCustom) body.include_custom = true;
+    return this.post('/api/v1/guardrails/test', body);
   }
 
   async listGuardrailExceptions(guardrailId: string): Promise<GuardrailException[]> {
-    return this.get(`/api/v1/guardrails/${guardrailId}/exceptions`);
+    return this.get(`/api/v1/guardrails/${seg(guardrailId)}/exceptions`);
   }
 
-  async addGuardrailException(guardrailId: string, agentName: string): Promise<GuardrailException> {
-    return this.post(`/api/v1/guardrails/${guardrailId}/exceptions`, { agent_name: agentName });
+  /** Exempt one agent from a rule; `expiresAt` (RFC 3339) makes the exception expire. */
+  async addGuardrailException(guardrailId: string, agentName: string, reason = '', expiresAt?: string): Promise<GuardrailException> {
+    return this.post(`/api/v1/guardrails/${seg(guardrailId)}/exceptions`, {
+      agent_name: agentName,
+      reason,
+      ...(expiresAt ? { expires_at: expiresAt } : {}),
+    });
   }
 
-  async removeGuardrailException(guardrailId: string, agentName: string): Promise<void> {
-    await this.delete(`/api/v1/guardrails/${guardrailId}/exceptions/${agentName}`);
+  /** Remove an exception by its own id, as `listGuardrailExceptions` returns it. */
+  async removeGuardrailException(guardrailId: string, exceptionId: string): Promise<void> {
+    await this.delete(`/api/v1/guardrails/${seg(guardrailId)}/exceptions/${seg(exceptionId)}`);
   }
 
   // ── Environments & promotions ──────────────────────────────────────────────
@@ -1203,6 +1238,77 @@ export class ProClient {
     await this.delete(`/api/v1/tools/${seg(name)}`);
   }
 
+  // ── Tool packs (Pro, ADR-0048) ─────────────────────────────────────────────
+  // A pack is a named, versioned set of governed tools for one kind of system (read-only PostgreSQL, email and Slack,
+  // or any REST API imported from an OpenAPI document). An installer supplies only secret references (`vault://name`);
+  // a pack's write tools wait for a person's approval by default.
+
+  /** The packs this server offers, with the secrets, settings and tools of each (`toolpack:read`). */
+  async listToolPackCatalog(): Promise<ToolPackManifest[]> {
+    return (await this.get<{ packs: ToolPackManifest[] }>('/api/v1/tool-packs/catalog')).packs ?? [];
+  }
+  /** The packs installed in this kitchen, each with its tools, their switches and its approval status. */
+  async listToolPacks(): Promise<ToolPackInstall[]> {
+    return (await this.get<{ installs: ToolPackInstall[] }>('/api/v1/tool-packs')).installs ?? [];
+  }
+  getToolPack(name: string): Promise<ToolPackInstall> {
+    return this.get(`/api/v1/tool-packs/${seg(name)}`);
+  }
+  /**
+   * Install a catalog pack (`toolpack:install`). `secrets` binds each secret role to a `vault://` reference. `tools` maps a
+   * tool's local name to its switches; switching a tool's approval off also needs `toolpack:govern`. With skill approval
+   * required the install waits for people (`status` is `awaiting_approval`).
+   */
+  installToolPack(req: InstallToolPackRequest): Promise<ToolPackInstall> {
+    return this.post('/api/v1/tool-packs', req);
+  }
+  /** Move an install to the catalog's current version; per-tool switches carry over. */
+  upgradeToolPack(name: string, req: { secrets?: Record<string, string>; settings?: Record<string, unknown> } = {}): Promise<ToolPackInstall> {
+    return this.post(`/api/v1/tool-packs/${seg(name)}/upgrade`, req);
+  }
+  /** Point an install at other `vault://` references. */
+  rebindToolPackSecrets(name: string, secrets: Record<string, string>): Promise<ToolPackInstall> {
+    return this.put(`/api/v1/tool-packs/${seg(name)}/secrets`, { secrets });
+  }
+  /** A connectivity check where one is possible. */
+  checkToolPack(name: string): Promise<{ ok: boolean; message?: string }> {
+    return this.post(`/api/v1/tool-packs/${seg(name)}/check`, {});
+  }
+  /** Switch one tool of an install on or off, or its approval on or off (`toolpack:govern`). */
+  setToolPackTool(pack: string, tool: string, sw: ToolPackSwitch): Promise<ToolPackTool> {
+    return this.request('PATCH', `/api/v1/tool-packs/${seg(pack)}/tools/${seg(tool)}`, sw);
+  }
+  /** Remove an install, its tools and its skill (`toolpack:remove`). */
+  async uninstallToolPack(name: string): Promise<void> {
+    await this.delete(`/api/v1/tool-packs/${seg(name)}`);
+  }
+  /**
+   * List the operations of an OpenAPI 3 document, each classified read or write, without importing. Give the document's
+   * `url` (the server fetches it, subject to the kitchen's egress allowlist) or its text as `spec`.
+   */
+  previewOpenApi(src: { url?: string; spec?: string }): Promise<OpenApiPreview> {
+    return this.post('/api/v1/tool-packs/openapi/preview', src);
+  }
+  /**
+   * Import an OpenAPI 3 document as a pack of governed tools, one per operation in `operations` (default: every read
+   * operation; a write is imported only when named, and waits for approval). `base_url` pins the API's address (default: the
+   * document's first server).
+   */
+  importOpenApi(req: ImportOpenApiRequest): Promise<ToolPackInstall> {
+    return this.post('/api/v1/tool-packs/openapi/import', req);
+  }
+  /** Hosts the kitchen allowlisted for tool packs although they resolve to private addresses. */
+  listEgressHosts(): Promise<{ hosts: Array<{ host: string; added_by: string; added_at: string }>; platform: string[] }> {
+    return this.get('/api/v1/tool-packs/egress');
+  }
+  /** Allowlist a host for the kitchen's packs (`toolpack:govern`). Cloud metadata addresses stay refused. */
+  async allowEgressHost(host: string): Promise<void> {
+    await this.post('/api/v1/tool-packs/egress', { host });
+  }
+  async removeEgressHost(host: string): Promise<void> {
+    await this.delete(`/api/v1/tool-packs/egress/${seg(host)}`);
+  }
+
   // ── Agent card ─────────────────────────────────────────────────────────────
 
   /** The agent's A2A card; `card.modalities` lists what its provider offers. */
@@ -1674,112 +1780,6 @@ export class ProClient {
     return this.request('POST', '/api/v1/audit/legal-hold', { hold: false, reason }, undefined, extra);
   }
 
-  // ── Identity-provider bindings, credential owners, my kitchens (Pro, ADR-0042) ──
-
-  /**
-   * Which group or app role of the identity provider is which role in this kitchen. A binding takes effect at a
-   * person's next login. Only the kitchen's Head Chef or a Restaurateur.
-   */
-  listKitchenBindings(kitchenId: string): Promise<KitchenBinding[]> {
-    return this.get(`/api/v1/kitchens/${seg(kitchenId)}/bindings`);
-  }
-
-  /**
-   * Bind an identity-provider group (its object id) or app role value to a kitchen `role` (one of `KITCHEN_ROLES`;
-   * `restaurateur` is platform-wide and `admin` is retired). Binding a group as `head_chef` is a Restaurateur's decision.
-   */
-  async createKitchenBinding(kitchenId: string, claimValue: string, role: KitchenRole, label = ''): Promise<KitchenBinding> {
-    checkRole(role, KITCHEN_ROLES, 'a kitchen binding');
-    if (!claimValue.trim()) throw new Error('claimValue is the group object id or app role value the identity provider puts in the token');
-    return this.post(`/api/v1/kitchens/${seg(kitchenId)}/bindings`, { claim_value: claimValue, role, label });
-  }
-
-  async deleteKitchenBinding(kitchenId: string, bindingId: string): Promise<void> {
-    await this.delete(`/api/v1/kitchens/${seg(kitchenId)}/bindings/${seg(bindingId)}`);
-  }
-
-  /**
-   * Give a service account to another person: a member of the kitchen at a rank that covers the account's role.
-   * Handing it to someone else is a Head Chef's act. It is how a credential whose owner left works again.
-   */
-  setServiceAccountOwner(saId: string, ownerEmail: string): Promise<ServiceAccount> {
-    return this.post(`/api/v1/service-accounts/${seg(saId)}/owner`, { owner_email: ownerEmail });
-  }
-
-  /** Give a scoped API key to another person (same rules as `setServiceAccountOwner`). */
-  setScopedKeyOwner(keyId: string, ownerEmail: string): Promise<ScopedAPIKey> {
-    return this.post(`/api/v1/keys/${seg(keyId)}/owner`, { owner_email: ownerEmail });
-  }
-
-  /** The kitchens you can enter and your role in each. */
-  myKitchens(): Promise<{ enforced: boolean; kitchens: { id: string; name: string; description?: string; role: UserRole }[] }> {
-    return this.get('/api/v1/me/kitchens');
-  }
-
-  // ── Agent versions ─────────────────────────────────────────────────────────
-  // An agent's version moves only on a bake whose configuration differs from the last bake's: the first bake keeps
-  // the registered version (0.1.0), a bake that changes nothing keeps its version, and a changed one takes the next
-  // minor version and keeps the old one. Editing a registered agent (`registerAgent`, `PUT`) does not bump it.
-  // Naming a `version` on `bake` sets that version as given.
-
-  /** The versions an agent has been baked at, each as the agent was configured then. */
-  listAgentVersions(name: string): Promise<Record<string, unknown>[]> {
-    return this.get(`/api/v1/agents/${seg(name)}/versions`);
-  }
-
-  /** One baked version of an agent (`0.1.0` is the first bake). */
-  getAgentVersion(name: string, version: string): Promise<Record<string, unknown>> {
-    return this.get(`/api/v1/agents/${seg(name)}/versions/${seg(version)}`);
-  }
-
-  // ── Audit events ───────────────────────────────────────────────────────────
-
-  async listAuditEvents(opts: { limit?: number; action?: string; agent?: string; environment?: string } = {}): Promise<AuditEvent[]> {
-    const params = new URLSearchParams();
-    if (opts.limit) params.set('limit', String(opts.limit));
-    if (opts.action) params.set('action', opts.action);
-    if (opts.agent) params.set('agent', opts.agent);
-    if (opts.environment) params.set('environment', opts.environment);
-    const qs = params.toString() ? `?${params.toString()}` : '';
-    return this.get(`/api/v1/audit${qs}`);
-  }
-
-  // ── Internal helpers ───────────────────────────────────────────────────────
-
-  /**
-   * Mint a short-lived token a *browser* can use to open the realtime socket.
-   *
-   * Browsers cannot set headers on a WebSocket, so a backend that holds the API
-   * key calls this and hands the token to the page, which connects with
-   * `connectRealtime({ url, agent, token })`. The token is bound to the agent
-   * and kitchen, is only checked when the socket opens, and expires in
-   * `ttlSeconds` (1-300).
-   */
-  async realtimeToken(agent: string, ttlSeconds = 60): Promise<RealtimeToken> {
-    if (!Number.isInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > 300) {
-      throw new Error('ttlSeconds must be a whole number of seconds between 1 and 300');
-    }
-    return this.post(`/api/v1/realtime/${seg(agent)}/token`, { ttl_seconds: ttlSeconds });
-  }
-
-  /**
-   * Open a realtime voice session with `agent`. See {@link connectRealtime}.
-   * Node with a global WebSocket (verified on Node 24), or pass `webSocket` to supply your own.
-   *
-   * The agent always runs on its own provider, which must offer the `realtime`
-   * modality. Pass `token` (from {@link realtimeToken}) to connect the way a
-   * browser does — no auth headers, the token as a WebSocket subprotocol.
-   */
-  realtime(
-    agent: string,
-    options: { voice?: string; model?: string; token?: string; webSocket?: WebSocketFactory } = {},
-  ): Promise<RealtimeSession> {
-    return connectRealtime({ url: this.baseUrl, apiKey: this.apiKey, kitchen: this.kitchen, agent, ...options });
-  }
-
-  /** Long-running tasks: start, watch, resume and cancel (`pro.tasks.start(agent, input)`). */
-  get tasks(): Tasks {
-    return new Tasks({ url: this.baseUrl, apiKey: this.apiKey, kitchen: this.kitchen });
   // ── Budgets, rate limits and the response cache (Pro, ADR-0051) ────────────
 
   /**
@@ -1919,6 +1919,112 @@ export class ProClient {
     return this.post('/api/v1/cache/purge', agent ? { agent } : {});
   }
 
+  // ── Identity-provider bindings, credential owners, my kitchens (Pro, ADR-0042) ──
+
+  /**
+   * Which group or app role of the identity provider is which role in this kitchen. A binding takes effect at a
+   * person's next login. Only the kitchen's Head Chef or a Restaurateur.
+   */
+  listKitchenBindings(kitchenId: string): Promise<KitchenBinding[]> {
+    return this.get(`/api/v1/kitchens/${seg(kitchenId)}/bindings`);
+  }
+
+  /**
+   * Bind an identity-provider group (its object id) or app role value to a kitchen `role` (one of `KITCHEN_ROLES`;
+   * `restaurateur` is platform-wide and `admin` is retired). Binding a group as `head_chef` is a Restaurateur's decision.
+   */
+  async createKitchenBinding(kitchenId: string, claimValue: string, role: KitchenRole, label = ''): Promise<KitchenBinding> {
+    checkRole(role, KITCHEN_ROLES, 'a kitchen binding');
+    if (!claimValue.trim()) throw new Error('claimValue is the group object id or app role value the identity provider puts in the token');
+    return this.post(`/api/v1/kitchens/${seg(kitchenId)}/bindings`, { claim_value: claimValue, role, label });
+  }
+
+  async deleteKitchenBinding(kitchenId: string, bindingId: string): Promise<void> {
+    await this.delete(`/api/v1/kitchens/${seg(kitchenId)}/bindings/${seg(bindingId)}`);
+  }
+
+  /**
+   * Give a service account to another person: a member of the kitchen at a rank that covers the account's role.
+   * Handing it to someone else is a Head Chef's act. It is how a credential whose owner left works again.
+   */
+  setServiceAccountOwner(saId: string, ownerEmail: string): Promise<ServiceAccount> {
+    return this.post(`/api/v1/service-accounts/${seg(saId)}/owner`, { owner_email: ownerEmail });
+  }
+
+  /** Give a scoped API key to another person (same rules as `setServiceAccountOwner`). */
+  setScopedKeyOwner(keyId: string, ownerEmail: string): Promise<ScopedAPIKey> {
+    return this.post(`/api/v1/keys/${seg(keyId)}/owner`, { owner_email: ownerEmail });
+  }
+
+  /** The kitchens you can enter and your role in each. */
+  myKitchens(): Promise<{ enforced: boolean; kitchens: { id: string; name: string; description?: string; role: UserRole }[] }> {
+    return this.get('/api/v1/me/kitchens');
+  }
+
+  // ── Agent versions ─────────────────────────────────────────────────────────
+  // An agent's version moves only on a bake whose configuration differs from the last bake's: the first bake keeps
+  // the registered version (0.1.0), a bake that changes nothing keeps its version, and a changed one takes the next
+  // minor version and keeps the old one. Editing a registered agent (`registerAgent`, `PUT`) does not bump it.
+  // Naming a `version` on `bake` sets that version as given.
+
+  /** The versions an agent has been baked at, each as the agent was configured then. */
+  listAgentVersions(name: string): Promise<Record<string, unknown>[]> {
+    return this.get(`/api/v1/agents/${seg(name)}/versions`);
+  }
+
+  /** One baked version of an agent (`0.1.0` is the first bake). */
+  getAgentVersion(name: string, version: string): Promise<Record<string, unknown>> {
+    return this.get(`/api/v1/agents/${seg(name)}/versions/${seg(version)}`);
+  }
+
+  // ── Audit events ───────────────────────────────────────────────────────────
+
+  async listAuditEvents(opts: { limit?: number; action?: string; agent?: string; environment?: string } = {}): Promise<AuditEvent[]> {
+    const params = new URLSearchParams();
+    if (opts.limit) params.set('limit', String(opts.limit));
+    if (opts.action) params.set('action', opts.action);
+    if (opts.agent) params.set('agent', opts.agent);
+    if (opts.environment) params.set('environment', opts.environment);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return this.get(`/api/v1/audit${qs}`);
+  }
+
+  // ── Internal helpers ───────────────────────────────────────────────────────
+
+  /**
+   * Mint a short-lived token a *browser* can use to open the realtime socket.
+   *
+   * Browsers cannot set headers on a WebSocket, so a backend that holds the API
+   * key calls this and hands the token to the page, which connects with
+   * `connectRealtime({ url, agent, token })`. The token is bound to the agent
+   * and kitchen, is only checked when the socket opens, and expires in
+   * `ttlSeconds` (1-300).
+   */
+  async realtimeToken(agent: string, ttlSeconds = 60): Promise<RealtimeToken> {
+    if (!Number.isInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > 300) {
+      throw new Error('ttlSeconds must be a whole number of seconds between 1 and 300');
+    }
+    return this.post(`/api/v1/realtime/${seg(agent)}/token`, { ttl_seconds: ttlSeconds });
+  }
+
+  /**
+   * Open a realtime voice session with `agent`. See {@link connectRealtime}.
+   * Node with a global WebSocket (verified on Node 24), or pass `webSocket` to supply your own.
+   *
+   * The agent always runs on its own provider, which must offer the `realtime`
+   * modality. Pass `token` (from {@link realtimeToken}) to connect the way a
+   * browser does — no auth headers, the token as a WebSocket subprotocol.
+   */
+  realtime(
+    agent: string,
+    options: { voice?: string; model?: string; token?: string; webSocket?: WebSocketFactory } = {},
+  ): Promise<RealtimeSession> {
+    return connectRealtime({ url: this.baseUrl, apiKey: this.apiKey, kitchen: this.kitchen, agent, ...options });
+  }
+
+  /** Long-running tasks: start, watch, resume and cancel (`pro.tasks.start(agent, input)`). */
+  get tasks(): Tasks {
+    return new Tasks({ url: this.baseUrl, apiKey: this.apiKey, kitchen: this.kitchen });
   }
 
   /** Upload a file once and name it in messages by `blob_ref` (`pro.blobs.upload(bytes)`). */
@@ -2065,6 +2171,68 @@ export interface SignatureRecord {
   outcome_detail?: string;
 }
 
+/** Which budget: the kitchen's (none of the three), or one provider's, agent's or credential's, in dollars or tokens. */
+export interface BudgetScope {
+  provider?: string;
+  agent?: string;
+  /** The credential's subject, for example `scopedkey:<id>`. */
+  apiKey?: string;
+  unit?: BudgetUnit;
+}
+export type BudgetUnit = (typeof BUDGET_UNITS)[number];
+export type BudgetPeriod = (typeof BUDGET_PERIODS)[number];
+export type LimitScope = (typeof LIMIT_SCOPES)[number];
+export type CacheMode = (typeof CACHE_MODES)[number];
+export type UsageGroup = 'agent' | 'model' | 'provider' | 'day';
+
+export interface SetBudgetOptions extends BudgetScope {
+  period?: BudgetPeriod;
+  thresholds?: { pct: number; action: 'alert' | 'block' }[];
+}
+
+/** A period budget as the server reports it. Amounts are in `unit`. */
+export interface Budget {
+  id: string; kitchen: string; scope: 'kitchen' | 'provider' | 'agent' | 'api_key'; unit: BudgetUnit;
+  provider?: string; agent?: string; api_key?: string;
+  amount: number; period: BudgetPeriod; period_start: string; reset_at?: string;
+  consumed: number; reserved: number; remaining: number; used_pct: number; exhausted: boolean;
+  thresholds: { pct: number; action: 'alert' | 'block' }[]; block_pct: number; updated_by?: string; updated_at: string;
+}
+
+export interface BudgetLedgerEntry {
+  id: number; budget_id: string; kitchen: string; period_start: string; at: string;
+  agent?: string; api_key?: string; provider?: string; model?: string; input_tokens: number; output_tokens: number; cost_usd: number;
+}
+
+export interface BudgetAlert {
+  id: number; budget_id: string; kitchen: string; provider?: string; agent?: string; api_key?: string; unit: BudgetUnit; period?: string;
+  period_start: string; threshold_pct: number; action: 'alert' | 'block'; consumed: number; amount: number; fired_at: string;
+  /** False when the notification channels were not told (the kitchen was throttled). */
+  notified: boolean;
+}
+
+export interface UsageRow {
+  group: string; calls: number; input_tokens: number; output_tokens: number; cost_usd: number;
+  cache_hits: number; cache_misses: number; cache_saved_usd: number;
+}
+
+export interface RateLimit {
+  id: string; kitchen: string; scope: LimitScope; ref: string;
+  requests_per_minute: number; tokens_per_minute: number; invocations_per_minute: number;
+  updated_by?: string; updated_at: string;
+  /** Requests it refused since the server process started (each replica counts alone). */
+  rejected?: number;
+}
+
+export interface CachePolicy {
+  kitchen: string; agent: string; mode: CacheMode; ttl_seconds: number; share_across_principals: boolean; updated_by?: string; updated_at: string;
+}
+
+export interface CacheState {
+  policies: CachePolicy[];
+  stats: { entries: number; bytes: number; max_bytes: number; hits: number; misses: number; stores: number; bypassed: Record<string, number> };
+}
+
 /** How a decision is signed: `password` of your local account (the SDK signs it), or a `signingToken` you already hold. */
 export interface Signing {
   password?: string;
@@ -2171,68 +2339,6 @@ export interface KitchenBinding {
   created_by?: string;
   created_at: string;
 }
-/** Which budget: the kitchen's (none of the three), or one provider's, agent's or credential's, in dollars or tokens. */
-export interface BudgetScope {
-  provider?: string;
-  agent?: string;
-  /** The credential's subject, for example `scopedkey:<id>`. */
-  apiKey?: string;
-  unit?: BudgetUnit;
-}
-export type BudgetUnit = (typeof BUDGET_UNITS)[number];
-export type BudgetPeriod = (typeof BUDGET_PERIODS)[number];
-export type LimitScope = (typeof LIMIT_SCOPES)[number];
-export type CacheMode = (typeof CACHE_MODES)[number];
-export type UsageGroup = 'agent' | 'model' | 'provider' | 'day';
-
-export interface SetBudgetOptions extends BudgetScope {
-  period?: BudgetPeriod;
-  thresholds?: { pct: number; action: 'alert' | 'block' }[];
-}
-
-/** A period budget as the server reports it. Amounts are in `unit`. */
-export interface Budget {
-  id: string; kitchen: string; scope: 'kitchen' | 'provider' | 'agent' | 'api_key'; unit: BudgetUnit;
-  provider?: string; agent?: string; api_key?: string;
-  amount: number; period: BudgetPeriod; period_start: string; reset_at?: string;
-  consumed: number; reserved: number; remaining: number; used_pct: number; exhausted: boolean;
-  thresholds: { pct: number; action: 'alert' | 'block' }[]; block_pct: number; updated_by?: string; updated_at: string;
-}
-
-export interface BudgetLedgerEntry {
-  id: number; budget_id: string; kitchen: string; period_start: string; at: string;
-  agent?: string; api_key?: string; provider?: string; model?: string; input_tokens: number; output_tokens: number; cost_usd: number;
-}
-
-export interface BudgetAlert {
-  id: number; budget_id: string; kitchen: string; provider?: string; agent?: string; api_key?: string; unit: BudgetUnit; period?: string;
-  period_start: string; threshold_pct: number; action: 'alert' | 'block'; consumed: number; amount: number; fired_at: string;
-  /** False when the notification channels were not told (the kitchen was throttled). */
-  notified: boolean;
-}
-
-export interface UsageRow {
-  group: string; calls: number; input_tokens: number; output_tokens: number; cost_usd: number;
-  cache_hits: number; cache_misses: number; cache_saved_usd: number;
-}
-
-export interface RateLimit {
-  id: string; kitchen: string; scope: LimitScope; ref: string;
-  requests_per_minute: number; tokens_per_minute: number; invocations_per_minute: number;
-  updated_by?: string; updated_at: string;
-  /** Requests it refused since the server process started (each replica counts alone). */
-  rejected?: number;
-}
-
-export interface CachePolicy {
-  kitchen: string; agent: string; mode: CacheMode; ttl_seconds: number; share_across_principals: boolean; updated_by?: string; updated_at: string;
-}
-
-export interface CacheState {
-  policies: CachePolicy[];
-  stats: { entries: number; bytes: number; max_bytes: number; hits: number; misses: number; stores: number; bypassed: Record<string, number> };
-}
-
 
 
 // ── Secrets (ADR-0035) ──────────────────────────────────────────────────────
@@ -2329,4 +2435,46 @@ export interface SecretMigrationPlan {
   secrets: Array<{ name: string; ref: string; version: string; linked: boolean }>;
   conflicts: string[];
   digest: string;
+}
+
+// ── Tool packs (ADR-0048) ───────────────────────────────────────────────────────
+
+export interface ToolPackSwitch { enabled?: boolean; require_approval?: boolean }
+
+export interface ToolPackManifest {
+  name: string; version: string; title: string; description: string; kind: string;
+  secrets: Array<{ role: string; description: string; required: boolean; hint?: string }>;
+  settings?: Array<{ key: string; description: string; type: string; default?: unknown; min?: number; max?: number }>;
+  tools: Array<{ name: string; description: string; access: 'read' | 'write'; needs?: string[] }>;
+  policy: { writes_require_approval: boolean };
+}
+
+export interface ToolPackTool {
+  name: string; local_name: string; description: string; access: 'read' | 'write'; enabled: boolean; require_approval: boolean;
+  schema?: Record<string, unknown>; method?: string; path?: string;
+}
+
+export interface ToolPackInstall {
+  name: string; pack: string; version: string; kind: string; title: string; description: string;
+  /** `awaiting_approval` while skill approval holds the tools; `skill_missing` and `out_of_sync` mean it needs repair. */
+  status: 'active' | 'awaiting_approval' | 'rejected' | 'suspended' | 'skill_missing' | string;
+  out_of_sync?: boolean; skill: string; settings: Record<string, unknown>; secrets: Record<string, string>;
+  source?: Record<string, unknown>; digest: string; installed_by: string; installed_at: string; updated_at: string;
+  tools: ToolPackTool[];
+}
+
+export interface InstallToolPackRequest {
+  pack: string; secrets: Record<string, string>; name?: string; settings?: Record<string, unknown>; tools?: Record<string, ToolPackSwitch>;
+}
+
+export interface OpenApiPreview {
+  title: string; version: string; description?: string; servers: string[]; sha256: string;
+  auth: { type: string; name?: string; token_url?: string; scopes?: string };
+  operations: Array<{ id: string; method: string; path: string; summary?: string; tags?: string[]; deprecated?: boolean; access: 'read' | 'write'; unsupported?: string }>;
+}
+
+export interface ImportOpenApiRequest {
+  name: string; url?: string; spec?: string; base_url?: string;
+  auth?: { type?: 'none' | 'bearer' | 'header' | 'query' | 'basic' | 'oauth2_client_credentials'; name?: string; token_url?: string; scopes?: string };
+  operations?: string[]; secrets?: Record<string, string>; tools?: Record<string, ToolPackSwitch>; replace?: boolean;
 }

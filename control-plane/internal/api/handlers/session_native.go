@@ -49,7 +49,8 @@ func (h *Handlers) sendNativeSessionMessage(w http.ResponseWriter, r *http.Reque
 	}
 	latencyMs := time.Since(start).Milliseconds()
 
-	if ok, eval := h.outputVerdict(r.Context(), agent, gr, reply); !ok {
+	reply, ok, eval := h.outputText(r.Context(), agent, gr, reply)
+	if !ok {
 		dropUserMessage()
 		respondOutputBlocked(w, eval)
 		return

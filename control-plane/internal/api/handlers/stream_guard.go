@@ -30,7 +30,7 @@ func outputStageEnabled(gr []models.Guardrail) bool {
 			continue
 		}
 		switch g.Stage {
-		case models.GuardrailStageOutput, models.GuardrailStageBoth, "":
+		case models.GuardrailStageOutput, models.GuardrailStageBoth, models.GuardrailStageAll, "":
 			return true
 		}
 	}
@@ -45,7 +45,27 @@ func (h *Handlers) holdBackNeeded(gr []models.Guardrail) bool {
 // outputVerdict checks text against the output guardrails. It fails closed: if the
 // guardrails cannot be evaluated the text is treated as blocked, because a guardrail that
 // errors out and lets the content through is a guardrail that was skipped.
+//
+// The verdict covers text that is released as it is: a held-back stream, a stored event. A rule
+// that redacts has nothing it can change there, so a reply it would alter is refused rather than
+// released with the sensitive part in it. Callers that can put the redacted text in place of the
+// original use outputText.
 func (h *Handlers) outputVerdict(ctx context.Context, agent *models.Agent, gr []models.Guardrail, text string) (bool, *models.GuardrailEvaluation) {
+	pass, eval := h.outputEvaluation(ctx, agent, gr, text)
+	if pass && eval != nil && eval.Redacted > 0 {
+		refused := *eval
+		refused.Passed = false // audited as the refusal it is, not as a redaction that took place
+		h.emitGuardrailAudit(ctx, agent.Kitchen, agent.Name, "output", &refused, nil)
+		return false, eval
+	}
+	if pass {
+		h.noteGuardrails(ctx, agent.Kitchen, agent.Name, "output", eval)
+	}
+	return pass, eval
+}
+
+// outputEvaluation is outputVerdict without the redaction refusal: pass means no rule blocked.
+func (h *Handlers) outputEvaluation(ctx context.Context, agent *models.Agent, gr []models.Guardrail, text string) (bool, *models.GuardrailEvaluation) {
 	if h.Guardrails == nil || len(gr) == 0 || strings.TrimSpace(text) == "" {
 		return true, nil
 	}

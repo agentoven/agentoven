@@ -23,34 +23,36 @@ func (h *Handlers) InstallDelegationBoundary() {
 		return
 	}
 	h.Executor.SetDelegationBoundary(&executor.DelegationBoundary{
-		Input: func(ctx context.Context, target *models.Agent, message string) error {
+		Input: func(ctx context.Context, target *models.Agent, message string) (string, error) {
 			gr, err := h.guardrailsFor(ctx, target, target.Guardrails)
 			if err != nil {
-				return fmt.Errorf("%s's guardrails could not be established, so nothing was sent", target.Name)
+				return "", fmt.Errorf("%s's guardrails could not be established, so nothing was sent", target.Name)
 			}
 			if h.Guardrails == nil || len(gr) == 0 {
-				return nil
+				return message, nil
 			}
 			eval, gErr := h.Guardrails.EvaluateInput(ctx, gr, message)
 			if gErr != nil {
 				h.emitGuardrailAudit(ctx, target.Kitchen, target.Name, "input", nil, gErr)
-				return fmt.Errorf("%s's input guardrails could not be evaluated, so nothing was sent", target.Name)
+				return "", fmt.Errorf("%s's input guardrails could not be evaluated, so nothing was sent", target.Name)
 			}
 			if !eval.Passed {
 				h.emitGuardrailAudit(ctx, target.Kitchen, target.Name, "input", eval, nil)
-				return fmt.Errorf("the message was blocked by %s's input guardrails", target.Name)
+				return "", fmt.Errorf("the message was blocked by %s's input guardrails", target.Name)
 			}
-			return nil
+			h.noteGuardrails(ctx, target.Kitchen, target.Name, "input", eval)
+			return eval.Apply(message), nil
 		},
 		Output: func(ctx context.Context, target *models.Agent, response string) (string, error) {
 			gr, err := h.guardrailsFor(ctx, target, target.Guardrails)
 			if err != nil {
 				return "", fmt.Errorf("%s's guardrails could not be established, so its answer was withheld", target.Name)
 			}
-			if pass, _ := h.outputVerdict(ctx, target, gr, response); !pass {
+			out, pass, _ := h.outputText(ctx, target, gr, response)
+			if !pass {
 				return "", fmt.Errorf("%s's answer was withheld by its output guardrails", target.Name)
 			}
-			return response, nil
+			return out, nil
 		},
 		Native: func(ctx context.Context, target *models.Agent, message string) (string, error) {
 			resp, _, err := h.proxyToProcess(ctx, target, message, nil, nil, target.Kitchen)

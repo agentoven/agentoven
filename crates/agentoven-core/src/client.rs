@@ -14,6 +14,7 @@ pub mod pro;
 pub mod controls;
 pub mod guardrails;
 pub mod secrets;
+pub mod toolpacks;
 
 /// Client for interacting with the AgentOven control plane.
 #[derive(Debug, Clone)]
@@ -1135,19 +1136,6 @@ impl AgentOvenClient {
         let mut url = self.url("/api/v1/audit");
         url.query_pairs_mut()
             .append_pair("limit", &limit.to_string());
-        let resp = self
-            .authed_request(self.http.get(url))
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(resp.json().await?)
-    }
-
-    // ── Guardrail Operations ─────────────────────────────────
-
-    /// List available guardrail kinds.
-    pub async fn guardrail_kinds(&self) -> anyhow::Result<Vec<serde_json::Value>> {
-        let url = self.url("/api/v1/guardrails/kinds");
         let resp = self
             .authed_request(self.http.get(url))
             .send()

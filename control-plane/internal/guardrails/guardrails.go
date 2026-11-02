@@ -24,20 +24,7 @@ import (
 )
 
 // ── Community Guardrail Service ─────────────────────────────
-
-// CommunityGuardrailService is the OSS implementation of contracts.GuardrailService.
-// It evaluates guardrails using built-in heuristics and regex patterns.
-type CommunityGuardrailService struct{}
-
-// EvaluateInput runs input-stage guardrails against the user message.
-func (s *CommunityGuardrailService) EvaluateInput(ctx context.Context, guardrails []models.Guardrail, message string) (*models.GuardrailEvaluation, error) {
-	return evaluate(guardrails, message, "input")
-}
-
-// EvaluateOutput runs output-stage guardrails against the model response.
-func (s *CommunityGuardrailService) EvaluateOutput(ctx context.Context, guardrails []models.Guardrail, response string) (*models.GuardrailEvaluation, error) {
-	return evaluate(guardrails, response, "output")
-}
+// The service itself, and how a stage is evaluated, is in engine.go.
 
 // MergeWithWorkspace combines a kitchen's workspace (global) guardrails with an agent's
 // own. Global rules are always applied; the agent's rules are applied on top of them.
@@ -78,46 +65,6 @@ func MergeWithWorkspace(workspaceRules, agentRules []models.Guardrail, exception
 	return append(merged, agentRules...)
 }
 
-// evaluate runs all applicable guardrails for the given stage.
-func evaluate(guardrails []models.Guardrail, text string, stage string) (*models.GuardrailEvaluation, error) {
-	eval := &models.GuardrailEvaluation{
-		Passed:  true,
-		Results: make([]models.GuardrailResult, 0),
-	}
-
-	for _, g := range guardrails {
-		if !g.Enabled {
-			continue
-		}
-		// Check if this guardrail applies to the current stage
-		if !appliesToStage(g.Stage, stage) {
-			continue
-		}
-
-		result := evaluateOne(g, text, stage)
-		eval.Results = append(eval.Results, result)
-		if !result.Passed {
-			eval.Passed = false
-		}
-	}
-
-	return eval, nil
-}
-
-// appliesToStage checks whether a guardrail applies to the given stage.
-func appliesToStage(guardrailStage models.GuardrailStage, currentStage string) bool {
-	switch guardrailStage {
-	case models.GuardrailStageBoth:
-		return true
-	case models.GuardrailStageInput:
-		return currentStage == "input"
-	case models.GuardrailStageOutput:
-		return currentStage == "output"
-	default:
-		return true // default: apply to all stages
-	}
-}
-
 // evaluateOne dispatches a single guardrail evaluation.
 func evaluateOne(g models.Guardrail, text string, stage string) models.GuardrailResult {
 	switch g.Kind {
@@ -136,7 +83,8 @@ func evaluateOne(g models.Guardrail, text string, stage string) models.Guardrail
 	case models.GuardrailLlamaGuard:
 		return evalLlamaGuard(g, text, stage)
 	case models.GuardrailCustom:
-		// Custom guardrails are a no-op in OSS (Pro adds webhook/LLM-judge)
+		// A custom rule is judged by the installed CustomGuardrailEvaluator (engine.go); this is
+		// only reached for the community edition's own evaluator, which has none.
 		return models.GuardrailResult{Passed: true, Kind: g.Kind, Stage: stage}
 	default:
 		return models.GuardrailResult{Passed: true, Kind: g.Kind, Stage: stage, Message: "unknown guardrail kind"}
@@ -178,50 +126,27 @@ func evalContentFilter(g models.Guardrail, text string, stage string) models.Gua
 }
 
 // ── PII Detection ───────────────────────────────────────────
-// Config: { "patterns": ["email", "phone", "ssn", "credit_card"] }
-// If "patterns" is empty, all built-in patterns are checked.
-
-var builtInPIIPatterns = map[string]*regexp.Regexp{
-	"email":       regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`),
-	"phone":       regexp.MustCompile(`(\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}`),
-	"ssn":         regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`),
-	"credit_card": regexp.MustCompile(`\b(?:\d{4}[-\s]?){3}\d{4}\b`),
-}
+// Config: { "patterns": ["email", "iban", "secrets", ...], "allowlist": [...], "allow_domains": [...] }
+// With no "patterns" the four that existed first are checked: email, phone, ssn, credit_card.
+// The detectors, groups and their validation are in detectors.go.
 
 func evalPIIDetection(g models.Guardrail, text string, stage string) models.GuardrailResult {
-	patternsRaw, _ := g.Config["patterns"].([]interface{})
-
-	// Determine which patterns to check
-	var patternsToCheck []string
-	if len(patternsRaw) > 0 {
-		for _, p := range patternsRaw {
-			if s, ok := p.(string); ok {
-				patternsToCheck = append(patternsToCheck, s)
-			}
-		}
-	} else {
-		// Check all built-in patterns
-		for k := range builtInPIIPatterns {
-			patternsToCheck = append(patternsToCheck, k)
-		}
+	spans, tooBig, err := piiSpans(g, text)
+	switch {
+	case err != nil:
+		return models.GuardrailResult{Passed: false, Kind: g.Kind, Stage: stage, Message: "PII rule cannot be applied: " + err.Error()}
+	case tooBig:
+		return tooLargeResult(g, stage)
+	case len(spans) == 0:
+		return models.GuardrailResult{Passed: true, Kind: g.Kind, Stage: stage}
 	}
-
-	for _, name := range patternsToCheck {
-		re, ok := builtInPIIPatterns[name]
-		if !ok {
-			continue
-		}
-		if re.MatchString(text) {
-			return models.GuardrailResult{
-				Passed:  false,
-				Kind:    g.Kind,
-				Stage:   stage,
-				Message: "PII detected: " + name + " pattern matched",
-			}
-		}
+	return models.GuardrailResult{
+		Passed:   false,
+		Kind:     g.Kind,
+		Stage:    stage,
+		Message:  "PII detected: " + spans[0].det.name + " pattern matched",
+		Findings: findingsOf(spans),
 	}
-
-	return models.GuardrailResult{Passed: true, Kind: g.Kind, Stage: stage}
 }
 
 // ── Topic Restriction ───────────────────────────────────────
@@ -315,7 +240,7 @@ func evalRegexFilter(g models.Guardrail, text string, stage string) models.Guard
 		return models.GuardrailResult{Passed: true, Kind: g.Kind, Stage: stage}
 	}
 
-	re, err := regexp.Compile(pattern)
+	re, err := compileBounded(pattern)
 	if err != nil {
 		return models.GuardrailResult{
 			Passed:  true,
@@ -323,6 +248,9 @@ func evalRegexFilter(g models.Guardrail, text string, stage string) models.Guard
 			Stage:   stage,
 			Message: "Invalid regex pattern: " + err.Error(),
 		}
+	}
+	if len(text) > MaxScanBytes {
+		return tooLargeResult(g, stage)
 	}
 
 	blockOnMatch := true // default: block when regex matches
@@ -337,6 +265,8 @@ func evalRegexFilter(g models.Guardrail, text string, stage string) models.Guard
 			Kind:    g.Kind,
 			Stage:   stage,
 			Message: "Content matched blocked regex pattern",
+			// The count only; the matched text is never kept.
+			Findings: []models.GuardrailFinding{{Type: regexLabel(g), Count: len(re.FindAllStringIndex(text, -1))}},
 		}
 	}
 	if !matched && !blockOnMatch {
@@ -456,7 +386,7 @@ func (e *PolicyError) Unwrap() error { return e.Err }
 // unreadable, it returns a *PolicyError and the caller must refuse to run the agent.
 func Effective(ctx context.Context, src contracts.WorkspaceGuardrailSource, kitchen, agent string, own []models.Guardrail) ([]models.Guardrail, error) {
 	if src == nil {
-		return own, nil
+		return stamp(own, kitchen), nil
 	}
 	fail := func(err error) ([]models.Guardrail, error) {
 		return nil, &PolicyError{Kitchen: kitchen, Agent: agent, Err: err}
@@ -466,7 +396,7 @@ func Effective(ctx context.Context, src contracts.WorkspaceGuardrailSource, kitc
 		return fail(err)
 	}
 	if len(workspace) == 0 {
-		return own, nil
+		return stamp(own, kitchen), nil
 	}
 	for _, r := range workspace {
 		if !r.Enabled {
@@ -480,35 +410,69 @@ func Effective(ctx context.Context, src contracts.WorkspaceGuardrailSource, kitc
 	if err != nil {
 		return fail(err)
 	}
-	return MergeWithWorkspace(workspace, own, exceptions), nil
+	return stamp(MergeWithWorkspace(workspace, own, exceptions), kitchen), nil
 }
 
-// Validate reports why a guardrail could not do its job as configured: an unknown kind or
-// stage, or a config the evaluator would read as "nothing to check" (which it passes
+// stamp records the kitchen on each rule, overwriting whatever the rule carried: the rule list of an
+// agent comes from a client, and the kitchen it runs in is the server's to say. The caller's slice
+// is not changed.
+func stamp(rules []models.Guardrail, kitchen string) []models.Guardrail {
+	if len(rules) == 0 {
+		return rules
+	}
+	out := make([]models.Guardrail, len(rules))
+	for i, r := range rules {
+		r.KitchenID = kitchen
+		out[i] = r
+	}
+	return out
+}
+
+// Validate reports why a guardrail could not do its job as configured: an unknown kind, stage
+// or action, or a config the evaluator would read as "nothing to check" (which it passes
 // silently). Effective applies it to enabled workspace rules so that one that cannot work
-// stops the agent instead of quietly doing nothing.
+// stops the agent instead of quietly doing nothing, and Pro applies it when a rule is saved.
 func Validate(g models.Guardrail) error {
 	switch g.Stage {
-	case "", models.GuardrailStageInput, models.GuardrailStageOutput, models.GuardrailStageBoth:
+	case "", models.GuardrailStageInput, models.GuardrailStageOutput, models.GuardrailStageBoth,
+		models.GuardrailStageRetrieval, models.GuardrailStageAll:
 	default:
 		return fmt.Errorf("unknown stage %q", g.Stage)
 	}
+	if err := validateAction(g); err != nil {
+		return err
+	}
 	switch g.Kind {
 	case models.GuardrailContentFilter:
-		return needStrings(g.Config, "blocked_words")
+		if err := needStrings(g.Config, "blocked_words"); err != nil {
+			return err
+		}
+		if list, _ := g.Config["blocked_words"].([]interface{}); len(list) > MaxListEntries {
+			return fmt.Errorf("blocked_words is limited to %d entries", MaxListEntries)
+		}
+		return nil
 	case models.GuardrailPIIDetection:
-		raw, ok := g.Config["patterns"]
-		if !ok {
-			return nil // no list means all built-in patterns
+		if raw, ok := g.Config["patterns"]; ok {
+			list, ok := raw.([]interface{})
+			if !ok {
+				return fmt.Errorf("patterns must be a list of pattern names")
+			}
+			for _, p := range list {
+				name, _ := p.(string)
+				if _, isGroup := detectorGroups[name]; isGroup {
+					continue
+				}
+				if _, known := detectors[name]; !known {
+					return fmt.Errorf("unknown PII pattern %v (known: %s)", p, strings.Join(DetectorNames(), ", "))
+				}
+			}
 		}
-		list, ok := raw.([]interface{})
-		if !ok {
-			return fmt.Errorf("patterns must be a list of pattern names")
-		}
-		for _, p := range list {
-			name, _ := p.(string)
-			if _, known := builtInPIIPatterns[name]; !known {
-				return fmt.Errorf("unknown PII pattern %v", p)
+		for _, key := range []string{"allowlist", "allow_domains"} {
+			if _, present := g.Config[key]; !present {
+				continue
+			}
+			if _, err := stringList(g.Config, key); err != nil {
+				return err
 			}
 		}
 		return nil
@@ -529,11 +493,21 @@ func Validate(g models.Guardrail) error {
 		if pattern == "" {
 			return fmt.Errorf("needs a pattern")
 		}
-		if _, err := regexp.Compile(pattern); err != nil {
+		if _, err := compileBounded(pattern); err != nil {
 			return fmt.Errorf("invalid pattern: %w", err)
 		}
+		if label, ok := g.Config["label"].(string); ok && !labelPattern.MatchString(label) {
+			return fmt.Errorf("label must be 1 to 32 letters, digits or underscores")
+		}
 		return nil
-	case models.GuardrailPromptInjection, models.GuardrailCustom:
+	case models.GuardrailPromptInjection:
+		return nil
+	case models.GuardrailCustom:
+		if v, ok := g.Config["fail_open"]; ok {
+			if _, isBool := v.(bool); !isBool {
+				return fmt.Errorf("fail_open must be true or false")
+			}
+		}
 		return nil
 	case models.GuardrailLlamaGuard:
 		if endpoint, _ := g.Config["endpoint"].(string); endpoint == "" {
@@ -542,6 +516,23 @@ func Validate(g models.Guardrail) error {
 		return nil
 	default:
 		return fmt.Errorf("unknown guardrail kind")
+	}
+}
+
+// validateAction checks the rule's action is one it can carry out. Redacting and masking need
+// a rule that finds spans (or a custom endpoint that returns the new text); a regex rule that
+// requires a match (block_on_match false) has no span to replace.
+func validateAction(g models.Guardrail) error {
+	switch g.Action {
+	case "", models.GuardrailActionBlock, models.GuardrailActionWarn, models.GuardrailActionRequireApproval:
+		return nil
+	case models.GuardrailActionRedact, models.GuardrailActionMask:
+		if !canRewrite(g) {
+			return fmt.Errorf("action %q needs a rule that finds spans: pii_detection, content_filter, regex_filter (with block_on_match true) or custom; %s cannot redact", g.Action, g.Kind)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown action %q (block, redact, mask, warn or require_approval)", g.Action)
 	}
 }
 

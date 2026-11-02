@@ -443,6 +443,34 @@ type GuardrailService interface {
 	EvaluateOutput(ctx context.Context, guardrails []models.Guardrail, response string) (*models.GuardrailEvaluation, error)
 }
 
+// StageGuardrailService is what the community service offers beyond GuardrailService (ADR-0032):
+// evaluate at the retrieval stage, redact without judging, and check a rule before it is saved.
+// The hops that need it (retrieved chunks, tool-call arguments) look for it with a type
+// assertion, so a service that only implements GuardrailService keeps working there as before.
+type StageGuardrailService interface {
+	GuardrailService
+
+	// Evaluate runs the rules that apply to stage (input, output or retrieval) on text.
+	Evaluate(ctx context.Context, guardrails []models.Guardrail, text string, stage models.GuardrailStage) (*models.GuardrailEvaluation, error)
+
+	// Scrub applies only the redact and mask rules of the local detectors, never a network call,
+	// and returns the text with the number of spans replaced. It is for text that is stored
+	// before the full check runs (a model's reply in a run's journal and trace).
+	Scrub(guardrails []models.Guardrail, text string, stage models.GuardrailStage) (string, int)
+
+	// ValidateGuardrail reports why a rule could not do its job as configured.
+	ValidateGuardrail(g models.Guardrail) error
+}
+
+// CustomGuardrailEvaluator judges text for a guardrail of kind "custom": Pro posts it to the
+// endpoint the kitchen configured. The community service calls it for every custom rule; with
+// none installed a custom rule passes, as it always has in the community edition. An error is
+// the endpoint being unreachable or answering badly: the service applies the rule's
+// fail_open setting (closed by default), so an evaluator never decides that on its own.
+type CustomGuardrailEvaluator interface {
+	EvaluateCustom(ctx context.Context, g models.Guardrail, text string, stage models.GuardrailStage) (models.GuardrailVerdict, error)
+}
+
 // ── Test Runner Backend (R9) ─────────────────────────────────
 
 // TestRunnerBackend dispatches test suite runs to a backend for async execution.

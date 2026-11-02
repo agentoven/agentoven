@@ -629,52 +629,93 @@ class AgentOvenClient(TaskMethods):
     # ── Guardrails (Pro) ─────────────────────────────────────────────────
 
     def list_guardrails(self) -> list[dict[str, Any]]:
-        """List kitchen-level guardrail policies."""
+        """List the kitchen's workspace guardrail rules, each with its ``action``."""
         return self._get("/api/v1/guardrails")
 
+    def guardrail_kinds(self) -> dict[str, Any]:
+        """The kinds, stages, actions and PII/secret detectors a rule can use:
+        ``{"kinds": [...], "stages": [...], "actions": [...], "detectors": [...]}``."""
+        return self._get("/api/v1/guardrails/kinds")
+
     def get_guardrail(self, guardrail_id: str) -> dict[str, Any]:
-        return self._get(f"/api/v1/guardrails/{guardrail_id}")
+        """One rule. Raises ``LookupError`` when the kitchen has no such rule."""
+        for rule in self.list_guardrails():
+            if rule.get("id") == guardrail_id:
+                return rule
+        raise LookupError(f"no guardrail {guardrail_id!r} in this kitchen")
 
     def create_guardrail(self, guardrail: dict[str, Any]) -> dict[str, Any]:
-        """Create a guardrail policy.
+        """Create a guardrail rule. ``action`` is what happens when it fires: ``block`` (the default), ``redact``
+        (matches become ``[IBAN]``-style placeholders and the rest of the text continues), ``mask`` (asterisks, last
+        four kept), ``warn`` (let it through and record it) or ``require_approval`` (on a tool call: pause for a
+        person). ``stage`` is ``input``, ``output``, ``both``, ``retrieval`` (each retrieved chunk before it enters the
+        prompt) or ``all``. The rule is checked when it is saved; a rule that could not work is refused (400).
 
-        Minimal example::
+        Redacting personal data and secrets from every reply and every retrieved document::
 
             client.create_guardrail({
-                "name": "content-safety",
-                "kind": "llamaguard",
-                "stage": "both",
-                "enabled": True,
-                "overridable": False,
-                "config": {
-                    "endpoint": "http://ollama:11434",
-                    "model": "llama-guard3:1b",
-                    "fail_open": False,
-                },
+                "name": "no-pii-out",
+                "kind": "pii_detection",
+                "stage": "all",
+                "action": "redact",
+                "config": {"patterns": ["pii", "secrets"], "allowlist": ["support@example.com"]},
+            })
+
+        A signed webhook of your own (``secret_ref`` names a vault credential that signs the request)::
+
+            client.create_guardrail({
+                "name": "dlp",
+                "kind": "custom",
+                "stage": "output",
+                "config": {"endpoint": "https://policy.example.com/check", "secret_ref": "vault://guardrail-hook",
+                           "timeout_ms": 3000, "fail_open": False},
             })
         """
         return self._post("/api/v1/guardrails", guardrail)
 
     def update_guardrail(self, guardrail_id: str, guardrail: dict[str, Any]) -> dict[str, Any]:
-        return self._put(f"/api/v1/guardrails/{guardrail_id}", guardrail)
+        """Change a rule: send only the fields to change (``name``, ``stage``, ``action``, ``config``, ``enabled``...)."""
+        return self._put(f"/api/v1/guardrails/{_seg(guardrail_id)}", guardrail)
 
-    def toggle_guardrail(self, guardrail_id: str, enabled: bool) -> dict[str, Any]:
-        return self._put(f"/api/v1/guardrails/{guardrail_id}/toggle", {"enabled": enabled})
+    def toggle_guardrail(self, guardrail_id: str, enabled: Optional[bool] = None) -> dict[str, Any]:
+        """Switch a rule on or off. With ``enabled`` it is set to that; without, it is flipped."""
+        if enabled is not None:
+            return self.update_guardrail(guardrail_id, {"enabled": enabled})
+        return self._request("PATCH", f"/api/v1/guardrails/{_seg(guardrail_id)}/toggle", {})
 
     def delete_guardrail(self, guardrail_id: str) -> dict[str, Any]:
-        return self._delete(f"/api/v1/guardrails/{guardrail_id}")
+        return self._delete(f"/api/v1/guardrails/{_seg(guardrail_id)}")
+
+    def test_guardrails(
+        self, text: str, *, stage: str = "input", rules: Optional[list[Mapping[str, Any]]] = None, include_custom: bool = False
+    ) -> dict[str, Any]:
+        """What rules would do to ``text`` (``stage``: ``input``, ``output`` or ``retrieval``), without running an agent
+        or storing anything. With no ``rules`` the kitchen's workspace rules are used (disabled ones too, so a rule can
+        be tried before it is switched on); custom endpoint rules are skipped unless ``include_custom`` (which needs
+        ``settings:update``). Returns ``{"outcome", "passed", "text", "redacted", "warned", "results"}``: ``outcome``
+        is ``pass``, ``redacted``, ``warned``, ``approval_required`` or ``blocked``, ``text`` the text that would
+        continue, and each result's ``findings`` the detector types and counts (never the matched text)."""
+        body: dict[str, Any] = {"text": text, "stage": stage}
+        _put_if(body, rules=[dict(r) for r in rules] if rules else None)
+        if include_custom:
+            body["include_custom"] = True
+        return self._post("/api/v1/guardrails/test", body)
 
     def list_guardrail_exceptions(self, guardrail_id: str) -> list[dict[str, Any]]:
         """List per-agent exceptions for a guardrail."""
-        return self._get(f"/api/v1/guardrails/{guardrail_id}/exceptions")
+        return self._get(f"/api/v1/guardrails/{_seg(guardrail_id)}/exceptions")
 
-    def add_guardrail_exception(self, guardrail_id: str, agent_name: str) -> dict[str, Any]:
-        return self._post(
-            f"/api/v1/guardrails/{guardrail_id}/exceptions", {"agent_name": agent_name}
-        )
+    def add_guardrail_exception(
+        self, guardrail_id: str, agent_name: str, reason: str = "", expires_at: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Exempt one agent from a rule. ``expires_at`` (RFC 3339) makes the exception expire."""
+        body: dict[str, Any] = {"agent_name": agent_name, "reason": reason}
+        _put_if(body, expires_at=expires_at)
+        return self._post(f"/api/v1/guardrails/{_seg(guardrail_id)}/exceptions", body)
 
-    def remove_guardrail_exception(self, guardrail_id: str, agent_name: str) -> dict[str, Any]:
-        return self._delete(f"/api/v1/guardrails/{guardrail_id}/exceptions/{agent_name}")
+    def remove_guardrail_exception(self, guardrail_id: str, exception_id: str) -> dict[str, Any]:
+        """Remove an exception by its id (as listed by ``list_guardrail_exceptions``)."""
+        return self._delete(f"/api/v1/guardrails/{_seg(guardrail_id)}/exceptions/{_seg(exception_id)}")
 
     # ── Environments & promotions (Pro) ──────────────────────────────────
 
@@ -1483,47 +1524,6 @@ class AgentOvenClient(TaskMethods):
         headers = self._signing_headers(password, signing_token, "legal_hold_release", f"audit:{self._kitchen}", {"reason": reason})
         return self._request("POST", "/api/v1/audit/legal-hold", {"hold": False, "reason": reason}, headers)
 
-    # ── Identity-provider bindings, credential owners, my kitchens (Pro, ADR-0042) ──
-
-    def list_kitchen_bindings(self, kitchen_id: str) -> list[dict[str, Any]]:
-        """Which group or app role of the identity provider is which role in this kitchen. A binding takes effect
-        at a person's next login. Only the kitchen's Head Chef or a Restaurateur."""
-        return self._get(f"/api/v1/kitchens/{_seg(kitchen_id)}/bindings")
-
-    def create_kitchen_binding(self, kitchen_id: str, claim_value: str, role: str, label: str = "") -> dict[str, Any]:
-        """Bind an identity-provider group (its object id) or app role value to a kitchen ``role`` (one of
-        ``KITCHEN_ROLES``; ``restaurateur`` is platform-wide and ``admin`` is retired). Binding a group as
-        ``head_chef`` is a Restaurateur's decision."""
-        _check_role(role, KITCHEN_ROLES, "a kitchen binding")
-        if not claim_value.strip():
-            raise ValueError("claim_value is the group object id or app role value the identity provider puts in the token")
-        return self._post(f"/api/v1/kitchens/{_seg(kitchen_id)}/bindings", {"claim_value": claim_value, "role": role, "label": label})
-
-    def delete_kitchen_binding(self, kitchen_id: str, binding_id: str) -> None:
-        """Remove a binding."""
-        self._delete(f"/api/v1/kitchens/{_seg(kitchen_id)}/bindings/{_seg(binding_id)}")
-
-    def set_service_account_owner(self, sa_id: str, owner_email: str) -> dict[str, Any]:
-        """Give a service account to another person: a member of the kitchen at a rank that covers the account's
-        role. Handing it to someone else is a Head Chef's act. It is how a credential whose owner left works again."""
-        return self._post(f"/api/v1/service-accounts/{_seg(sa_id)}/owner", {"owner_email": owner_email})
-
-    def set_scoped_key_owner(self, key_id: str, owner_email: str) -> dict[str, Any]:
-        """Give a scoped API key to another person (same rules as :meth:`set_service_account_owner`)."""
-        return self._post(f"/api/v1/keys/{_seg(key_id)}/owner", {"owner_email": owner_email})
-
-    @property
-    def blobs(self) -> "Blobs":
-        """Upload a file once and name it in messages by ``blob_ref`` (``client.blobs.upload(path)``)."""
-        from agentoven.blobs import Blobs
-
-        return Blobs(self)
-
-    def my_kitchens(self) -> dict[str, Any]:
-        """The kitchens you can enter and your role in each: ``{"enforced", "kitchens": [{"id", "name", "role"}]}``."""
-        return self._get("/api/v1/me/kitchens")
-
-    # ── Agent versions ─────────────────────────────────────────────────────
     # ── Budgets, rate limits and the response cache (Pro, ADR-0051) ───────
 
     def list_budgets(self) -> list[dict[str, Any]]:
@@ -1671,6 +1671,47 @@ class AgentOvenClient(TaskMethods):
         Returns ``{"purged_at": ...}``."""
         return self._post("/api/v1/cache/purge", {"agent": agent} if agent else {})
 
+    # ── Identity-provider bindings, credential owners, my kitchens (Pro, ADR-0042) ──
+
+    def list_kitchen_bindings(self, kitchen_id: str) -> list[dict[str, Any]]:
+        """Which group or app role of the identity provider is which role in this kitchen. A binding takes effect
+        at a person's next login. Only the kitchen's Head Chef or a Restaurateur."""
+        return self._get(f"/api/v1/kitchens/{_seg(kitchen_id)}/bindings")
+
+    def create_kitchen_binding(self, kitchen_id: str, claim_value: str, role: str, label: str = "") -> dict[str, Any]:
+        """Bind an identity-provider group (its object id) or app role value to a kitchen ``role`` (one of
+        ``KITCHEN_ROLES``; ``restaurateur`` is platform-wide and ``admin`` is retired). Binding a group as
+        ``head_chef`` is a Restaurateur's decision."""
+        _check_role(role, KITCHEN_ROLES, "a kitchen binding")
+        if not claim_value.strip():
+            raise ValueError("claim_value is the group object id or app role value the identity provider puts in the token")
+        return self._post(f"/api/v1/kitchens/{_seg(kitchen_id)}/bindings", {"claim_value": claim_value, "role": role, "label": label})
+
+    def delete_kitchen_binding(self, kitchen_id: str, binding_id: str) -> None:
+        """Remove a binding."""
+        self._delete(f"/api/v1/kitchens/{_seg(kitchen_id)}/bindings/{_seg(binding_id)}")
+
+    def set_service_account_owner(self, sa_id: str, owner_email: str) -> dict[str, Any]:
+        """Give a service account to another person: a member of the kitchen at a rank that covers the account's
+        role. Handing it to someone else is a Head Chef's act. It is how a credential whose owner left works again."""
+        return self._post(f"/api/v1/service-accounts/{_seg(sa_id)}/owner", {"owner_email": owner_email})
+
+    def set_scoped_key_owner(self, key_id: str, owner_email: str) -> dict[str, Any]:
+        """Give a scoped API key to another person (same rules as :meth:`set_service_account_owner`)."""
+        return self._post(f"/api/v1/keys/{_seg(key_id)}/owner", {"owner_email": owner_email})
+
+    @property
+    def blobs(self) -> "Blobs":
+        """Upload a file once and name it in messages by ``blob_ref`` (``client.blobs.upload(path)``)."""
+        from agentoven.blobs import Blobs
+
+        return Blobs(self)
+
+    def my_kitchens(self) -> dict[str, Any]:
+        """The kitchens you can enter and your role in each: ``{"enforced", "kitchens": [{"id", "name", "role"}]}``."""
+        return self._get("/api/v1/me/kitchens")
+
+    # ── Agent versions ─────────────────────────────────────────────────────
     # An agent's version moves only on a bake whose configuration differs from the last bake's: the first bake
     # keeps the registered version (0.1.0), a bake that changes nothing keeps its version, and a changed one takes
     # the next minor version and keeps the old one. Editing a registered agent (``register``, ``PUT``) does not
@@ -1854,6 +1895,101 @@ class AgentOvenClient(TaskMethods):
     def delete_tool(self, name: str) -> None:
         """Remove a tool from the kitchen."""
         self._delete(f"/api/v1/tools/{_seg(name)}")
+
+    # ── Tool packs (Pro, ADR-0048) ────────────────────────────────────────
+    # A pack is a named, versioned set of governed tools for one kind of system (read-only PostgreSQL, email and
+    # Slack, or any REST API imported from an OpenAPI document). An installer supplies only secret references
+    # (``vault://name``); a pack's write tools wait for a person's approval by default.
+
+    def list_tool_pack_catalog(self) -> list[dict[str, Any]]:
+        """The packs this server offers, with the secrets, settings and tools of each (``toolpack:read``)."""
+        return (self._get("/api/v1/tool-packs/catalog") or {}).get("packs", [])
+
+    def list_tool_packs(self) -> list[dict[str, Any]]:
+        """The packs installed in this kitchen, each with its tools, their switches and its approval status."""
+        return (self._get("/api/v1/tool-packs") or {}).get("installs", [])
+
+    def get_tool_pack(self, name: str) -> dict[str, Any]:
+        return self._get(f"/api/v1/tool-packs/{_seg(name)}")
+
+    def install_tool_pack(
+        self, pack: str, secrets: Mapping[str, str], *, name: Optional[str] = None,
+        settings: Optional[Mapping[str, Any]] = None, tools: Optional[Mapping[str, Mapping[str, bool]]] = None,
+    ) -> dict[str, Any]:
+        """Install a catalog pack (``toolpack:install``). ``secrets`` binds each secret role to a ``vault://``
+        reference. ``tools`` maps a tool's local name to ``{"enabled": bool, "require_approval": bool}``; switching
+        a tool's approval off also needs ``toolpack:govern``. With skill approval required the install waits for
+        people (``status`` is ``awaiting_approval``)."""
+        body: dict[str, Any] = {"pack": pack, "secrets": dict(secrets)}
+        _put_if(body, name=name, settings=dict(settings) if settings is not None else None,
+                tools={k: dict(v) for k, v in tools.items()} if tools is not None else None)
+        return self._post("/api/v1/tool-packs", body)
+
+    def upgrade_tool_pack(
+        self, name: str, *, secrets: Optional[Mapping[str, str]] = None, settings: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Move an install to the catalog's current version. Per-tool switches carry over."""
+        body: dict[str, Any] = {}
+        _put_if(body, secrets=dict(secrets) if secrets is not None else None,
+                settings=dict(settings) if settings is not None else None)
+        return self._post(f"/api/v1/tool-packs/{_seg(name)}/upgrade", body)
+
+    def rebind_tool_pack_secrets(self, name: str, secrets: Mapping[str, str]) -> dict[str, Any]:
+        """Point an install at other ``vault://`` references."""
+        return self._put(f"/api/v1/tool-packs/{_seg(name)}/secrets", {"secrets": dict(secrets)})
+
+    def check_tool_pack(self, name: str) -> dict[str, Any]:
+        """A connectivity check where one is possible (``{"ok": true}`` or ``{"ok": false, "message": ...}``)."""
+        return self._post(f"/api/v1/tool-packs/{_seg(name)}/check", {})
+
+    def set_tool_pack_tool(
+        self, pack: str, tool: str, *, enabled: Optional[bool] = None, require_approval: Optional[bool] = None,
+    ) -> dict[str, Any]:
+        """Switch one tool of an install on or off, or its approval on or off (``toolpack:govern``)."""
+        body: dict[str, Any] = {}
+        _put_if(body, enabled=enabled, require_approval=require_approval)
+        return self._request("PATCH", f"/api/v1/tool-packs/{_seg(pack)}/tools/{_seg(tool)}", body)
+
+    def uninstall_tool_pack(self, name: str) -> None:
+        """Remove an install, its tools and its skill (``toolpack:remove``)."""
+        self._delete(f"/api/v1/tool-packs/{_seg(name)}")
+
+    def preview_openapi(self, *, url: Optional[str] = None, spec: Optional[str] = None) -> dict[str, Any]:
+        """List the operations of an OpenAPI 3 document, each classified read or write, without importing. Give the
+        document's ``url`` (the server fetches it, subject to the kitchen's egress allowlist) or its text as ``spec``."""
+        body: dict[str, Any] = {}
+        _put_if(body, url=url, spec=spec)
+        return self._post("/api/v1/tool-packs/openapi/preview", body)
+
+    def import_openapi(
+        self, name: str, *, url: Optional[str] = None, spec: Optional[str] = None, base_url: Optional[str] = None,
+        auth: Optional[Mapping[str, str]] = None, operations: Optional[Sequence[str]] = None,
+        secrets: Optional[Mapping[str, str]] = None, tools: Optional[Mapping[str, Mapping[str, bool]]] = None,
+        replace: bool = False,
+    ) -> dict[str, Any]:
+        """Import an OpenAPI 3 document as a pack of governed tools, one per operation in ``operations`` (default:
+        every read operation; a write is imported only when named and waits for approval). ``base_url`` pins the
+        API's address (default: the document's first server). ``auth`` is ``{"type": "bearer" | "header" | "query" |
+        "basic" | "oauth2_client_credentials" | "none", "name": ..., "token_url": ..., "scopes": ...}`` (default: what
+        the document says), and ``secrets`` binds the roles that type needs to ``vault://`` references. ``replace``
+        imports a new document over an existing install of the same name."""
+        body: dict[str, Any] = {"name": name, "replace": replace}
+        _put_if(body, url=url, spec=spec, base_url=base_url, auth=dict(auth) if auth is not None else None,
+                operations=list(operations) if operations is not None else None,
+                secrets=dict(secrets) if secrets is not None else None,
+                tools={k: dict(v) for k, v in tools.items()} if tools is not None else None)
+        return self._post("/api/v1/tool-packs/openapi/import", body)
+
+    def list_egress_hosts(self) -> dict[str, Any]:
+        """Hosts the kitchen allowlisted for tool packs although they resolve to private addresses."""
+        return self._get("/api/v1/tool-packs/egress")
+
+    def allow_egress_host(self, host: str) -> None:
+        """Allowlist a host for the kitchen's packs (``toolpack:govern``). Cloud metadata addresses stay refused."""
+        self._post("/api/v1/tool-packs/egress", {"host": host})
+
+    def remove_egress_host(self, host: str) -> None:
+        self._delete(f"/api/v1/tool-packs/egress/{_seg(host)}")
 
     # ── Agent card ────────────────────────────────────────────────────────
 
@@ -2098,6 +2234,26 @@ class RealtimeToken:
 _NO_AUDIO = "does not offer the audio modality"
 
 
+def _budget_ref(provider: Optional[str], agent: Optional[str], api_key: Optional[str], unit: str) -> dict[str, str]:
+    """The fields that say which budget: at most one of provider, agent and api_key, and the unit."""
+    named = {k: v for k, v in (("provider", provider), ("agent", agent), ("api_key", api_key)) if v}
+    if len(named) > 1:
+        raise ValueError("a budget counts the kitchen or one provider, one agent or one API key, not a mix")
+    if unit not in BUDGET_UNITS:
+        raise ValueError(f"unit must be one of {', '.join(BUDGET_UNITS)}")
+    return {**named, "unit": unit}
+
+
+def budget_record_id(provider: Optional[str] = None, agent: Optional[str] = None, api_key: Optional[str] = None, unit: str = "usd") -> str:
+    """The record id a signature on a budget change covers: ``<scope>:<name>:<unit>``, for example
+    ``provider:openai:usd``, ``agent:triage:tokens`` or ``kitchen::usd`` (the name is empty for the kitchen)."""
+    _budget_ref(provider, agent, api_key, unit)
+    for scope, name in (("provider", provider), ("agent", agent), ("api_key", api_key)):
+        if name:
+            return f"{scope}:{name}:{unit}"
+    return f"kitchen::{unit}"
+
+
 def _seg(value: str) -> str:
     """Escape one URL path segment."""
     return urllib.parse.quote(value, safe="")
@@ -2168,58 +2324,6 @@ class AgentOvenAPIError(Exception):
         self.status_code = status_code
         self.detail = detail
         super().__init__(f"AgentOven API error {status_code}: {detail}")
-
-
-class OidcSigningRequired(AgentOvenAPIError):
-    """This account signs through the identity provider (OIDC), which re-asks for the password in a browser.
-    The SDK can sign with a local account's password only; sign in the dashboard, or use a local account."""
-
-    @property
-    def message(self) -> str:
-        if isinstance(self.detail, dict) and self.detail.get("message"):
-            return str(self.detail["message"])
-        return _error_text(self.detail)
-
-
-@dataclass
-class DatasetExport:
-    """A dataset version exported as JSONL: the ``manifest`` line (digests, verification), the ``cases`` that
-    follow it in manifest order, the ``manifest_digest`` the server sent in ``X-Manifest-Digest``, and the
-    exported ``text`` as received (write that to a file to keep the export byte for byte)."""
-
-    version: int
-    manifest_digest: str
-    manifest: dict[str, Any]
-    cases: list[dict[str, Any]]
-    text: str
-
-
-class AudioModalityError(AgentOvenAPIError):
-    """The agent's provider does not offer the ``audio`` modality, so it cannot
-    take or give speech (HTTP 400). Enable audio on the provider, or move the
-    agent to one that supports it — see ``client.agent_card(name).modalities``."""
-
-    @property
-    def message(self) -> str:
-        return _error_text(self.detail)
-def _budget_ref(provider: Optional[str], agent: Optional[str], api_key: Optional[str], unit: str) -> dict[str, str]:
-    """The fields that say which budget: at most one of provider, agent and api_key, and the unit."""
-    named = {k: v for k, v in (("provider", provider), ("agent", agent), ("api_key", api_key)) if v}
-    if len(named) > 1:
-        raise ValueError("a budget counts the kitchen or one provider, one agent or one API key, not a mix")
-    if unit not in BUDGET_UNITS:
-        raise ValueError(f"unit must be one of {', '.join(BUDGET_UNITS)}")
-    return {**named, "unit": unit}
-
-
-def budget_record_id(provider: Optional[str] = None, agent: Optional[str] = None, api_key: Optional[str] = None, unit: str = "usd") -> str:
-    """The record id a signature on a budget change covers: ``<scope>:<name>:<unit>``, for example
-    ``provider:openai:usd``, ``agent:triage:tokens`` or ``kitchen::usd`` (the name is empty for the kitchen)."""
-    _budget_ref(provider, agent, api_key, unit)
-    for scope, name in (("provider", provider), ("agent", agent), ("api_key", api_key)):
-        if name:
-            return f"{scope}:{name}:{unit}"
-    return f"kitchen::{unit}"
 
 
 class RateLimitedError(AgentOvenAPIError):
@@ -2313,3 +2417,35 @@ def _api_error(status: int, detail: Any, headers: Mapping[str, str]) -> AgentOve
     return AgentOvenAPIError(status, detail)
 
 
+class OidcSigningRequired(AgentOvenAPIError):
+    """This account signs through the identity provider (OIDC), which re-asks for the password in a browser.
+    The SDK can sign with a local account's password only; sign in the dashboard, or use a local account."""
+
+    @property
+    def message(self) -> str:
+        if isinstance(self.detail, dict) and self.detail.get("message"):
+            return str(self.detail["message"])
+        return _error_text(self.detail)
+
+
+@dataclass
+class DatasetExport:
+    """A dataset version exported as JSONL: the ``manifest`` line (digests, verification), the ``cases`` that
+    follow it in manifest order, the ``manifest_digest`` the server sent in ``X-Manifest-Digest``, and the
+    exported ``text`` as received (write that to a file to keep the export byte for byte)."""
+
+    version: int
+    manifest_digest: str
+    manifest: dict[str, Any]
+    cases: list[dict[str, Any]]
+    text: str
+
+
+class AudioModalityError(AgentOvenAPIError):
+    """The agent's provider does not offer the ``audio`` modality, so it cannot
+    take or give speech (HTTP 400). Enable audio on the provider, or move the
+    agent to one that supports it — see ``client.agent_card(name).modalities``."""
+
+    @property
+    def message(self) -> str:
+        return _error_text(self.detail)

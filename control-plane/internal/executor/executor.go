@@ -53,6 +53,11 @@ type ToolCall struct {
 	ID        string                 `json:"id"`
 	Name      string                 `json:"name"`
 	Arguments map[string]interface{} `json:"arguments"`
+
+	// guarded is set when guardToolCalls already judged and redacted this call's arguments, so
+	// dispatch does not judge them again (a custom endpoint would be asked twice). It is not
+	// serialised: a call read back from a journal is judged at dispatch.
+	guarded bool
 }
 
 // ToolResult represents the result of executing a tool call.
@@ -61,6 +66,9 @@ type ToolResult struct {
 	Name       string `json:"name"`
 	Content    string `json:"content"`
 	IsError    bool   `json:"is_error"`
+	// Redacted is how many spans a guardrail rule replaced in this call's result. The count is on
+	// the trace; the text that was taken out is not kept anywhere.
+	Redacted int `json:"redacted,omitempty"`
 	// ChildUsage is what a subagent spent producing this result. It is already charged to
 	// the run's budget as it happened; carrying it here lets the journal record it so a
 	// resumed run still knows what the delegation cost.
@@ -86,6 +94,9 @@ type ExecutionTrace struct {
 	// when the run stopped at its cap — see PausedError.
 	Budget      *models.BudgetStatus `json:"budget,omitempty"`
 	BudgetPause *models.BudgetPause  `json:"budget_pause,omitempty"`
+	// Guardrails counts the spans guardrail rules redacted and the warnings they raised during
+	// the run (tool arguments, tool results, retrieved chunks). Absent when none did.
+	Guardrails *GuardrailCounts `json:"guardrails,omitempty"`
 }
 
 // Turn is one iteration of the agentic loop.
@@ -272,7 +283,7 @@ func (e *Executor) buildSystemPrompt(ctx context.Context, agent *models.Agent, r
 	// If the agent has retriever ingredients and a RAG registry is available,
 	// perform retrieval and inject context into the system prompt.
 	if len(resolved.Retrievers) > 0 && e.ragRegistry != nil && userMessage != "" {
-		ragContext := e.retrieveContext(ctx, agent.Kitchen, resolved.Retrievers, userMessage)
+		ragContext := e.retrieveContext(ctx, agent, resolved.Retrievers, userMessage)
 		if ragContext != "" {
 			systemPrompt += "\n\n" + ragContext
 		}
@@ -326,7 +337,8 @@ func allResolvedTools(resolved *models.ResolvedIngredients) []models.ResolvedToo
 
 // retrieveContext performs RAG retrieval using resolved retriever ingredients
 // and returns formatted context text for injection into the system prompt.
-func (e *Executor) retrieveContext(ctx context.Context, kitchen string, retrievers []models.ResolvedRetriever, userMessage string) string {
+func (e *Executor) retrieveContext(ctx context.Context, agent *models.Agent, retrievers []models.ResolvedRetriever, userMessage string) string {
+	kitchen := agent.Kitchen
 	var contextParts []string
 
 	for _, ret := range retrievers {
@@ -373,18 +385,34 @@ func (e *Executor) retrieveContext(ctx context.Context, kitchen string, retrieve
 			continue
 		}
 
+		// What enters the prompt is checked first: a chunk a guardrail blocks is dropped, one it
+		// redacts goes in redacted (see guardChunks).
+		contents := make([]string, len(result.Sources))
+		for i, s := range result.Sources {
+			contents[i] = s.Doc.Content
+		}
+		contents, usable := e.guardChunks(ctx, agent, providerName, contents)
+
 		// Format retrieved sources as context
 		var sb strings.Builder
 		sb.WriteString("## Retrieved Knowledge\n\n")
 		sb.WriteString("Use the following retrieved information to help answer the user's question:\n\n")
+		used := 0
 		for i, s := range result.Sources {
-			sb.WriteString(fmt.Sprintf("### Source %d", i+1))
+			if !usable[i] {
+				continue
+			}
+			used++
+			sb.WriteString(fmt.Sprintf("### Source %d", used))
 			if src, ok := s.Doc.Metadata["source"]; ok {
 				sb.WriteString(fmt.Sprintf(" (%s)", src))
 			}
 			sb.WriteString(fmt.Sprintf(" [score: %.3f]\n", s.Score))
-			sb.WriteString(s.Doc.Content)
+			sb.WriteString(contents[i])
 			sb.WriteString("\n\n")
+		}
+		if used == 0 {
+			continue
 		}
 
 		contextParts = append(contextParts, sb.String())
@@ -856,7 +884,8 @@ func (e *Executor) executeDelegation(ctx context.Context, agent *models.Agent, t
 
 	// The target is held to its own rules: what the delegating agent's model wrote is input to it.
 	if b := e.boundary; b != nil && b.Input != nil {
-		if err := b.Input(ctx, target, message); err != nil {
+		sent, err := b.Input(ctx, target, message)
+		if err != nil {
 			return ToolResult{
 				ToolCallID: tc.ID,
 				Name:       tc.Name,
@@ -864,6 +893,7 @@ func (e *Executor) executeDelegation(ctx context.Context, agent *models.Agent, t
 				IsError:    true,
 			}
 		}
+		message = sent
 	}
 
 	// For managed agents, resolve and execute directly

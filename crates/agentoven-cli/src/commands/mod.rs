@@ -9,6 +9,7 @@ pub mod init;
 pub mod kitchen;
 pub mod local;
 pub mod login;
+pub mod packs;
 pub mod pro_gate;
 pub mod prompt;
 pub mod provider;
@@ -20,13 +21,14 @@ pub mod session;
 pub mod skills;
 pub mod connector;
 pub mod dataset;
+pub mod guardrails;
 pub mod key;
-pub mod legal_hold;
-pub mod secret;
 pub mod budgets;
 pub mod cache;
-pub mod signing;
+pub mod legal_hold;
 pub mod limits;
+pub mod secret;
+pub mod signing;
 pub mod eval;
 pub mod judge;
 pub mod scenario;
@@ -94,9 +96,13 @@ pub enum Commands {
     #[command(subcommand)]
     Skills(skills::SkillsCommands),
 
-    /// 🛠️  Manage MCP tools.
-    #[command(subcommand)]
+    /// 🛠️  Manage MCP tools, and import an OpenAPI document as tools.
+    #[command(subcommand, visible_alias = "tools")]
     Tool(tool::ToolCommands),
+
+    /// 📦 Tool packs: governed tools for enterprise systems, installed with secret references only (Pro).
+    #[command(subcommand)]
+    Packs(packs::PacksCommands),
 
     /// 📝 Manage versioned prompt templates.
     #[command(subcommand)]
@@ -190,12 +196,6 @@ pub enum Commands {
     #[command(subcommand)]
     Key(key::KeyCommands),
 
-    /// 🗝  Secrets and where they live: create, link, rotate, bind to skills, migrate between providers (Pro).
-    #[command(subcommand)]
-    Secret(secret::SecretCommands),
-
-    /// ⏳ Background tasks: start, follow, extend, resume and cancel long-running agent work.
-    #[command(subcommand)]
     /// 💰 Period budgets for the kitchen, an agent, a provider or an API key, in dollars or tokens (Pro).
     #[command(subcommand)]
     Budgets(budgets::BudgetsCommands),
@@ -208,6 +208,16 @@ pub enum Commands {
     #[command(subcommand)]
     Cache(cache::CacheCommands),
 
+    /// 🗝  Secrets and where they live: create, link, rotate, bind to skills, migrate between providers (Pro).
+    #[command(subcommand)]
+    Secret(secret::SecretCommands),
+
+    /// 🛡  Guardrail rules with actions (block, redact, mask, warn, ask a person), and a way to test a text against them.
+    #[command(subcommand)]
+    Guardrails(guardrails::GuardrailCommands),
+
+    /// ⏳ Background tasks: start, follow, extend, resume and cancel long-running agent work.
+    #[command(subcommand)]
     Task(task::TaskCommands),
 
     /// 📊 Show control plane status and health.
@@ -247,7 +257,8 @@ pub async fn execute(cli: Cli) -> anyhow::Result<()> {
             )
             .await
         }
-        Commands::Tool(cmd) => tool::execute(cmd).await,
+        Commands::Tool(cmd) => tool::execute(cmd, signing::client_with(url, api_key, kitchen)?).await,
+        Commands::Packs(cmd) => packs::execute(cmd, signing::client_with(url, api_key, kitchen)?).await,
         Commands::Prompt(cmd) => prompt::execute(cmd).await,
         Commands::Recipe(cmd) => recipe::execute(cmd).await,
         Commands::Session(cmd) => session::execute(cmd).await,
@@ -272,7 +283,17 @@ pub async fn execute(cli: Cli) -> anyhow::Result<()> {
         Commands::Signature(cmd) => signing::execute(cmd, signing::client_with(url, api_key, kitchen)?).await,
         Commands::LegalHold(cmd) => legal_hold::execute(cmd, signing::client_with(url, api_key, kitchen)?).await,
         Commands::Key(cmd) => key::execute(cmd, signing::client_with(url, api_key, kitchen)?).await,
+        Commands::Budgets(cmd) => {
+            budgets::execute(cmd, signing::client_with(url, api_key, kitchen)?, matches!(output, OutputFormat::Json)).await
+        }
+        Commands::Limits(cmd) => {
+            limits::execute(cmd, signing::client_with(url, api_key, kitchen)?, matches!(output, OutputFormat::Json)).await
+        }
+        Commands::Cache(cmd) => {
+            cache::execute(cmd, signing::client_with(url, api_key, kitchen)?, matches!(output, OutputFormat::Json)).await
+        }
         Commands::Secret(cmd) => secret::execute(cmd, signing::client_with(url, api_key, kitchen)?).await,
+        Commands::Guardrails(cmd) => guardrails::execute(cmd, signing::client_with(url, api_key, kitchen)?).await,
         Commands::Task(cmd) => task::execute(cmd, task::Globals { url, api_key, kitchen }).await,
         Commands::Status => status().await,
     }
@@ -283,15 +304,6 @@ async fn status() -> anyhow::Result<()> {
 
     let client = agentoven_core::AgentOvenClient::from_env()?;
 
-        Commands::Budgets(cmd) => {
-            budgets::execute(cmd, signing::client_with(url, api_key, kitchen)?, matches!(output, OutputFormat::Json)).await
-        }
-        Commands::Limits(cmd) => {
-            limits::execute(cmd, signing::client_with(url, api_key, kitchen)?, matches!(output, OutputFormat::Json)).await
-        }
-        Commands::Cache(cmd) => {
-            cache::execute(cmd, signing::client_with(url, api_key, kitchen)?, matches!(output, OutputFormat::Json)).await
-        }
     // Try to get server info
     print!("  Control plane: checking...");
     match client.server_info().await {

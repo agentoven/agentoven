@@ -64,8 +64,8 @@ func (h *Handlers) outputFilter(ctx context.Context, agent *models.Agent, gr []m
 		return nil
 	}
 	check := func(text string) string {
-		if pass, _ := h.outputVerdict(ctx, agent, gr, text); pass {
-			return text
+		if out, pass, _ := h.outputText(ctx, agent, gr, text); pass {
+			return out
 		}
 		return withheld
 	}
@@ -107,9 +107,12 @@ func (h *Handlers) viewOf(ctx context.Context, snap executor.TaskSnapshot) taskV
 		v.Result, v.ResultBlocked = "", true
 		return v
 	}
-	if pass, _ := h.outputVerdict(ctx, agent, gr, snap.Result); !pass {
+	out, pass, _ := h.outputText(ctx, agent, gr, snap.Result)
+	if !pass {
 		v.Result, v.ResultBlocked = "", true
+		return v
 	}
+	v.Result = out
 	return v
 }
 
@@ -213,6 +216,8 @@ func (h *Handlers) CreateTask(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		req.Message = eval.Apply(req.Message)
+		h.noteGuardrails(r.Context(), kitchen, agent.Name, "input", eval)
 	}
 
 	resolved := agent.ResolvedConfig

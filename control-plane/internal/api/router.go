@@ -400,6 +400,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 		// Guardrails — list available guardrail kinds + configuration
 		r.Route("/guardrails", func(r chi.Router) {
 			r.Get("/kinds", h.ListGuardrailKinds)
+			r.Post("/test", h.TestGuardrails)
 		})
 	})
 

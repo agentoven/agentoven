@@ -36,6 +36,8 @@ type runState struct {
 	startTurn  int // 1 for a fresh run, completedTurns+1 for a resumed one
 	totalUsage models.TokenUsage
 	start      time.Time
+	// guard counts what guardrail rules changed during this run (see GuardrailCounts).
+	guard *guardCounts
 
 	// budget is nil for a run with no limits, which then behaves exactly as it always
 	// did. baseBudget is the limits the run started under, before any extension.
@@ -81,7 +83,9 @@ func (e *Executor) newRunState(ctx context.Context, agent *models.Agent, userMsg
 		toolDefs:  e.buildToolDefinitions(agent, allResolvedTools(resolved)),
 		startTurn: 1,
 		start:     time.Now(),
+		guard:     &guardCounts{},
 	}
+	ctx = withGuardCounts(ctx, st.guard) // chunks retrieved for the first prompt are counted too
 	st.toolSchema = make(map[string]map[string]interface{}, len(resolved.Tools))
 	for _, t := range allResolvedTools(resolved) {
 		st.toolSchema[t.Name] = t.Schema
@@ -576,6 +580,7 @@ func (e *Executor) runLoop(ctx context.Context, st *runState, thinkingEnabled bo
 		if bud != nil {
 			trace.Budget = bud.status(len(trace.Turns))
 		}
+		trace.Guardrails = st.guard.snapshot()
 	}()
 
 	// With a budget that sets its own turn limit, the gate decides when to stop (and pauses
@@ -744,6 +749,9 @@ func (e *Executor) runLoop(ctx context.Context, st *runState, thinkingEnabled bo
 		}
 
 		toolCalls := e.extractToolCalls(routeResp)
+		// Redact the calls' arguments and find the ones a guardrail holds for a person, before the
+		// calls are captured, journaled, shown to an approver or run.
+		routeResp, guardHeld, guardHolds := e.guardToolCalls(ctx, agent, routeResp, toolCalls)
 		turnRecord := Turn{Number: turn, Request: st.messages, ThinkingBlocks: routeResp.ThinkingBlocks, Usage: routeResp.Usage,
 			Provider: routeResp.Provider, Model: routeResp.Model, Attempts: routeResp.Attempts,
 			SpanID: e.captureCall(ctx, st.traceID, agent, turn, turnStart, routeReq, routeResp)}
@@ -801,8 +809,8 @@ func (e *Executor) runLoop(ctx context.Context, st *runState, thinkingEnabled bo
 		// results to correlate to a preceding assistant tool_calls message.
 		messagesWithAssistant := append(append([]models.ChatMessage{}, st.messages...), assistantMsg)
 
-		if gated := e.gatedNames(agent, toolCalls); len(gated) > 0 {
-			pending := PendingApproval{Turn: turn, ToolCalls: toolCalls, GatedNames: gated,
+		if gated := mergeNames(e.gatedNames(agent, toolCalls), guardHeld); len(gated) > 0 {
+			pending := PendingApproval{Turn: turn, ToolCalls: toolCalls, GatedNames: gated, GuardrailHolds: guardHolds,
 				Usage: routeResp.Usage, LatencyMs: time.Since(turnStart).Milliseconds()}
 			trace.Turns = appendTurn(trace.Turns, turnRecord) // tool results not yet known
 			trace.TotalMs = time.Since(st.start).Milliseconds()
@@ -949,7 +957,11 @@ func (e *Executor) resolvePendingTurn(ctx context.Context, agent *models.Agent, 
 		toRun = append(toRun, i)
 	}
 	for _, i := range toRun {
-		results[i] = e.dispatchToolCall(ctx, agent, pending.ToolCalls[i], schemas[pending.ToolCalls[i].Name])
+		callCtx := ctx
+		if gated[pending.ToolCalls[i].Name] {
+			callCtx = withGuardrailApproval(ctx) // a person said yes: a require_approval rule does not hold it again
+		}
+		results[i] = e.dispatchToolCall(callCtx, agent, pending.ToolCalls[i], schemas[pending.ToolCalls[i].Name])
 		if onResult != nil {
 			onResult(results[i])
 		}
@@ -1090,6 +1102,10 @@ func (e *Executor) turnEndEvent(st *runState, turn, turnsDone int) Event {
 func (e *Executor) bindRun(ctx context.Context, st *runState, opts loopOpts) context.Context {
 	agent, resolved := st.agent, st.resolved
 
+	if st.guard == nil {
+		st.guard = &guardCounts{} // a run read back from a journal
+	}
+	ctx = withGuardCounts(ctx, st.guard)
 	ctx = withRunBudget(ctx, st.budget)
 	ctx = WithTraceID(ctx, "") // a hint names this run only, never a subagent's
 	ctx = withGrant(ctx, nil)  // this run's own grant was applied when it started; it is not inherited downward

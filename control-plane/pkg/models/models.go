@@ -2668,17 +2668,57 @@ type GuardrailStage string
 const (
 	GuardrailStageInput  GuardrailStage = "input"
 	GuardrailStageOutput GuardrailStage = "output"
-	GuardrailStageBoth   GuardrailStage = "both"
+	GuardrailStageBoth   GuardrailStage = "both" // input and output, as it always was
+	// GuardrailStageRetrieval is the text of a retrieved chunk before it enters the prompt.
+	// It is separate from "both" on purpose: a rule written before retrieval was guarded
+	// (a topic list, a length limit) must not start dropping chunks.
+	GuardrailStageRetrieval GuardrailStage = "retrieval"
+	// GuardrailStageAll is input, output and retrieval.
+	GuardrailStageAll GuardrailStage = "all"
 )
+
+// GuardrailAction says what a rule does when it finds something. A rule with no action
+// blocks, which is what every rule did before actions existed.
+type GuardrailAction string
+
+const (
+	// GuardrailActionBlock refuses the text (the default).
+	GuardrailActionBlock GuardrailAction = "block"
+	// GuardrailActionRedact replaces each match with a typed placeholder such as [IBAN]; the
+	// rest of the text continues. Needs a rule that finds spans (pii_detection, regex_filter,
+	// content_filter) or a custom endpoint.
+	GuardrailActionRedact GuardrailAction = "redact"
+	// GuardrailActionMask replaces each match with asterisks, keeping its last four characters.
+	GuardrailActionMask GuardrailAction = "mask"
+	// GuardrailActionWarn lets the text through and records that the rule fired.
+	GuardrailActionWarn GuardrailAction = "warn"
+	// GuardrailActionRequireApproval holds a tool call until a person approves it. On any
+	// other surface it behaves as block: nothing there can wait for a person.
+	GuardrailActionRequireApproval GuardrailAction = "require_approval"
+)
+
+// EffectiveAction is the rule's action with the default applied.
+func (g Guardrail) EffectiveAction() GuardrailAction {
+	if g.Action == "" {
+		return GuardrailActionBlock
+	}
+	return g.Action
+}
 
 // Guardrail defines a single validation rule applied to agent I/O.
 type Guardrail struct {
-	ID      string                 `json:"id"`
-	Name    string                 `json:"name,omitempty"`
-	Kind    GuardrailKind          `json:"kind"`
-	Stage   GuardrailStage         `json:"stage"`
-	Config  map[string]interface{} `json:"config,omitempty"` // kind-specific configuration
-	Enabled bool                   `json:"enabled"`
+	ID     string                 `json:"id"`
+	Name   string                 `json:"name,omitempty"`
+	Kind   GuardrailKind          `json:"kind"`
+	Stage  GuardrailStage         `json:"stage"`
+	Config map[string]interface{} `json:"config,omitempty"` // kind-specific configuration
+	// Action is what happens when the rule fires; empty means block (see GuardrailAction).
+	Action  GuardrailAction `json:"action,omitempty"`
+	Enabled bool            `json:"enabled"`
+	// KitchenID is the kitchen the rule is being applied for. guardrails.Effective stamps it on
+	// every rule it returns, whatever the client sent, so an evaluator that calls out (a custom
+	// endpoint) knows whose rule it is without trusting the rule's own config.
+	KitchenID string `json:"kitchen_id,omitempty"`
 	// Overridable controls whether an agent may replace this rule with its own
 	// configuration when it appears in a WorkspaceGuardrailPolicy.
 	// False (default) = mandatory; the workspace rule always runs.
@@ -2722,18 +2762,68 @@ type WorkspaceGuardrailException struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// GuardrailFinding is what a rule found, by type and count. It never carries the matched text:
+// results end up in audit events and API responses, and the original is not stored there.
+type GuardrailFinding struct {
+	Type  string `json:"type"` // a detector name or label: "iban", "aws_access_key", "EMPLOYEE_ID"
+	Count int    `json:"count"`
+}
+
 // GuardrailResult is the outcome of a single guardrail evaluation.
 type GuardrailResult struct {
 	Passed  bool          `json:"passed"`
 	Kind    GuardrailKind `json:"kind"`
-	Stage   string        `json:"stage"`             // "input" or "output"
+	Stage   string        `json:"stage"`             // "input", "output" or "retrieval"
 	Message string        `json:"message,omitempty"` // explanation when blocked
+	// RuleID and RuleName say which rule this is, so a result can be traced to the rule that fired.
+	RuleID   string `json:"rule_id,omitempty"`
+	RuleName string `json:"rule_name,omitempty"`
+	// Action is the rule's action; empty on a result from before actions existed (block).
+	Action GuardrailAction `json:"action,omitempty"`
+	// Redacted is how many spans this rule replaced (redact and mask).
+	Redacted int                `json:"redacted,omitempty"`
+	Findings []GuardrailFinding `json:"findings,omitempty"`
 }
 
 // GuardrailEvaluation is the aggregate result of all guardrails for a request.
 type GuardrailEvaluation struct {
+	// Passed is false when any rule blocked the text or wants a person's approval. A caller
+	// that only reads Passed is therefore safe: it refuses what it cannot ask anyone about.
 	Passed  bool              `json:"passed"`
 	Results []GuardrailResult `json:"results"`
+	// ApprovalRequired is true when the only reason for Passed=false is require_approval
+	// rules: nothing blocked outright. Only a tool call can wait for that approval.
+	ApprovalRequired bool `json:"approval_required,omitempty"`
+	// Redacted counts every span replaced across the rules; Warned counts rules that fired
+	// with the warn action.
+	Redacted int `json:"redacted,omitempty"`
+	Warned   int `json:"warned,omitempty"`
+	// Text is the text that continues, the input with every redaction applied. Set only when
+	// Redacted > 0, and never serialised: it is for the caller to use, not to store.
+	Text string `json:"-"`
+}
+
+// Apply returns the text that should continue: the redacted text when the evaluation
+// replaced anything, original otherwise. Safe on a nil evaluation.
+func (e *GuardrailEvaluation) Apply(original string) string {
+	if e != nil && e.Redacted > 0 {
+		return e.Text
+	}
+	return original
+}
+
+// Fired reports whether any rule did something other than pass quietly: redacted, warned,
+// blocked or asked for approval. Callers audit an evaluation when it fired.
+func (e *GuardrailEvaluation) Fired() bool {
+	return e != nil && (!e.Passed || e.Redacted > 0 || e.Warned > 0)
+}
+
+// GuardrailVerdict is a custom endpoint's answer for one piece of text. Action is one of
+// allow, warn, redact, require_approval or block; Text is the replacement when it redacts.
+type GuardrailVerdict struct {
+	Action string `json:"action"`
+	Text   string `json:"text,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // ── API Key Rotation ────────────────────────────────────────

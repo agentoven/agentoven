@@ -27,8 +27,23 @@ export interface RegisterAgentOptions {
 
 export type AgentStatus = 'draft' | 'baking' | 'ready' | 'cooled' | 'burnt' | 'retired';
 export type IngredientKind = 'model' | 'tool' | 'prompt' | 'data';
-export type GuardrailKind = 'keyword' | 'regex' | 'prompt-injection' | 'llamaguard' | 'custom';
-export type GuardrailStage = 'input' | 'output' | 'both';
+export type GuardrailKind =
+  | 'content_filter'
+  | 'pii_detection'
+  | 'topic_restriction'
+  | 'max_length'
+  | 'regex_filter'
+  | 'prompt_injection'
+  | 'llamaguard'
+  | 'custom';
+/** `retrieval` is each retrieved chunk before it enters the prompt; `all` is input, output and retrieval. */
+export type GuardrailStage = 'input' | 'output' | 'both' | 'retrieval' | 'all';
+/**
+ * What a rule does when it fires. `block` refuses (what a rule with no action does); `redact` replaces each match with a
+ * placeholder such as `[IBAN]` and the rest of the text continues; `mask` keeps the last four characters; `warn` lets the
+ * text through and records it; `require_approval` pauses a tool call for a person (anywhere else it blocks).
+ */
+export type GuardrailAction = 'block' | 'redact' | 'mask' | 'warn' | 'require_approval';
 export type EnvironmentKind = 'dev' | 'qa' | 'staging' | 'prod';
 /**
  * The roles a person or credential can hold inside one kitchen. The retired `admin` is gone: it was a Head Chef
@@ -154,8 +169,10 @@ export interface Guardrail {
   name: string;
   kind: GuardrailKind;
   stage: GuardrailStage;
+  action: GuardrailAction;
   enabled: boolean;
   overridable: boolean;
+  priority?: number;
   config: Record<string, unknown>;
   created_at: string;
   updated_at: string;
@@ -165,8 +182,10 @@ export interface CreateGuardrailRequest {
   name: string;
   kind: GuardrailKind;
   stage: GuardrailStage;
+  action?: GuardrailAction;
   enabled?: boolean;
   overridable?: boolean;
+  priority?: number;
   config?: Record<string, unknown>;
 }
 
@@ -174,7 +193,50 @@ export interface GuardrailException {
   id: string;
   guardrail_id: string;
   agent_name: string;
+  reason?: string;
+  approved_by?: string;
+  expires_at?: string;
   created_at: string;
+}
+
+/** The kinds, stages, actions and PII/secret detectors a rule can use. */
+export interface GuardrailKinds {
+  kinds: Array<{ kind: GuardrailKind; label: string; description: string; config_schema: Record<string, string> }>;
+  stages: GuardrailStage[];
+  actions: GuardrailAction[];
+  detectors: string[];
+}
+
+export interface TestGuardrailsOptions {
+  /** Where the text is: a user message, an agent reply or a retrieved chunk. Default `input`. */
+  stage?: 'input' | 'output' | 'retrieval';
+  /** Rules to try. Without them the kitchen's workspace rules are used. */
+  rules?: Array<Partial<CreateGuardrailRequest>>;
+  /** Also call custom endpoint rules (needs `settings:update`). */
+  includeCustom?: boolean;
+}
+
+/** What rules would do to a text. `findings` carry detector types and counts, never the matched text. */
+export interface GuardrailTestResult {
+  outcome: 'pass' | 'redacted' | 'warned' | 'approval_required' | 'blocked';
+  passed: boolean;
+  approval_required?: boolean;
+  redacted: number;
+  warned: number;
+  /** The text that would continue: the input with every redaction applied. */
+  text: string;
+  skipped_custom?: number;
+  results: Array<{
+    passed: boolean;
+    kind: string;
+    stage: string;
+    message?: string;
+    rule_id?: string;
+    rule_name?: string;
+    action?: GuardrailAction;
+    redacted?: number;
+    findings?: Array<{ type: string; count: number }>;
+  }>;
 }
 
 // ── Environment / Promotion (Pro) ─────────────────────────────────────────────

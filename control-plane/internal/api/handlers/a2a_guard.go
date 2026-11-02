@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -217,6 +218,19 @@ func (h *Handlers) proxyA2AGuarded(w http.ResponseWriter, r *http.Request, backe
 		audit("input", eval, nil)
 		a2aRPCError(w, req.rpcID, -32001, "Input blocked by guardrails", eval.Results)
 		return
+	} else if eval.Redacted > 0 {
+		rewritten, ok := h.redactA2A(body, req.text == "", eval, gr, models.GuardrailStageInput, a2aRequestParts)
+		if !ok {
+			refused := *eval
+			refused.Passed = false // the redaction could not be applied to the message, so it is refused
+			audit("input", &refused, nil)
+			a2aRPCError(w, req.rpcID, -32001, "Input blocked by guardrails", eval.Results)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(rewritten))
+		audit("input", eval, nil)
+	} else if eval.Fired() {
+		audit("input", eval, nil)
 	}
 
 	if req.streaming && !outputStageEnabled(gr) {
@@ -241,6 +255,25 @@ func (h *Handlers) proxyA2AGuarded(w http.ResponseWriter, r *http.Request, backe
 			audit("output", eval, nil)
 			a2aRPCError(w, req.rpcID, -32001, "Output blocked by guardrails", eval.Results)
 			return
+		} else if eval.Redacted > 0 {
+			// Frames of a held-back stream cannot be rewritten; a whole response can.
+			var rewritten []byte
+			ok := false
+			if !req.streaming {
+				rewritten, ok = h.redactA2A(rec.body.Bytes(), false, eval, gr, models.GuardrailStageOutput, a2aResponseParts)
+			}
+			if !ok {
+				refused := *eval
+				refused.Passed = false
+				audit("output", &refused, nil)
+				a2aRPCError(w, req.rpcID, -32001, "Output blocked by guardrails", eval.Results)
+				return
+			}
+			rec.body.Reset()
+			rec.body.Write(rewritten)
+			audit("output", eval, nil)
+		} else if eval.Fired() {
+			audit("output", eval, nil)
 		}
 	}
 	rec.replay(w)
@@ -308,4 +341,83 @@ func a2aHasFileParts(params map[string]interface{}) bool {
 		}
 	}
 	return false
+}
+
+// a2aRequestParts and a2aResponseParts find the text parts of a JSON-RPC A2A request and
+// response: the places a redaction has to be written back to.
+func a2aRequestParts(doc map[string]interface{}) []map[string]interface{} {
+	params, _ := doc["params"].(map[string]interface{})
+	msg, _ := params["message"].(map[string]interface{})
+	return textParts(msg["parts"])
+}
+
+func a2aResponseParts(doc map[string]interface{}) []map[string]interface{} {
+	// The order of a2aResponseText, which is the order the evaluated text was joined in.
+	res, _ := doc["result"].(map[string]interface{})
+	var out []map[string]interface{}
+	if arts, ok := res["artifacts"].([]interface{}); ok {
+		for _, a := range arts {
+			if am, ok := a.(map[string]interface{}); ok {
+				out = append(out, textParts(am["parts"])...)
+			}
+		}
+	}
+	if status, ok := res["status"].(map[string]interface{}); ok {
+		if msg, ok := status["message"].(map[string]interface{}); ok {
+			out = append(out, textParts(msg["parts"])...)
+		}
+	}
+	return append(out, textParts(res["parts"])...)
+}
+
+func textParts(v interface{}) []map[string]interface{} {
+	list, _ := v.([]interface{})
+	var out []map[string]interface{}
+	for _, p := range list {
+		if pm, ok := p.(map[string]interface{}); ok {
+			if _, isText := pm["text"].(string); isText {
+				out = append(out, pm)
+			}
+		}
+	}
+	return out
+}
+
+// redactA2A writes an evaluation's redactions into a JSON-RPC body. Each text part is scrubbed
+// on its own with the same rules, which gives the same result as redacting the joined text
+// when the rules are local detectors. If the parts do not add up to what the evaluation
+// produced (a custom endpoint rewrote the text, or a match spanned two parts) the redaction
+// cannot be applied faithfully and ok is false: the caller refuses the message. whole is the
+// case of a message with no text parts, where the evaluation was of the entire body.
+func (h *Handlers) redactA2A(body []byte, whole bool, eval *models.GuardrailEvaluation, gr []models.Guardrail, stage models.GuardrailStage, find func(map[string]interface{}) []map[string]interface{}) ([]byte, bool) {
+	if whole {
+		if json.Valid([]byte(eval.Text)) {
+			return []byte(eval.Text), true
+		}
+		return nil, false
+	}
+	svc, ok := h.Guardrails.(contracts.StageGuardrailService)
+	if !ok {
+		return nil, false
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber() // ids and numbers come back exactly as they went in
+	var doc map[string]interface{}
+	if dec.Decode(&doc) != nil {
+		return nil, false
+	}
+	var joined []string
+	for _, part := range find(doc) {
+		text, _ := part["text"].(string)
+		scrubbed, _ := svc.Scrub(gr, text, stage)
+		part["text"] = scrubbed
+		if scrubbed != "" {
+			joined = append(joined, scrubbed)
+		}
+	}
+	if strings.Join(joined, "\n") != eval.Text {
+		return nil, false
+	}
+	out, err := json.Marshal(doc)
+	return out, err == nil
 }

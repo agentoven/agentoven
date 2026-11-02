@@ -31,6 +31,8 @@ type PendingApproval struct {
 	Turn       int        `json:"turn"`
 	ToolCalls  []ToolCall `json:"tool_calls"`
 	GatedNames []string   `json:"gated_names"`
+	// GuardrailHolds says, for the calls a guardrail rule holds for approval, which rules asked.
+	GuardrailHolds []GuardrailHold `json:"guardrail_holds,omitempty"`
 	// Usage and LatencyMs are the model call that asked for these tools. They are
 	// journaled with the pause so the call is not lost from the run's spend.
 	Usage     models.TokenUsage `json:"usage,omitempty"`

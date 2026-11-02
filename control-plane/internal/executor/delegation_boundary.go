@@ -14,9 +14,10 @@ import (
 //
 // The control plane's handlers install one (Handlers.New); an executor used on its own has none.
 type DelegationBoundary struct {
-	// Input is asked before the message goes to target. An error refuses the delegation; the
-	// delegating agent's model is told why (the message must not carry the blocked content).
-	Input func(ctx context.Context, target *models.Agent, message string) error
+	// Input is asked before the message goes to target. It returns the message to send (the
+	// target's redactions applied), or an error that refuses the delegation; the delegating
+	// agent's model is told why (the message must not carry the blocked content).
+	Input func(ctx context.Context, target *models.Agent, message string) (string, error)
 	// Output is asked about the target's answer. It returns the answer to hand back, or an error to
 	// withhold it.
 	Output func(ctx context.Context, target *models.Agent, response string) (string, error)
