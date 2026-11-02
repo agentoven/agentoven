@@ -1,7 +1,11 @@
 //! `agentoven trace` — inspect traces and observability data.
 
+use agentoven_core::AgentOvenClient;
 use clap::{Args, Subcommand};
 use colored::Colorize;
+use serde_json::{json, Value};
+
+use super::signing::{clip, json_arg, pretty, signing_hint, SignArgs};
 
 #[derive(Subcommand)]
 pub enum TraceCommands {
@@ -20,6 +24,90 @@ pub enum TraceCommands {
     /// Saved views of the trace list.
     #[command(subcommand)]
     Views(ViewCommands),
+    /// Re-run a captured call or run with edits (Pro). A replay is an investigation, never evidence.
+    #[command(subcommand)]
+    Replay(ReplayCommands),
+    /// A model call as it was captured, whole: the request with its tools and the response (Pro).
+    Capture(CaptureArgs),
+}
+
+#[derive(Subcommand)]
+pub enum ReplayCommands {
+    /// Re-run one captured model call as up to five variants. Runs no tool.
+    Call(ReplayCallArgs),
+    /// Re-run a run from one of its model calls: tools frozen (default), blocked, or live (signed).
+    Run(ReplayRunArgs),
+    /// Check a live replay and show what would be signed for it.
+    Prepare(ReplayPrepareArgs),
+}
+
+#[derive(Args)]
+pub struct ReplayCallArgs {
+    /// Trace ID.
+    pub trace_id: String,
+    /// Span ID of the model call.
+    pub span_id: String,
+    /// A variant, as JSON: {"label": "cooler", "edits": {"temperature": 0.1}}. Repeat for more (up to five).
+    /// Edits: model, provider, temperature, max_tokens, top_p, stop, thinking_enabled, thinking_budget,
+    /// tool_choice, response_format, messages ([{"index": 1, "content": "..."}]).
+    #[arg(long = "variant")]
+    pub variants: Vec<String>,
+    /// Read the variants from a JSON file (an array).
+    #[arg(long)]
+    pub variants_file: Option<String>,
+    /// Why (recorded; required for an archived agent's trace).
+    #[arg(long)]
+    pub reason: Option<String>,
+    /// Print the whole result as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args)]
+pub struct ReplayRunArgs {
+    /// Trace ID.
+    pub trace_id: String,
+    /// Span ID of the model call to start at.
+    #[arg(long)]
+    pub from_span: String,
+    /// The edits, as JSON (same keys as a variant's).
+    #[arg(long)]
+    pub edits: Option<String>,
+    /// What tool calls do: frozen (captured results), blocked (returned, not run) or live (signed).
+    #[arg(long, default_value = "frozen")]
+    pub tools: String,
+    /// A tool that may run live (only with --tools live, only if the agent marked it idempotent). Repeat.
+    #[arg(long = "live-tool")]
+    pub live_tools: Vec<String>,
+    #[arg(long)]
+    pub reason: Option<String>,
+    /// Print the whole result as JSON.
+    #[arg(long)]
+    pub json: bool,
+    #[command(flatten)]
+    pub signing: SignArgs,
+}
+
+#[derive(Args)]
+pub struct ReplayPrepareArgs {
+    /// Trace ID.
+    pub trace_id: String,
+    #[arg(long)]
+    pub from_span: String,
+    #[arg(long = "live-tool", required = true)]
+    pub live_tools: Vec<String>,
+    #[arg(long)]
+    pub edits: Option<String>,
+    #[arg(long)]
+    pub reason: Option<String>,
+}
+
+#[derive(Args)]
+pub struct CaptureArgs {
+    /// Trace ID.
+    pub trace_id: String,
+    /// Span ID.
+    pub span_id: String,
 }
 
 #[derive(Subcommand)]
@@ -123,6 +211,142 @@ pub async fn execute(cmd: TraceCommands) -> anyhow::Result<()> {
         TraceCommands::Timeline(args) => timeline(args).await,
         TraceCommands::Events(args) => events(args).await,
         TraceCommands::Views(cmd) => views(cmd).await,
+        TraceCommands::Replay(cmd) => {
+            let client = AgentOvenClient::from_env()?;
+            finish(replay(cmd, &client).await)
+        }
+        TraceCommands::Capture(a) => {
+            let client = AgentOvenClient::from_env()?;
+            finish(capture(a, &client).await)
+        }
+    }
+}
+
+fn finish(out: anyhow::Result<String>) -> anyhow::Result<()> {
+    match out {
+        Ok(text) => {
+            print!("{text}");
+            Ok(())
+        }
+        Err(e) => {
+            if let Some(h) = signing_hint(&e) {
+                eprintln!("{h}");
+            }
+            Err(e)
+        }
+    }
+}
+
+/// `trace capture`: the call as it was captured, as JSON.
+pub async fn capture(a: CaptureArgs, client: &AgentOvenClient) -> anyhow::Result<String> {
+    let c = client.span_capture(&a.trace_id, &a.span_id).await?;
+    Ok(format!("{}\n", pretty(&c)))
+}
+
+fn parse_edits(edits: &Option<String>) -> anyhow::Result<Value> {
+    match edits {
+        Some(e) => json_arg("--edits", e),
+        None => Ok(json!({})),
+    }
+}
+
+/// `trace replay ...`: run it against `client` and return what it prints.
+pub async fn replay(cmd: ReplayCommands, client: &AgentOvenClient) -> anyhow::Result<String> {
+    match cmd {
+        ReplayCommands::Call(a) => {
+            let mut variants = Vec::new();
+            if let Some(f) = &a.variants_file {
+                match json_arg("--variants-file", &std::fs::read_to_string(f)?)? {
+                    Value::Array(vs) => variants.extend(vs),
+                    _ => anyhow::bail!("--variants-file holds a JSON array of variants"),
+                }
+            }
+            for v in &a.variants {
+                variants.push(json_arg("--variant", v)?);
+            }
+            let out = client
+                .replay_call(&a.trace_id, &a.span_id, &variants, a.reason.as_deref().unwrap_or(""))
+                .await?;
+            if a.json {
+                return Ok(format!("{}\n", pretty(&out)));
+            }
+            let mut text = format!("\n  🔁 Replay of span {} (trace {})\n", a.span_id.bold(), a.trace_id);
+            if let Some(n) = out["notice"].as_str() {
+                text.push_str(&format!("  {} {}\n", "ⓘ".dimmed(), n.dimmed()));
+            }
+            text.push('\n');
+            for v in out["variants"].as_array().cloned().unwrap_or_default() {
+                let status = v["status"].as_str().unwrap_or("-");
+                let shown = match status {
+                    "completed" => status.green().to_string(),
+                    "failed" => status.red().to_string(),
+                    _ => status.yellow().to_string(),
+                };
+                text.push_str(&format!(
+                    "  #{} {:<14} {:<10} {}\n",
+                    v["index"].as_u64().unwrap_or(0),
+                    v["label"].as_str().unwrap_or(""),
+                    shown,
+                    v["model"].as_str().unwrap_or("")
+                ));
+                if let Some(r) = v["reason"].as_str() {
+                    text.push_str(&format!("     {}\n", r.dimmed()));
+                }
+                if let Some(c) = v["content"].as_str() {
+                    text.push_str(&format!("     {}\n", clip(&c.replace('\n', " "), 160)));
+                }
+                for t in v["tool_calls"].as_array().cloned().unwrap_or_default() {
+                    text.push_str(&format!("     wants tool {} (not run)\n", t["name"].as_str().unwrap_or("?").cyan()));
+                }
+                if let Some(t) = v["trace_id"].as_str() {
+                    text.push_str(&format!("     {} trace {}\n", "→".dimmed(), t));
+                }
+            }
+            Ok(text)
+        }
+        ReplayCommands::Run(a) => {
+            let edits = parse_edits(&a.edits)?;
+            let signing = a.signing.resolve()?;
+            let out = client
+                .replay_run(
+                    &a.trace_id,
+                    &a.from_span,
+                    &edits,
+                    &a.tools,
+                    &a.live_tools,
+                    a.reason.as_deref().unwrap_or(""),
+                    signing.signature(),
+                )
+                .await?;
+            if a.json {
+                return Ok(format!("{}\n", pretty(&out)));
+            }
+            let mut text = format!("\n  🔁 Replay of trace {} from span {} (tools: {})\n", a.trace_id.bold(), a.from_span, a.tools);
+            if let Some(n) = out["notice"].as_str() {
+                text.push_str(&format!("  {} {}\n", "ⓘ".dimmed(), n.dimmed()));
+            }
+            text.push_str(&format!("  status: {}\n\n", out["status"].as_str().unwrap_or("-")));
+            for st in out["steps"].as_array().cloned().unwrap_or_default() {
+                let kind = st["kind"].as_str().unwrap_or("-");
+                let line = if kind == "tool" {
+                    format!("tool {} [{}]", st["tool"].as_str().unwrap_or("?"), st["source"].as_str().unwrap_or("-"))
+                } else {
+                    clip(&st["content"].as_str().unwrap_or("").replace('\n', " "), 120)
+                };
+                text.push_str(&format!("  {:>2}. {:<6} {}\n", st["n"].as_u64().unwrap_or(0), kind, line));
+            }
+            if out["divergence"].is_object() {
+                text.push_str(&format!("\n  {} the run diverged; use --json to see both sides\n", "⚠".yellow().bold()));
+            }
+            Ok(text)
+        }
+        ReplayCommands::Prepare(a) => {
+            let edits = parse_edits(&a.edits)?;
+            let prep = client
+                .prepare_live_replay(&a.trace_id, &a.from_span, &edits, &a.live_tools, a.reason.as_deref().unwrap_or(""))
+                .await?;
+            Ok(format!("{}\n", pretty(&prep)))
+        }
     }
 }
 
@@ -508,4 +732,118 @@ async fn views(cmd: ViewCommands) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+    use crate::commands::{Cli, Commands};
+    use agentoven_core::testing::{fake_control_plane, json as reply, Log, Routes};
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> TraceCommands {
+        let mut v = vec!["agentoven", "trace"];
+        v.extend_from_slice(args);
+        match Cli::try_parse_from(v).expect("parse").command {
+            Commands::Trace(c) => c,
+            _ => panic!("not a trace command"),
+        }
+    }
+
+    fn replay_cmd(args: &[&str]) -> ReplayCommands {
+        match parse(&[&["replay"], args].concat()) {
+            TraceCommands::Replay(c) => c,
+            _ => panic!("not a replay command"),
+        }
+    }
+
+    async fn client(extra: &[(&str, agentoven_core::testing::Reply)]) -> (AgentOvenClient, Log) {
+        colored::control::set_override(false);
+        let mut routes = Routes::from([
+            ("POST /api/v1/signatures/challenge".to_string(), reply(200, json!({"subject": {"digest": "d"}, "reauth": "password"}))),
+            ("POST /api/v1/signatures/token".to_string(), reply(200, json!({"signing_token": "tok.sig"}))),
+        ]);
+        for (k, v) in extra {
+            routes.insert(k.to_string(), v.clone());
+        }
+        let (base, log) = fake_control_plane(routes).await;
+        (AgentOvenClient::new(&base).unwrap().with_kitchen("acme"), log)
+    }
+
+    #[tokio::test]
+    async fn replay_call_sends_the_variants_and_summarises_them() {
+        let (c, log) = client(&[(
+            "POST /api/v1/traces/t1/spans/s1/replay",
+            reply(200, json!({"notice": "This is a replay", "variants": [
+                {"index": 0, "label": "cooler", "status": "completed", "model": "claude-haiku", "content": "Sure.", "trace_id": "rt1",
+                 "tool_calls": [{"name": "lookup"}]},
+                {"index": 1, "status": "blocked", "reason": "input guardrail"}]})),
+        )]).await;
+        let out = replay(
+            replay_cmd(&["call", "t1", "s1", "--variant", r#"{"label":"cooler","edits":{"temperature":0.1}}"#, "--variant", r#"{"edits":{"model":"claude-haiku"}}"#, "--reason", "why"]),
+            &c,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            log.last().body,
+            json!({"variants": [{"label": "cooler", "edits": {"temperature": 0.1}}, {"edits": {"model": "claude-haiku"}}], "reason": "why"})
+        );
+        assert!(out.contains("This is a replay") && out.contains("cooler") && out.contains("wants tool lookup (not run)"), "{out}");
+        assert!(out.contains("blocked") && out.contains("input guardrail") && out.contains("rt1"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn replay_call_reads_variants_from_a_file_and_refuses_bad_json() {
+        let (c, log) = client(&[("POST /api/v1/traces/t1/spans/s1/replay", reply(200, json!({"variants": []})))]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("v.json");
+        std::fs::write(&f, r#"[{"edits": {"max_tokens": 50}}]"#).unwrap();
+        replay(replay_cmd(&["call", "t1", "s1", "--variants-file", f.to_str().unwrap()]), &c).await.unwrap();
+        assert_eq!(log.last().body["variants"], json!([{"edits": {"max_tokens": 50}}]));
+        std::fs::write(&f, r#"{"not": "an array"}"#).unwrap();
+        assert!(replay(replay_cmd(&["call", "t1", "s1", "--variants-file", f.to_str().unwrap()]), &c).await.is_err());
+        let e = replay(replay_cmd(&["call", "t1", "s1", "--variant", "{oops"]), &c).await.unwrap_err().to_string();
+        assert!(e.contains("--variant"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn replay_run_is_frozen_by_default_and_refuses_what_the_server_would() {
+        let (c, log) = client(&[(
+            "POST /api/v1/traces/t1/replay",
+            reply(200, json!({"status": "diverged", "steps": [
+                {"n": 1, "kind": "model", "content": "calling lookup"},
+                {"n": 2, "kind": "tool", "tool": "lookup", "source": "frozen"}], "divergence": {"step": 3}})),
+        )]).await;
+        let out = replay(replay_cmd(&["run", "t1", "--from-span", "s2", "--edits", r#"{"model":"claude-haiku"}"#]), &c).await.unwrap();
+        assert_eq!(log.last().body, json!({"from_span": "s2", "edits": {"model": "claude-haiku"}, "tools": "frozen", "live_tools": [], "reason": ""}));
+        assert!(out.contains("diverged") && out.contains("tool lookup [frozen]"), "{out}");
+        let n = log.len();
+        assert!(replay(replay_cmd(&["run", "t1", "--from-span", "s2", "--tools", "simulated"]), &c).await.is_err());
+        assert!(replay(replay_cmd(&["run", "t1", "--from-span", "s2", "--tools", "live"]), &c).await.is_err());
+        assert_eq!(log.len(), n);
+    }
+
+    #[tokio::test]
+    async fn a_live_replay_with_a_held_token_sends_it_and_prepare_shows_what_to_sign() {
+        let (c, log) = client(&[
+            ("POST /api/v1/traces/t1/replay", reply(200, json!({"status": "completed", "steps": []}))),
+            ("POST /api/v1/traces/t1/replay/prepare", reply(200, json!({"gate": "live_tool_replay", "record_id": "t1:s2", "payload": {"x": 1}}))),
+        ]).await;
+        replay(replay_cmd(&["run", "t1", "--from-span", "s2", "--tools", "live", "--live-tool", "lookup", "--signing-token", "held"]), &c).await.unwrap();
+        assert_eq!(log.last().headers["x-signing-token"], "held");
+        assert_eq!(log.last().body["live_tools"], json!(["lookup"]));
+        let out = replay(replay_cmd(&["prepare", "t1", "--from-span", "s2", "--live-tool", "lookup"]), &c).await.unwrap();
+        assert!(out.contains("live_tool_replay") && out.contains("t1:s2"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn capture_prints_the_call_whole() {
+        let (c, _) = client(&[("GET /api/v1/traces/t1/spans/s1/capture", reply(200, json!({"request": {"messages": []}, "response": {"content": "ok"}})))]).await;
+        let a = match parse(&["capture", "t1", "s1"]) {
+            TraceCommands::Capture(a) => a,
+            _ => panic!(),
+        };
+        assert!(capture(a, &c).await.unwrap().contains("\"content\": \"ok\""));
+    }
 }

@@ -78,7 +78,7 @@ before it can be used by agents. NOTE: this sends the skill's content to \
 whichever provider the router picks. Use `skills stage` + `skills analyze \
 --provider` (AgentOven Pro) to choose the provider explicitly.\n\n\
 Prints the verification verdict and reasoning. Exit codes: 0 accepted, \
-2 needs_review (an admin must run `skills approve` or `skills reject`), \
+2 needs_review (a Taster, Chef or Head Chef must run `skills approve` or `skills reject`), \
 3 rejected, 1 any other failure.",
         after_help = SOURCE_HELP
     )]
@@ -115,7 +115,7 @@ with a SOURCE the plugins one of them lists. A catalog is a git repository with 
 (.claude-plugin/marketplace.json) or Codex (.agents/plugins/marketplace.json) index. SOURCE is a \
 catalog's name or part of its URL, such as `openai`. Entries the kitchen's allowlist or pin policy \
 refuses show as blocked.\n\n\
-A kitchen starts with Anthropic's two catalogs and OpenAI's; administrators change the list and the \
+A kitchen starts with Anthropic's two catalogs and OpenAI's; a Head Chef changes the list and the \
 allowlist in the dashboard. Requires AgentOven Pro."
     )]
     Catalog(CatalogArgs),
@@ -675,7 +675,7 @@ fn verdict_report(
             past(action)
         ),
         Verdict::NeedsReview => out += &format!(
-            "  {} Skill {} needs review — verdict: needs_review. It is inert (no tools registered, unusable by agents) until an admin decides.\n",
+            "  {} Skill {} needs review — verdict: needs_review. It is inert (no tools registered, unusable by agents) until a reviewer (Taster, Chef or Head Chef) decides.\n",
             "⚠".yellow().bold(),
             label
         ),
@@ -1439,7 +1439,7 @@ fn render_catalog(body: &Value, from: &str) -> String {
     );
     if blocked > 0 {
         out += &format!(
-            "  {} {blocked} blocked by this kitchen's allowlist or pin policy (see `agentoven skills catalog`); an administrator changes it in the dashboard\n",
+            "  {} {blocked} blocked by this kitchen's allowlist or pin policy (see `agentoven skills catalog`); a Head Chef changes it in the dashboard\n",
             "·".dimmed()
         );
     }

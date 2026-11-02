@@ -19,11 +19,17 @@ pub mod service_account;
 pub mod session;
 pub mod skills;
 pub mod connector;
+pub mod dataset;
+pub mod key;
+pub mod legal_hold;
+pub mod secret;
+pub mod signing;
 pub mod eval;
 pub mod judge;
 pub mod scenario;
 pub mod test_suite;
 pub mod world_schema;
+pub mod task;
 pub mod tool;
 pub mod trace;
 pub mod use_cmd;
@@ -165,6 +171,30 @@ pub enum Commands {
     #[command(subcommand)]
     ServiceAccount(service_account::ServiceAccountCommands),
 
+    /// 🗂  Manage governed datasets: cases, versions, retention, export, purge (Pro).
+    #[command(subcommand)]
+    Dataset(dataset::DatasetCommands),
+
+    /// ✍️  Signed decisions: list, verify, sign, and who may approve what (Pro).
+    #[command(subcommand)]
+    Signature(signing::SignatureCommands),
+
+    /// ⚖️  Place or lift a legal hold on a dataset or the audit trail (Pro).
+    #[command(subcommand)]
+    LegalHold(legal_hold::LegalHoldCommands),
+
+    /// 🔑 Manage scoped API keys and their owners (Pro).
+    #[command(subcommand)]
+    Key(key::KeyCommands),
+
+    /// 🗝  Secrets and where they live: create, link, rotate, bind to skills, migrate between providers (Pro).
+    #[command(subcommand)]
+    Secret(secret::SecretCommands),
+
+    /// ⏳ Background tasks: start, follow, extend, resume and cancel long-running agent work.
+    #[command(subcommand)]
+    Task(task::TaskCommands),
+
     /// 📊 Show control plane status and health.
     Status,
 }
@@ -223,6 +253,12 @@ pub async fn execute(cli: Cli) -> anyhow::Result<()> {
         Commands::Judge(cmd) => judge::execute(cmd).await,
         Commands::Eval(cmd) => eval::execute(cmd).await,
         Commands::ServiceAccount(cmd) => service_account::execute(cmd).await,
+        Commands::Dataset(cmd) => dataset::execute(cmd, signing::client_with(url, api_key, kitchen)?).await,
+        Commands::Signature(cmd) => signing::execute(cmd, signing::client_with(url, api_key, kitchen)?).await,
+        Commands::LegalHold(cmd) => legal_hold::execute(cmd, signing::client_with(url, api_key, kitchen)?).await,
+        Commands::Key(cmd) => key::execute(cmd, signing::client_with(url, api_key, kitchen)?).await,
+        Commands::Secret(cmd) => secret::execute(cmd, signing::client_with(url, api_key, kitchen)?).await,
+        Commands::Task(cmd) => task::execute(cmd, task::Globals { url, api_key, kitchen }).await,
         Commands::Status => status().await,
     }
 }
@@ -269,4 +305,77 @@ async fn status() -> anyhow::Result<()> {
     );
     println!("  CLI version:   {}", env!("CARGO_PKG_VERSION"));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// clap's own consistency check (duplicate names, bad defaults) over the commands added for the Pro
+    /// APIs. It is not run over `agent`: `agent bake --version` already collides with the auto-generated
+    /// `--version` (a pre-existing issue that only clap's debug build asserts on).
+    #[test]
+    fn the_new_commands_are_well_formed() {
+        let root = Cli::command();
+        for name in ["dataset", "signature", "legal-hold", "key", "secret", "trace", "kitchen", "service-account", "recipe"] {
+            let sub = root.find_subcommand(name).unwrap_or_else(|| panic!("no {name}")).clone();
+            sub.debug_assert();
+        }
+    }
+
+    fn long_help(path: &[&str]) -> String {
+        let mut cmd = Cli::command();
+        for p in path {
+            cmd = cmd.find_subcommand(p).unwrap_or_else(|| panic!("no subcommand {p}")).clone();
+        }
+        cmd.render_long_help().to_string()
+    }
+
+    #[test]
+    fn agent_help_says_when_a_version_moves() {
+        let help = long_help(&["agent", "versions"]);
+        let flat = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains("moves only on a bake whose configuration differs"), "{flat}");
+        assert!(flat.contains("0.1.0") && flat.contains("do not bump") || flat.contains("does not bump"), "{flat}");
+    }
+
+    #[test]
+    fn no_help_text_names_the_retired_admin_role_as_a_choice() {
+        for path in [vec!["service-account", "create"], vec!["kitchen", "bindings", "add"], vec!["signature", "policy", "set"]] {
+            let help = long_help(&path);
+            assert!(!help.contains("chef, admin") && !help.contains("(baker, chef, admin)"), "{path:?}: {help}");
+        }
+        let help = long_help(&["service-account", "create"]);
+        for r in ["head_chef", "chef", "baker", "taster", "auditor", "legal", "finance", "viewer"] {
+            assert!(help.contains(r), "service-account create help lacks {r}: {help}");
+        }
+    }
+
+    #[test]
+    fn recipe_bake_can_name_an_environment_and_sign_an_approval_skip() {
+        let cli = Cli::try_parse_from(["agentoven", "recipe", "bake", "refunds", "--environment", "prod", "--sign"]).unwrap();
+        match cli.command {
+            Commands::Recipe(recipe::RecipeCommands::Bake(a)) => {
+                assert_eq!(a.environment.as_deref(), Some("prod"));
+                assert!(a.signing.sign);
+            }
+            _ => panic!("not recipe bake"),
+        }
+    }
+
+    #[test]
+    fn agent_versions_takes_an_optional_version() {
+        for (args, want) in [(vec!["agent", "versions", "bot"], None), (vec!["agent", "versions", "bot", "0.1.0"], Some("0.1.0"))] {
+            let mut v = vec!["agentoven"];
+            v.extend(args);
+            match Cli::try_parse_from(v).unwrap().command {
+                Commands::Agent(a) => match *a {
+                    agent::AgentCommands::Versions(a) => assert_eq!(a.number.as_deref(), want),
+                    _ => panic!(),
+                },
+                _ => panic!(),
+            }
+        }
+    }
 }

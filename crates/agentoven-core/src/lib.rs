@@ -40,8 +40,16 @@ pub mod recipe;
 pub mod router;
 pub mod telemetry;
 
+/// A fake control plane for tests: a loopback HTTP server that records requests.
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+
 // Re-exports
 pub use agent::{Agent, AgentBuilder, AgentMode, AgentStatus, Guardrail};
+pub use client::pro::{
+    check_role, check_retention_mode, ApiError, DatasetExport, OidcSigningRequired, Signature,
+    KITCHEN_ROLES, PERSON_ROLES, SIGNING_GATES, SIGNING_TOKEN_HEADER,
+};
 pub use client::AgentOvenClient;
 pub use config::AgentOvenConfig;
 pub use ingredient::{Ingredient, IngredientKind};

@@ -8,6 +8,10 @@ use url::Url;
 use crate::agent::{Agent, AgentMode};
 use crate::recipe::Recipe;
 
+/// Pro surfaces: replay, governed datasets, signed decisions, bindings and owners.
+pub mod pro;
+pub mod secrets;
+
 /// Client for interacting with the AgentOven control plane.
 #[derive(Debug, Clone)]
 pub struct AgentOvenClient {
@@ -65,11 +69,28 @@ impl AgentOvenClient {
 
     // ── Agent Operations ─────────────────────────────────────
 
-    /// Register a new agent in the oven (menu).
+    /// Register an agent in the oven (menu): create it when the kitchen has no agent of that
+    /// name, update it when it does.
+    ///
+    /// The control plane creates with `POST /agents` and updates with `PUT /agents/{name}`
+    /// (404 for a name that does not exist). A `POST` for a name that exists fails on the
+    /// database store and silently replaces the agent on the in-memory one, so this asks
+    /// first (`GET /agents/{name}`) and sends the one call that fits. An update changes the
+    /// fields sent and leaves the others as they are.
     ///
     /// Sends only the user-provided fields; server-managed fields
     /// (id, status, kitchen, timestamps, a2a_endpoint) are set server-side.
     pub async fn register(&self, agent: &Agent) -> anyhow::Result<Agent> {
+        let item_url = self.url(&format!("/api/v1/agents/{}", agent.name));
+        let probe = self
+            .authed_request(self.http.get(item_url.clone()))
+            .send()
+            .await?;
+        let exists = match probe.status() {
+            s if s.is_success() => true,
+            reqwest::StatusCode::NOT_FOUND => false,
+            other => anyhow::bail!("could not look up agent '{}' ({other})", agent.name),
+        };
         let url = self.url("/api/v1/agents");
 
         // Build a minimal registration payload — only fields the server expects.
@@ -123,12 +144,15 @@ impl AgentOvenClient {
             obj.insert("mode".into(), serde_json::to_value(&agent.mode)?);
         }
 
-        let resp = self
-            .authed_request(self.http.post(url))
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()?;
+        let resp = if exists {
+            self.authed_request(self.http.put(item_url))
+        } else {
+            self.authed_request(self.http.post(url))
+        }
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
         Ok(resp.json().await?)
     }
 
@@ -373,7 +397,12 @@ impl AgentOvenClient {
         Ok(resp.json().await?)
     }
 
-    /// List version history for an agent.
+    /// List version history for an agent: the versions it has been baked at.
+    ///
+    /// A version moves only on a bake whose configuration differs from the last bake's. The first
+    /// bake keeps the registered version (`0.1.0`), a bake that changes nothing keeps its version,
+    /// and a changed one takes the next minor version and keeps the old one. Editing a registered
+    /// agent does not bump it. [`Self::agent_version`] reads one.
     pub async fn agent_versions(&self, name: &str) -> anyhow::Result<Vec<serde_json::Value>> {
         let url = self.url(&format!("/api/v1/agents/{name}/versions"));
         let resp = self
@@ -1085,6 +1114,7 @@ impl AgentOvenClient {
     /// Prove who you are again and get the single-use signing token for one decision (Pro, ADR-0041).
     /// `gate` names the kind of decision (`recipe_gate`, `skill_approval`, ...), `record_id` what is decided,
     /// `meaning` is `approved` or `rejected`, `password` is the password of the local account signed in with.
+    /// Same as [`Self::sign`] for a decision with no payload.
     pub async fn sign_decision(
         &self,
         gate: &str,
@@ -1092,38 +1122,7 @@ impl AgentOvenClient {
         meaning: &str,
         password: &str,
     ) -> anyhow::Result<String> {
-        let request =
-            serde_json::json!({ "gate": gate, "record_id": record_id, "meaning": meaning });
-        let challenge = self
-            .authed_request(self.http.post(self.url("/api/v1/signatures/challenge")))
-            .json(&request)
-            .send()
-            .await?;
-        if !challenge.status().is_success() {
-            let text = challenge.text().await.unwrap_or_default();
-            anyhow::bail!("{}", signing_message(&text));
-        }
-        let challenge: serde_json::Value = challenge.json().await?;
-        let digest = challenge["subject"]["digest"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("the control plane sent no digest to sign"))?;
-        let mut body = request;
-        body["digest"] = serde_json::json!(digest);
-        body["password"] = serde_json::json!(password);
-        let reply = self
-            .authed_request(self.http.post(self.url("/api/v1/signatures/token")))
-            .json(&body)
-            .send()
-            .await?;
-        if !reply.status().is_success() {
-            let text = reply.text().await.unwrap_or_default();
-            anyhow::bail!("{}", signing_message(&text));
-        }
-        let reply: serde_json::Value = reply.json().await?;
-        reply["signing_token"]
-            .as_str()
-            .map(String::from)
-            .ok_or_else(|| anyhow::anyhow!("the control plane sent no signing token"))
+        self.sign(gate, record_id, meaning, None, password).await
     }
 
     // ── Audit Operations ─────────────────────────────────────
@@ -1257,4 +1256,145 @@ fn signing_message(body: &str) -> String {
             }
         })
         .unwrap_or_else(|| body.to_string())
+}
+
+#[cfg(test)]
+mod register_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    type Seen = Arc<Mutex<Vec<(String, String, String)>>>; // (method, path, body)
+
+    /// A loopback HTTP server that records each request and answers from a
+    /// `"METHOD /path" -> (status, json)` table (404 for anything not listed).
+    async fn fake_control_plane(
+        routes: HashMap<&'static str, (u16, serde_json::Value)>,
+    ) -> (String, Seen) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen: Seen = Arc::default();
+        let recorded = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let routes = routes.clone();
+                let recorded = recorded.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let (head_end, content_len) = loop {
+                        let n = sock.read(&mut chunk).await.unwrap();
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&buf[..pos]).to_lowercase();
+                            let len = head
+                                .lines()
+                                .find_map(|l| l.strip_prefix("content-length:"))
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            break (pos + 4, len);
+                        }
+                    };
+                    while buf.len() < head_end + content_len {
+                        let n = sock.read(&mut chunk).await.unwrap();
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                    let mut first = head.lines().next().unwrap().split_whitespace();
+                    let (method, path) = (first.next().unwrap(), first.next().unwrap());
+                    let body = String::from_utf8_lossy(&buf[head_end..head_end + content_len]).to_string();
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push((method.to_string(), path.to_string(), body));
+                    let (status, json) = routes
+                        .get(format!("{method} {path}").as_str())
+                        .cloned()
+                        .unwrap_or((404, serde_json::json!({"error": "no route"})));
+                    let payload = json.to_string();
+                    let reply = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    let _ = sock.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        (base, seen)
+    }
+
+    fn agent() -> Agent {
+        Agent::builder("refund-bot")
+            .version("1.0.0")
+            .description("Pays refunds")
+            .build()
+    }
+
+    fn calls(seen: &Seen) -> Vec<(String, String)> {
+        seen.lock().unwrap().iter().map(|(m, p, _)| (m.clone(), p.clone())).collect()
+    }
+
+    #[tokio::test]
+    async fn register_creates_with_post_when_the_agent_does_not_exist() {
+        let stored = serde_json::to_value(agent()).unwrap();
+        let routes = HashMap::from([("POST /api/v1/agents", (201, stored))]);
+        let (base, seen) = fake_control_plane(routes).await;
+
+        let client = AgentOvenClient::new(&base).unwrap().with_kitchen("acme");
+        let out = client.register(&agent()).await.unwrap();
+
+        assert_eq!(out.name, "refund-bot");
+        assert_eq!(
+            calls(&seen),
+            vec![
+                ("GET".to_string(), "/api/v1/agents/refund-bot".to_string()),
+                ("POST".to_string(), "/api/v1/agents".to_string()),
+            ]
+        );
+        let body: serde_json::Value = serde_json::from_str(&seen.lock().unwrap()[1].2).unwrap();
+        assert_eq!(body["name"], "refund-bot");
+        assert_eq!(body["description"], "Pays refunds");
+    }
+
+    #[tokio::test]
+    async fn register_updates_with_put_when_the_agent_exists() {
+        let stored = serde_json::to_value(agent()).unwrap();
+        let routes = HashMap::from([
+            ("GET /api/v1/agents/refund-bot", (200, stored.clone())),
+            ("PUT /api/v1/agents/refund-bot", (200, stored)),
+        ]);
+        let (base, seen) = fake_control_plane(routes).await;
+
+        let client = AgentOvenClient::new(&base).unwrap();
+        let out = client.register(&agent()).await.unwrap();
+
+        assert_eq!(out.name, "refund-bot");
+        assert_eq!(
+            calls(&seen),
+            vec![
+                ("GET".to_string(), "/api/v1/agents/refund-bot".to_string()),
+                ("PUT".to_string(), "/api/v1/agents/refund-bot".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn register_fails_loudly_when_the_lookup_fails() {
+        let routes = HashMap::from([(
+            "GET /api/v1/agents/refund-bot",
+            (500, serde_json::json!({"error": "boom"})),
+        )]);
+        let (base, seen) = fake_control_plane(routes).await;
+
+        let client = AgentOvenClient::new(&base).unwrap();
+        assert!(client.register(&agent()).await.is_err());
+        // It did not guess: nothing was created or changed.
+        assert_eq!(calls(&seen).len(), 1);
+    }
 }

@@ -58,6 +58,13 @@ pub struct RecipeBakeArgs {
     /// Input from file.
     #[arg(long)]
     pub input_file: Option<String>,
+    /// Run on this environment. When it requires approval, a Head Chef or Restaurateur can skip that
+    /// approval with --sign (never in a GxP kitchen): a signed decision on the approval_skip gate,
+    /// record `<recipe>@<environment>`, bound to this input.
+    #[arg(long, alias = "env")]
+    pub environment: Option<String>,
+    #[command(flatten)]
+    pub signing: super::signing::SignArgs,
 }
 
 #[derive(Args)]
@@ -283,7 +290,15 @@ async fn bake(args: RecipeBakeArgs) -> anyhow::Result<()> {
         serde_json::json!({})
     };
 
-    match client.bake_recipe(&args.name, input).await {
+    let signing = args.signing.resolve()?;
+    let started = if args.environment.is_some() || !matches!(signing, super::signing::Signing::None) {
+        client
+            .run_recipe(&args.name, &input, args.environment.as_deref(), signing.signature())
+            .await
+    } else {
+        client.bake_recipe(&args.name, input).await
+    };
+    match started {
         Ok(result) => {
             println!("  {} Recipe baking started!", "✓".green().bold());
             if let Some(run_id) = result.get("run_id").or(result.get("task_id")) {

@@ -33,5 +33,9 @@ base64 = "0.22"
 dirs-next = "2"
 toml = "0.8"
 
+[features]
+# `testing` exposes `agentoven_core::testing`, a fake control plane, so the CLI can test against it.
+testing = []
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

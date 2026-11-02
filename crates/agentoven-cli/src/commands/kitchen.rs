@@ -17,6 +17,50 @@ pub enum KitchenCommands {
     Settings,
     /// Update kitchen settings.
     UpdateSettings(UpdateSettingsArgs),
+    /// Identity-provider group bindings of a kitchen (Pro): which group is which role.
+    #[command(subcommand)]
+    Bindings(BindingCommands),
+    /// The kitchens you can enter and your role in each (Pro).
+    Mine,
+}
+
+#[derive(Subcommand)]
+pub enum BindingCommands {
+    /// List a kitchen's bindings.
+    Ls(BindingLsArgs),
+    /// Bind an identity-provider group (or app role) to a kitchen role. Takes effect at the next login.
+    Add(BindingAddArgs),
+    /// Remove a binding.
+    Rm(BindingRmArgs),
+}
+
+#[derive(Args)]
+pub struct BindingLsArgs {
+    /// Kitchen ID.
+    pub kitchen: String,
+}
+
+#[derive(Args)]
+pub struct BindingAddArgs {
+    /// Kitchen ID.
+    pub kitchen: String,
+    /// The group object id or app role value the identity provider puts in the token.
+    pub claim: String,
+    /// The kitchen role: head_chef, chef, baker, taster, auditor, legal, finance or viewer. Binding a group
+    /// as head_chef is a Restaurateur's decision; `restaurateur` is platform-wide and `admin` is retired.
+    #[arg(long)]
+    pub role: String,
+    /// A name for people ("QA reviewers").
+    #[arg(long, default_value = "")]
+    pub label: String,
+}
+
+#[derive(Args)]
+pub struct BindingRmArgs {
+    /// Kitchen ID.
+    pub kitchen: String,
+    /// Binding ID.
+    pub binding: String,
 }
 
 #[derive(Args)]
@@ -73,7 +117,81 @@ pub async fn execute(cmd: KitchenCommands) -> anyhow::Result<()> {
         KitchenCommands::Delete(args) => delete(args).await,
         KitchenCommands::Settings => settings().await,
         KitchenCommands::UpdateSettings(args) => update_settings(args).await,
+        KitchenCommands::Bindings(cmd) => {
+            let client = agentoven_core::AgentOvenClient::from_env()?;
+            print!("{}", bindings(cmd, &client).await?);
+            Ok(())
+        }
+        KitchenCommands::Mine => {
+            let client = agentoven_core::AgentOvenClient::from_env()?;
+            print!("{}", mine(&client).await?);
+            Ok(())
+        }
     }
+}
+
+/// `kitchen bindings ...`: run it against `client` and return what it prints.
+pub async fn bindings(
+    cmd: BindingCommands,
+    client: &agentoven_core::AgentOvenClient,
+) -> anyhow::Result<String> {
+    match cmd {
+        BindingCommands::Ls(a) => {
+            let bs = client.list_kitchen_bindings(&a.kitchen).await?;
+            let mut out = String::from("\n");
+            if bs.is_empty() {
+                out.push_str("  (no bindings — people get the role their membership gives them)\n");
+            } else {
+                out.push_str(&format!(
+                    "  {:<38} {:<40} {:<10} {}\n",
+                    "ID".bold(), "GROUP / APP ROLE".bold(), "ROLE".bold(), "LABEL".bold()
+                ));
+                for b in &bs {
+                    out.push_str(&format!(
+                        "  {:<38} {:<40} {:<10} {}\n",
+                        b["id"].as_str().unwrap_or("-"),
+                        b["claim_value"].as_str().unwrap_or("-"),
+                        b["role"].as_str().unwrap_or("-"),
+                        b["label"].as_str().unwrap_or("")
+                    ));
+                }
+            }
+            Ok(out)
+        }
+        BindingCommands::Add(a) => {
+            let b = client
+                .create_kitchen_binding(&a.kitchen, &a.claim, &a.role, &a.label)
+                .await?;
+            Ok(format!(
+                "  {} Bound {} to {} (binding {}); it takes effect at each person's next login.\n",
+                "✓".green().bold(),
+                a.claim.cyan(),
+                a.role.bold(),
+                b["id"].as_str().unwrap_or("-")
+            ))
+        }
+        BindingCommands::Rm(a) => {
+            client.delete_kitchen_binding(&a.kitchen, &a.binding).await?;
+            Ok(format!("  {} Removed binding {}.\n", "✓".green().bold(), a.binding))
+        }
+    }
+}
+
+/// `kitchen mine`: the kitchens you can enter and your role in each.
+pub async fn mine(client: &agentoven_core::AgentOvenClient) -> anyhow::Result<String> {
+    let m = client.my_kitchens().await?;
+    let mut out = String::from("\n");
+    if m["enforced"].as_bool().unwrap_or(false) {
+        out.push_str("  Membership is enforced: you can enter only these kitchens.\n\n");
+    }
+    for k in m["kitchens"].as_array().cloned().unwrap_or_default() {
+        out.push_str(&format!(
+            "  {:<28} {}\n",
+            k["name"].as_str().unwrap_or("-"),
+            k["role"].as_str().unwrap_or("-").cyan()
+        ));
+    }
+    Ok(out)
 }
 
 async fn list() -> anyhow::Result<()> {
@@ -300,4 +418,69 @@ async fn delete(args: DeleteArgs) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::{Cli, Commands};
+    use agentoven_core::testing::{fake_control_plane, json as reply, Routes};
+    use clap::Parser;
+    use serde_json::json;
+
+    fn parse(args: &[&str]) -> KitchenCommands {
+        let mut v = vec!["agentoven", "kitchen"];
+        v.extend_from_slice(args);
+        match Cli::try_parse_from(v).expect("parse").command {
+            Commands::Kitchen(c) => c,
+            _ => panic!("not a kitchen command"),
+        }
+    }
+
+    fn bindings_cmd(args: &[&str]) -> BindingCommands {
+        match parse(&[&["bindings"], args].concat()) {
+            KitchenCommands::Bindings(b) => b,
+            _ => panic!(),
+        }
+    }
+
+    #[tokio::test]
+    async fn bindings_are_listed_added_and_removed() {
+        colored::control::set_override(false);
+        let (base, log) = fake_control_plane(Routes::from([
+            ("GET /api/v1/kitchens/k1/bindings".to_string(), reply(200, json!([{"id": "b1", "claim_value": "g-1", "role": "chef", "label": "builders"}]))),
+            ("POST /api/v1/kitchens/k1/bindings".to_string(), reply(201, json!({"id": "b2"}))),
+            ("DELETE /api/v1/kitchens/k1/bindings/b2".to_string(), reply(204, json!({}))),
+        ])).await;
+        let c = agentoven_core::AgentOvenClient::new(&base).unwrap();
+        let out = bindings(bindings_cmd(&["ls", "k1"]), &c).await.unwrap();
+        assert!(out.contains("g-1") && out.contains("chef") && out.contains("builders"), "{out}");
+        let out = bindings(bindings_cmd(&["add", "k1", "aad-group", "--role", "taster", "--label", "QA"]), &c).await.unwrap();
+        assert!(out.contains("next login"), "{out}");
+        assert_eq!(log.last().body, json!({"claim_value": "aad-group", "role": "taster", "label": "QA"}));
+        bindings(bindings_cmd(&["rm", "k1", "b2"]), &c).await.unwrap();
+        assert_eq!(log.last().method, "DELETE");
+    }
+
+    #[tokio::test]
+    async fn a_binding_takes_a_kitchen_role_only() {
+        let (base, log) = fake_control_plane(Routes::new()).await;
+        let c = agentoven_core::AgentOvenClient::new(&base).unwrap();
+        for role in ["admin", "restaurateur", "sous_chef"] {
+            assert!(bindings(bindings_cmd(&["add", "k1", "g", "--role", role]), &c).await.is_err(), "{role}");
+        }
+        assert!(log.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mine_shows_each_kitchen_and_the_role() {
+        colored::control::set_override(false);
+        let (base, _) = fake_control_plane(Routes::from([(
+            "GET /api/v1/me/kitchens".to_string(),
+            reply(200, json!({"enforced": true, "kitchens": [{"name": "acme", "role": "head_chef"}, {"name": "labs", "role": "viewer"}]})),
+        )])).await;
+        let c = agentoven_core::AgentOvenClient::new(&base).unwrap();
+        let out = mine(&c).await.unwrap();
+        assert!(out.contains("enforced") && out.contains("acme") && out.contains("head_chef") && out.contains("labs"), "{out}");
+    }
 }

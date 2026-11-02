@@ -62,7 +62,12 @@ pub enum AgentCommands {
     /// Show the A2A Agent Card (discovery metadata).
     Card(CardArgs),
 
-    /// List version history for an agent.
+    /// List the versions an agent has been baked at, or show one.
+    ///
+    /// A version moves only on a bake whose configuration differs from the last bake's. The first bake
+    /// keeps the registered version (0.1.0), a bake that changes nothing keeps its version, and a
+    /// changed one takes the next minor version and keeps the old one. Editing an agent (`register`,
+    /// `update`) does not bump it.
     Versions(VersionsArgs),
 }
 
@@ -206,7 +211,9 @@ pub struct BakeArgs {
     #[arg(long, short, default_value = "production")]
     pub environment: String,
 
-    /// Version to deploy (defaults to latest).
+    /// Bake this stored version of the agent (defaults to the agent as it is now). The agent's version
+    /// itself moves only on a bake whose configuration differs from the last bake's: the first bake keeps
+    /// the registered version (0.1.0), edits do not bump it.
     #[arg(long, short)]
     pub version: Option<String>,
 }
@@ -307,6 +314,9 @@ pub struct CardArgs {
 pub struct VersionsArgs {
     /// Agent name.
     pub name: String,
+    /// Show this one version as it was configured when it was baked (0.1.0 is the first bake).
+    #[arg(value_name = "VERSION")]
+    pub number: Option<String>,
 }
 
 pub async fn execute(cmd: AgentCommands) -> anyhow::Result<()> {
@@ -1379,9 +1389,19 @@ async fn card(args: CardArgs) -> anyhow::Result<()> {
 }
 
 async fn versions(args: VersionsArgs) -> anyhow::Result<()> {
-    println!("\n  📜 Version history for: {}\n", args.name.bold());
-
     let client = agentoven_core::AgentOvenClient::from_env()?;
+    if let Some(version) = &args.number {
+        let v = client.agent_version(&args.name, version).await?;
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    println!("\n  📜 Version history for: {}\n", args.name.bold());
+    println!(
+        "  {}",
+        "A version moves only on a bake with a changed configuration; the first bake is 0.1.0; edits do not bump it.".dimmed()
+    );
+    println!();
+
     match client.agent_versions(&args.name).await {
         Ok(versions) => {
             if versions.is_empty() {
