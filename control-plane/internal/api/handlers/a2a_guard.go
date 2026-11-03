@@ -306,6 +306,7 @@ func (h *Handlers) a2aFilesInProcess(w http.ResponseWriter, r *http.Request, age
 	if !ok {
 		return true // answered: too large
 	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
 	var env struct {
 		ID     interface{}            `json:"id"`
 		Method string                 `json:"method"`

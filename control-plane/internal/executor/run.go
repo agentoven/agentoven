@@ -525,6 +525,9 @@ func (e *Executor) RunState(ctx context.Context, kitchen, traceID string) (*Jour
 	return js, nil
 }
 
+// ErrNoSuchRun is wrapped by RunState for a run that does not exist or belongs to another kitchen.
+var ErrNoSuchRun = errors.New("run not found")
+
 // Journal returns the executor's journal, or nil.
 func (e *Executor) Journal() Journal { return e.journal }
 
@@ -733,6 +736,7 @@ func (e *Executor) runLoop(ctx context.Context, st *runState, thinkingEnabled bo
 			attribute.Int64("llm.thinking_tokens", routeResp.Usage.ThinkingTokens),
 			attribute.Int("llm.thinking_blocks", len(routeResp.ThinkingBlocks)),
 			attribute.String("llm.price_source", routeResp.Usage.PriceSource),
+			attribute.Bool("llm.cache_hit", routeResp.Cached),
 		)
 		llmSpan.End()
 
@@ -742,7 +746,6 @@ func (e *Executor) runLoop(ctx context.Context, st *runState, thinkingEnabled bo
 		st.totalUsage.ThinkingTokens += routeResp.Usage.ThinkingTokens
 		st.totalUsage.EstimatedCost += routeResp.Usage.EstimatedCost
 		if bud != nil {
-			attribute.Bool("llm.cache_hit", routeResp.Cached),
 			for _, w := range bud.charge(routeResp.Usage) {
 				w := w
 				opts.onEvent.emit(Event{Type: EventBudgetWarning, Turn: turn, BudgetWarning: &w})

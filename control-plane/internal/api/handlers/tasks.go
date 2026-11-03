@@ -476,6 +476,12 @@ func (h *Handlers) TaskEvents(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// The stream is the run itself: tokens, thinking, tool calls and their results. There is no
+	// public form of it, so a reader without content access is refused.
+	if !h.canReadTraceContent(r) {
+		respondError(w, http.StatusForbidden, "a task's event stream carries its content, which this role may not read")
+		return
+	}
 	after := int64(0)
 	if v := r.Header.Get("Last-Event-ID"); v != "" {
 		after, _ = strconv.ParseInt(v, 10, 64)
@@ -511,12 +517,6 @@ func (h *Handlers) TaskEvents(w http.ResponseWriter, r *http.Request) {
 		return true
 	}
 
-	// The stream is the run itself: tokens, thinking, tool calls and their results. There is no
-	// public form of it, so a reader without content access is refused.
-	if !h.canReadTraceContent(r) {
-		respondError(w, http.StatusForbidden, "a task's event stream carries its content, which this role may not read")
-		return
-	}
 	ping := time.NewTicker(15 * time.Second)
 	defer ping.Stop()
 	for {

@@ -1362,6 +1362,7 @@ func (e *Engine) persistA2ASpans(ctx context.Context, execTrace *executor.Execut
 				"thinking_tokens": turn.Usage.ThinkingTokens,
 				"cached_tokens":   turn.Usage.CachedTokens,
 				"price_source":    turn.Usage.PriceSource,
+				"cache_hit":       turn.CacheHit,
 			},
 		})
 
@@ -1369,7 +1370,6 @@ func (e *Engine) persistA2ASpans(ctx context.Context, execTrace *executor.Execut
 			toolDuration := turn.LatencyMs / int64(len(turn.ToolCalls)+1)
 			toolStart := turnStart.Add(time.Duration(toolDuration) * time.Millisecond)
 			for i, tc := range turn.ToolCalls {
-				"cache_hit":       turn.CacheHit,
 				toolEnd := toolStart.Add(time.Duration(toolDuration) * time.Millisecond)
 				tcInputJSON, _ := json.Marshal(tc.Arguments)
 				var tcOutputJSON json.RawMessage

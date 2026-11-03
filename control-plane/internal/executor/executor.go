@@ -160,12 +160,12 @@ type Executor struct {
 	retry modelRetry
 	// subagents, when set, offers agents the task and tasks tools (see subagent.go).
 	subagents contracts.SubagentRuntime
-	// hostedInvoke runs a message on a hosted agent's own process (see SetHostedInvoker).
-	hostedInvoke func(ctx context.Context, agent *models.Agent, message string) (string, error)
-	// boundary holds a delegation to the target's own guardrails and reaches framework-native
 	// toolApproval, when set, names more tools that need a person's approval than the agent's own
 	// ApprovalTools do (see SetToolApprovalPolicy).
 	toolApproval contracts.ToolApprovalPolicy
+	// hostedInvoke runs a message on a hosted agent's own process (see SetHostedInvoker).
+	hostedInvoke func(ctx context.Context, agent *models.Agent, message string) (string, error)
+	// boundary holds a delegation to the target's own guardrails and reaches framework-native
 	// agents (see SetDelegationBoundary).
 	boundary *DelegationBoundary
 	// audit, when set, is told about the events of a run that someone accountable for its
