@@ -7720,6 +7720,13 @@ func (h *Handlers) SetCustomGuardrails(ev contracts.CustomGuardrailEvaluator) bo
 	return ok
 }
 
+// SetOwnEndpointPolicy installs the rule that decides whether the custom endpoints an agent names in its own
+// guardrails may be used (Pro: a Head Chef approves each for the agent). It is asked before every run and
+// before a bake. Without one nothing is asked (the community edition evaluates no custom rule).
+func (h *Handlers) SetOwnEndpointPolicy(p func(ctx context.Context, kitchen, agent string, own []models.Guardrail) error) {
+	grails.UseOwnEndpointPolicy(p)
+}
+
 // withRunTrace chooses the trace ID of the run about to start and records it on the context. The
 // executor uses it as the run's ID, and every audit event the run causes (a guardrail verdict, a
 // budget pause, an approval) carries it, which is what lets a trace show its governance events.
