@@ -377,7 +377,14 @@ func (h *Handlers) GetAgent(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, agent.Redacted())
 }
 
+// UpdateAgent edits an agent. It runs on a fresh read of the agent each time a concurrent write beats
+// it to the row (see retryOnStale), and refuses with 409 an edit that names a revision which is no
+// longer the stored one.
 func (h *Handlers) UpdateAgent(w http.ResponseWriter, r *http.Request) {
+	retryOnStale(w, r, h.updateAgent)
+}
+
+func (h *Handlers) updateAgent(w http.ResponseWriter, r *http.Request) {
 	agentName := chi.URLParam(r, "agentName")
 	kitchen := middleware.GetKitchen(r.Context())
 
@@ -401,10 +408,15 @@ func (h *Handlers) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	// The body is an edit (see models.AgentEdit) and the tags, which are labels and not behaviour.
 	var req struct {
 		models.AgentEdit
-		Tags map[string]string `json:"tags"`
+		Tags     map[string]string `json:"tags"`
+		Revision int64             `json:"revision"` // the revision the client's edit is based on, optional
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if want := ifMatchRevision(r, req.Revision); want > 0 && want != agent.Revision {
+		respondStaleRevision(w, agent)
 		return
 	}
 	edit := req.AgentEdit
@@ -444,7 +456,7 @@ func (h *Handlers) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.Store.UpdateAgent(r.Context(), agent); err != nil {
 		h.dropCredentials(r.Context(), kitchen, sealed, heldBefore)
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondStoreError(w, err)
 		return
 	}
 	h.reapAgentSecrets(r.Context(), agent, heldBefore)
@@ -475,7 +487,14 @@ func (h *Handlers) DeleteAgent(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]string{"status": "deleted", "agent": agentName})
 }
 
+// BakeAgent bakes an agent. A PUT that lands while the bake is being prepared makes the bake's write
+// stale; the bake is then prepared again on the agent as it is now, so its configuration includes the
+// edit (or the edit waits in the draft for the next bake) and neither is lost.
 func (h *Handlers) BakeAgent(w http.ResponseWriter, r *http.Request) {
+	retryOnStale(w, r, h.bakeAgent)
+}
+
+func (h *Handlers) bakeAgent(w http.ResponseWriter, r *http.Request) {
 	agentName := chi.URLParam(r, "agentName")
 	kitchen := middleware.GetKitchen(r.Context())
 
@@ -972,6 +991,10 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 // After applying edits, runs the full bake pipeline (resolve + provider test).
 // Bumps the minor version automatically unless version is explicitly provided.
 func (h *Handlers) RecookAgent(w http.ResponseWriter, r *http.Request) {
+	retryOnStale(w, r, h.recookAgent)
+}
+
+func (h *Handlers) recookAgent(w http.ResponseWriter, r *http.Request) {
 	agentName := chi.URLParam(r, "agentName")
 	kitchen := middleware.GetKitchen(r.Context())
 
@@ -1098,7 +1121,7 @@ func (h *Handlers) CoolAgent(w http.ResponseWriter, r *http.Request) {
 	agentName := chi.URLParam(r, "agentName")
 	kitchen := middleware.GetKitchen(r.Context())
 
-	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
+	_, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
 	if err != nil {
 		if _, ok := err.(*store.ErrNotFound); ok {
 			respondError(w, http.StatusNotFound, err.Error())
@@ -1115,10 +1138,12 @@ func (h *Handlers) CoolAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	agent.Status = models.AgentStatusCooled
-	agent.Process = nil // clear process info
-	agent.UpdatedAt = time.Now().UTC()
-	h.Store.UpdateAgent(r.Context(), agent)
+	// Only the status and the process change: the agent read above may be stale by now, and writing it
+	// whole would put back whatever a bake or an edit changed in between.
+	if _, err := h.Store.UpdateAgentLifecycle(r.Context(), kitchen, agentName, models.AgentLifecycleGuard{},
+		models.AgentLifecycle{Status: models.AgentStatusCooled, ClearProcess: true}); err != nil {
+		log.Warn().Err(err).Str("agent", agentName).Msg("The cooled status could not be recorded")
+	}
 
 	// Pro: scale the k8s deployment to 0 so the pod is drained.
 	if h.WorkloadScaler != nil {
@@ -1157,14 +1182,15 @@ func (h *Handlers) RewarmAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent.Status = models.AgentStatusReady
-	agent.UpdatedAt = time.Now().UTC()
-	if agent.Tags != nil {
-		delete(agent.Tags, "error")
-	}
-
-	if err := h.Store.UpdateAgent(r.Context(), agent); err != nil {
+	// Guarded by the status read above: an agent that was baked or retired since is not rewarmed.
+	applied, err := h.Store.UpdateAgentLifecycle(r.Context(), kitchen, agentName, models.AgentLifecycleGuard{Status: models.AgentStatusCooled},
+		models.AgentLifecycle{Status: models.AgentStatusReady, DeleteTags: []string{"error"}})
+	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !applied {
+		respondError(w, http.StatusConflict, "the agent is no longer cooled: read it again")
 		return
 	}
 
@@ -2152,11 +2178,13 @@ func (h *Handlers) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				if ag.ModelName != "" && !newModels[ag.ModelName] {
-					ag.Status = models.AgentStatusBurnt
-					ag.UpdatedAt = time.Now().UTC()
-					if updateErr := h.Store.UpdateAgent(r.Context(), ag); updateErr != nil {
+					// Guarded by the status and version read above, and only the status is written: an
+					// agent baked or edited since is not burnt with a stale copy of itself.
+					applied, updateErr := h.Store.UpdateAgentLifecycle(r.Context(), kitchen, ag.Name,
+						models.AgentLifecycleGuard{Status: ag.Status, Version: ag.Version}, models.AgentLifecycle{Status: models.AgentStatusBurnt})
+					if updateErr != nil {
 						log.Warn().Err(updateErr).Str("agent", ag.Name).Msg("Failed to burn agent after provider update")
-					} else {
+					} else if applied {
 						burntCount++
 						log.Info().Str("provider", name).Str("agent", ag.Name).Str("model", ag.ModelName).Msg("Agent burnt — model removed from provider")
 					}
@@ -6485,7 +6513,9 @@ func (h *Handlers) CreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondJSON(w, http.StatusCreated, session)
+	// Through sessionOut like every other session reply: a Session is a content type, and a bare one is
+	// refused by respondJSON after the session was already created.
+	respondJSON(w, http.StatusCreated, h.sessionOut(r, session))
 }
 
 // GetSession retrieves session details.
@@ -7303,12 +7333,16 @@ func (h *Handlers) AdminRetireAllDeployments(w http.ResponseWriter, r *http.Requ
 					log.Warn().Err(stopErr).Str("agent", ag.Name).Msg("Failed to stop agent process during retire-all")
 				}
 			}
-			ag.Status = models.AgentStatusCooled
-			ag.Process = nil
-			ag.UpdatedAt = time.Now().UTC()
-			if updateErr := h.Store.UpdateAgent(r.Context(), ag); updateErr != nil {
+			// Only the status and the process change, guarded by the status read above: the list was read
+			// before the processes were stopped, and an edit or bake made since must not be put back.
+			applied, updateErr := h.Store.UpdateAgentLifecycle(r.Context(), kitchen, ag.Name, models.AgentLifecycleGuard{Status: ag.Status},
+				models.AgentLifecycle{Status: models.AgentStatusCooled, ClearProcess: true})
+			if updateErr != nil {
 				log.Warn().Err(updateErr).Str("agent", ag.Name).Msg("Failed to update agent status during retire-all")
 				continue
+			}
+			if !applied {
+				continue // it changed state meanwhile (a bake finished, someone cooled it): not retired by this request
 			}
 			retired++
 			log.Info().Str("agent", ag.Name).Str("kitchen", kitchen).Msg("Agent retired (bulk)")

@@ -192,10 +192,10 @@ func TestTheBackgroundStepDoesNotOverwriteLaterEdits(t *testing.T) {
 func TestAStaleBakeOutcomeIsDropped(t *testing.T) {
 	h, s := bakeHandlers(t)
 	agentCall(t, h.BakeAgent, "POST", `{}`)
-	cooled := waitStatus(t, s, models.AgentStatusReady)
+	waitStatus(t, s, models.AgentStatusReady)
 	agentCall(t, h.RecookAgent, "POST", `{}`)
-	cooled.Status = models.AgentStatusCooled // someone cools it while the re-cook step sleeps
-	if err := s.UpdateAgent(context.Background(), cooled); err != nil {
+	// someone cools it while the re-cook step sleeps (what CoolAgent does: only the status changes)
+	if _, err := s.UpdateAgentLifecycle(context.Background(), "default", "bot", models.AgentLifecycleGuard{}, models.AgentLifecycle{Status: models.AgentStatusCooled}); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(2500 * time.Millisecond)

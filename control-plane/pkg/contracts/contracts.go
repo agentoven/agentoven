@@ -37,6 +37,10 @@ type TraceFilter = store.TraceFilter
 // store built outside this repository returns these very types so the handlers answer 404 and 409.
 type ErrConflict = store.ErrConflict
 
+// ErrStale is what a Store returns for an agent write made from a copy that is no longer current
+// (models.Agent.Revision): nothing was written, and the handlers answer 409 or read the agent again.
+type ErrStale = store.ErrStale
+
 // ── Model Router Service ────────────────────────────────────
 
 // ModelRouterService routes LLM requests to configured providers.

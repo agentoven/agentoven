@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/agentoven/agentoven/control-plane/internal/store"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 )
 
@@ -50,6 +51,9 @@ func TestConcurrentIdenticalBakesAppendOneVersion(t *testing.T) {
 		a, _ := s.GetAgent(ctx, "k", "bot")
 		a.ResolvedConfig = &models.ResolvedIngredients{Prompt: &models.ResolvedPrompt{Name: "p", Template: "two"}}
 		a.VersionBump = models.VersionBumpBake
+		// Writers that do not carry a revision (values built by hand) are written unconditionally, and the
+		// version decision must hold for them too; the revision check has its own test below.
+		a.Revision = 0
 		copies[i] = a
 	}
 	var wg sync.WaitGroup
@@ -171,5 +175,50 @@ func TestLifecycleUpdateTouchesOnlyItsFieldsAndRespectsTheGuard(t *testing.T) {
 	}
 	if _, err := s.UpdateAgentLifecycle(ctx, "k", "nobody", guard, models.AgentLifecycle{}); err == nil {
 		t.Fatal("an unknown agent is an error")
+	}
+}
+
+// With the revision, requests that read the agent before any of them wrote are not all let through: one
+// write wins and the rest are refused as stale. Each refused one reads again and bakes again, and the
+// result is still one new version, and none of the writers was overwritten without knowing it.
+func TestStaleBakesAreRefusedAndRetriedToOneVersion(t *testing.T) {
+	ctx, s := seedBaked(t, "one")
+	const n = 12
+	copies := make([]*models.Agent, n)
+	for i := range copies {
+		a, _ := s.GetAgent(ctx, "k", "bot")
+		copies[i] = a
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	refused := 0
+	for _, a := range copies {
+		wg.Add(1)
+		go func(a *models.Agent) {
+			defer wg.Done()
+			for {
+				a.ResolvedConfig = &models.ResolvedIngredients{Prompt: &models.ResolvedPrompt{Name: "p", Template: "two"}}
+				a.VersionBump = models.VersionBumpBake
+				err := s.UpdateAgent(ctx, a)
+				if err == nil {
+					return
+				}
+				if !errors.As(err, new(*store.ErrStale)) {
+					t.Error(err)
+					return
+				}
+				mu.Lock()
+				refused++
+				mu.Unlock()
+				a, _ = s.GetAgent(ctx, "k", "bot") // read again, as the handler does
+			}
+		}(a)
+	}
+	wg.Wait()
+	if refused < n-1 {
+		t.Fatalf("every writer but the first read before it wrote, so at least %d must be refused, got %d", n-1, refused)
+	}
+	if got := versionList(t, s); len(got) != 2 || got[1] != "0.2.0" {
+		t.Fatalf("versions = %v, want [0.1.0 0.2.0]", got)
 	}
 }

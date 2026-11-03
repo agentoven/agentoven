@@ -34,6 +34,7 @@ var agentStateFields = map[string]string{
 	"order":         "display order",
 	"created_at":    "bookkeeping",
 	"updated_at":    "bookkeeping",
+	"revision":      "counts writes to the stored row, for optimistic concurrency",
 	"created_by":    "bookkeeping",
 	"tags":          "labels and the last error; none is read by the executor",
 	"a2a_endpoint":  "derived from the agent name and environment",

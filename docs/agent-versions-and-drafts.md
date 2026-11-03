@@ -13,6 +13,20 @@ PUT  /api/v1/agents/support {"guardrails": [], "max_turns": 20}   -> 200, "draft
 POST /api/v1/agents/support/recook {}                                -> 202; the draft is applied and the version becomes 0.2.0
 ```
 
+## Two requests at once
+
+Every agent carries a `revision`, which goes up with each write to it. An edit, a bake and a re-cook that run at the same
+moment do not overwrite each other: the one that lost the race reads the agent again and applies its change to what is stored
+now, so the edit is either applied or waiting in the draft, and the bake has happened. If you want your edit refused when the
+agent has changed since you read it, send the revision you read, as `"revision": 7` in the body or as `If-Match: "7"`:
+
+```
+PUT /api/v1/agents/support  If-Match: "7"  {"description": "..."}   -> 409 {"current_revision": 9, "current_version": "0.2.0"}
+```
+
+A 409 from a bake or edit without a revision means the agent kept changing under it for five attempts in a row: read it and
+try again.
+
 ## What counts as a change
 
 Everything about an agent that decides what it says or does: the resolved prompt, tools, model and backup, guardrails, turn

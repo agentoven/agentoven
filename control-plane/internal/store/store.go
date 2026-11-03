@@ -516,6 +516,20 @@ func (e *ErrConflict) Error() string {
 	return e.Entity + " already exists: " + e.Key
 }
 
+// ErrStale is returned by a write that was made from a copy of an entity somebody else has changed since
+// it was read (see models.Agent.Revision). Nothing was written. Revision and Version describe the stored
+// entity as it is now, so the caller can read it again, or tell its own caller what it is up against.
+type ErrStale struct {
+	Entity   string
+	Key      string
+	Revision int64
+	Version  string
+}
+
+func (e *ErrStale) Error() string {
+	return e.Entity + " changed since it was read: " + e.Key
+}
+
 // ── Filter helpers ──────────────────────────────────────────
 
 // ListFilter provides common pagination/filter options.

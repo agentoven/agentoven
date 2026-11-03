@@ -11,6 +11,7 @@ type AgentLifecycle struct {
 	DeleteTags      []string
 	BackendEndpoint string       // empty: unchanged
 	Process         *ProcessInfo // nil: unchanged
+	ClearProcess    bool         // the process is gone (a cool); wins over Process
 }
 
 // AgentLifecycleGuard is the optimistic-concurrency condition of a lifecycle change: it applies only
@@ -43,7 +44,9 @@ func (c AgentLifecycle) Apply(a *Agent) {
 	if c.BackendEndpoint != "" {
 		a.BackendEndpoint = c.BackendEndpoint
 	}
-	if c.Process != nil {
+	if c.ClearProcess {
+		a.Process = nil
+	} else if c.Process != nil {
 		a.Process = c.Process
 	}
 }

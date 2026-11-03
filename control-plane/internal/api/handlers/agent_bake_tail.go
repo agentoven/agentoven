@@ -245,7 +245,10 @@ func mergeTags(a, b map[string]string) map[string]string {
 // a malformed one, 409 for one that is taken or behind the latest), anything else is the server's.
 func respondStoreError(w http.ResponseWriter, err error) {
 	var ve *models.VersionError
+	stale, isStale := asStale(err)
 	switch {
+	case isStale:
+		respondStale(w, stale)
 	case errors.As(err, &ve) && ve.Conflict:
 		respondError(w, http.StatusConflict, ve.Reason)
 	case errors.As(err, &ve):

@@ -81,14 +81,10 @@ func (h *Handlers) pointAt(ctx context.Context, agent *models.Agent, info *model
 	if !changed {
 		return
 	}
-	if stored, err := h.Store.GetAgent(ctx, agent.Kitchen, agent.Name); err == nil && stored != nil {
-		stored.Process = info
-		if info.Endpoint != "" {
-			stored.BackendEndpoint = info.Endpoint
-		}
-		if err := h.Store.UpdateAgent(ctx, stored); err != nil {
-			log.Warn().Err(err).Str("agent", agent.Name).Msg("Could not record the agent's new process endpoint")
-		}
+	// Only the process and its endpoint are written, so a concurrent edit or bake is not undone.
+	if _, err := h.Store.UpdateAgentLifecycle(ctx, agent.Kitchen, agent.Name, models.AgentLifecycleGuard{},
+		models.AgentLifecycle{Process: info, BackendEndpoint: info.Endpoint}); err != nil {
+		log.Warn().Err(err).Str("agent", agent.Name).Msg("Could not record the agent's new process endpoint")
 	}
 }
 

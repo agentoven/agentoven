@@ -317,6 +317,13 @@ type Agent struct {
 	// Populated by the ProcessManager at bake time.
 	Process *ProcessInfo `json:"process,omitempty"`
 
+	// Revision counts the writes of the stored agent, starting at 1. A store that is given an agent
+	// whose Revision is not the stored one refuses the write (store.ErrStale): the caller read the agent
+	// before somebody else changed it, and its copy would overwrite what that write did. Zero means "not
+	// read from the store" (a new value) and is written unconditionally. Clients may send it back in a PUT
+	// (or as If-Match) to refuse an edit made to an agent they have not seen.
+	Revision int64 `json:"revision,omitempty" db:"-"`
+
 	// Metadata
 	Tags      map[string]string `json:"tags,omitempty"`
 	CreatedAt time.Time         `json:"created_at" db:"created_at"`

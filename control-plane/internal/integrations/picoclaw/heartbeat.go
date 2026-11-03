@@ -115,13 +115,17 @@ func (m *HeartbeatMonitor) checkAll(ctx context.Context) {
 }
 
 // processResult updates agent status based on heartbeat result and fires callbacks.
-// ISS-006 fix: consolidates all mutations into a single UpdateAgent call to avoid
+// ISS-006 fix: consolidates all mutations into a single store update to avoid
 // double version bumps and phantom version entries.
 func (m *HeartbeatMonitor) processResult(ctx context.Context, kitchen string, agent *models.Agent, result models.HeartbeatResult) {
 	oldStatus := inferCurrentStatus(agent)
 	newStatus := result.Status
 
 	needsUpdate := false
+	// Only what the heartbeat learned is written (the status when it moved, three tags), under the
+	// store's row lock: this agent was read before a health check that can take seconds, and writing it
+	// whole would put back anything an edit or a bake changed meanwhile.
+	change := models.AgentLifecycle{}
 
 	if oldStatus != newStatus {
 		log.Info().
@@ -142,6 +146,7 @@ func (m *HeartbeatMonitor) processResult(ctx context.Context, kitchen string, ag
 			agent.Status = models.AgentStatusCooled
 		}
 
+		change.Status = agent.Status
 		needsUpdate = true
 
 		// Fire callback if registered
@@ -152,23 +157,19 @@ func (m *HeartbeatMonitor) processResult(ctx context.Context, kitchen string, ag
 
 	// Update last-seen tag
 	if result.Status == models.PicoClawStatusOnline || result.Status == models.PicoClawStatusDegraded {
-		if agent.Tags == nil {
-			agent.Tags = make(map[string]string)
-		}
-		agent.Tags["last_seen"] = time.Now().UTC().Format(time.RFC3339)
+		change.SetTags = map[string]string{"last_seen": time.Now().UTC().Format(time.RFC3339)}
 		if result.Model != "" {
-			agent.Tags["model"] = result.Model
+			change.SetTags["model"] = result.Model
 		}
 		if result.MemoryMB > 0 {
-			agent.Tags["memory_mb"] = fmt.Sprintf("%.1f", result.MemoryMB)
+			change.SetTags["memory_mb"] = fmt.Sprintf("%.1f", result.MemoryMB)
 		}
 		needsUpdate = true
 	}
 
 	// Single store update with all mutations applied
 	if needsUpdate {
-		agent.UpdatedAt = time.Now().UTC()
-		if err := m.store.UpdateAgent(ctx, agent); err != nil {
+		if _, err := m.store.UpdateAgentLifecycle(ctx, kitchen, agent.Name, models.AgentLifecycleGuard{}, change); err != nil {
 			log.Warn().Err(err).Str("agent", agent.Name).Msg("heartbeat: failed to update agent")
 		}
 	}

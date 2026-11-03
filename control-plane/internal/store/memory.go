@@ -519,6 +519,7 @@ func (m *MemoryStore) CreateAgent(_ context.Context, agent *models.Agent) error 
 		// Migrate legacy integer versions ("1","2") to semver
 		copy.Version = models.MigrateLegacyVersion(copy.Version)
 	}
+	copy.Revision = 1
 	m.agents[key(agent.Kitchen, agent.Name)] = &copy
 
 	// Track version history
@@ -537,6 +538,17 @@ func (m *MemoryStore) UpdateAgent(_ context.Context, agent *models.Agent) error 
 		m.requestSave()
 	}()
 	copy := *agent
+
+	// A copy read before somebody else's write is refused whole: writing it would put back every field
+	// that write changed (a bake's configuration, an edit's draft, a status).
+	var storedRevision int64
+	if cur, ok := m.agents[key(agent.Kitchen, agent.Name)]; ok {
+		storedRevision = cur.Revision
+		if agent.Revision > 0 && agent.Revision != cur.Revision {
+			return &ErrStale{Entity: "agent", Key: agent.Name, Revision: cur.Revision, Version: cur.Version}
+		}
+	}
+	copy.Revision = storedRevision + 1
 
 	// Migrate legacy integer versions to semver (a name the caller chose is judged as it is, not migrated)
 	if copy.VersionBump != models.VersionBumpNamed && copy.Version != "" && !models.IsSemver(copy.Version) {
@@ -604,6 +616,7 @@ func (m *MemoryStore) UpdateAgent(_ context.Context, agent *models.Agent) error 
 	copy.UpdatedAt = time.Now().UTC()
 
 	m.agents[vk] = &copy
+	agent.Revision = copy.Revision // the caller's copy is current again, so a second write of it is not stale
 
 	if recordHistory {
 		vCopy := copy
@@ -633,6 +646,7 @@ func (m *MemoryStore) UpdateAgentLifecycle(_ context.Context, kitchen, name stri
 	}
 	next := *cur
 	change.Apply(&next)
+	next.Revision = cur.Revision + 1
 	next.UpdatedAt = time.Now().UTC()
 	m.agents[key(kitchen, name)] = &next
 	m.mu.Unlock()

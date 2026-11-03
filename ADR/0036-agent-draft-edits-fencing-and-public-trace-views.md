@@ -27,5 +27,6 @@ An adversarial review of the 2026-11-02 work found that the rules held on the ha
 ## Not done
 
 - Recipe runs and approvals have no public form (see agentoven-pro ADR-0043 amendment).
-- `PUT` writes the whole agent row.
+- **Done 2026-11-03 (review 5, finding 8):** `PUT` no longer overwrites what a bake changed, and the reverse. Every stored agent carries `revision` (`models.Agent.Revision`, from 1, moved by every write to the row); `Store.UpdateAgent` refuses a copy whose revision is not the stored one with `*store.ErrStale` (`contracts.ErrStale`), in the memory store and in Pro's PostgreSQL store (a trigger counts, so no write path can forget). `PUT`, bake, re-cook read the agent again and redo their change on it (`retryOnStale`, five attempts, then 409 with `current_revision` and `current_version`); a client that sends `revision` in the body or `If-Match` gets a 409 at once when it is stale. Cool, rewarm, the provider burn, the heartbeat and the process-endpoint writers use `UpdateAgentLifecycle` (only their fields). `TestAPutRacingABakeNeverLosesTheEditNorTheBake`, `TestStaleBakesAreRefusedAndRetriedToOneVersion`, `scripts/e2e/e2e_promotion.py` (Pro).
+- A write of an agent built by hand (revision 0: an import, a test) is still unconditional.
 - The file journal has no fence (a single process owns it); the memory test `RecordLog` does not check fences, the PostgreSQL one does.
