@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/agentoven/agentoven/control-plane/internal/executor"
+	grails "github.com/agentoven/agentoven/control-plane/internal/guardrails"
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/rs/zerolog/log"
@@ -151,4 +152,16 @@ func (h *Handlers) recordGuardrailsOnTrace(ctx context.Context, trace *models.Tr
 	if err := h.Store.UpdateTrace(ctx, trace); err != nil {
 		log.Warn().Err(err).Str("trace", trace.ID).Msg("could not record the guardrail counts on the trace")
 	}
+}
+
+// checkAgentGuardrails refuses, with the reason, an agent whose own guardrail rules cannot do their job:
+// an unknown kind, a pattern that does not compile, a list over the limit, a llamaguard endpoint the
+// egress guard would refuse. Before this a typo made the rule a silent no-op (it passed everything),
+// and the baker of an agent could point a llamaguard rule at any address. Rules that are switched off
+// are not judged: they are never evaluated.
+func (h *Handlers) checkAgentGuardrails(ctx context.Context, kitchen string, rules []models.Guardrail) error {
+	if err := grails.ValidateOwn(rules); err != nil {
+		return err
+	}
+	return grails.CheckEndpoints(ctx, kitchen, rules)
 }

@@ -23,12 +23,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
+	"github.com/agentoven/agentoven/control-plane/pkg/netguard"
 )
 
 // defaultLlamaGuardPolicy lists all 14 hazard categories defined in LlamaGuard 3.
@@ -70,11 +76,6 @@ func evalLlamaGuard(g models.Guardrail, text, stage string) models.GuardrailResu
 		model = "llama-guard3:1b" // 1B: ~700 MB RAM, runs on CPU; set "llama-guard3:8b" for GPU
 	}
 
-	timeoutSecs := 10
-	if ts, ok := g.Config["timeout_secs"].(float64); ok && ts > 0 {
-		timeoutSecs = int(ts)
-	}
-
 	failOpen, _ := g.Config["fail_open"].(bool)
 
 	// Build the safety policy — optionally restrict to a subset of categories.
@@ -96,16 +97,17 @@ func evalLlamaGuard(g models.Guardrail, text, stage string) models.GuardrailResu
 
 	raw, err := json.Marshal(reqBody)
 	if err != nil {
-		return transientError(g, stage, "llamaguard: marshal: "+err.Error(), failOpen)
+		return transientError(g, stage, failOpen, "marshal", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSecs)*time.Second)
+	timeout := llamaGuardTimeout(g.Config)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	url := strings.TrimRight(endpoint, "/") + "/v1/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
 	if err != nil {
-		return transientError(g, stage, "llamaguard: build request: "+err.Error(), failOpen)
+		return transientError(g, stage, failOpen, "build request", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
@@ -113,12 +115,20 @@ func evalLlamaGuard(g models.Guardrail, text, stage string) models.GuardrailResu
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	client := &http.Client{Timeout: time.Duration(timeoutSecs+1) * time.Second}
+	// The endpoint is written by whoever edits the rule, an agent's baker included, and this call is
+	// made from inside the deployment with the conversation and the rule's key. It dials only what the
+	// egress guard allows for the rule's kitchen (loopback, private and metadata addresses need an
+	// allowlist entry, checked at dial time against the address actually connected to) and follows no
+	// redirect, so the key goes to the host the rule names and nowhere else.
+	client := netguard.Default().ClientWith(g.KitchenID, netguard.HTTPOptions{Timeout: timeout + time.Second, MaxRedirects: 0, NoKeepAlive: true})
 	resp, err := client.Do(req)
 	if err != nil {
-		return transientError(g, stage, "llamaguard: http: "+err.Error(), failOpen)
+		return transientError(g, stage, failOpen, "request", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return transientError(g, stage, failOpen, "status", fmt.Errorf("HTTP %d", resp.StatusCode))
+	}
 
 	var respBody struct {
 		Choices []struct {
@@ -126,44 +136,63 @@ func evalLlamaGuard(g models.Guardrail, text, stage string) models.GuardrailResu
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
-		Error *struct {
-			Message string `json:"message"`
-		} `json:"error"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&respBody); err != nil {
-		return transientError(g, stage, "llamaguard: decode: "+err.Error(), failOpen)
-	}
-	if respBody.Error != nil {
-		return transientError(g, stage, "llamaguard: api error: "+respBody.Error.Message, failOpen)
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxLlamaGuardReply)).Decode(&respBody); err != nil {
+		return transientError(g, stage, failOpen, "decode", err)
 	}
 	if len(respBody.Choices) == 0 {
-		return transientError(g, stage, "llamaguard: empty choices", failOpen)
+		return transientError(g, stage, failOpen, "empty reply", errors.New("no choices"))
 	}
 
-	return parseVerdict(g, stage, respBody.Choices[0].Message.Content)
+	res, ok := parseVerdict(g, stage, respBody.Choices[0].Message.Content)
+	if !ok {
+		return transientError(g, stage, failOpen, "verdict", errors.New("neither safe nor unsafe"))
+	}
+	return res
 }
+
+// maxLlamaGuardReply bounds what is read from the endpoint: a verdict is a few words.
+const maxLlamaGuardReply = 64 << 10
+
+// maxLlamaGuardTimeout is the longest an endpoint may take; the rule can ask for less.
+const maxLlamaGuardTimeout = 30 * time.Second
+
+// llamaGuardTimeout is the rule's timeout_secs (default 10 s), at most maxLlamaGuardTimeout.
+func llamaGuardTimeout(cfg map[string]interface{}) time.Duration {
+	secs := 10.0
+	if ts, ok := cfg["timeout_secs"].(float64); ok && ts > 0 {
+		secs = ts
+	}
+	return min(time.Duration(secs*float64(time.Second)), maxLlamaGuardTimeout)
+}
+
+// categoryList is the second line of an unsafe verdict when it is what LlamaGuard defines: category
+// codes. Anything else the endpoint wrote there is not repeated to the caller.
+var categoryList = regexp.MustCompile(`^s\d{1,2}(?:\s*,\s*s\d{1,2}){0,13}$`)
 
 // parseVerdict interprets LlamaGuard's response:
 //
 //	"safe"          → pass
 //	"unsafe\nS1,S10" → block with category list
-func parseVerdict(g models.Guardrail, stage, content string) models.GuardrailResult {
+//
+// ok is false when the first line is neither word: the endpoint gave no verdict, which is an error of
+// the endpoint and not a finding.
+func parseVerdict(g models.Guardrail, stage, content string) (models.GuardrailResult, bool) {
 	verdict := strings.TrimSpace(strings.ToLower(content))
 	lines := strings.SplitN(verdict, "\n", 2)
+	first := strings.TrimSpace(lines[0])
 
-	if lines[0] == "safe" {
-		return models.GuardrailResult{
-			Passed: true,
-			Kind:   models.GuardrailLlamaGuard,
-			Stage:  stage,
-		}
+	switch first {
+	case "safe":
+		return models.GuardrailResult{Passed: true, Kind: models.GuardrailLlamaGuard, Stage: stage}, true
+	case "unsafe":
+	default:
+		return models.GuardrailResult{}, false
 	}
 
-	// unsafe
 	msg := "llamaguard: content classified as unsafe"
 	if len(lines) == 2 {
-		cats := strings.TrimSpace(lines[1])
-		if cats != "" {
+		if cats := strings.TrimSpace(lines[1]); categoryList.MatchString(cats) {
 			msg += " (categories: " + cats + ")"
 		}
 	}
@@ -172,7 +201,7 @@ func parseVerdict(g models.Guardrail, stage, content string) models.GuardrailRes
 		Kind:    models.GuardrailLlamaGuard,
 		Stage:   stage,
 		Message: msg,
-	}
+	}, true
 }
 
 // buildPolicy returns the safety policy string, filtered to the categories
@@ -211,12 +240,19 @@ func llmGuardError(g models.Guardrail, stage, message string) models.GuardrailRe
 	}
 }
 
-// transientError returns a result for network/runtime errors, respecting fail_open.
-func transientError(g models.Guardrail, stage, message string, failOpen bool) models.GuardrailResult {
+// llamaGuardUnavailable is what a caller is told when the endpoint could not give a verdict, whatever
+// the reason. The reason (refused connection, timeout, a blocked address, an error body) would let
+// whoever wrote the rule map the network the control plane sits in, so it goes to the log only.
+const llamaGuardUnavailable = "llamaguard: the safety endpoint could not be used"
+
+// transientError returns a result for network/runtime errors, respecting fail_open. The detail is
+// logged, never returned.
+func transientError(g models.Guardrail, stage string, failOpen bool, what string, err error) models.GuardrailResult {
+	log.Warn().Str("rule", g.ID).Str("kitchen", g.KitchenID).Str("step", what).Err(err).Msg("llamaguard rule: no verdict from the endpoint")
 	return models.GuardrailResult{
 		Passed:  failOpen, // fail-closed by default; set fail_open=true to pass-through on errors
 		Kind:    models.GuardrailLlamaGuard,
 		Stage:   stage,
-		Message: message,
+		Message: llamaGuardUnavailable,
 	}
 }

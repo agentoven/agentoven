@@ -340,6 +340,10 @@ func (h *Handlers) RegisterAgent(w http.ResponseWriter, r *http.Request) {
 		respondError(w, status, err.Error())
 		return
 	}
+	if err := h.checkAgentGuardrails(r.Context(), kitchen, req.Guardrails); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	sealed, err := h.sealAgentSecrets(r.Context(), &req)
 	if err != nil {
@@ -414,6 +418,10 @@ func (h *Handlers) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if status, err := h.checkBotAgent(probe); err != nil {
 		respondError(w, status, err.Error())
+		return
+	}
+	if err := h.checkAgentGuardrails(r.Context(), kitchen, probe.Guardrails); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	// An agent that has been baked runs what was baked: the edit waits in its draft for the next bake
@@ -5855,11 +5863,27 @@ func (h *Handlers) ListGuardrailKinds(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 		{
+			"kind":        "llamaguard",
+			"label":       "LlamaGuard",
+			"description": "Ask a LlamaGuard-compatible model (any OpenAI-style chat endpoint) whether the text is safe; fails closed. The endpoint is reached through the egress guard: a private address needs an allowlist entry",
+			"config_schema": map[string]interface{}{
+				"endpoint":     "string   — base URL of the inference server (http or https, no credentials in the URL)",
+				"model":        "string   — default llama-guard3:1b",
+				"api_key":      "string   — optional bearer token, sent to the endpoint only",
+				"timeout_secs": "number   — 1 to 30 (default 10)",
+				"categories":   "string   — optional subset, e.g. S1,S10,S11",
+				"fail_open":    "boolean  — pass the text when the endpoint gives no verdict (default: false)",
+			},
+		},
+		{
 			"kind":        "custom",
 			"label":       "Custom",
-			"description": "Custom guardrail (Pro: signed webhook, OSS: no-op pass-through)",
+			"description": "A signed https endpoint of the kitchen's own that decides allow, warn, redact, require_approval or block. Pro only, and only on a workspace rule: an agent's own custom rule names no endpoint and passes",
 			"config_schema": map[string]interface{}{
-				"webhook_url": "string  — (Pro only) URL to call for custom evaluation",
+				"endpoint":   "string   — https URL (Pro workspace rule)",
+				"secret_ref": "string   — vault:// reference to the credential that signs the request",
+				"timeout_ms": "number   — 100 to 10000 (default 3000)",
+				"fail_open":  "boolean  — pass the text when the endpoint cannot be used (default: false)",
 			},
 		},
 	}

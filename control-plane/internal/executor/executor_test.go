@@ -711,7 +711,7 @@ func TestGuardrailsBlockToolCallArguments(t *testing.T) {
 	e.SetGuardrails(&fakeGuardrails{blockOutputSubstr: "123-45-6789"})
 
 	agent := testAgent()
-	agent.Guardrails = []models.Guardrail{{Enabled: true}}
+	agent.Guardrails = []models.Guardrail{{ID: "g", Kind: models.GuardrailPromptInjection, Enabled: true}}
 	tool := models.ResolvedTool{Name: "send_email", Schema: map[string]interface{}{"type": "object"}}
 
 	_, trace, err := e.Execute(context.Background(), agent, "email someone", resolvedWithTools(tool), nil, false)
@@ -823,7 +823,7 @@ func TestGuardrailsBlockToolResultsBeforeTheyReenterTheConversation(t *testing.T
 	e.SetGuardrails(&fakeGuardrails{blockInputSubstr: "ignore previous instructions"})
 
 	agent := testAgent()
-	agent.Guardrails = []models.Guardrail{{Enabled: true}}
+	agent.Guardrails = []models.Guardrail{{ID: "g", Kind: models.GuardrailPromptInjection, Enabled: true}}
 	tool := models.ResolvedTool{Name: "fetch_page", Schema: map[string]interface{}{"type": "object"}}
 
 	_, trace, err := e.Execute(context.Background(), agent, "fetch that page", resolvedWithTools(tool), nil, false)

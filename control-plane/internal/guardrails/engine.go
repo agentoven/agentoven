@@ -2,6 +2,7 @@ package guardrails
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -19,8 +20,9 @@ import (
 // capped, and a text over the cap is refused (fail closed) rather than half-scanned.
 const (
 	// MaxScanBytes is the longest text a span-finding rule scans. Go's regexp scans tens of megabytes
-	// a second, and a rule may run a couple of dozen patterns, so this keeps one evaluation to well
-	// under a second; 1 MiB is a quarter of a million tokens.
+	// a second and a rule may run a couple of dozen patterns, so one rule over a text this long costs
+	// a fraction of a second; many rules multiply that, which is what MaxScanWork (scan.go) bounds.
+	// 1 MiB is a quarter of a million tokens.
 	MaxScanBytes = 1 << 20
 	// MaxRules is the most enabled rules evaluated for one piece of text.
 	MaxRules = 128
@@ -69,7 +71,15 @@ func (s *CommunityGuardrailService) EvaluateOutput(ctx context.Context, guardrai
 }
 
 // ValidateGuardrail implements contracts.StageGuardrailService.
-func (s *CommunityGuardrailService) ValidateGuardrail(g models.Guardrail) error { return Validate(g) }
+// It is Validate and, for a llamaguard rule, the egress check on the endpoint (CheckEndpoints), which
+// Validate leaves out because it runs on every request; this runs when a rule is saved or tried.
+func (s *CommunityGuardrailService) ValidateGuardrail(g models.Guardrail) error {
+	if err := Validate(g); err != nil {
+		return err
+	}
+	g.Enabled = true // saving a rule checks it whether or not it starts switched on
+	return CheckEndpoints(context.Background(), g.KitchenID, []models.Guardrail{g})
+}
 
 // appliesToStage reports whether a rule written for ruleStage runs at the stage being evaluated.
 // A rule with no stage runs on input and output, as it always did; retrieval is only for rules
@@ -120,6 +130,7 @@ func (s *CommunityGuardrailService) Evaluate(ctx context.Context, guardrails []m
 		return eval, nil
 	}
 
+	sc := newScan(len(text))
 	results := make([]models.GuardrailResult, len(rules))
 	var rewrites, customs []int
 	for i, g := range rules {
@@ -129,7 +140,7 @@ func (s *CommunityGuardrailService) Evaluate(ctx context.Context, guardrails []m
 		case isRewrite(g):
 			rewrites = append(rewrites, i)
 		default:
-			results[i] = judge(g, text, stageName)
+			results[i] = judge(g, text, stageName, sc)
 		}
 	}
 	rewrites = append(rewrites, customs...) // the endpoints last, on text the local detectors cleaned
@@ -137,7 +148,7 @@ func (s *CommunityGuardrailService) Evaluate(ctx context.Context, guardrails []m
 	working := text
 	for _, i := range rewrites {
 		var res models.GuardrailResult
-		res, working = s.rewrite(ctx, rules[i], working, stage)
+		res, working = s.rewrite(ctx, rules[i], working, stage, sc)
 		results[i] = res
 	}
 
@@ -171,11 +182,12 @@ func (s *CommunityGuardrailService) Evaluate(ctx context.Context, guardrails []m
 // detectors, nothing that blocks and nothing that calls out.
 func (s *CommunityGuardrailService) Scrub(guardrails []models.Guardrail, text string, stage models.GuardrailStage) (string, int) {
 	total := 0
+	sc := newScan(len(text))
 	for _, g := range guardrails {
 		if !g.Enabled || !appliesToStage(g.Stage, stage) || g.Kind == models.GuardrailCustom || !isRewrite(g) {
 			continue
 		}
-		res, out := s.rewrite(context.Background(), g, text, stage)
+		res, out := s.rewrite(context.Background(), g, text, stage, sc)
 		if res.Passed {
 			text = out
 			total += res.Redacted
@@ -187,8 +199,8 @@ func (s *CommunityGuardrailService) Scrub(guardrails []models.Guardrail, text st
 // judge evaluates a rule that does not rewrite and applies its action to a failure: warn lets
 // the text through and records that the rule fired, require_approval and block fail it (a
 // caller that cannot wait for a person treats both as a block).
-func judge(g models.Guardrail, text, stage string) models.GuardrailResult {
-	res := evaluateOne(g, text, stage)
+func judge(g models.Guardrail, text, stage string, sc *scan) models.GuardrailResult {
+	res := evaluateOne(g, text, stage, sc)
 	if !res.Passed && g.EffectiveAction() == models.GuardrailActionWarn {
 		res.Passed = true
 		if res.Message == "" {
@@ -223,13 +235,15 @@ func canRewrite(g models.Guardrail) bool {
 
 // rewrite applies a redact, mask or custom rule to text and returns the result and the text
 // that continues.
-func (s *CommunityGuardrailService) rewrite(ctx context.Context, g models.Guardrail, text string, stage models.GuardrailStage) (models.GuardrailResult, string) {
+func (s *CommunityGuardrailService) rewrite(ctx context.Context, g models.Guardrail, text string, stage models.GuardrailStage, sc *scan) (models.GuardrailResult, string) {
 	base := models.GuardrailResult{Passed: true, Kind: g.Kind, Stage: string(stage)}
 	if g.Kind == models.GuardrailCustom {
 		return s.rewriteCustom(ctx, g, text, base)
 	}
-	spans, tooBig, err := spansFor(g, text)
+	spans, tooBig, err := spansFor(g, text, sc)
 	switch {
+	case errors.Is(err, errScanBudget):
+		return budgetResult(g, string(stage)), text
 	case err != nil:
 		base.Passed, base.Message = false, "rule cannot be applied: "+err.Error()
 		return base, text
@@ -243,7 +257,7 @@ func (s *CommunityGuardrailService) rewrite(ctx context.Context, g models.Guardr
 	last := 0
 	for _, sp := range spans {
 		sb.WriteString(text[last:sp.start])
-		sb.WriteString(replacement(sp, text[sp.start:sp.end], mask))
+		sb.WriteString(replacement(sp, mask))
 		last = sp.end
 	}
 	sb.WriteString(text[last:])
@@ -254,32 +268,37 @@ func (s *CommunityGuardrailService) rewrite(ctx context.Context, g models.Guardr
 
 // replacement is what stands in for a matched value: [LABEL], or under mask the value with all
 // but its last four characters starred. A secret is never partly kept.
-func replacement(sp span, value string, mask bool) string {
-	if !mask || sp.det.secret {
-		return "[" + sp.det.label + "]"
+func replacement(sp span, mask bool) string {
+	out := "[" + sp.det.label + "]"
+	if mask && !sp.det.secret {
+		runes := []rune(sp.val)
+		if len(runes) <= 8 {
+			out = strings.Repeat("*", len(runes))
+		} else {
+			out = strings.Repeat("*", len(runes)-4) + string(runes[len(runes)-4:])
+		}
 	}
-	runes := []rune(value)
-	if len(runes) <= 8 {
-		return strings.Repeat("*", len(runes))
+	if sp.quote {
+		return `"` + out + `"` // a number of a JSON document becomes a string: the document stays valid
 	}
-	return strings.Repeat("*", len(runes)-4) + string(runes[len(runes)-4:])
+	return out
 }
 
 // spansFor finds the spans a span-finding rule would replace in text.
-func spansFor(g models.Guardrail, text string) (spans []span, tooBig bool, err error) {
+func spansFor(g models.Guardrail, text string, sc *scan) (spans []span, tooBig bool, err error) {
 	switch g.Kind {
 	case models.GuardrailPIIDetection:
-		return piiSpans(g, text)
+		return piiSpans(g, text, sc)
 	case models.GuardrailRegexFilter:
-		return regexSpans(g, text)
+		return regexSpans(g, text, sc)
 	case models.GuardrailContentFilter:
-		return contentSpans(g, text)
+		return contentSpans(g, text, sc)
 	}
 	return nil, false, fmt.Errorf("%s cannot find spans", g.Kind)
 }
 
-func piiSpans(g models.Guardrail, text string) ([]span, bool, error) {
-	if len(text) > MaxScanBytes {
+func piiSpans(g models.Guardrail, text string, sc *scan) ([]span, bool, error) {
+	if sc.tooBig(len(text)) {
 		return nil, true, nil
 	}
 	names, _ := stringList(g.Config, "patterns")
@@ -302,36 +321,40 @@ func piiSpans(g models.Guardrail, text string) ([]span, bool, error) {
 	}
 	values, _ := stringList(g.Config, "allowlist")
 	domains, _ := stringList(g.Config, "allow_domains")
-	return findSpans(dets, text, newAllowlist(values, domains)), false, nil
+	spans, err := findSpans(dets, text, newAllowlist(values, domains), sc)
+	return spans, false, err
 }
 
-func regexSpans(g models.Guardrail, text string) ([]span, bool, error) {
+func regexSpans(g models.Guardrail, text string, sc *scan) ([]span, bool, error) {
 	pattern, _ := g.Config["pattern"].(string)
 	re, err := compileBounded(pattern)
 	if err != nil {
 		return nil, false, err
 	}
-	if len(text) > MaxScanBytes {
+	if sc.tooBig(len(text)) {
 		return nil, true, nil
+	}
+	if !sc.charge(len(text)) {
+		return nil, false, errScanBudget
 	}
 	det := &detector{name: regexLabel(g), label: strings.ToUpper(regexLabel(g))}
 	var out []span
 	for _, loc := range re.FindAllStringIndex(text, -1) {
 		if loc[1] > loc[0] { // an empty match has nothing to replace
-			out = append(out, span{loc[0], loc[1], det})
+			out = append(out, span{start: loc[0], end: loc[1], det: det, val: text[loc[0]:loc[1]]})
 		}
 	}
 	return out, false, nil
 }
 
-func contentSpans(g models.Guardrail, text string) ([]span, bool, error) {
+func contentSpans(g models.Guardrail, text string, sc *scan) ([]span, bool, error) {
 	words, _ := stringList(g.Config, "blocked_words")
 	if len(words) == 0 {
 		return nil, false, nil
 	}
 	quoted := make([]string, 0, len(words))
 	for _, w := range words {
-		if w != "" {
+		if w = fold(w).text; w != "" { // read the way the text is, so a full-width word still matches
 			quoted = append(quoted, regexp.QuoteMeta(w))
 		}
 	}
@@ -345,15 +368,21 @@ func contentSpans(g models.Guardrail, text string) ([]span, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	if len(text) > MaxScanBytes {
+	if sc.tooBig(len(text)) {
 		return nil, true, nil
+	}
+	// The words are matched on the folded text, so a zero-width space inside one does not hide it, and
+	// the finding is mapped back to the original.
+	f := sc.fold(text)
+	if f == nil || !sc.charge(len(f.text)) {
+		return nil, false, errScanBudget
 	}
 	det := &detector{name: "blocked_word", label: "BLOCKED"}
 	var out []span
-	for _, loc := range re.FindAllStringIndex(text, -1) {
-		out = append(out, span{loc[0], loc[1], det})
+	for _, loc := range re.FindAllStringIndex(f.text, -1) {
+		out = append(out, span{start: loc[0], end: loc[1], det: det, val: f.text[loc[0]:loc[1]]})
 	}
-	return out, false, nil
+	return f.mapBack(out), false, nil
 }
 
 // regexLabel names what a regex rule found: its configured label, or REDACTED.
@@ -376,6 +405,14 @@ func findingsOf(spans []span) []models.GuardrailFinding {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Type < out[j].Type })
 	return out
+}
+
+// budgetResult is the refusal for a text that would cost more than one evaluation may spend.
+func budgetResult(g models.Guardrail, stage string) models.GuardrailResult {
+	return models.GuardrailResult{
+		Passed: false, Kind: g.Kind, Stage: stage,
+		Message: "the text needs too much work to check with the guardrail rules that apply to it, so it was refused",
+	}
 }
 
 func tooLargeResult(g models.Guardrail, stage string) models.GuardrailResult {

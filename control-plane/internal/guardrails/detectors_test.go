@@ -21,7 +21,7 @@ func TestDetectorsAcceptRealValuesAndRejectLookalikes(t *testing.T) {
 		{"aadhaar",
 			[]string{"234567890124", "2345 6789 0124"},
 			[]string{"234567890125", "123456789012" /* leading 1 is never issued */}},
-		{"pan_in", []string{"ABCPE1234F"}, []string{"ABCXE1234F", "abcpe1234f"}},
+		{"pan_in", []string{"ABCPE1234F", "abcpe1234f"}, []string{"ABCXE1234F"}},
 		{"uk_nino", []string{"AB123456C", "AB 12 34 56 C", "JG103759A"}, []string{"BG123456A", "DA123456A", "AB123456E"}},
 		{"nhs_number", []string{"9434765919", "943 476 5919"}, []string{"9434765918", "9434765910"}},
 		{"eu_vat",
@@ -47,12 +47,12 @@ func TestDetectorsAcceptRealValuesAndRejectLookalikes(t *testing.T) {
 			t.Fatalf("no detector %q", c.detector)
 		}
 		for _, v := range c.valid {
-			if got := findSpans([]*detector{det}, v, nil); len(got) == 0 {
+			if got, _ := findSpans([]*detector{det}, v, nil, nil); len(got) == 0 {
 				t.Errorf("%s: should find %q", c.detector, v)
 			}
 		}
 		for _, v := range c.invalid {
-			if got := findSpans([]*detector{det}, v, nil); len(got) != 0 {
+			if got, _ := findSpans([]*detector{det}, v, nil, nil); len(got) != 0 {
 				t.Errorf("%s: should not find %q (found %q)", c.detector, v, v[got[0].start:got[0].end])
 			}
 		}
@@ -62,7 +62,7 @@ func TestDetectorsAcceptRealValuesAndRejectLookalikes(t *testing.T) {
 func TestOverlappingFindingsKeepTheLongerAndMoreSpecific(t *testing.T) {
 	dets, _ := resolveDetectors([]string{"phone", "credit_card", "nhs_number", "aadhaar"})
 	text := "card 4111 1111 1111 1111 end"
-	spans := findSpans(dets, text, nil)
+	spans, _ := findSpans(dets, text, nil, nil)
 	if len(spans) != 1 || spans[0].det.name != "credit_card" || text[spans[0].start:spans[0].end] != "4111 1111 1111 1111" {
 		t.Fatalf("a card number must be one finding, not also a phone number inside it: %+v", spans)
 	}
@@ -72,7 +72,7 @@ func TestAllowlistLeavesListedValuesAndDomainsAlone(t *testing.T) {
 	dets, _ := resolveDetectors([]string{"email", "credit_card"})
 	al := newAllowlist([]string{"4111 1111 1111 1111", "Support@Example.com"}, []string{"@corp.example"})
 	text := "mail support@example.com, ann@corp.example, bob@x.corp.example, eve@other.com, card 4111-1111-1111-1111"
-	spans := findSpans(dets, text, al)
+	spans, _ := findSpans(dets, text, al, nil)
 	if len(spans) != 1 || text[spans[0].start:spans[0].end] != "eve@other.com" {
 		t.Fatalf("only the unlisted address should remain: %+v", spans)
 	}

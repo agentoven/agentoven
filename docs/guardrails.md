@@ -51,6 +51,30 @@ Groups: `default`, `pii`, `secrets`, `national_id`, `all`. `allowlist` (exact va
  "config": {"patterns": ["pii", "secrets"], "allowlist": ["support@example.com"], "allow_domains": ["example.com"]}}
 ```
 
+### How text is read
+
+Detectors do not match raw bytes. The text is folded first: Unicode compatibility forms are normalised (full-width digits and letters, ligatures),
+zero-width and bidirectional control characters are dropped, no-break and other exotic spaces become a space and Unicode dashes a hyphen; a
+finding is mapped back, so it is the original wording that is redacted. Groups of a card, IBAN or national number may be separated by a space, hyphen,
+dot, slash or line break, IBAN, PAN, NINO and VAT may be in any case, an `ssn` may be written without separators, and an e-mail address may be
+international. A number that is a value in a JSON document (the arguments of a tool call) is never cut up: loose detectors (`phone`, `ssn`,
+`nhs_number`, `nl_bsn`) ignore it, the others replace the whole number with the string `"[LABEL]"`. Values hidden by encoding (base64,
+URL-encoding) are not decoded. `prompt_injection`, `content_filter` and `topic_restriction` read the folded text too.
+
+### Budget
+
+One evaluation may spend `MaxScanWork` (48 MiB) of pattern work over all the rules that apply to a text; a text that would need more is refused with
+"the text needs too much work to check with the guardrail rules that apply to it", before the work is done. A redaction that makes the text longer
+does not make the next rule refuse it.
+
+## `llamaguard`
+
+`config.endpoint` (http or https URL, no credentials), `model`, `api_key` (sent to that endpoint only), `timeout_secs` (1 to 30), `categories`, `fail_open`.
+The endpoint is reached through the egress guard (`AGENTOVEN_TOOL_EGRESS_ALLOW`, the kitchen's allowlist): loopback, private and metadata addresses
+are refused at the connection, redirects are not followed, the reply is capped at 64 KiB and every failure reads the same. An agent's own rules are
+checked when the agent is saved (`POST`/`PUT /agents`): an unknown kind, an invalid pattern, a list over 1000 entries or an endpoint written as a
+refused address is a 400, not a rule that does nothing.
+
 ## Regex rules
 
 `regex_filter`: `pattern` (Go RE2 syntax) and `label` (the placeholder name when redacting, default `REDACTED`). RE2 matches in time linear in the

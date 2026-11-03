@@ -103,7 +103,7 @@ func (f *fakeSource) WorkspaceGuardrailExceptions(_ context.Context, kitchen, ag
 }
 
 func TestEffectiveWithNoSourceIsTheAgentsOwnRules(t *testing.T) {
-	own := []models.Guardrail{rule("a", cf, in, true, false)}
+	own := []models.Guardrail{validCF("a")}
 	got, err := Effective(context.Background(), nil, "k", "a", own)
 	if err != nil {
 		t.Fatal(err)
@@ -119,7 +119,11 @@ func validCF(id string) models.Guardrail {
 
 func TestEffectiveAppliesTheKitchensRulesOnTopOfTheAgentsAndAsksForThatAgentsExceptions(t *testing.T) {
 	src := &fakeSource{rules: []models.Guardrail{validCF("ws-cf")}, ex: []models.WorkspaceGuardrailException{{GuardrailID: "none"}}}
-	got, err := Effective(context.Background(), src, "kitchen1", "agent1", []models.Guardrail{rule("a-x", models.GuardrailMaxLength, in, true, false)})
+	got, err := Effective(context.Background(), src, "kitchen1", "agent1", []models.Guardrail{func() models.Guardrail {
+		g := rule("a-x", models.GuardrailMaxLength, in, true, false)
+		g.Config = map[string]interface{}{"max_characters": float64(100)}
+		return g
+	}()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +135,7 @@ func TestEffectiveAppliesTheKitchensRulesOnTopOfTheAgentsAndAsksForThatAgentsExc
 
 func TestEffectiveSkipsTheExceptionLookupWhenThereAreNoWorkspaceRules(t *testing.T) {
 	src := &fakeSource{}
-	own := []models.Guardrail{rule("a", cf, in, true, false)}
+	own := []models.Guardrail{validCF("a")}
 	got, err := Effective(context.Background(), src, "k", "a", own)
 	if err != nil {
 		t.Fatal(err)
@@ -202,7 +206,7 @@ func TestEffectiveFailsClosedOnAnEnabledWorkspaceRuleThatCannotBeApplied(t *test
 
 func TestADisabledWorkspaceRuleThatCannotBeAppliedIsIgnored(t *testing.T) {
 	src := &fakeSource{rules: []models.Guardrail{rule("r", "telepathy", in, false, false)}}
-	got, err := Effective(context.Background(), src, "k", "a", []models.Guardrail{rule("a", cf, in, true, false)})
+	got, err := Effective(context.Background(), src, "k", "a", []models.Guardrail{validCF("a")})
 	if err != nil {
 		t.Fatalf("a disabled rule is not applied, so it cannot stop anyone: %v", err)
 	}

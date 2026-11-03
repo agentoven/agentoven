@@ -25,6 +25,12 @@ func digitsOf(s string) []int {
 	return out
 }
 
+// compact is a code in capitals without the separators an issuer's grouping may carry (space, hyphen,
+// dot, slash, line break), which is what the check digits are computed over.
+func compact(s string) string {
+	return strings.ToUpper(strings.NewReplacer(" ", "", "-", "", ".", "", "/", "", "\n", "").Replace(s))
+}
+
 // luhnValid is the Luhn check over every digit of s.
 func luhnValid(digits []int) bool {
 	if len(digits) < 2 {
@@ -113,7 +119,7 @@ var ibanLengths = map[string]int{
 
 // ibanValid checks the country's length and the ISO 7064 MOD 97-10 check digits.
 func ibanValid(match string) bool {
-	s := strings.ToUpper(strings.ReplaceAll(match, " ", ""))
+	s := compact(match)
 	if len(s) < 15 || len(s) > 34 {
 		return false
 	}
@@ -170,13 +176,14 @@ func aadhaarValid(match string) bool {
 
 // panValid: the fourth character of a PAN is the holder type, one of a fixed set.
 func panValid(match string) bool {
-	return len(match) == 10 && strings.IndexByte("ABCFGHLJPTK", match[3]) >= 0
+	m := compact(match)
+	return len(m) == 10 && strings.IndexByte("ABCFGHLJPTK", m[3]) >= 0
 }
 
 // ninoValid rejects the prefixes HMRC never issues. The pattern already excludes the letters
 // that never occur in a prefix.
 func ninoValid(match string) bool {
-	s := strings.ToUpper(strings.ReplaceAll(match, " ", ""))
+	s := compact(match)
 	if len(s) != 9 {
 		return false
 	}
@@ -208,7 +215,7 @@ func nhsValid(match string) bool {
 // vatValid checks the national check digits of a VAT number for the countries whose scheme is
 // public (DE, FR, IT, BE, PL). The pattern only produces those prefixes.
 func vatValid(match string) bool {
-	s := strings.ToUpper(strings.ReplaceAll(match, " ", ""))
+	s := compact(match)
 	if len(s) < 4 {
 		return false
 	}

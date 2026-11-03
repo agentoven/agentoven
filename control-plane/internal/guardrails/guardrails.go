@@ -13,7 +13,10 @@ package guardrails
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/netip"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -21,6 +24,7 @@ import (
 
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
+	"github.com/agentoven/agentoven/control-plane/pkg/netguard"
 )
 
 // ── Community Guardrail Service ─────────────────────────────
@@ -66,20 +70,20 @@ func MergeWithWorkspace(workspaceRules, agentRules []models.Guardrail, exception
 }
 
 // evaluateOne dispatches a single guardrail evaluation.
-func evaluateOne(g models.Guardrail, text string, stage string) models.GuardrailResult {
+func evaluateOne(g models.Guardrail, text string, stage string, sc *scan) models.GuardrailResult {
 	switch g.Kind {
 	case models.GuardrailContentFilter:
-		return evalContentFilter(g, text, stage)
+		return evalContentFilter(g, text, stage, sc)
 	case models.GuardrailPIIDetection:
-		return evalPIIDetection(g, text, stage)
+		return evalPIIDetection(g, text, stage, sc)
 	case models.GuardrailTopicRestriction:
-		return evalTopicRestriction(g, text, stage)
+		return evalTopicRestriction(g, text, stage, sc)
 	case models.GuardrailMaxLength:
 		return evalMaxLength(g, text, stage)
 	case models.GuardrailRegexFilter:
-		return evalRegexFilter(g, text, stage)
+		return evalRegexFilter(g, text, stage, sc)
 	case models.GuardrailPromptInjection:
-		return evalPromptInjection(g, text, stage)
+		return evalPromptInjection(g, text, stage, sc)
 	case models.GuardrailLlamaGuard:
 		return evalLlamaGuard(g, text, stage)
 	case models.GuardrailCustom:
@@ -87,20 +91,36 @@ func evaluateOne(g models.Guardrail, text string, stage string) models.Guardrail
 		// only reached for the community edition's own evaluator, which has none.
 		return models.GuardrailResult{Passed: true, Kind: g.Kind, Stage: stage}
 	default:
-		return models.GuardrailResult{Passed: true, Kind: g.Kind, Stage: stage, Message: "unknown guardrail kind"}
+		// A rule that cannot be evaluated is not a rule that passes: a typo in a kind ("llama_guard")
+		// must not turn the rule into a no-op. Validate refuses such a rule when it is saved; this is
+		// for one that was stored before it did.
+		return models.GuardrailResult{Passed: false, Kind: g.Kind, Stage: stage, Message: "unknown guardrail kind " + string(g.Kind) + ": the rule cannot be applied"}
 	}
+}
+
+// foldedText is the text a judging rule reads: folded (fold.go), so a zero-width space or a full-width
+// letter does not change what a phrase says. A nil result means the budget is spent.
+func foldedText(text string, sc *scan) (string, bool) {
+	f := sc.fold(text)
+	if f == nil {
+		return "", false
+	}
+	return f.text, true
 }
 
 // ── Content Filter ──────────────────────────────────────────
 // Config: { "blocked_words": ["word1", "word2"], "case_sensitive": false }
 
-func evalContentFilter(g models.Guardrail, text string, stage string) models.GuardrailResult {
+func evalContentFilter(g models.Guardrail, text string, stage string, sc *scan) models.GuardrailResult {
 	blockedRaw, _ := g.Config["blocked_words"].([]interface{})
 	caseSensitive, _ := g.Config["case_sensitive"].(bool)
 
-	checkText := text
+	checkText, ok := foldedText(text, sc)
+	if !ok {
+		return budgetResult(g, stage)
+	}
 	if !caseSensitive {
-		checkText = strings.ToLower(text)
+		checkText = strings.ToLower(checkText)
 	}
 
 	for _, bRaw := range blockedRaw {
@@ -108,7 +128,7 @@ func evalContentFilter(g models.Guardrail, text string, stage string) models.Gua
 		if !ok {
 			continue
 		}
-		checkWord := word
+		checkWord := fold(word).text // the words are read the way the text is
 		if !caseSensitive {
 			checkWord = strings.ToLower(word)
 		}
@@ -130,9 +150,11 @@ func evalContentFilter(g models.Guardrail, text string, stage string) models.Gua
 // With no "patterns" the four that existed first are checked: email, phone, ssn, credit_card.
 // The detectors, groups and their validation are in detectors.go.
 
-func evalPIIDetection(g models.Guardrail, text string, stage string) models.GuardrailResult {
-	spans, tooBig, err := piiSpans(g, text)
+func evalPIIDetection(g models.Guardrail, text string, stage string, sc *scan) models.GuardrailResult {
+	spans, tooBig, err := piiSpans(g, text, sc)
 	switch {
+	case errors.Is(err, errScanBudget):
+		return budgetResult(g, stage)
 	case err != nil:
 		return models.GuardrailResult{Passed: false, Kind: g.Kind, Stage: stage, Message: "PII rule cannot be applied: " + err.Error()}
 	case tooBig:
@@ -154,8 +176,12 @@ func evalPIIDetection(g models.Guardrail, text string, stage string) models.Guar
 // Keyword-based matching. If allowed_topics is set, text must contain
 // at least one allowed topic keyword to pass. blocked_topics always blocks.
 
-func evalTopicRestriction(g models.Guardrail, text string, stage string) models.GuardrailResult {
-	lower := strings.ToLower(text)
+func evalTopicRestriction(g models.Guardrail, text string, stage string, sc *scan) models.GuardrailResult {
+	folded, ok := foldedText(text, sc)
+	if !ok {
+		return budgetResult(g, stage)
+	}
+	lower := strings.ToLower(folded)
 
 	// Check blocked topics first
 	blockedRaw, _ := g.Config["blocked_topics"].([]interface{})
@@ -234,7 +260,7 @@ func evalMaxLength(g models.Guardrail, text string, stage string) models.Guardra
 // ── Regex Filter ────────────────────────────────────────────
 // Config: { "pattern": "regex_string", "block_on_match": true }
 
-func evalRegexFilter(g models.Guardrail, text string, stage string) models.GuardrailResult {
+func evalRegexFilter(g models.Guardrail, text string, stage string, sc *scan) models.GuardrailResult {
 	pattern, _ := g.Config["pattern"].(string)
 	if pattern == "" {
 		return models.GuardrailResult{Passed: true, Kind: g.Kind, Stage: stage}
@@ -242,15 +268,20 @@ func evalRegexFilter(g models.Guardrail, text string, stage string) models.Guard
 
 	re, err := compileBounded(pattern)
 	if err != nil {
+		// Fail closed: a pattern that does not compile checks nothing, and a rule that checks nothing
+		// must not read as one that found nothing. Validate refuses it when it is saved.
 		return models.GuardrailResult{
-			Passed:  true,
+			Passed:  false,
 			Kind:    g.Kind,
 			Stage:   stage,
 			Message: "Invalid regex pattern: " + err.Error(),
 		}
 	}
-	if len(text) > MaxScanBytes {
+	if sc.tooBig(len(text)) {
 		return tooLargeResult(g, stage)
+	}
+	if !sc.charge(2 * len(text)) { // a match and a count of the matches
+		return budgetResult(g, stage)
 	}
 
 	blockOnMatch := true // default: block when regex matches
@@ -307,7 +338,11 @@ var highSensitivityPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)repeat\s+(your|the)\s+(system\s+)?(prompt|instructions?)\s+verbatim`),
 }
 
-func evalPromptInjection(g models.Guardrail, text string, stage string) models.GuardrailResult {
+func evalPromptInjection(g models.Guardrail, text string, stage string, sc *scan) models.GuardrailResult {
+	text, ok := foldedText(text, sc)
+	if !ok || !sc.charge(len(injectionPatterns)*len(text)) {
+		return budgetResult(g, stage)
+	}
 	sensitivity, _ := g.Config["sensitivity"].(string)
 	if sensitivity == "" {
 		sensitivity = "medium"
@@ -386,10 +421,18 @@ func (e *PolicyError) Unwrap() error { return e.Err }
 // unreadable, it returns a *PolicyError and the caller must refuse to run the agent.
 func effective(ctx context.Context, src contracts.WorkspaceGuardrailSource, kitchen, agent string, own []models.Guardrail) ([]models.Guardrail, error) {
 	if src == nil {
+		if err := ValidateOwn(own); err != nil {
+			return nil, &PolicyError{Kitchen: kitchen, Agent: agent, Err: err}
+		}
 		return stamp(own, kitchen), nil
 	}
 	fail := func(err error) ([]models.Guardrail, error) {
 		return nil, &PolicyError{Kitchen: kitchen, Agent: agent, Err: err}
+	}
+	// The agent's own rules get the check the workspace's get: one that cannot be applied stops the
+	// agent. It used to be a rule that passed everything.
+	if err := ValidateOwn(own); err != nil {
+		return fail(err)
 	}
 	workspace, err := src.WorkspaceGuardrails(ctx, kitchen)
 	if err != nil {
@@ -510,13 +553,98 @@ func Validate(g models.Guardrail) error {
 		}
 		return nil
 	case models.GuardrailLlamaGuard:
-		if endpoint, _ := g.Config["endpoint"].(string); endpoint == "" {
-			return fmt.Errorf("needs an endpoint")
-		}
-		return nil
+		return validateLlamaGuard(g.Config)
 	default:
 		return fmt.Errorf("unknown guardrail kind")
 	}
+}
+
+// validateLlamaGuard checks the parts of a llamaguard rule that can be judged without the network:
+// the endpoint is an http(s) URL with a host and no credentials, and the numbers and flags have the
+// types the evaluator reads. Whether the host may be reached from here is the egress guard's answer
+// (CheckEndpoints, when the rule is saved, and the dial, every time it runs).
+func validateLlamaGuard(cfg map[string]interface{}) error {
+	endpoint, _ := cfg["endpoint"].(string)
+	if endpoint == "" {
+		return fmt.Errorf("needs an endpoint")
+	}
+	u, err := url.Parse(endpoint)
+	switch {
+	case err != nil || u.Host == "" || u.Hostname() == "":
+		return fmt.Errorf("endpoint must be an http or https URL with a host")
+	case u.Scheme != "http" && u.Scheme != "https":
+		return fmt.Errorf("endpoint must be an http or https URL, not %q", u.Scheme)
+	case u.User != nil:
+		return fmt.Errorf("endpoint must not carry credentials in the URL; use api_key")
+	}
+	if v, ok := cfg["timeout_secs"]; ok {
+		secs, isNum := v.(float64)
+		if !isNum || secs <= 0 || secs > maxLlamaGuardTimeout.Seconds() {
+			return fmt.Errorf("timeout_secs must be a number of seconds from 1 to %d", int(maxLlamaGuardTimeout.Seconds()))
+		}
+	}
+	if v, ok := cfg["fail_open"]; ok {
+		if _, isBool := v.(bool); !isBool {
+			return fmt.Errorf("fail_open must be true or false")
+		}
+	}
+	for _, key := range []string{"api_key", "model", "categories"} {
+		if v, ok := cfg[key]; ok {
+			if _, isStr := v.(string); !isStr {
+				return fmt.Errorf("%s must be a string", key)
+			}
+		}
+	}
+	return nil
+}
+
+// numericHost is a host written as a number the way inet_aton reads it (2130706433, 0x7f.1, 017700000001, 127.1):
+// it has one meaning whatever the resolver says, so it can be judged without the network. A name is not one.
+var numericHost = regexp.MustCompile(`^(?:0[xX][0-9a-fA-F]*|[0-9]+)(?:\.(?:0[xX][0-9a-fA-F]*|[0-9]+))*$`)
+
+// literalHost is whether a host is an IP address (either family) or such a number.
+func literalHost(host string) bool {
+	_, err := netip.ParseAddr(host)
+	return err == nil || numericHost.MatchString(host)
+}
+
+// CheckEndpoints refuses, when a rule is saved, a llamaguard endpoint written as an address the egress
+// guard would refuse when the rule runs (netguard.Vet): the mistake is reported to the person who made
+// it, and not as a rule that blocks everything later. A host name is not resolved here: the answer
+// would tell whoever saves the rule which internal names exist, and the dial is what enforces (it
+// resolves, vets the address it connects to, and answers with one message whatever the reason).
+func CheckEndpoints(ctx context.Context, kitchen string, rules []models.Guardrail) error {
+	for _, g := range rules {
+		if g.Kind != models.GuardrailLlamaGuard || !g.Enabled {
+			continue
+		}
+		endpoint, _ := g.Config["endpoint"].(string)
+		u, err := url.Parse(endpoint)
+		if err != nil || u.Hostname() == "" {
+			continue // Validate reports it
+		}
+		if host := u.Hostname(); literalHost(host) {
+			if _, err := netguard.Default().Vet(ctx, kitchen, host); err != nil {
+				return fmt.Errorf("rule %q: the llamaguard endpoint is not an address this server may call (loopback, private, link-local and metadata addresses need an egress allowlist entry)", g.ID)
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateOwn validates an agent's own rules, the ones it carries in its definition: every enabled
+// rule must be one the evaluator can apply. Run when an agent is saved, so a typo is an error for the
+// person who made it instead of a rule that quietly does nothing.
+func ValidateOwn(rules []models.Guardrail) error {
+	for i, r := range rules {
+		if !r.Enabled {
+			continue
+		}
+		if err := Validate(r); err != nil {
+			return fmt.Errorf("guardrail %d (%q, kind %q): %w", i+1, r.Name, r.Kind, err)
+		}
+	}
+	return nil
 }
 
 // validateAction checks the rule's action is one it can carry out. Redacting and masking need

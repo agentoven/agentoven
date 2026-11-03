@@ -24,7 +24,7 @@ func bakeHandlers(t *testing.T) (*handlers.Handlers, store.Store) {
 	err := s.CreateAgent(context.Background(), &models.Agent{
 		Name: "bot", Kitchen: "default", Status: models.AgentStatusDraft, Mode: models.AgentModeExternal,
 		MaxTurns: 5, ModelName: "m1", Description: "be brief",
-		Guardrails: []models.Guardrail{{ID: "g1", Kind: models.GuardrailKind("keyword_block"), Stage: models.GuardrailStageInput, Enabled: true}},
+		Guardrails: []models.Guardrail{{ID: "g1", Kind: models.GuardrailPromptInjection, Stage: models.GuardrailStageInput, Enabled: true}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -168,7 +168,7 @@ func TestTheBackgroundStepDoesNotOverwriteLaterEdits(t *testing.T) {
 	}
 	wg.Wait()
 	// The review's sequence: an edit right after a re-cook was accepted.
-	if code, body := agentCall(t, h.UpdateAgent, "PUT", `{"guardrails": [{"id": "late", "kind": "keyword_block", "stage": "input", "enabled": true}], "tags": {"note": "late"}}`); code != 200 {
+	if code, body := agentCall(t, h.UpdateAgent, "PUT", `{"guardrails": [{"id": "late", "kind": "prompt_injection", "stage": "input", "enabled": true}], "tags": {"note": "late"}}`); code != 200 {
 		t.Fatalf("PUT: %d %s", code, body)
 	}
 	waitStatus(t, s, models.AgentStatusReady)
