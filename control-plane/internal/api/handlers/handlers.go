@@ -586,27 +586,7 @@ func (h *Handlers) bakeAgent(w http.ResponseWriter, r *http.Request) {
 	// model, tools, prompts, data, embeddings, vectorstores, retrievers.
 
 	// If agent has a top-level ModelProvider but no model ingredient, synthesize one
-	if agent.ModelProvider != "" {
-		hasModelIngredient := false
-		for _, ing := range agent.Ingredients {
-			if ing.Kind == models.IngredientModel {
-				hasModelIngredient = true
-				break
-			}
-		}
-		if !hasModelIngredient {
-			agent.Ingredients = append(agent.Ingredients, models.Ingredient{
-				ID:       "auto-model",
-				Name:     agent.ModelProvider,
-				Kind:     models.IngredientModel,
-				Required: true,
-				Config: map[string]interface{}{
-					"provider": agent.ModelProvider,
-					"model":    agent.ModelName,
-				},
-			})
-		}
-	}
+	agent.EnsureModelIngredient()
 
 	resolved, err := h.Resolver.Resolve(r.Context(), agent)
 	if err != nil {
@@ -1133,27 +1113,7 @@ func (h *Handlers) recookAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ── Resolve ingredients (same as BakeAgent) ──────────────
-	if agent.ModelProvider != "" {
-		hasModelIngredient := false
-		for _, ing := range agent.Ingredients {
-			if ing.Kind == models.IngredientModel {
-				hasModelIngredient = true
-				break
-			}
-		}
-		if !hasModelIngredient {
-			agent.Ingredients = append(agent.Ingredients, models.Ingredient{
-				ID:       "auto-model",
-				Name:     agent.ModelProvider,
-				Kind:     models.IngredientModel,
-				Required: true,
-				Config: map[string]interface{}{
-					"provider": agent.ModelProvider,
-					"model":    agent.ModelName,
-				},
-			})
-		}
-	}
+	agent.EnsureModelIngredient()
 
 	resolved, err := h.Resolver.Resolve(r.Context(), agent)
 	if err != nil {
