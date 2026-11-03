@@ -125,12 +125,15 @@ func SetKitchenAllow(f func(ctx context.Context, kitchen string) ([]string, erro
 	def = &Guard{KitchenAllow: f, Resolver: def.Resolver, Dialer: def.Dialer, Allow: def.Allow, IgnoreEnv: def.IgnoreEnv}
 }
 
-func normHost(h string) string { return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(h)), ".") }
+// NormHost is a host name as lists compare it: lower case, without a trailing dot.
+func NormHost(h string) string { return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(h)), ".") }
 
-func hostAllowed(list []string, host string) bool {
-	host = normHost(host)
+// HostAllowed says whether host matches an allowlist entry: an exact name or address, or "*.suffix" for
+// any sub-domain.
+func HostAllowed(list []string, host string) bool {
+	host = NormHost(host)
 	for _, e := range list {
-		e = normHost(e)
+		e = NormHost(e)
 		switch {
 		case e == "":
 		case e == host:
@@ -155,17 +158,17 @@ func envAllow() []string {
 // allowed says whether host is on a list that admits a name: the environment's, the kitchen's, or the
 // guard's own.
 func (g *Guard) allowed(ctx context.Context, kitchen, host string) bool {
-	if !g.IgnoreEnv && hostAllowed(envAllow(), host) {
+	if !g.IgnoreEnv && HostAllowed(envAllow(), host) {
 		return true
 	}
-	if hostAllowed(g.Allow, host) {
+	if HostAllowed(g.Allow, host) {
 		return true
 	}
 	if g.KitchenAllow == nil {
 		return false
 	}
 	list, err := g.KitchenAllow(ctx, kitchen)
-	return err == nil && hostAllowed(list, host)
+	return err == nil && HostAllowed(list, host)
 }
 
 // allowsAddr says whether the guard's own list admits an address by number or by range.
