@@ -1063,6 +1063,10 @@
   },
   {
    "method": "GET",
+   "path": "/auth/methods"
+  },
+  {
+   "method": "GET",
    "path": "/auth/saml/idps"
   },
   {
