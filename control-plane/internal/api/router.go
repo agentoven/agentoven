@@ -121,6 +121,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 				r.With(h.LimitTraffic).Post("/test", h.TestAgent)
 				r.Get("/config", h.GetAgentConfig)
 				r.Get("/validate", h.ValidateAgent)
+				r.Get("/draft/diff", h.GetAgentDraftDiff)
 				r.Get("/process", h.GetAgentProcess)
 
 				// Invoke routes always require a resolved identity — regardless of the
