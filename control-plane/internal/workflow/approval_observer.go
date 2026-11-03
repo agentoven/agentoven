@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/agentoven/agentoven/control-plane/internal/store"
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/rs/zerolog/log"
@@ -48,10 +49,22 @@ func (e *Engine) ExpireGate(ctx context.Context, kitchen, gateKey, reason string
 	record.Status = "timed_out"
 	record.ResolvedAt = &now
 	record.Comments = reason
-	if err := e.store.UpdateApproval(ctx, record); err != nil {
+	won, err := e.decideRecord(ctx, record)
+	if err != nil {
 		return false, fmt.Errorf("record the timeout of gate %s: %w", gateKey, err)
 	}
-	return true, nil
+	return won, nil
+}
+
+// decideRecord writes the decision on a record that was pending when it was read, and reports whether it
+// won. A store that can (store.ApprovalResolver) refuses the write if the record is no longer pending, which
+// is what keeps two decisions from two replicas, or a decision and an expiry, from both taking effect;
+// otherwise the process-wide lock the callers hold is all there is.
+func (e *Engine) decideRecord(ctx context.Context, record *models.ApprovalRecord) (bool, error) {
+	if r, ok := e.store.(store.ApprovalResolver); ok {
+		return r.ResolveApproval(ctx, record)
+	}
+	return true, e.store.UpdateApproval(ctx, record)
 }
 
 // gateTimedOut is what a human gate does when nobody answered: carry on along the recipe's
@@ -60,8 +73,6 @@ func (e *Engine) gateTimedOut(ctx context.Context, run *models.RecipeRun, step *
 	result.GateStatus = "timed_out"
 	if ctx.Err() == nil && gateFollowsPath(step, "on_timeout") {
 		result.Output = map[string]interface{}{"approved": false, "decision": "timed_out"}
-		run.Status = models.RecipeRunRunning
-		e.store.UpdateRecipeRun(ctx, run)
 		return nil
 	}
 	return fmt.Errorf("human gate '%s' %s", step.Name, why)

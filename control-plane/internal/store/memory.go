@@ -46,6 +46,7 @@ type snapshot struct {
 	Deployments   map[string]*models.AgentDeployment     `json:"deployments"`      // key: id
 	ServiceAccts  map[string]*models.ServiceAccount      `json:"service_accounts"` // key: id
 	TraceViews    map[string]*models.TraceView           `json:"trace_views,omitempty"`
+	RunTimers     map[string]time.Time                   `json:"run_timers,omitempty"` // when a gate or wait of a run ends (resume.go)
 }
 
 // MemoryStore implements Store with in-memory maps.
@@ -92,6 +93,12 @@ type MemoryStore struct {
 	// Trace TTL — traces older than this are evicted automatically.
 	// Defaults to 7 days (community plan). Set via AGENTOVEN_TRACE_TTL env var (Go duration string).
 	traceTTL time.Duration
+
+	// Restart-safe runs (resume.go).
+	runTimers   map[string]time.Time // when a gate or wait of a run ends; key: run id + step; kept in the snapshot
+	resumeOnce  sync.Once
+	resumeState *memoryResume // leases on runs; never written to disk
+
 }
 
 // NewMemoryStore creates a new in-memory store.
@@ -123,6 +130,7 @@ func NewMemoryStore() *MemoryStore {
 		agentVersions:      make(map[string][]*models.Agent),
 		auditEvents:        make([]*models.AuditEvent, 0),
 		approvals:          make(map[string]*models.ApprovalRecord),
+		runTimers:          make(map[string]time.Time),
 		channels:           make(map[string]*models.NotificationChannel),
 		vectorDocs:         make(map[string]*models.VectorDoc),
 		connectors:         make(map[string]*models.DataConnectorConfig),
@@ -272,6 +280,7 @@ func (m *MemoryStore) saveSnapshot() {
 		Deployments:   m.deployments,
 		ServiceAccts:  m.serviceAccts,
 		TraceViews:    m.traceViews,
+		RunTimers:     m.runTimers,
 	}
 	data, err := json.MarshalIndent(snap, "", "  ")
 	m.mu.RUnlock()
@@ -363,6 +372,9 @@ func (m *MemoryStore) loadSnapshot() {
 	}
 	if snap.Approvals != nil {
 		m.approvals = snap.Approvals
+	}
+	if snap.RunTimers != nil {
+		m.runTimers = snap.RunTimers
 	}
 	if snap.Channels != nil {
 		m.channels = snap.Channels

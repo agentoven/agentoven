@@ -981,6 +981,16 @@ type RecipeRun struct {
 	Error        string                 `json:"error,omitempty" db:"error"`
 }
 
+// ResumableRun is a run a process has just taken over after another one stopped executing it, with the
+// digest of the recipe it started from (ADR-0043). It is declared here, not in the engine's store package,
+// because the Pro store implements the method that returns it and cannot name an internal type.
+type ResumableRun struct {
+	Run RecipeRun
+	// Digest is what the starting process stored when it leased the run: a hash of the recipe's steps.
+	// Empty for a run that began before digests were kept.
+	Digest string
+}
+
 type StepResult struct {
 	StepName      string                 `json:"step_name"`
 	StepKind      string                 `json:"step_kind"`
@@ -1009,6 +1019,10 @@ type StepResult struct {
 
 	// WakeAt is when a wait step that is waiting ends (Status "waiting").
 	WakeAt *time.Time `json:"wake_at,omitempty"`
+
+	// Resumed says the step was in flight when the control plane restarted and was taken up again (a gate or
+	// wait that went on waiting) or was not run again and failed because of it.
+	Resumed bool `json:"resumed,omitempty"`
 }
 
 type NotifyResult struct {

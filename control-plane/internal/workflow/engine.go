@@ -70,6 +70,14 @@ type Engine struct {
 
 	// Recipe names: runID → recipeName (for readable step trace labels)
 	runRecipeNames sync.Map
+
+	// Restart safety (resume.go): the lease and timer store, the checkpoint of each run this process
+	// executes, and the runs whose lease another process took over.
+	resume    *resumeState
+	runStates sync.Map
+	lost      sync.Map
+	onResume  func(kitchen, runID, recipe, outcome, detail string)
+	readyURL  string
 }
 
 // SetOIDCIssuer configures the expected OIDC issuer for same-tenant approver validation.
@@ -194,6 +202,7 @@ func (e *Engine) ExecuteRecipe(ctx context.Context, recipe *models.Recipe, kitch
 	e.runsMu.Lock()
 	e.runs[runID] = cancel
 	e.runsMu.Unlock()
+	e.claim(ctx, run, recipe)
 
 	log.Info().
 		Str("run_id", runID).
@@ -228,6 +237,8 @@ func (e *Engine) ApproveGate(runID, stepName string, approved bool) bool {
 	gateKey := runID + ":" + stepName
 
 	// Try store-backed approval first
+	decideMu.Lock()
+	defer decideMu.Unlock()
 	record, err := e.store.GetApproval(context.Background(), gateKey)
 	if err == nil && record.Status == "pending" {
 		now := time.Now().UTC()
@@ -237,15 +248,22 @@ func (e *Engine) ApproveGate(runID, stepName string, approved bool) bool {
 			record.Status = "rejected"
 		}
 		record.ResolvedAt = &now
-		if updateErr := e.store.UpdateApproval(context.Background(), record); updateErr != nil {
+		won, updateErr := e.decideRecord(context.Background(), record)
+		if updateErr != nil {
 			log.Error().Err(updateErr).Str("gate_key", gateKey).Msg("Failed to update approval record")
+		}
+		if !won {
+			return false // somebody else decided it first
 		}
 		// Also signal the channel if the goroutine is waiting
 		e.gatesMu.RLock()
 		ch, ok := e.gates[gateKey]
 		e.gatesMu.RUnlock()
 		if ok {
-			ch <- approved
+			select {
+			case ch <- approved:
+			default:
+			}
 		}
 		return true
 	}
@@ -257,7 +275,11 @@ func (e *Engine) ApproveGate(runID, stepName string, approved bool) bool {
 	if !ok {
 		return false
 	}
-	ch <- approved
+	select {
+	case ch <- approved:
+	default:
+		return false
+	}
 	return true
 }
 
@@ -310,9 +332,13 @@ func (e *Engine) ApproveGateAs(runID, stepName string, approved bool, who Approv
 	record.Comments = comments
 	record.ResolvedAt = &now
 
-	if updateErr := e.store.UpdateApproval(ctx, record); updateErr != nil {
+	won, updateErr := e.decideRecord(ctx, record)
+	if updateErr != nil {
 		log.Error().Err(updateErr).Str("gate_key", gateKey).Msg("Failed to update approval record")
 		return false, nil
+	}
+	if !won {
+		return false, nil // somebody else decided it first
 	}
 
 	// Signal the waiting goroutine
@@ -320,7 +346,10 @@ func (e *Engine) ApproveGateAs(runID, stepName string, approved bool, who Approv
 	ch, ok := e.gates[gateKey]
 	e.gatesMu.RUnlock()
 	if ok {
-		ch <- approved
+		select {
+		case ch <- approved:
+		default:
+		}
 	}
 	return true, nil
 }
@@ -478,29 +507,42 @@ func (e *Engine) executeAsync(ctx context.Context, run *models.RecipeRun, recipe
 		e.runsMu.Lock()
 		delete(e.runs, run.ID)
 		e.runsMu.Unlock()
+		e.lost.Delete(run.ID)
 	}()
+	e.runRecipe(ctx, run, recipe, nil)
+}
+
+// runRecipe executes a recipe's steps. prior is nil for a new run, and for a run taken over after a restart
+// it is the results the run was left with: steps that ended are not run again, steps that were in flight
+// are dealt with by resumePolicy.
+func (e *Engine) runRecipe(ctx context.Context, run *models.RecipeRun, recipe *models.Recipe, prior []models.StepResult) {
+	defer e.runStates.Delete(run.ID)
+	rs := e.newRunState(ctx, run)
+	ctx = context.WithValue(ctx, rootRunKey{}, rs.root) // a sub-recipe's run answers to the same lease
 
 	// Every trace this run writes says which environment it was for (ADR-0039).
 	ctx = models.WithTraceStamp(ctx, models.TraceStamp{Environment: run.Environment})
 
-	// Create a parent trace for the entire recipe run
-	recipeStart := time.Now().UTC()
-	parentTraceID := uuid.New().String()
-	parentTrace := &models.Trace{
-		ID:         parentTraceID,
-		AgentName:  recipe.Name,
-		RecipeName: recipe.Name,
-		Kitchen:    run.Kitchen,
-		Status:     "running",
-		Metadata: map[string]interface{}{
-			"run_id": run.ID,
-			"type":   "recipe",
-			"steps":  len(recipe.Steps),
-		},
-		CreatedAt: recipeStart,
-	}
-	if err := e.store.CreateTrace(ctx, parentTrace); err != nil {
-		log.Error().Err(err).Str("run_id", run.ID).Msg("Failed to create parent recipe trace")
+	// Create a parent trace for the entire recipe run, or find the one a restart interrupted.
+	parentTraceID := e.findParentTrace(ctx, run, recipe, prior != nil)
+	if parentTraceID == "" {
+		parentTraceID = uuid.New().String()
+		parentTrace := &models.Trace{
+			ID:         parentTraceID,
+			AgentName:  recipe.Name,
+			RecipeName: recipe.Name,
+			Kitchen:    run.Kitchen,
+			Status:     "running",
+			Metadata: map[string]interface{}{
+				"run_id": run.ID,
+				"type":   "recipe",
+				"steps":  len(recipe.Steps),
+			},
+			CreatedAt: time.Now().UTC(),
+		}
+		if err := e.store.CreateTrace(ctx, parentTrace); err != nil {
+			log.Error().Err(err).Str("run_id", run.ID).Msg("Failed to create parent recipe trace")
+		}
 	}
 
 	// Store parentTraceID for linking step traces to the recipe trace
@@ -533,10 +575,33 @@ func (e *Engine) executeAsync(ctx context.Context, run *models.RecipeRun, recipe
 	var completedMu sync.Mutex
 	var stepResults []models.StepResult
 
+	// A run taken over after a restart carries on from what it had recorded.
+	if prior != nil {
+		ended, err := e.restore(rs, steps, prior)
+		if err != nil {
+			e.failRun(run, prior, err.Error())
+			return
+		}
+		for i := range ended {
+			sr := ended[i]
+			completed[sr.StepName] = &sr
+			if sr.Status == "skipped" {
+				skipped[sr.StepName] = true
+			}
+			stepResults = append(stepResults, sr)
+		}
+		rs.mu.Lock()
+		rs.finished = append([]models.StepResult(nil), stepResults...)
+		rs.mu.Unlock()
+	}
+
 	// Topological execution: keep running until all steps complete or error
 	for {
 		select {
 		case <-ctx.Done():
+			if e.leaseLost(run.ID) {
+				return // another process owns the run now; it is not over
+			}
 			e.failRun(run, stepResults, "execution canceled")
 			return
 		default:
@@ -602,12 +667,15 @@ func (e *Engine) executeAsync(ctx context.Context, run *models.RecipeRun, recipe
 			go func(s *models.Step) {
 				defer wg.Done()
 
+				e.begin(run, s)
 				result := e.executeStep(ctx, run, s, completed, &completedMu)
+				if e.leaseLost(run.ID) {
+					return // the run was taken over: what this process saw of the step is not its to record
+				}
 
 				completedMu.Lock()
 				completed[s.Name] = result
 				stepResults = append(stepResults, *result)
-				run.StepResults = append([]models.StepResult(nil), stepResults...)
 
 				// R8: Routing skip-set propagation.
 				// If this step has branches and BranchTaken is set, skip
@@ -620,7 +688,9 @@ func (e *Engine) executeAsync(ctx context.Context, run *models.RecipeRun, recipe
 						}
 					}
 				}
+				ended := append([]models.StepResult(nil), stepResults...)
 				completedMu.Unlock()
+				e.end(run, s.Name, ended)
 
 				if result.Status == "failed" {
 					errCh <- fmt.Errorf("step '%s' failed: %s", s.Name, result.Error)
@@ -754,7 +824,7 @@ func (e *Engine) executeStep(ctx context.Context, run *models.RecipeRun, step *m
 				select {
 				case <-ctx.Done():
 					result.Status = "canceled"
-					result.DurationMs = time.Since(start).Milliseconds()
+					result.DurationMs = time.Since(result.StartedAt).Milliseconds()
 					return result
 				case <-time.After(delay):
 				}
@@ -771,7 +841,7 @@ func (e *Engine) executeStep(ctx context.Context, run *models.RecipeRun, step *m
 		if !succeeded {
 			result.Status = "failed"
 			result.Error = lastErr.Error()
-			result.DurationMs = time.Since(start).Milliseconds()
+			result.DurationMs = time.Since(result.StartedAt).Milliseconds()
 
 			// Dispatch step_failed notifications
 			if len(step.NotifyTools) > 0 && e.notifier != nil {
@@ -823,7 +893,7 @@ func (e *Engine) executeStep(ctx context.Context, run *models.RecipeRun, step *m
 	}
 
 	result.Status = "completed"
-	result.DurationMs = time.Since(start).Milliseconds()
+	result.DurationMs = time.Since(result.StartedAt).Milliseconds()
 
 	// Dispatch step_completed notifications
 	if len(step.NotifyTools) > 0 && e.notifier != nil {
@@ -896,7 +966,7 @@ func (e *Engine) executeStepOnce(ctx context.Context, run *models.RecipeRun, ste
 		return e.executeMap(ctx, run, step, result, completed, mu)
 
 	case models.StepWait:
-		return e.executeWait(ctx, run, step, result, mu)
+		return e.executeWait(ctx, run, step, result)
 
 	case models.StepNotify:
 		return e.executeNotify(ctx, run, step, result, completed, mu)
@@ -1661,7 +1731,11 @@ func (e *Engine) executeRAGStep(ctx context.Context, run *models.RecipeRun, step
 // Creates a durable ApprovalRecord in the store, then waits via both
 // in-memory channel (for immediate API-driven approvals) and periodic
 // store polling (for external approvals via Slack/Teams callbacks).
-// Supports SLA timeout via MaxGateWaitMinutes in step config.
+// Supports SLA timeout via max_wait_minutes in step config.
+//
+// A gate survives a restart (ADR-0043): its record is the store's, the end of its SLA is a timer the
+// store keeps on its own clock, and a process that takes the run over re-enters the gate here with the
+// record it left, whatever has happened to it since (decided, timed out, still pending).
 func (e *Engine) executeHumanGate(ctx context.Context, run *models.RecipeRun, step *models.Step, result *models.StepResult) error {
 	gateKey := run.ID + ":" + step.Name
 
@@ -1678,23 +1752,56 @@ func (e *Engine) executeHumanGate(ctx context.Context, run *models.RecipeRun, st
 			}
 		}
 	}
+	slaWindow := time.Duration(float64(time.Minute) * maxWaitMinutes)
 
-	// Create durable approval record
-	approval := &models.ApprovalRecord{
-		ID:             uuid.New().String(),
-		GateKey:        gateKey,
-		RunID:          run.ID,
-		StepName:       step.Name,
-		Kitchen:        run.Kitchen,
-		Status:         "pending",
-		RequestedAt:    time.Now().UTC(),
-		MaxWaitMinutes: int(maxWaitMinutes),
+	// Re-entering a gate a restart interrupted: the record is already there.
+	var existing *models.ApprovalRecord
+	if prior, resumed := e.priorOf(run.ID, step.Name); resumed {
+		result.StartedAt = prior.StartedAt
+		result.Resumed = true
+		if rec, err := e.store.GetApproval(ctx, gateKey); err == nil && rec != nil && rec.Kitchen == run.Kitchen {
+			existing = rec
+		}
 	}
-	if err := e.store.CreateApproval(ctx, approval); err != nil {
-		log.Warn().Err(err).Str("gate_key", gateKey).Msg("Failed to persist approval record, falling back to in-memory only")
-	} else {
-		e.observeGate(ctx, run.Kitchen, gateKey, time.Duration(float64(time.Minute)*maxWaitMinutes))
+
+	if existing == nil {
+		// Create durable approval record
+		approval := &models.ApprovalRecord{
+			ID:             uuid.New().String(),
+			GateKey:        gateKey,
+			RunID:          run.ID,
+			StepName:       step.Name,
+			Kitchen:        run.Kitchen,
+			Status:         "pending",
+			RequestedAt:    time.Now().UTC(),
+			MaxWaitMinutes: int(maxWaitMinutes),
+		}
+		if err := e.store.CreateApproval(ctx, approval); err != nil {
+			log.Warn().Err(err).Str("gate_key", gateKey).Msg("Failed to persist approval record, falling back to in-memory only")
+		} else {
+			e.observeGate(ctx, run.Kitchen, gateKey, slaWindow)
+		}
+	} else if existing.Status != "pending" {
+		// Decided, or timed out, while nobody was executing the run: take the decision as it stands.
+		// The step has not ended yet, so this is the one time it takes effect.
+		log.Info().Str("run_id", run.ID).Str("step", step.Name).Str("decision", existing.Status).Msg("Human gate was decided while the control plane was down")
+		return e.gateDecided(ctx, run, step, result, gateKey, existing)
 	}
+
+	// The end of the SLA is a timer on the store's clock, so a restart finds what is left of it.
+	left := slaWindow
+	if maxWaitMinutes > 0 && e.resume != nil {
+		first := slaWindow
+		if existing != nil {
+			first = slaWindow - time.Since(existing.RequestedAt) // a gate from before timers were kept: what is left of its window
+		}
+		if l, err := e.resume.store.ArmRunTimer(ctx, run.ID, step.Name, first); err == nil {
+			left = l
+		} else {
+			log.Warn().Err(err).Str("gate_key", gateKey).Msg("Could not arm the gate's timer; it uses this process's clock")
+		}
+	}
+	defer e.clearTimer(run.ID, step.Name)
 
 	// Register in-memory channel for fast signaling
 	ch := make(chan bool, 1)
@@ -1714,10 +1821,11 @@ func (e *Engine) executeHumanGate(ctx context.Context, run *models.RecipeRun, st
 		Str("run_id", run.ID).
 		Str("step", step.Name).
 		Float64("max_wait_minutes", maxWaitMinutes).
+		Bool("resumed", existing != nil).
 		Msg("⏸️  Human gate — waiting for approval")
 
-	// Dispatch gate_waiting notifications
-	if len(step.NotifyTools) > 0 && e.notifier != nil {
+	// Dispatch gate_waiting notifications (once: a gate re-entered after a restart has sent them)
+	if existing == nil && len(step.NotifyTools) > 0 && e.notifier != nil {
 		evt := notify.Event{
 			Type:       string(notify.EventGateWaiting),
 			RunID:      run.ID,
@@ -1735,16 +1843,16 @@ func (e *Engine) executeHumanGate(ctx context.Context, run *models.RecipeRun, st
 		}
 	}
 
-	// Update run status to paused
-	run.StepResults = append(append([]models.StepResult(nil), run.StepResults...), *result)
-	run.Status = models.RecipeRunPaused
-	e.store.UpdateRecipeRun(ctx, run)
+	// The run shows as paused, with this gate waiting
+	e.annotate(run, step.Name, func(r *models.StepResult) {
+		r.Status, r.GateStatus, r.NotifyResults, r.Resumed = "waiting", "waiting", result.NotifyResults, result.Resumed
+	})
 
 	// Build SLA deadline context
 	var gateCtx context.Context
 	var gateCancel context.CancelFunc
 	if maxWaitMinutes > 0 {
-		gateCtx, gateCancel = context.WithTimeout(ctx, time.Duration(float64(time.Minute)*maxWaitMinutes))
+		gateCtx, gateCancel = context.WithTimeout(ctx, left)
 	} else {
 		gateCtx, gateCancel = context.WithCancel(ctx)
 	}
@@ -1764,28 +1872,43 @@ func (e *Engine) executeHumanGate(ctx context.Context, run *models.RecipeRun, st
 			// Check store for external approval
 			record, err := e.store.GetApproval(gateCtx, gateKey)
 			if err == nil && record.Status != "pending" {
-				if record.Status == "timed_out" {
-					return e.gateTimedOut(ctx, run, step, result, "timed out: "+record.Comments)
-				}
-				return e.resolveGate(ctx, run, step, result, gateKey, record.Status == "approved")
+				return e.gateDecided(ctx, run, step, result, gateKey, record)
 			}
 
 		case <-gateCtx.Done():
 			// SLA timeout or parent cancellation
-			if maxWaitMinutes > 0 {
-				// SLA breach — mark as timed_out
-				now := time.Now().UTC()
-				if record, err := e.store.GetApproval(ctx, gateKey); err == nil && record.Status == "pending" {
-					record.Status = "timed_out"
-					record.ResolvedAt = &now
-					record.Comments = fmt.Sprintf("SLA breach: gate not resolved within %.2f minutes", maxWaitMinutes)
-					e.store.UpdateApproval(ctx, record)
+			if maxWaitMinutes > 0 && ctx.Err() == nil {
+				// SLA breach: record it, unless somebody decided in the meantime, in which case that stands.
+				reason := fmt.Sprintf("SLA breach: gate not resolved within %.2f minutes", maxWaitMinutes)
+				if _, err := e.ExpireGate(ctx, run.Kitchen, gateKey, reason); err != nil {
+					log.Warn().Err(err).Str("gate_key", gateKey).Msg("Could not record the gate's timeout")
+				}
+				if record, err := e.store.GetApproval(ctx, gateKey); err == nil && record.Status != "pending" && record.Status != "timed_out" {
+					return e.gateDecided(ctx, run, step, result, gateKey, record)
 				}
 				// The recipe says what happens when nobody answers: carry on along its on_timeout path, or fail.
 				return e.gateTimedOut(ctx, run, step, result, fmt.Sprintf("exceeded SLA of %.2f minutes", maxWaitMinutes))
 			}
 			return fmt.Errorf("human gate '%s' was canceled", step.Name)
 		}
+	}
+}
+
+// gateDecided takes a decision already recorded for the gate.
+func (e *Engine) gateDecided(ctx context.Context, run *models.RecipeRun, step *models.Step, result *models.StepResult, gateKey string, record *models.ApprovalRecord) error {
+	if record.Status == "timed_out" {
+		return e.gateTimedOut(ctx, run, step, result, "timed out: "+record.Comments)
+	}
+	return e.resolveGate(ctx, run, step, result, gateKey, record.Status == "approved")
+}
+
+// clearTimer removes the timer of a gate or wait step that has ended.
+func (e *Engine) clearTimer(runID, step string) {
+	if e.resume == nil || e.leaseLost(runID) {
+		return
+	}
+	if err := e.resume.store.ClearRunTimer(context.Background(), runID, step); err != nil {
+		log.Warn().Err(err).Str("run_id", runID).Str("step", step).Msg("Could not clear the timer of a step that ended")
 	}
 }
 
@@ -1829,10 +1952,6 @@ func (e *Engine) resolveGate(ctx context.Context, run *models.RecipeRun, step *m
 	if !approved && !gateFollowsPath(step, "on_reject") {
 		return fmt.Errorf("human gate '%s' was rejected", step.Name)
 	}
-
-	// Resume run
-	run.Status = models.RecipeRunRunning
-	e.store.UpdateRecipeRun(ctx, run)
 	return nil
 }
 
@@ -2377,32 +2496,53 @@ func (e *Engine) executeSubRecipe(ctx context.Context, run *models.RecipeRun, st
 	// Execute the sub-recipe synchronously (with incremented depth)
 	subCtx := withSubRecipeDepth(ctx, depth+1)
 	subRunID := uuid.New().String()
+	var subRun *models.RecipeRun
+	var subPrior []models.StepResult
 
-	subRun := &models.RecipeRun{
-		ID:          subRunID,
-		RecipeID:    subRecipe.ID,
-		Kitchen:     run.Kitchen,
-		Status:      models.RecipeRunRunning,
-		Input:       subInput,
-		ParentRunID: run.ID,
-		StartedAt:   time.Now().UTC(),
+	// A restart interrupted this step: carry on in the run it had started, if that run is still going.
+	if prior, resumed := e.priorOf(run.ID, step.Name); resumed && prior.SubRunID != "" {
+		if cur, err := e.store.GetRecipeRun(ctx, prior.SubRunID); err == nil && cur.Kitchen == run.Kitchen {
+			result.Resumed = true
+			subRunID = cur.ID
+			if cur.Status == models.RecipeRunRunning || cur.Status == models.RecipeRunPaused {
+				subRun, subPrior = cur, cur.StepResults
+				if subPrior == nil {
+					subPrior = []models.StepResult{}
+				}
+			}
+		}
 	}
 
-	if err := e.store.CreateRecipeRun(ctx, subRun); err != nil {
-		return fmt.Errorf("create sub-recipe run: %w", err)
+	if subRun == nil && !result.Resumed {
+		subRun = &models.RecipeRun{
+			ID:          subRunID,
+			RecipeID:    subRecipe.ID,
+			Kitchen:     run.Kitchen,
+			Status:      models.RecipeRunRunning,
+			Input:       subInput,
+			ParentRunID: run.ID,
+			StartedAt:   time.Now().UTC(),
+		}
+		if err := e.store.CreateRecipeRun(ctx, subRun); err != nil {
+			return fmt.Errorf("create sub-recipe run: %w", err)
+		}
 	}
 
 	result.SubRunID = subRunID
+	e.annotate(run, step.Name, func(r *models.StepResult) { r.SubRunID, r.Resumed = subRunID, result.Resumed })
 
 	log.Info().
 		Str("parent_run", run.ID).
 		Str("sub_run", subRunID).
 		Str("sub_recipe", step.RecipeRef).
 		Int("depth", depth+1).
+		Bool("resumed", result.Resumed).
 		Msg("🔀 Starting sub-recipe execution")
 
 	// Run synchronously (blocking) so the parent step waits
-	e.executeAsync(subCtx, subRun, subRecipe)
+	if subRun != nil {
+		e.runRecipe(subCtx, subRun, subRecipe, subPrior)
+	}
 
 	// Read the completed sub-run
 	completedSubRun, err := e.store.GetRecipeRun(ctx, subRunID)

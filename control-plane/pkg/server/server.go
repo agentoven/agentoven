@@ -259,6 +259,9 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 	baseURL := fmt.Sprintf("http://localhost:%d", cfg.Port)
 	wf := workflow.NewEngine(dataStore, ns, baseURL)
 	wf.SetPricer(mr.Settle)
+	// Runs survive a restart (ADR-0043): this process takes over the runs an earlier one left, once it is serving.
+	wf.SetReadyURL(baseURL + "/health")
+	wf.EnableResume(ctx, "")
 
 	log.Info().Msg("✅ Model Router initialized")
 	log.Info().Msg("✅ MCP Gateway initialized")
@@ -716,6 +719,11 @@ func seedAgentFromEnv(ctx context.Context, s store.Store) {
 // Shutdown stops all background goroutines (retention janitor, etc.)
 // and flushes telemetry. Should be called on graceful shutdown.
 func (s *Server) Shutdown(ctx context.Context) error {
+	// Give up the leases on running recipes so the next process takes them over at once (ADR-0043).
+	if s.Handlers != nil && s.Handlers.Workflow != nil {
+		s.Handlers.Workflow.ReleaseRuns(ctx)
+	}
+
 	// Stop all running agent processes
 	if s.ProcessManager != nil {
 		if err := s.ProcessManager.StopAll(ctx); err != nil {
