@@ -127,6 +127,10 @@
   },
   {
    "method": "DELETE",
+   "path": "/api/v1/saml/idps/{id}"
+  },
+  {
+   "method": "DELETE",
    "path": "/api/v1/scenarios/{scenarioID}"
   },
   {
@@ -735,6 +739,14 @@
   },
   {
    "method": "GET",
+   "path": "/api/v1/saml/idps"
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/saml/idps/{id}"
+  },
+  {
+   "method": "GET",
    "path": "/api/v1/scenario-runs"
   },
   {
@@ -1048,6 +1060,22 @@
   {
    "method": "GET",
    "path": "/auth/me"
+  },
+  {
+   "method": "GET",
+   "path": "/auth/saml/idps"
+  },
+  {
+   "method": "GET",
+   "path": "/auth/saml/{slug}/login"
+  },
+  {
+   "method": "GET",
+   "path": "/auth/saml/{slug}/metadata"
+  },
+  {
+   "method": "GET",
+   "path": "/auth/saml/{slug}/slo"
   },
   {
    "method": "GET",
@@ -1523,6 +1551,22 @@
   },
   {
    "method": "POST",
+   "path": "/api/v1/saml/idps"
+  },
+  {
+   "method": "POST",
+   "path": "/api/v1/saml/idps/parse-metadata"
+  },
+  {
+   "method": "POST",
+   "path": "/api/v1/saml/idps/{id}/refresh-metadata"
+  },
+  {
+   "method": "POST",
+   "path": "/api/v1/saml/logout"
+  },
+  {
+   "method": "POST",
    "path": "/api/v1/scenario-runs"
   },
   {
@@ -1799,6 +1843,14 @@
   },
   {
    "method": "POST",
+   "path": "/auth/saml/{slug}/acs"
+  },
+  {
+   "method": "POST",
+   "path": "/auth/saml/{slug}/slo"
+  },
+  {
+   "method": "POST",
    "path": "/env/{envSlug}/agents/{agentName}/a2a"
   },
   {
@@ -1924,6 +1976,10 @@
   {
    "method": "PUT",
    "path": "/api/v1/recipes/{recipeName}"
+  },
+  {
+   "method": "PUT",
+   "path": "/api/v1/saml/idps/{id}"
   },
   {
    "method": "PUT",
