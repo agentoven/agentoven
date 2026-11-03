@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net/http"
 
+	pkgmw "github.com/agentoven/agentoven/control-plane/pkg/middleware"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
+	"github.com/agentoven/agentoven/control-plane/pkg/netguard"
 	"github.com/agentoven/agentoven/control-plane/pkg/toolauth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -21,7 +23,7 @@ const TransportMCP = models.MCPTransportStreamableHTTP
 // ListRemoteTools connects to a remote MCP server and returns the tools it
 // offers. auth is a resolved authentication (see pkg/toolauth), or nil.
 func (gw *Gateway) ListRemoteTools(ctx context.Context, endpoint string, auth map[string]interface{}) ([]models.RemoteTool, error) {
-	cs, err := gw.connectRemote(ctx, endpoint, auth)
+	cs, err := gw.connectRemote(ctx, pkgmw.GetKitchen(ctx), endpoint, auth)
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +49,7 @@ func (gw *Gateway) ListRemoteTools(ctx context.Context, endpoint string, auth ma
 // instance owns a session, which keeps it correct when the control plane
 // scales out or runs serverless. The cost is the handshake's extra round trips.
 func (gw *Gateway) executeMCPTool(ctx context.Context, tool *models.MCPTool, params *models.MCPToolCallParams, auth map[string]interface{}) (*models.MCPToolResult, error) {
-	cs, err := gw.connectRemote(ctx, tool.Endpoint, auth)
+	cs, err := gw.connectRemote(ctx, tool.Kitchen, tool.Endpoint, auth)
 	if err != nil {
 		return nil, err
 	}
@@ -77,11 +79,11 @@ func (gw *Gateway) executeMCPTool(ctx context.Context, tool *models.MCPTool, par
 	return out, nil
 }
 
-func (gw *Gateway) connectRemote(ctx context.Context, endpoint string, auth map[string]interface{}) (*mcp.ClientSession, error) {
+func (gw *Gateway) connectRemote(ctx context.Context, kitchen, endpoint string, auth map[string]interface{}) (*mcp.ClientSession, error) {
 	client := mcp.NewClient(&mcp.Implementation{Name: "agentoven-mcp-gateway", Version: "0.2.0"}, nil)
 	cs, err := client.Connect(ctx, &mcp.StreamableClientTransport{
 		Endpoint:             endpoint,
-		HTTPClient:           &http.Client{Timeout: gw.client.Timeout, Transport: authTransport{auth: auth, next: http.DefaultTransport}},
+		HTTPClient:           &http.Client{Timeout: gw.client.Timeout, Transport: authTransport{auth: auth, next: netguard.Default().Transport(kitchen)}},
 		MaxRetries:           -1,
 		DisableStandaloneSSE: true,
 	}, nil)

@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/agentoven/agentoven/control-plane/pkg/netguard"
 	"github.com/agentoven/agentoven/control-plane/pkg/toolauth"
 	"net/http"
 	"sync"
@@ -352,19 +353,29 @@ func (s *Service) sendMCPNotification(ctx context.Context, tool *models.MCPTool,
 	}
 	applyAuth(req, auth)
 
-	return s.sendWithRetries(req)
+	return s.sendWith(netguard.Default().Client(tool.Kitchen, s.client.Timeout), req)
 }
 
 // ── HTTP Helpers ─────────────────────────────────────────────
 
 // sendWithRetries sends an HTTP request with up to 3 attempts and exponential backoff.
 func (s *Service) sendWithRetries(req *http.Request) error {
+	return s.sendWith(s.client, req)
+}
+
+// sendWith is sendWithRetries over a given client: a tool's notification goes through the guarded client
+// of its kitchen (pkg/netguard), a channel's webhook through the service's own.
+func (s *Service) sendWith(client *http.Client, req *http.Request) error {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
 			time.Sleep(time.Duration(attempt*2) * time.Second)
+			var err error
+			if req, err = rewound(req); err != nil {
+				return err
+			}
 		}
-		resp, err := s.client.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			lastErr = err
 			continue
@@ -376,6 +387,20 @@ func (s *Service) sendWithRetries(req *http.Request) error {
 		lastErr = fmt.Errorf("HTTP %d from %s", resp.StatusCode, req.URL.String())
 	}
 	return fmt.Errorf("notification failed after 3 attempts: %w", lastErr)
+}
+
+// rewound returns req ready to be sent again. The body of a request that has been sent is spent, so a
+// retry that reused it would post an empty message (and report success if the receiver accepted it).
+func rewound(req *http.Request) (*http.Request, error) {
+	again := req.Clone(req.Context())
+	if req.GetBody != nil {
+		body, err := req.GetBody()
+		if err != nil {
+			return nil, fmt.Errorf("rewind request body: %w", err)
+		}
+		again.Body = body
+	}
+	return again, nil
 }
 
 // applyAuth adds authentication headers to the request based on tool auth config.
@@ -470,6 +495,10 @@ func (d *WebhookChannelDriver) Send(ctx context.Context, channel *models.Notific
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
 			time.Sleep(time.Duration(attempt*2) * time.Second)
+			var err error
+			if req, err = rewound(req); err != nil {
+				return err
+			}
 		}
 		resp, err := d.client.Do(req)
 		if err != nil {

@@ -1528,7 +1528,9 @@ func (h *Handlers) BakeRecipe(w http.ResponseWriter, r *http.Request) {
 
 	runID, err := executor.ExecuteRecipe(recipeExecContext(r), recipe, kitchen, req.Input, req.Environment)
 	if err != nil {
-		if err.Error() == "permission_denied" || len(err.Error()) > 0 && err.Error()[:16] == "permission_denied" {
+		// (This compared the first 16 characters of the message with the 17-character word, so a refusal
+		// such as "permission_denied: environment requires approval" was answered 500, not 403.)
+		if strings.HasPrefix(err.Error(), "permission_denied") {
 			respondError(w, http.StatusForbidden, err.Error())
 		} else {
 			respondError(w, http.StatusInternalServerError, err.Error())
@@ -2323,11 +2325,12 @@ func (h *Handlers) ListMCPTools(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) RegisterMCPTool(w http.ResponseWriter, r *http.Request) {
-	var req models.MCPTool
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var body toolBody
+	if raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)); err != nil || body.decode(raw) != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
+	req := body.MCPTool
 
 	// Validate required fields
 	if strings.TrimSpace(req.Name) == "" {
@@ -2346,7 +2349,7 @@ func (h *Handlers) RegisterMCPTool(w http.ResponseWriter, r *http.Request) {
 	kitchen := middleware.GetKitchen(r.Context())
 	req.ID = uuid.New().String()
 	req.Kitchen = kitchen
-	req.Enabled = true
+	req.Enabled = body.enabledOnCreate() // a tool registered with enabled=false is registered switched off
 	req.CreatedAt = time.Now().UTC()
 	req.UpdatedAt = time.Now().UTC()
 
@@ -2356,8 +2359,19 @@ func (h *Handlers) RegisterMCPTool(w http.ResponseWriter, r *http.Request) {
 	if len(req.Capabilities) == 0 {
 		req.Capabilities = []string{"tool"}
 	}
+	if err := h.checkToolEndpoint(r.Context(), kitchen, req.Transport, req.Endpoint); err != nil {
+		respondError(w, http.StatusBadRequest, "endpoint: "+err.Error())
+		return
+	}
+	auth, sealed, err := h.sealToolAuth(r.Context(), kitchen, req.Name, restoreMaskedAuth(nil, req.AuthConfig))
+	if err != nil {
+		respondCreateError(w, err, "register the tool")
+		return
+	}
+	req.AuthConfig = auth
 
 	if err := h.Store.CreateTool(r.Context(), &req); err != nil {
+		h.dropToolCredential(r.Context(), kitchen, sealed)
 		respondCreateError(w, err, "register the tool")
 		return
 	}
@@ -2371,9 +2385,9 @@ func (h *Handlers) RegisterMCPTool(w http.ResponseWriter, r *http.Request) {
 // Body: { "tools": [ { "name": "...", ... }, ... ] }
 func (h *Handlers) BulkRegisterMCPTools(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Tools []models.MCPTool `json:"tools"`
+		Tools []toolBody `json:"tools"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -2385,17 +2399,18 @@ func (h *Handlers) BulkRegisterMCPTools(w http.ResponseWriter, r *http.Request) 
 
 	kitchen := middleware.GetKitchen(r.Context())
 	now := time.Now().UTC()
-	created := make([]models.MCPTool, 0, len(req.Tools))
 
+	// Every tool is checked before any is created, so a bad one does not leave the others half registered.
+	tools := make([]models.MCPTool, len(req.Tools))
 	for i := range req.Tools {
-		tool := &req.Tools[i]
+		tool := req.Tools[i].MCPTool
 		if tool.Name == "" {
 			respondError(w, http.StatusBadRequest, fmt.Sprintf("Tool at index %d missing 'name'", i))
 			return
 		}
 		tool.ID = uuid.New().String()
 		tool.Kitchen = kitchen
-		tool.Enabled = true
+		tool.Enabled = req.Tools[i].enabledOnCreate()
 		tool.CreatedAt = now
 		tool.UpdatedAt = now
 		if tool.Transport == "" {
@@ -2404,9 +2419,25 @@ func (h *Handlers) BulkRegisterMCPTools(w http.ResponseWriter, r *http.Request) 
 		if len(tool.Capabilities) == 0 {
 			tool.Capabilities = []string{"tool"}
 		}
+		if err := h.checkToolEndpoint(r.Context(), kitchen, tool.Transport, tool.Endpoint); err != nil {
+			respondError(w, http.StatusBadRequest, fmt.Sprintf("Tool '%s' endpoint: %s", tool.Name, err.Error()))
+			return
+		}
+		tools[i] = tool
+	}
 
+	created := make([]models.MCPTool, 0, len(tools))
+	for i := range tools {
+		tool := &tools[i]
+		auth, sealed, err := h.sealToolAuth(r.Context(), kitchen, tool.Name, restoreMaskedAuth(nil, tool.AuthConfig))
+		if err != nil {
+			respondCreateError(w, err, "register the tool '"+tool.Name+"'")
+			return
+		}
+		tool.AuthConfig = auth
 		if err := h.Store.CreateTool(r.Context(), tool); err != nil {
-			respondError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create tool '%s': %s", tool.Name, err.Error()))
+			h.dropToolCredential(r.Context(), kitchen, sealed)
+			respondCreateError(w, err, "register the tool '"+tool.Name+"'")
 			return
 		}
 		created = append(created, *tool)
@@ -2440,8 +2471,12 @@ func (h *Handlers) DeleteMCPTool(w http.ResponseWriter, r *http.Request) {
 	kitchen := middleware.GetKitchen(r.Context())
 
 	if err := h.Store.DeleteTool(r.Context(), kitchen, toolName); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondCreateError(w, err, "delete the tool")
 		return
+	}
+	// The credential this code sealed the tool's secret into goes with it.
+	if h.SecretResolver != nil && h.keyVault() != nil {
+		_ = h.Store.DeleteKitchenCredential(r.Context(), kitchen, toolCredentialName(toolName))
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -2460,11 +2495,12 @@ func (h *Handlers) UpdateMCPTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req models.MCPTool
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var body toolBody
+	if raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)); err != nil || body.decode(raw) != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
+	req := body.MCPTool
 
 	if req.Description != "" {
 		tool.Description = req.Description
@@ -2478,18 +2514,33 @@ func (h *Handlers) UpdateMCPTool(w http.ResponseWriter, r *http.Request) {
 	if req.Schema != nil {
 		tool.Schema = req.Schema
 	}
+	var sealed string
 	if req.AuthConfig != nil {
-		tool.AuthConfig = req.AuthConfig
+		// What GET returned (secrets as ****) written back keeps the secret that is stored.
+		auth, created, err := h.sealToolAuth(r.Context(), kitchen, toolName, restoreMaskedAuth(tool.AuthConfig, req.AuthConfig))
+		if err != nil {
+			respondCreateError(w, err, "update the tool")
+			return
+		}
+		tool.AuthConfig, sealed = auth, created
 	}
 	if len(req.Capabilities) > 0 {
 		tool.Capabilities = req.Capabilities
 	}
-	// Always apply enabled (it's a boolean, false is meaningful)
-	tool.Enabled = req.Enabled
+	// enabled is applied when the body says it (false is meaningful), not defaulted to false by its absence.
+	if body.EnabledSet != nil {
+		tool.Enabled = *body.EnabledSet
+	}
 	tool.UpdatedAt = time.Now().UTC()
+	if err := h.checkToolEndpoint(r.Context(), kitchen, tool.Transport, tool.Endpoint); err != nil {
+		h.dropToolCredential(r.Context(), kitchen, sealed)
+		respondError(w, http.StatusBadRequest, "endpoint: "+err.Error())
+		return
+	}
 
 	if err := h.Store.UpdateTool(r.Context(), tool); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		h.dropToolCredential(r.Context(), kitchen, sealed)
+		respondCreateError(w, err, "update the tool")
 		return
 	}
 

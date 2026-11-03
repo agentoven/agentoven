@@ -21,6 +21,7 @@ import (
 	"github.com/agentoven/agentoven/control-plane/internal/store"
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
+	"github.com/agentoven/agentoven/control-plane/pkg/netguard"
 	"github.com/agentoven/agentoven/control-plane/pkg/toolauth"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -49,6 +50,13 @@ func (gw *Gateway) SetNativeToolRunner(r contracts.NativeToolRunner) { gw.native
 // tool is served only when it comes through the executor's approval gate (see
 // contracts.WithToolApproved); any other caller is refused. Call it before serving.
 func (gw *Gateway) SetToolApprovalPolicy(p contracts.ToolApprovalPolicy) { gw.approval = p }
+
+// guardedClient is the HTTP client for one tool call: it dials only addresses the guard allows for the
+// tool's kitchen (pkg/netguard), so a tool pointed at the metadata service, loopback or a private network
+// is refused when it is called, whatever its name resolved to when it was registered.
+func (gw *Gateway) guardedClient(kitchen string) *http.Client {
+	return netguard.Default().Client(kitchen, gw.client.Timeout)
+}
 
 // NewGateway creates a new MCP gateway.
 func NewGateway(s store.Store) *Gateway {
@@ -320,7 +328,7 @@ func (gw *Gateway) executeHTTPTool(ctx context.Context, tool *models.MCPTool, pa
 	// Apply auth if configured
 	toolauth.Apply(httpReq, auth)
 
-	resp, err := gw.client.Do(httpReq)
+	resp, err := gw.guardedClient(tool.Kitchen).Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("tool request failed: %w", err)
 	}
@@ -373,7 +381,7 @@ func (gw *Gateway) executeSSETool(ctx context.Context, tool *models.MCPTool, par
 	httpReq.Header.Set("Accept", "text/event-stream")
 	toolauth.Apply(httpReq, auth)
 
-	resp, err := gw.client.Do(httpReq)
+	resp, err := gw.guardedClient(tool.Kitchen).Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("SSE request failed: %w", err)
 	}
