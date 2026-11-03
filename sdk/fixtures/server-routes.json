@@ -107,6 +107,10 @@
   },
   {
    "method": "DELETE",
+   "path": "/api/v1/online-judges/{id}"
+  },
+  {
+   "method": "DELETE",
    "path": "/api/v1/prompts/{promptName}"
   },
   {
@@ -608,6 +612,22 @@
   {
    "method": "GET",
    "path": "/api/v1/models/providers/{providerName}"
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/online-judges"
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/online-judges/agent-scores"
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/online-judges/{id}"
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/online-judges/{id}/judgments"
   },
   {
    "method": "GET",
@@ -1363,6 +1383,18 @@
   },
   {
    "method": "POST",
+   "path": "/api/v1/online-judges"
+  },
+  {
+   "method": "POST",
+   "path": "/api/v1/online-judges/{id}/disable"
+  },
+  {
+   "method": "POST",
+   "path": "/api/v1/online-judges/{id}/enable"
+  },
+  {
+   "method": "POST",
    "path": "/api/v1/promotion-approvals/{approvalID}/approve"
   },
   {
@@ -1816,6 +1848,10 @@
   {
    "method": "PUT",
    "path": "/api/v1/models/providers/{providerName}"
+  },
+  {
+   "method": "PUT",
+   "path": "/api/v1/online-judges/{id}"
   },
   {
    "method": "PUT",
