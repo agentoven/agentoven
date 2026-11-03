@@ -35,6 +35,10 @@
   },
   {
    "method": "DELETE",
+   "path": "/api/v1/channel-egress/{host}"
+  },
+  {
+   "method": "DELETE",
    "path": "/api/v1/channels/{channelName}"
   },
   {
@@ -364,6 +368,10 @@
   {
    "method": "GET",
    "path": "/api/v1/cache"
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/channel-egress"
   },
   {
    "method": "GET",
@@ -1168,6 +1176,10 @@
   {
    "method": "POST",
    "path": "/api/v1/cache/purge"
+  },
+  {
+   "method": "POST",
+   "path": "/api/v1/channel-egress"
   },
   {
    "method": "POST",
