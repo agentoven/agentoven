@@ -63,6 +63,10 @@
   },
   {
    "method": "DELETE",
+   "path": "/api/v1/guardrail-endpoints/{agent}/{digest}"
+  },
+  {
+   "method": "DELETE",
    "path": "/api/v1/guardrails/{id}"
   },
   {
@@ -476,6 +480,10 @@
   {
    "method": "GET",
    "path": "/api/v1/evals/tools"
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/guardrail-endpoints"
   },
   {
    "method": "GET",
@@ -1264,6 +1272,10 @@
   {
    "method": "POST",
    "path": "/api/v1/evals/mcp"
+  },
+  {
+   "method": "POST",
+   "path": "/api/v1/guardrail-endpoints/{agent}/approve"
   },
   {
    "method": "POST",
