@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 )
@@ -203,4 +204,27 @@ func TestScanBudgetIsPerEvaluation(t *testing.T) {
 		}
 	}
 	_ = context.Background
+}
+
+// Mixed scripts, combining marks and invisible characters must never make the mapping back to the
+// original text panic or produce text that is not UTF-8.
+func TestFoldingAndMappingHoldOnMixedText(t *testing.T) {
+	alphabet := []string{"4", "1", "1", "1", " ", "-", ".", "/", "\n", "@", "a", "Z", "D", "E", "8", "9", "sk-", "ghp_", "AKIA", "​", "‮", " ", "４", "１", "é", "́", "ß", "ﬁ", "‑", "{", "}", "[", "]", ":", ",", "\"", "\\", "ü", "ａ", "＠", "𝟒"}
+	seed := uint32(12345)
+	next := func(n int) int { seed = seed*1664525 + 1013904223; return int(seed>>8) % n }
+	s := &CommunityGuardrailService{}
+	for _, action := range []models.GuardrailAction{models.GuardrailActionRedact, models.GuardrailActionMask, models.GuardrailActionBlock} {
+		r := mkRule("all", models.GuardrailPIIDetection, models.GuardrailStageAll, action, piiCfg("all"))
+		for i := 0; i < 400; i++ {
+			var sb strings.Builder
+			for n := next(80); n > 0; n-- {
+				sb.WriteString(alphabet[next(len(alphabet))])
+			}
+			in := sb.String()
+			e := eval(t, s, []models.Guardrail{r}, in, models.GuardrailStageInput)
+			if out := e.Apply(in); !utf8.ValidString(out) && utf8.ValidString(in) {
+				t.Fatalf("%q became invalid UTF-8: %q", in, out)
+			}
+		}
+	}
 }
