@@ -1,6 +1,7 @@
 package contracts
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -46,8 +47,20 @@ const (
 	// GateSecretMigrate moves secrets from one secret provider to another (ADR-0035): the person is shown
 	// exactly which secrets move, and the digest covers that list.
 	GateSecretMigrate = "secret_migrate"
-	MeaningApproved   = "approved"
-	MeaningRejected   = "rejected"
+	// GateAuditErasure erases a person from a kitchen's audit trail (GDPR Art. 17): the display copies of
+	// their identity on the audit events and the pseudonym mapping. It is signed by the legal team alone,
+	// who are shown the scope; the person erased may not sign it (ADR-0043).
+	GateAuditErasure = "audit_erasure"
+	// GateGxPSwitch switches a kitchen's GxP protections off (the gxp_enabled setting, or a GxP compliance
+	// requirement removed). Turning them on only protects and is not a gate. A Head Chef signs it, shown
+	// the settings before and after (ADR-0041).
+	GateGxPSwitch = "gxp_switch"
+	// GateApproverPolicy replaces the kitchen's approver policy (who may approve what) in a GxP kitchen.
+	// The person is shown the policy before and after; elsewhere the change is not signed but its content
+	// is recorded on the audit trail.
+	GateApproverPolicy = "approver_policy"
+	MeaningApproved    = "approved"
+	MeaningRejected    = "rejected"
 )
 
 // DecisionSubject is what a person is shown and what a signature is bound to.
@@ -104,17 +117,22 @@ type DecisionSigner interface {
 }
 
 // DigestOf returns the SHA-256 (hex) of v's canonical JSON: maps with sorted keys, no whitespace.
-// The same value gives the same digest wherever it is computed.
+// The same value gives the same digest wherever it is computed. Numbers keep their literal text, so two
+// integers above 2^53 do not collapse into one float. A value that cannot be encoded has no digest and
+// DigestOf returns "": the signing service refuses an empty digest, because two unrelated records that
+// both failed to encode would otherwise share one.
 func DigestOf(v interface{}) string {
 	raw, err := json.Marshal(v)
 	if err != nil {
-		raw = []byte(err.Error())
+		return ""
 	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
 	var generic interface{}
-	if err := json.Unmarshal(raw, &generic); err == nil {
-		raw = canonicalJSON(generic)
+	if err := dec.Decode(&generic); err != nil {
+		return ""
 	}
-	sum := sha256.Sum256(raw)
+	sum := sha256.Sum256(canonicalJSON(generic))
 	return hex.EncodeToString(sum[:])
 }
 

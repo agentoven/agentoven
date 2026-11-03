@@ -112,10 +112,13 @@ func TestAWaitingStepIsVisibleWithItsWakeTimeAndCanBeReleased(t *testing.T) {
 	if w.StepName != "pause" || w.WakeAt == nil || time.Until(*w.WakeAt) < 59*time.Minute {
 		t.Fatalf("a waiting step should say when it ends: %+v", w)
 	}
-	if eng.ReleaseWait(id, "no-such-step") {
+	if eng.ReleaseWait("another-kitchen", id, "pause") {
+		t.Error("a release from another kitchen must not end the wait")
+	}
+	if eng.ReleaseWait("default", id, "no-such-step") {
 		t.Error("releasing a step that is not waiting should say so")
 	}
-	if !eng.ReleaseWait(id, "pause") {
+	if !eng.ReleaseWait("default", id, "pause") {
 		t.Fatal("the waiting step was not found")
 	}
 	run := waitForRun(t, eng, id, 10)
@@ -125,7 +128,7 @@ func TestAWaitingStepIsVisibleWithItsWakeTimeAndCanBeReleased(t *testing.T) {
 	if r := stepResult(run, "pause"); r == nil || r.Output["released_early"] != true {
 		t.Errorf("the result should say it was released early: %+v", r)
 	}
-	if eng.ReleaseWait(id, "pause") {
+	if eng.ReleaseWait("default", id, "pause") {
 		t.Error("a step that has finished is not waiting")
 	}
 }

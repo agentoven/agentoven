@@ -81,3 +81,4 @@ What other options were evaluated and why were they rejected?
 | [0034](0034-approval-observer-and-expirer-seams.md) | The approval observer and expirer seams — OSS hooks for Pro approvals where people work | Accepted | 2026-11-03 |
 | [0035](0035-traffic-and-cache-seams.md) | Traffic and cache seams — OSS hooks for Pro rate limits, budgets per scope and the response cache | Accepted | 2026-11-03 |
 | [0036](0036-agent-draft-edits-fencing-and-public-trace-views.md) | Draft edits, fingerprint rules, lease fencing and public views of trace content — fixes from the 2026-11-03 adversarial review | Accepted | 2026-11-03 |
+| [0038](0038-after-authentication-hook-and-kitchen-scoped-waits.md) | After-authentication hook, kitchen-scoped wait release, signed run decisions that do not proceed blind, decision routes in `pkg/contracts` | Accepted (built 2026-11-03) | 2026-11-03 |

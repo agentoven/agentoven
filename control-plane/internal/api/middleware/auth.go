@@ -116,7 +116,17 @@ func (am *AuthMiddleware) Handler(next http.Handler) http.Handler {
 			}
 		}
 
-		next.ServeHTTP(w, r.WithContext(ctx))
+		// An edition's hooks (Pro: one canonical kitchen name, the intent record of a decision) see the
+		// request only now, when who made it and which kitchen it is for have been settled.
+		r, err = pkgmw.RunAfterAuth(r.WithContext(ctx), identity)
+		if err != nil {
+			status, code, message := pkgmw.AfterAuthStatus(err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			json.NewEncoder(w).Encode(map[string]string{"error": code, "message": message})
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

@@ -88,8 +88,15 @@ func checkLength(step *models.Step, deadline, now time.Time) error {
 	return nil
 }
 
-// waiters holds, for each wait step that is waiting, the channel that ends it early.
+// waiters holds, for each wait step that is waiting, the channel that ends it early and the kitchen the
+// run belongs to: a release names its kitchen, so one kitchen's people cannot end another's wait by
+// guessing a run id.
 type waiters struct{ m sync.Map }
+
+type waiter struct {
+	release chan struct{}
+	kitchen string
+}
 
 func waitKey(runID, step string) string { return runID + ":" + step }
 
@@ -107,7 +114,7 @@ func (e *Engine) executeWait(ctx context.Context, run *models.RecipeRun, step *m
 
 	release := make(chan struct{}, 1)
 	key := waitKey(run.ID, step.Name)
-	e.waits.m.Store(key, release)
+	e.waits.m.Store(key, waiter{release: release, kitchen: run.Kitchen})
 	defer e.waits.m.Delete(key)
 
 	released := false
@@ -143,14 +150,19 @@ func (e *Engine) executeWait(ctx context.Context, run *models.RecipeRun, step *m
 	return nil
 }
 
-// ReleaseWait ends a wait step early. It reports false when that step is not waiting.
-func (e *Engine) ReleaseWait(runID, stepName string) bool {
+// ReleaseWait ends a wait step early. It reports false when that step is not waiting, and when the run
+// belongs to another kitchen than the one named.
+func (e *Engine) ReleaseWait(kitchen, runID, stepName string) bool {
 	v, ok := e.waits.m.Load(waitKey(runID, stepName))
 	if !ok {
 		return false
 	}
+	w := v.(waiter)
+	if w.kitchen != kitchen {
+		return false
+	}
 	select {
-	case v.(chan struct{}) <- struct{}{}:
+	case w.release <- struct{}{}:
 	default: // already released
 	}
 	return true

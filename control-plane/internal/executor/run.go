@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -511,10 +512,15 @@ func (e *Executor) RunState(ctx context.Context, kitchen, traceID string) (*Jour
 	}
 	js, err := e.journal.Load(ctx, traceID)
 	if err != nil {
-		return nil, fmt.Errorf("executor: run %s not found", traceID)
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrRunNotFound) {
+			return nil, fmt.Errorf("executor: run %s not found: %w", traceID, ErrNoSuchRun)
+		}
+		// Anything else (a journal that cannot be read) is not "no such run": a caller that must not
+		// decide blind (a signed decision) has to tell the two apart.
+		return nil, fmt.Errorf("executor: could not read run %s: %w", traceID, err)
 	}
 	if js.Header.Kitchen != kitchen {
-		return nil, fmt.Errorf("executor: run %s not found", traceID)
+		return nil, fmt.Errorf("executor: run %s not found: %w", traceID, ErrNoSuchRun)
 	}
 	return js, nil
 }

@@ -752,7 +752,7 @@ func (j *FileJournal) readAll(traceID string) ([]journalRecord, error) {
 	f, err := os.Open(j.path(traceID))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("journal: no run found for trace %s", traceID)
+			return nil, fmt.Errorf("journal: no run found for trace %s: %w", traceID, ErrRunNotFound)
 		}
 		return nil, err
 	}

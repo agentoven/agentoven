@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/agentoven/agentoven/control-plane/internal/api/middleware"
@@ -207,9 +208,21 @@ func (h *Handlers) describeRun(gate string) contracts.DecisionDescriber {
 }
 
 func (h *Handlers) describeRecipeGate(ctx context.Context, kitchen, gateKey string, _ map[string]interface{}) (*contracts.DecisionSubject, error) {
+	notFound := fmt.Errorf("no gate %q in this kitchen", gateKey)
 	rec, err := h.Store.GetApproval(ctx, gateKey)
-	if err != nil || rec == nil || rec.Kitchen != "" && rec.Kitchen != kitchen {
-		return nil, fmt.Errorf("no gate %q in this kitchen", gateKey)
+	if err != nil || rec == nil {
+		return nil, notFound
+	}
+	// A gate belongs to the kitchen of its record, or when the record names none, of its run. A record
+	// that names no kitchen is the default kitchen's, never every kitchen's.
+	owner := rec.Kitchen
+	if owner == "" {
+		if run, rerr := h.Store.GetRecipeRun(ctx, rec.RunID); rerr == nil && run != nil {
+			owner = run.Kitchen
+		}
+	}
+	if !ownedBy(owner, kitchen) {
+		return nil, notFound
 	}
 	if rec.Status != "pending" && rec.Status != "waiting" {
 		return nil, fmt.Errorf("gate %q is %s, not pending", gateKey, rec.Status)
@@ -282,13 +295,50 @@ func (h *Handlers) stepApprovers(ctx context.Context, rec *models.ApprovalRecord
 	return nil
 }
 
+// waitingStep returns the wait step of a run that is waiting now, only if the run belongs to this
+// kitchen. A run of another kitchen, a run with no kitchen recorded and a step that is not waiting are
+// all "not found": which of them it is does not leave the kitchen.
+func (h *Handlers) waitingStep(ctx context.Context, kitchen, runID, stepName string) (*models.RecipeRun, *models.StepResult, error) {
+	notFound := fmt.Errorf("no waiting step %q of run %q in this kitchen", stepName, runID)
+	if h.Store == nil || kitchen == "" {
+		return nil, nil, notFound
+	}
+	run, err := h.Store.GetRecipeRun(ctx, runID)
+	if err != nil || run == nil || !ownedBy(run.Kitchen, kitchen) {
+		return nil, nil, notFound
+	}
+	for i := range run.StepResults {
+		if r := &run.StepResults[i]; r.StepName == stepName && r.Status == "waiting" {
+			return run, r, nil
+		}
+	}
+	return nil, nil, notFound
+}
+
 func (h *Handlers) describeWaitRelease(ctx context.Context, kitchen, key string, _ map[string]interface{}) (*contracts.DecisionSubject, error) {
+	runID, step, ok := strings.Cut(key, ":")
+	if !ok {
+		return nil, fmt.Errorf("a wait is identified as <run id>:<step>")
+	}
+	run, res, err := h.waitingStep(ctx, kitchen, runID, step)
+	if err != nil {
+		return nil, err
+	}
+	wake := ""
+	if res.WakeAt != nil {
+		wake = res.WakeAt.UTC().Format("2006-01-02T15:04:05.000000Z")
+	}
 	return &contracts.DecisionSubject{
 		Gate: contracts.GateWaitRelease, RecordID: key, Kitchen: kitchen,
-		Digest:   contracts.DigestOf(map[string]interface{}{"gate": contracts.GateWaitRelease, "kitchen": kitchen, "wait": key}),
-		Title:    "Release a waiting step",
-		Display:  map[string]interface{}{"wait": key},
-		Meanings: []string{contracts.MeaningApproved},
+		Digest: contracts.DigestOf(map[string]interface{}{
+			"gate": contracts.GateWaitRelease, "kitchen": kitchen, "run": run.ID, "recipe": run.RecipeID, "step": step,
+			"started_at": res.StartedAt.UTC().Format("2006-01-02T15:04:05.000000Z"), "wakes_at": wake,
+		}),
+		Title:     "Release the waiting step " + step + " of run " + run.ID,
+		Display:   map[string]interface{}{"run": run.ID, "recipe": run.RecipeID, "step": step, "wakes_at": res.WakeAt},
+		Requester: run.TriggeredBy,
+		Scope:     step,
+		Meanings:  []string{contracts.MeaningApproved},
 	}, nil
 }
 
@@ -323,7 +373,18 @@ func skillDigest(s *models.Skill) string { return contracts.DigestOf(s.Manifest)
 func (h *Handlers) signRunDecision(w http.ResponseWriter, r *http.Request, kitchen, traceID string, d *executor.ResumeDecision) (*contracts.SignedDecision, bool) {
 	js, err := h.Executor.RunState(r.Context(), kitchen, traceID)
 	if err != nil {
-		return nil, true // not found and the like: the resume path answers it
+		// With a signer installed a run whose state cannot be read is not decided: proceeding would let the
+		// decision through unsigned if the resume path then reads it. Not found stays a 404.
+		if h.DecisionSigner == nil {
+			return nil, true
+		}
+		if errors.Is(err, executor.ErrNoSuchRun) {
+			respondError(w, http.StatusNotFound, err.Error())
+		} else {
+			log.Error().Err(err).Str("run", traceID).Msg("signing: could not read the state of a run")
+			respondError(w, http.StatusServiceUnavailable, "could not read the state of this run, try again")
+		}
+		return nil, false
 	}
 	gate := gateOfRun(js)
 	if gate == "" {
