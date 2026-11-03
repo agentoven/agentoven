@@ -775,7 +775,13 @@ func (mr *ModelRouter) RouteStream(ctx context.Context, req *models.RouteRequest
 		if sd, ok := driver.(StreamingProviderDriver); ok {
 			// A streamed call is held to the same spend gate as any other: refused before it goes
 			// out, charged with the usage its last chunk reports.
-			endSpend, serr := mr.spendBegin(ctx, &provider, req)
+			sreq, derr := mr.withDocuments(ctx, &provider, req)
+			if derr != nil {
+				// The file, not the provider, is the problem: the next provider would refuse it too.
+				lastErr = derr
+				break
+			}
+			endSpend, serr := mr.spendBegin(ctx, &provider, sreq)
 			if serr != nil {
 				lastErr = serr
 				if refusalCoversAllProviders(serr) {
@@ -785,7 +791,7 @@ func (mr *ModelRouter) RouteStream(ctx context.Context, req *models.RouteRequest
 			}
 			var streamed *models.TokenUsage
 			received := 0 // characters of text, thinking and tool arguments the caller was sent
-			err := sd.StreamCall(ctx, &provider, req, func(c *models.StreamChunk) error {
+			err := sd.StreamCall(ctx, &provider, sreq, func(c *models.StreamChunk) error {
 				if c != nil {
 					if c.Usage != nil {
 						streamed = c.Usage
@@ -800,7 +806,7 @@ func (mr *ModelRouter) RouteStream(ctx context.Context, req *models.RouteRequest
 			// Whatever ended the stream, what was generated up to then was billed by the provider, so it
 			// is charged: an error half-way, or a client that read the answer and dropped the connection
 			// before the usage chunk, must not spend for free. A stream that produced nothing is released.
-			endSpend(mr.streamCharge(&provider, req, streamed, received))
+			endSpend(mr.streamCharge(&provider, sreq, streamed, received))
 			if err != nil {
 				log.Warn().Str("provider", provider.Name).Err(err).Msg("Streaming call failed, trying next")
 				lastErr = err
@@ -951,11 +957,18 @@ func (mr *ModelRouter) callProvider(ctx context.Context, provider *models.ModelP
 		return cached, nil
 	}
 
-	endSpend, err := mr.spendBegin(ctx, provider, &driverReq)
+	// Attached Word, Excel, HTML and similar files become text before the size of the call is
+	// reserved or the call is sent. The cache above and below is keyed on the request as the caller
+	// wrote it (a blob ref names the same bytes every time), not on the text read from it.
+	callReq, err := mr.withDocuments(ctx, provider, &driverReq)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := driver.Call(ctx, provider, &driverReq)
+	endSpend, err := mr.spendBegin(ctx, provider, callReq)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := driver.Call(ctx, provider, callReq)
 	if err != nil {
 		endSpend(nil)
 		return nil, err

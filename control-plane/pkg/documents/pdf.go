@@ -33,18 +33,45 @@ func PDFText(data []byte) (string, error) {
 
 // readPDFPages returns the text of up to maxPages pages and the page count of the file. The PDF
 // library panics on some damaged files, so any panic is returned as an error: a hostile upload
-// must not take the server down.
-func readPDFPages(ctx context.Context, data []byte, maxPages int) (pages []string, total int, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			pages, total, err = nil, 0, fmt.Errorf("documents: not a readable PDF: %v", r)
-		}
+// must not take the server down. Streams that would expand beyond a budget are refused first.
+func readPDFPages(ctx context.Context, data []byte, maxPages int) ([]string, int, error) {
+	if err := checkInflation(data); err != nil {
+		return nil, 0, err
+	}
+	type result struct {
+		pages []string
+		total int
+		err   error
+	}
+	// The library cannot be interrupted, so it runs on its own goroutine and the caller stops waiting
+	// when its context ends. A file that makes the library loop forever leaves that goroutine behind;
+	// process isolation is the real answer (ADR-0039, "Not done").
+	done := make(chan result, 1)
+	go func() {
+		var r result
+		defer func() {
+			if rec := recover(); rec != nil {
+				r = result{err: fmt.Errorf("documents: not a readable PDF: %v", rec)}
+			}
+			done <- r
+		}()
+		r.pages, r.total, r.err = pdfPages(ctx, data, maxPages)
 	}()
+	select {
+	case r := <-done:
+		return r.pages, r.total, r.err
+	case <-ctx.Done():
+		return nil, 0, ctx.Err()
+	}
+}
+
+func pdfPages(ctx context.Context, data []byte, maxPages int) ([]string, int, error) {
 	r, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil, 0, fmt.Errorf("documents: not a readable PDF: %w", err)
 	}
-	total = r.NumPage()
+	total := r.NumPage()
+	var pages []string
 	for i := 1; i <= total && i <= maxPages; i++ {
 		if err := ctx.Err(); err != nil {
 			return nil, 0, err

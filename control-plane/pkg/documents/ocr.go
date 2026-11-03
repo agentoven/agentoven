@@ -285,7 +285,7 @@ func (o *ocrRun) transcribe(ctx context.Context, page int, img scanImage, provid
 		Messages:       []models.ChatMessage{{Role: "system", Content: ocrSystemPrompt}, user},
 	})
 	if err != nil {
-		return "", false, err
+		return "", false, &ProviderError{Err: err}
 	}
 	addUsage(&o.res.Usage, resp.Usage)
 	if o.res.Model == "" && pass == "primary" {

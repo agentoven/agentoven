@@ -617,27 +617,20 @@ func uploadOpenAIFile(ctx context.Context, client *http.Client, endpoint, apiKey
 // document's text is extracted in-process and sent as an ordinary text part,
 // labelled so the model knows where it came from.
 func (mr *ModelRouter) documentFallbackText(ctx context.Context, p models.ContentPart) (string, error) {
-	r, err := mr.resolveMedia(ctx, p.Media)
+	raw, err := mr.mediaBytes(ctx, p.Media)
 	if err != nil {
 		return "", err
 	}
-	if r.url != "" && r.b64 == "" {
-		return "", mediaErrorf("this model cannot read PDFs natively and the PDF is only available by URL; attach it inline or by blob_ref so its text can be extracted")
-	}
-	raw, err := base64.StdEncoding.DecodeString(r.b64)
-	if err != nil {
-		return "", mediaErrorf("pdf data is not valid base64: %v", err)
-	}
-	text, err := documents.PDFText(raw)
+	res, err := documents.Extract(ctx, documents.FormatPDF, raw, documents.Limits{})
 	if err != nil {
 		return "", &MediaError{msg: err.Error()}
 	}
-	if strings.TrimSpace(text) == "" {
+	if len(res.Blocks) == 0 {
 		// A scanned PDF has no text layer. Sending an empty document would make the
 		// model answer as if the file were blank, so say so instead.
-		return "", mediaErrorf("%s has no extractable text (it may be a scan) and this model cannot read PDFs natively; use a model with PDF input", nonEmpty(r.name, "the PDF"))
+		return "", mediaErrorf("%s has no extractable text (it may be a scan) and this model cannot read PDFs natively; use a model with PDF input, or read it first with POST /api/v1/documents/ocr", nonEmpty(p.Media.Name, "the PDF"))
 	}
-	return fmt.Sprintf("[Document: %s]\n%s", nonEmpty(r.name, "document.pdf"), text), nil
+	return res.Render(nonEmpty(p.Media.Name, "document.pdf"), 0), nil
 }
 
 // anthropicFileID uploads a blob-backed PDF to the Anthropic Files API once and

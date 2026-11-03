@@ -13,13 +13,13 @@ import (
 func (r *Result) Text(maxBytes int) string {
 	var b strings.Builder
 	lastPage := 0
-	prevList := false
+	prevList, afterLabel := false, false
 	for _, blk := range r.Blocks {
 		if blk.Page > 0 && blk.Page != lastPage {
 			lastPage = blk.Page
 			sep(&b, false)
 			fmt.Fprintf(&b, "[Page %d]", blk.Page)
-			prevList = false
+			prevList, afterLabel = false, true // the page's first block follows its label on the next line
 		}
 		switch blk.Kind {
 		case "heading":
@@ -46,10 +46,11 @@ func (r *Result) Text(maxBytes int) string {
 			renderTable(&b, blk.Table)
 			prevList = false
 		default:
-			sep(&b, false)
+			sep(&b, afterLabel)
 			b.WriteString(blk.Text)
 			prevList = false
 		}
+		afterLabel = false
 	}
 	out := b.String()
 	if maxBytes > 0 && len(out) > maxBytes {
@@ -129,4 +130,52 @@ func padTo(cells []string, n int) []string {
 		cells = append(cells, "")
 	}
 	return cells
+}
+
+// PageTexts is the document's rendered text split by page: one entry per PDF page that has text,
+// or a single entry (page 0) for a document without pages. It is the text a model is shown, split
+// where quotes are checked against pages (see ExtractFields).
+func (r *Result) PageTexts() []PageText {
+	paged := false
+	for _, b := range r.Blocks {
+		if b.Page > 0 {
+			paged = true
+			break
+		}
+	}
+	if !paged {
+		if t := r.Text(0); t != "" {
+			return []PageText{{Text: t}}
+		}
+		return nil
+	}
+	var out []PageText
+	var group []Block
+	flush := func() {
+		if len(group) == 0 {
+			return
+		}
+		sub := Result{Blocks: group}
+		out = append(out, PageText{Page: group[0].Page, Text: sub.bodyWithoutLabels()})
+		group = nil
+	}
+	for _, b := range r.Blocks {
+		if len(group) > 0 && group[0].Page != b.Page {
+			flush()
+		}
+		group = append(group, b)
+	}
+	flush()
+	return out
+}
+
+// bodyWithoutLabels renders blocks the way Text does but without the "[Page N]" line, because the
+// page number is carried separately.
+func (r *Result) bodyWithoutLabels() string {
+	stripped := make([]Block, len(r.Blocks))
+	copy(stripped, r.Blocks)
+	for i := range stripped {
+		stripped[i].Page = 0
+	}
+	return (&Result{Blocks: stripped}).Text(0)
 }

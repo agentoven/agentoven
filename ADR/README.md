@@ -83,3 +83,5 @@ What other options were evaluated and why were they rejected?
 | [0036](0036-agent-draft-edits-fencing-and-public-trace-views.md) | Draft edits, fingerprint rules, lease fencing and public views of trace content — fixes from the 2026-11-03 adversarial review | Accepted | 2026-11-03 |
 | [0037](0037-tool-egress-guard-store-errors-and-sdk-route-contract.md) | Tool egress guard, store errors, retired agents and the SDK route contract — fixes from the 2026-11-03 adversarial review | Accepted | 2026-11-03 |
 | [0038](0038-after-authentication-hook-and-kitchen-scoped-waits.md) | After-authentication hook, kitchen-scoped wait release, signed run decisions that do not proceed blind, decision routes in `pkg/contracts` | Accepted (built 2026-11-03) | 2026-11-03 |
+| [0039](0039-document-intelligence.md) | Document intelligence: in-process reading of Office and text files, OCR through the router, grounded field extraction | Accepted (built 2026-11-03) | 2026-11-03 |
+| [0040](0040-round-2-residuals-2026-11-03.md) | Round 2 residuals: tool authentication shapes, channel signing secrets, signed notes, kitchen-required stores | Accepted (built 2026-11-03) | 2026-11-03 |

@@ -202,6 +202,16 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 			r.Delete("/{ref}", h.DeleteBlob)
 		})
 
+		// Documents — read a file into text with its structure (extract: no model), transcribe a
+		// scan (ocr) or read schema fields with their source quotes (fields) through the kitchen's
+		// own provider. Kitchen-scoped like blobs; ocr and fields spend the kitchen's money.
+		r.Route("/documents", func(r chi.Router) {
+			r.Use(middleware.RequireIdentity)
+			r.Post("/extract", h.ExtractDocument)
+			r.Post("/ocr", h.OCRDocument)
+			r.Post("/fields", h.ExtractDocumentFields)
+		})
+
 		// Model Router
 		r.Route("/models", func(r chi.Router) {
 			r.Post("/route", h.RouteModel)

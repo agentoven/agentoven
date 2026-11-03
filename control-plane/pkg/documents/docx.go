@@ -41,7 +41,7 @@ func extractDOCX(ctx context.Context, data []byte, lim Limits) (*Result, error) 
 	defer rc.Close()
 
 	res := &Result{}
-	w := &docxWalker{x: newXML(ctx, rc, lim.MaxXMLDepth), styles: styles, c: newCollector(res, lim)}
+	w := &docxWalker{x: newXML(ctx, rc, lim.MaxXMLDepth), styles: styles, c: newCollector(res, lim), tableMax: 4 * lim.MaxTextBytes}
 	w.emit = func(p docxPara) { w.c.text(Block{Kind: p.kind(), Level: p.level, Text: p.text}) }
 	for {
 		tok, err := w.x.next()
@@ -61,6 +61,7 @@ func extractDOCX(ctx context.Context, data []byte, lim Limits) (*Result, error) 
 			rerr = w.paragraph(w.emit)
 		case "tbl":
 			var rows [][]string
+			w.tableBytes = 0
 			if rows, rerr = w.table(); rerr == nil {
 				w.c.table(Block{Kind: "table", Table: &Table{Rows: rows}})
 			}
@@ -71,6 +72,7 @@ func extractDOCX(ctx context.Context, data []byte, lim Limits) (*Result, error) 
 			rerr = errEnough
 		}
 		if errors.Is(rerr, errEnough) {
+			w.c.stop() // a table past the working budget stops the read as a spent text budget does
 			break
 		}
 		if rerr != nil {
@@ -92,6 +94,9 @@ type docxWalker struct {
 	styles map[string]string // style id -> lower-case style name
 	c      *collector
 	emit   func(docxPara)
+	// tableBytes counts the cell text of the table being read: a table is held whole before it is
+	// handed to the collector, so it needs a bound of its own.
+	tableBytes, tableMax int
 }
 
 type docxPara struct {
@@ -383,7 +388,11 @@ func (w *docxWalker) tableCell() (string, int, error) {
 			depth--
 		}
 	}
-	return strings.Join(lines, "\n"), span, nil
+	cell := strings.Join(lines, "\n")
+	if w.tableBytes += len(cell); w.tableBytes > w.tableMax {
+		return "", 0, errEnough
+	}
+	return cell, span, nil
 }
 
 // loadStyleNames maps style ids to their lower-case names, so that a heading is found by what the

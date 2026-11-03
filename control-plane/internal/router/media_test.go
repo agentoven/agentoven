@@ -297,7 +297,7 @@ func TestPDFFallsBackToExtractedTextForModelsWithoutPDFSupport(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, _ := json.Marshal(got)
-	if !strings.Contains(string(b), "Refund policy thirty days") || !strings.Contains(string(b), "[Document: policy.pdf]") {
+	if !strings.Contains(string(b), "Refund policy thirty days") || !strings.Contains(string(b), "[Attached file: policy.pdf (pdf)") {
 		t.Fatalf("expected the PDF text as a labelled text part, got %s", b)
 	}
 	if strings.Contains(string(b), `"type":"file"`) {

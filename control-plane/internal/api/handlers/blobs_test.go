@@ -90,11 +90,14 @@ func TestUploadRawAndMultipartReturnABlobRef(t *testing.T) {
 func TestUploadRefusesWhatIsNotMediaAndWhatIsTooBig(t *testing.T) {
 	e := newMMEnv(t, "openai", "gpt-4o")
 
-	if rec := e.uploadRaw("default", "text/html", "", []byte("<script>alert(1)</script>")); rec.Code != http.StatusUnsupportedMediaType {
-		t.Fatalf("HTML is not media: %d", rec.Code)
+	if rec := e.uploadRaw("default", "application/x-msdownload", "", []byte("MZ not media")); rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("an executable is not media: %d", rec.Code)
 	}
-	if rec := e.uploadRaw("default", "application/octet-stream", "", []byte("just some text bytes")); rec.Code != http.StatusUnsupportedMediaType {
-		t.Fatalf("sniffed text is not media: %d", rec.Code)
+	if rec := e.uploadRaw("default", "application/octet-stream", "", []byte{0x7f, 'E', 'L', 'F', 0, 1, 2, 3}); rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("sniffed binary is not media: %d", rec.Code)
+	}
+	if rec := e.uploadRaw("default", "application/octet-stream", "?name=old.doc", []byte{0xd0, 0xcf, 0x11, 0xe0, 1, 2, 3, 4}); rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("a legacy .doc is not readable: %d", rec.Code)
 	}
 	if rec := e.uploadRaw("default", "image/png", "", nil); rec.Code != http.StatusBadRequest {
 		t.Fatalf("empty upload: %d", rec.Code)

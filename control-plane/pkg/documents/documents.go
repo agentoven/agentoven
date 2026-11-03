@@ -70,6 +70,31 @@ func IsOfficeOrText(mimeType, name string) bool {
 	return ok && f != FormatPDF && f != FormatImage
 }
 
+// MimeOf is the canonical MIME type of a format ("" for an image, which has many).
+func MimeOf(f Format) string {
+	switch f {
+	case FormatDOCX:
+		return mimeDOCX
+	case FormatXLSX:
+		return mimeXLSX
+	case FormatHTML:
+		return "text/html"
+	case FormatCSV:
+		return "text/csv"
+	case FormatTSV:
+		return "text/tab-separated-values"
+	case FormatMarkdown:
+		return "text/markdown"
+	case FormatRTF:
+		return "application/rtf"
+	case FormatPDF:
+		return "application/pdf"
+	case FormatText:
+		return "text/plain"
+	}
+	return ""
+}
+
 func normalizeMime(m string) string {
 	m = strings.TrimSpace(m)
 	if m == "" {
@@ -137,6 +162,14 @@ func formatOfExt(name string) (Format, bool) {
 	}
 	return "", false
 }
+
+// ProviderError is a failure of a model call made for OCR or field extraction (the router refused it,
+// the provider failed, or its answer was unusable), as opposed to a problem with the document or the
+// request. It unwraps to the router's error, so a refused budget is still errors.Is(models.ErrSpendRefused).
+type ProviderError struct{ Err error }
+
+func (e *ProviderError) Error() string { return e.Err.Error() }
+func (e *ProviderError) Unwrap() error { return e.Err }
 
 // Limits bound what one extraction may cost. A zero field takes its default (see DefaultLimits), so
 // a caller sets only what it wants tighter.

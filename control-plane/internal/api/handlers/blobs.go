@@ -11,6 +11,7 @@ import (
 
 	"github.com/agentoven/agentoven/control-plane/internal/api/middleware"
 	"github.com/agentoven/agentoven/control-plane/pkg/blobstore"
+	"github.com/agentoven/agentoven/control-plane/pkg/documents"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/go-chi/chi/v5"
 )
@@ -25,10 +26,24 @@ import (
 // answer as for a ref that never existed, so a ref is not a credential and its existence cannot
 // be probed. The size limit is AGENTOVEN_BLOB_MAX_BYTES (default 25 MB).
 
-// blobMimeAllowed is what the harness can hand a model: images, audio, video and PDF. Anything
-// else is not media and is refused rather than stored for no purpose.
+// blobMimeAllowed is what the harness can hand a model: images, audio, video, PDF, and the documents
+// it reads into text before the call (pkg/documents). Anything else is not media and is refused
+// rather than stored for no purpose.
 func blobMimeAllowed(m string) bool {
-	return strings.HasPrefix(m, "image/") || strings.HasPrefix(m, "audio/") || strings.HasPrefix(m, "video/") || m == "application/pdf"
+	return strings.HasPrefix(m, "image/") || strings.HasPrefix(m, "audio/") || strings.HasPrefix(m, "video/") || documents.IsTextExtractable(m, "")
+}
+
+// documentMime settles the type of an upload whose declared type says little (none, octet-stream, a
+// zip, plain text): a docx arrives as application/zip from many clients, and a .csv as text/plain.
+// The file name's extension is better evidence then. A specific declared type is kept.
+func documentMime(declared, name string) string {
+	switch declared {
+	case "", "application/octet-stream", "application/zip", "text/plain":
+		if f, ok := documents.Detect("", name); ok && f != documents.FormatImage {
+			return documents.MimeOf(f)
+		}
+	}
+	return declared
 }
 
 func (h *Handlers) blobStore(w http.ResponseWriter) blobstore.Store {
@@ -39,19 +54,11 @@ func (h *Handlers) blobStore(w http.ResponseWriter) blobstore.Store {
 	return h.Router.Blobs()
 }
 
-// UploadBlob handles POST /api/v1/blobs.
-func (h *Handlers) UploadBlob(w http.ResponseWriter, r *http.Request) {
-	store := h.blobStore(w)
-	if store == nil {
-		return
-	}
-	kitchen := middleware.GetKitchen(r.Context())
-	limit := blobstore.MaxBytesFromEnv()
-
-	var data []byte
-	var mimeType, name string
+// readUpload reads one file from a multipart body (field "file", optional "name") or a raw body
+// (name from ?name= or X-Filename), at most limit bytes. It has written the error response when ok
+// is false. The mime type is the declared one, or sniffed when none was declared.
+func (h *Handlers) readUpload(w http.ResponseWriter, r *http.Request, limit int64) (data []byte, mimeType, name string, ok bool) {
 	var err error
-
 	ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if ct == "multipart/form-data" {
 		// Allow for the multipart framing around the file itself.
@@ -59,7 +66,7 @@ func (h *Handlers) UploadBlob(w http.ResponseWriter, r *http.Request) {
 		mr, merr := r.MultipartReader()
 		if merr != nil {
 			respondError(w, http.StatusBadRequest, "invalid multipart body: "+merr.Error())
-			return
+			return nil, "", "", false
 		}
 		for {
 			part, perr := mr.NextPart()
@@ -68,7 +75,7 @@ func (h *Handlers) UploadBlob(w http.ResponseWriter, r *http.Request) {
 			}
 			if perr != nil {
 				h.blobReadError(w, perr)
-				return
+				return nil, "", "", false
 			}
 			switch part.FormName() {
 			case "name":
@@ -77,7 +84,7 @@ func (h *Handlers) UploadBlob(w http.ResponseWriter, r *http.Request) {
 			case "file":
 				if data != nil {
 					respondError(w, http.StatusBadRequest, "send one file per upload")
-					return
+					return nil, "", "", false
 				}
 				if name == "" {
 					name = filepath.Base(part.FileName())
@@ -86,20 +93,20 @@ func (h *Handlers) UploadBlob(w http.ResponseWriter, r *http.Request) {
 				data, err = io.ReadAll(io.LimitReader(part, limit+1))
 				if err != nil {
 					h.blobReadError(w, err)
-					return
+					return nil, "", "", false
 				}
 			}
 		}
 		if data == nil {
 			respondError(w, http.StatusBadRequest, `multipart upload needs a "file" field`)
-			return
+			return nil, "", "", false
 		}
 	} else {
 		r.Body = http.MaxBytesReader(w, r.Body, limit+1)
 		data, err = io.ReadAll(r.Body)
 		if err != nil {
 			h.blobReadError(w, err)
-			return
+			return nil, "", "", false
 		}
 		mimeType = ct
 		name = firstNonEmpty(r.URL.Query().Get("name"), r.Header.Get("X-Filename"))
@@ -107,22 +114,36 @@ func (h *Handlers) UploadBlob(w http.ResponseWriter, r *http.Request) {
 
 	if int64(len(data)) > limit {
 		respondError(w, http.StatusRequestEntityTooLarge, "the file is larger than the upload limit of "+strconv.FormatInt(limit, 10)+" bytes")
-		return
+		return nil, "", "", false
 	}
 	if len(data) == 0 {
 		respondError(w, http.StatusBadRequest, "the file is empty")
-		return
+		return nil, "", "", false
 	}
 	if mimeType == "" || mimeType == "application/octet-stream" {
 		mimeType, _, _ = mime.ParseMediaType(http.DetectContentType(data))
 	}
-	if !blobMimeAllowed(mimeType) {
-		respondError(w, http.StatusUnsupportedMediaType, "only images, audio, video and PDF can be uploaded (got "+mimeType+")")
-		return
-	}
 	name = filepath.Base(strings.ReplaceAll(name, "\\", "/"))
 	if name == "." || name == "/" {
 		name = ""
+	}
+	return data, documentMime(mimeType, name), name, true
+}
+
+// UploadBlob handles POST /api/v1/blobs.
+func (h *Handlers) UploadBlob(w http.ResponseWriter, r *http.Request) {
+	store := h.blobStore(w)
+	if store == nil {
+		return
+	}
+	kitchen := middleware.GetKitchen(r.Context())
+	data, mimeType, name, ok := h.readUpload(w, r, blobstore.MaxBytesFromEnv())
+	if !ok {
+		return
+	}
+	if !blobMimeAllowed(mimeType) {
+		respondError(w, http.StatusUnsupportedMediaType, "only images, audio, video, PDF and documents (docx, xlsx, html, csv, tsv, markdown, rtf, text) can be uploaded (got "+mimeType+")")
+		return
 	}
 
 	ref, err := store.Put(r.Context(), kitchen, mimeType, name, data)

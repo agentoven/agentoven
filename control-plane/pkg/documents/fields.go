@@ -236,12 +236,12 @@ func ExtractFields(ctx context.Context, r Router, opts FieldsOptions) (*FieldsRe
 		},
 	})
 	if err != nil {
-		return nil, err
+		return nil, &ProviderError{Err: err}
 	}
 	res.Model, res.Usage = resp.Model, resp.Usage
 	answers, err := parseFieldAnswers(resp.Content)
 	if err != nil {
-		return nil, fmt.Errorf("documents: the model's answer was not the requested JSON (%v)", err)
+		return nil, &ProviderError{Err: fmt.Errorf("the model's answer was not the requested JSON (%v)", err)}
 	}
 	verify := newVerifier(opts.Pages)
 	res.AllGrounded = true
@@ -282,6 +282,8 @@ func fieldsPrompt(specs []fieldSpec, instructions, text string) string {
 	if strings.TrimSpace(instructions) != "" {
 		b.WriteString("\nAdditional instructions from the operator:\n" + cutRunes(instructions, 2000) + "\n")
 	}
+	// The markers cannot be forged from inside the document.
+	text = strings.NewReplacer("<<<DOCUMENT", "<<DOCUMENT", "DOCUMENT>>>", "DOCUMENT>>").Replace(text)
 	b.WriteString("\nThe document follows between the markers.\n<<<DOCUMENT\n" + text + "DOCUMENT>>>")
 	return b.String()
 }

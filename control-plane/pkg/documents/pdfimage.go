@@ -2,7 +2,9 @@ package documents
 
 import (
 	"bytes"
+	"compress/zlib"
 	"fmt"
+	"io"
 	"regexp"
 	"strconv"
 
@@ -68,20 +70,33 @@ type rawJPEG struct {
 
 var (
 	reDCT    = regexp.MustCompile(`/DCTDecode`)
+	reFlate  = regexp.MustCompile(`/FlateDecode`)
 	reImage  = regexp.MustCompile(`/Subtype\s*/Image`)
 	reWidth  = regexp.MustCompile(`/Width\s+(\d+)`)
 	reHeight = regexp.MustCompile(`/Height\s+(\d+)`)
 	reLength = regexp.MustCompile(`/Length\s+(\d+)(\s+\d+\s+R)?`)
 )
 
-// rawJPEGs scans the file for image objects stored as DCTDecode and returns their streams, in file
-// order, at most max of them.
-func rawJPEGs(data []byte, max int) []rawJPEG {
-	var out []rawJPEG
-	for pos := 0; len(out) < max; {
+// maxUnterminatedStreams bounds the streams whose end has to be searched for (no usable /Length):
+// each search can run to the end of the file, so a file made of thousands of them would cost the
+// file's size times their number.
+const maxUnterminatedStreams = 64
+
+// pdfStream is one "stream ... endstream" body in the raw file and the dictionary before it.
+type pdfStream struct {
+	dict []byte
+	body []byte
+}
+
+// scanStreams walks the stream objects of a PDF file in order, without parsing its structure, and
+// calls visit for each (stop when it returns false). It is how the file is looked at before the PDF
+// library reads it (decompression bombs) and how scanned pages are found.
+func scanStreams(data []byte, visit func(pdfStream) bool) {
+	unterminated := 0
+	for pos := 0; ; {
 		i := bytes.Index(data[pos:], []byte("stream"))
 		if i < 0 {
-			break
+			return
 		}
 		at := pos + i
 		pos = at + len("stream")
@@ -97,17 +112,12 @@ func rawJPEGs(data []byte, max int) []rawJPEG {
 		default:
 			continue
 		}
-		winStart := max0(at - 2048)
-		window := data[winStart:at]
+		window := data[max0(at-2048):at]
 		obj := bytes.LastIndex(window, []byte(" obj"))
 		if obj < 0 {
 			continue
 		}
 		dict := window[obj:]
-		if !reDCT.Match(dict) || !reImage.Match(dict) {
-			continue
-		}
-		w, h := intOf(reWidth, dict), intOf(reHeight, dict)
 		length := int64(-1)
 		if m := reLength.FindSubmatch(dict); m != nil && m[2] == nil {
 			length, _ = strconv.ParseInt(string(m[1]), 10, 64)
@@ -115,19 +125,67 @@ func rawJPEGs(data []byte, max int) []rawJPEG {
 		end := -1
 		if length > 0 && start+int(length) <= len(data) && bytes.Contains(data[start+int(length):min(len(data), start+int(length)+32)], []byte("endstream")) {
 			end = start + int(length)
-		} else if e := bytes.Index(data[start:], []byte("endstream")); e >= 0 {
-			end = start + e
-			for end > start && (data[end-1] == '\n' || data[end-1] == '\r') {
-				end--
+		} else {
+			if unterminated++; unterminated > maxUnterminatedStreams {
+				return
+			}
+			if e := bytes.Index(data[start:], []byte("endstream")); e >= 0 {
+				end = start + e
+				for end > start && (data[end-1] == '\n' || data[end-1] == '\r') {
+					end--
+				}
 			}
 		}
-		if end < 0 || end-start < 4 || data[start] != 0xff || data[start+1] != 0xd8 {
+		if end < 0 {
 			continue
 		}
-		out = append(out, rawJPEG{w: w, h: h, length: int64(end - start), data: data[start:end]})
+		if !visit(pdfStream{dict: dict, body: data[start:end]}) {
+			return
+		}
 		pos = end
 	}
+}
+
+// rawJPEGs returns the image objects stored as DCTDecode, in file order, at most max of them.
+func rawJPEGs(data []byte, max int) []rawJPEG {
+	var out []rawJPEG
+	scanStreams(data, func(s pdfStream) bool {
+		if reDCT.Match(s.dict) && reImage.Match(s.dict) && len(s.body) >= 4 && s.body[0] == 0xff && s.body[1] == 0xd8 {
+			out = append(out, rawJPEG{w: intOf(reWidth, s.dict), h: intOf(reHeight, s.dict), length: int64(len(s.body)), data: s.body})
+		}
+		return len(out) < max
+	})
 	return out
+}
+
+// maxInflatedStream and maxInflatedTotal bound what the streams of one PDF may expand to.
+const (
+	maxInflatedStream = 128 << 20
+	maxInflatedTotal  = 512 << 20
+)
+
+// checkInflation inflates every Flate stream of the file to nowhere, within a budget, before the PDF
+// library reads the file: the library decompresses a page's content into memory without a limit, so a
+// small file that expands to gigabytes would take the process down. A file over the budget is refused.
+func checkInflation(data []byte) error {
+	var total int64
+	var err error
+	scanStreams(data, func(s pdfStream) bool {
+		if !reFlate.Match(s.dict) {
+			return true
+		}
+		zr, zerr := zlib.NewReader(bytes.NewReader(s.body))
+		if zerr != nil {
+			return true // not a stream the library can read either; it reports its own error
+		}
+		n, _ := io.Copy(io.Discard, io.LimitReader(zr, maxInflatedStream+1))
+		if total += n; n > maxInflatedStream || total > maxInflatedTotal {
+			err = fmt.Errorf("%w: a PDF stream expands past %d MB", ErrTooLarge, maxInflatedStream>>20)
+			return false
+		}
+		return true
+	})
+	return err
 }
 
 func max0(n int) int {
