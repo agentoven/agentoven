@@ -177,6 +177,7 @@ func (h *Handlers) describeRun(gate string) contracts.DecisionDescriber {
 			}
 			display["turn"], display["tool_calls"] = turn, calls
 			digest["turn"], digest["tool_calls"] = turn, calls
+			addNote(display, digest, payload)
 		case contracts.GateBudgetExtension:
 			if js.BudgetPause != nil {
 				display["paused_at"] = js.BudgetPause
@@ -186,6 +187,7 @@ func (h *Handlers) describeRun(gate string) contracts.DecisionDescriber {
 				n := normalizeExtension(ext)
 				display["extension"], digest["extension"] = n, n
 			}
+			addNote(display, digest, payload)
 		case contracts.GateResumeGuidance:
 			if js.StallPause != nil {
 				display["stalled_on"] = js.StallPause
@@ -204,6 +206,16 @@ func (h *Handlers) describeRun(gate string) contracts.DecisionDescriber {
 			Scope:     agent,
 			Meanings:  []string{contracts.MeaningApproved, contracts.MeaningRejected},
 		}, nil
+	}
+}
+
+// addNote puts the free-text note of a decision in what is shown and in what is signed. The note is not
+// decoration: on a refusal the model is told "Human denied this tool call: <note>", so a note a person did not
+// sign would be words put in a signer's mouth. An empty note adds nothing, so a decision without one digests as
+// it always did.
+func addNote(display, digest, payload map[string]interface{}) {
+	if note, _ := payload["note"].(string); strings.TrimSpace(note) != "" {
+		display["note"], digest["note"] = note, note
 	}
 }
 
@@ -342,7 +354,7 @@ func (h *Handlers) describeWaitRelease(ctx context.Context, kitchen, key string,
 	}, nil
 }
 
-func (h *Handlers) describeSkill(ctx context.Context, kitchen, name string, _ map[string]interface{}) (*contracts.DecisionSubject, error) {
+func (h *Handlers) describeSkill(ctx context.Context, kitchen, name string, payload map[string]interface{}) (*contracts.DecisionSubject, error) {
 	skill, err := h.Store.GetSkill(ctx, kitchen, name)
 	if err != nil || skill == nil {
 		return nil, fmt.Errorf("no skill %q in this kitchen", name)
@@ -350,16 +362,19 @@ func (h *Handlers) describeSkill(ctx context.Context, kitchen, name string, _ ma
 	if skill.Status != models.SkillStatusNeedsReview {
 		return nil, fmt.Errorf("skill %q is %q, not needs_review", name, skill.Status)
 	}
+	digest := map[string]interface{}{
+		"gate": contracts.GateSkillApproval, "kitchen": kitchen, "skill": skill.Name, "content": skillDigest(skill),
+		"verdict": skill.VerificationVerdict, "reasoning": skill.VerificationReasoning,
+	}
+	display := map[string]interface{}{
+		"skill": skill.Name, "content_digest": skillDigest(skill), "verdict": skill.VerificationVerdict, "analysis": skill.VerificationReasoning,
+	}
+	addNote(display, digest, payload) // the reviewer's note is appended to the skill's analysis, so it is signed
 	return &contracts.DecisionSubject{
 		Gate: contracts.GateSkillApproval, RecordID: name, Kitchen: kitchen,
-		Digest: contracts.DigestOf(map[string]interface{}{
-			"gate": contracts.GateSkillApproval, "kitchen": kitchen, "skill": skill.Name, "content": skillDigest(skill),
-			"verdict": skill.VerificationVerdict, "reasoning": skill.VerificationReasoning,
-		}),
-		Title: "Review skill " + skill.Name,
-		Display: map[string]interface{}{
-			"skill": skill.Name, "content_digest": skillDigest(skill), "verdict": skill.VerificationVerdict, "analysis": skill.VerificationReasoning,
-		},
+		Digest:   contracts.DigestOf(digest),
+		Title:    "Review skill " + skill.Name,
+		Display:  display,
 		Scope:    skill.Name,
 		Meanings: []string{contracts.MeaningApproved, contracts.MeaningRejected},
 	}, nil

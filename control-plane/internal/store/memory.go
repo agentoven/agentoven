@@ -488,11 +488,14 @@ func key(parts ...string) string {
 // ── Agent Store ─────────────────────────────────────────────
 
 func (m *MemoryStore) ListAgents(_ context.Context, kitchen string) ([]models.Agent, error) {
+	if kitchen == "" {
+		return nil, ErrKitchenRequired
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var result []models.Agent
 	for _, a := range m.agents {
-		if a.Kitchen == kitchen || kitchen == "" {
+		if a.Kitchen == kitchen {
 			result = append(result, *a)
 		}
 	}
@@ -703,11 +706,14 @@ func (m *MemoryStore) GetAgentVersion(_ context.Context, kitchen, name, version 
 // ── Recipe Store ────────────────────────────────────────────
 
 func (m *MemoryStore) ListRecipes(_ context.Context, kitchen string) ([]models.Recipe, error) {
+	if kitchen == "" {
+		return nil, ErrKitchenRequired
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var result []models.Recipe
 	for _, r := range m.recipes {
-		if r.Kitchen == kitchen || kitchen == "" {
+		if r.Kitchen == kitchen {
 			result = append(result, *r)
 		}
 	}
@@ -797,11 +803,14 @@ func (m *MemoryStore) DeleteKitchen(_ context.Context, id string) error {
 // ── Trace Store ─────────────────────────────────────────────
 
 func (m *MemoryStore) ListTraces(_ context.Context, kitchen string, limit int) ([]models.Trace, error) {
+	if kitchen == "" {
+		return nil, ErrKitchenRequired
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var result []models.Trace
 	for _, t := range m.traces {
-		if t.Kitchen == kitchen || kitchen == "" {
+		if t.Kitchen == kitchen {
 			result = append(result, *t)
 			if len(result) >= limit {
 				break
@@ -814,7 +823,7 @@ func (m *MemoryStore) ListTraces(_ context.Context, kitchen string, limit int) (
 // matchTrace reports whether a trace satisfies a filter. spans are the trace's own, for the filters that
 // look into them (the model and provider a trace used). Caller holds m.mu.
 func (m *MemoryStore) matchTrace(t *models.Trace, kitchen string, f TraceFilter) bool {
-	if kitchen != "" && t.Kitchen != kitchen {
+	if t.Kitchen != kitchen {
 		return false
 	}
 	if f.AgentName != "" && t.AgentName != f.AgentName {
@@ -907,6 +916,9 @@ func (m *MemoryStore) traceUsed(t *models.Trace, model, provider string) bool {
 }
 
 func (m *MemoryStore) ListTracesFiltered(_ context.Context, kitchen string, filter TraceFilter) ([]models.Trace, error) {
+	if kitchen == "" {
+		return nil, ErrKitchenRequired
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -954,6 +966,9 @@ func sortTraces(ts []models.Trace, by string, asc bool) {
 }
 
 func (m *MemoryStore) TraceStats(_ context.Context, kitchen string, filter TraceFilter) (models.TraceStats, error) {
+	if kitchen == "" {
+		return models.TraceStats{}, ErrKitchenRequired
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var st models.TraceStats
@@ -1182,11 +1197,14 @@ func (m *MemoryStore) DeleteSpansByTrace(_ context.Context, traceID string) erro
 // ── Model Provider Store ────────────────────────────────────
 
 func (m *MemoryStore) ListProviders(_ context.Context, kitchen string) ([]models.ModelProvider, error) {
+	if kitchen == "" {
+		return nil, ErrKitchenRequired
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var result []models.ModelProvider
 	for _, p := range m.providers {
-		if kitchen == "" || p.Kitchen == kitchen {
+		if p.Kitchen == kitchen {
 			result = append(result, *p)
 		}
 	}
@@ -1279,11 +1297,14 @@ func (m *MemoryStore) UpdateRecipeRun(_ context.Context, run *models.RecipeRun) 
 // ── MCP Tool Store ──────────────────────────────────────────
 
 func (m *MemoryStore) ListTools(_ context.Context, kitchen string) ([]models.MCPTool, error) {
+	if kitchen == "" {
+		return nil, ErrKitchenRequired
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var result []models.MCPTool
 	for _, t := range m.tools {
-		if t.Kitchen == kitchen || kitchen == "" {
+		if t.Kitchen == kitchen {
 			result = append(result, *t)
 		}
 	}
@@ -1330,11 +1351,14 @@ func (m *MemoryStore) DeleteTool(_ context.Context, kitchen, name string) error 
 // ── Skill Store ──────────────────────────────────────────────
 
 func (m *MemoryStore) ListSkills(_ context.Context, kitchen string) ([]models.Skill, error) {
+	if kitchen == "" {
+		return nil, ErrKitchenRequired
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var result []models.Skill
 	for _, s := range m.skills {
-		if s.Kitchen == kitchen || kitchen == "" {
+		if s.Kitchen == kitchen {
 			result = append(result, *s)
 		}
 	}
@@ -1381,6 +1405,9 @@ func (m *MemoryStore) DeleteSkill(_ context.Context, kitchen, name string) error
 // ── Prompt Store ────────────────────────────────────────────
 
 func (m *MemoryStore) ListPrompts(_ context.Context, kitchen string) ([]models.Prompt, error) {
+	if kitchen == "" {
+		return nil, ErrKitchenRequired
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var result []models.Prompt
@@ -1389,7 +1416,7 @@ func (m *MemoryStore) ListPrompts(_ context.Context, kitchen string) ([]models.P
 			continue
 		}
 		latest := versions[len(versions)-1]
-		if latest.Kitchen == kitchen || kitchen == "" {
+		if latest.Kitchen == kitchen {
 			result = append(result, *latest)
 		}
 	}
@@ -1511,12 +1538,15 @@ func (m *MemoryStore) CreateAuditEvent(ctx context.Context, event *models.AuditE
 }
 
 func (m *MemoryStore) ListAuditEvents(_ context.Context, filter models.AuditFilter) ([]models.AuditEvent, error) {
+	if filter.Kitchen == "" {
+		return nil, ErrKitchenRequired
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var result []models.AuditEvent
 	for i := len(m.auditEvents) - 1; i >= 0; i-- { // newest first
 		e := m.auditEvents[i]
-		if filter.Kitchen != "" && e.Kitchen != filter.Kitchen {
+		if e.Kitchen != filter.Kitchen {
 			continue
 		}
 		if filter.UserID != "" && e.UserID != filter.UserID {
@@ -1553,11 +1583,14 @@ func (m *MemoryStore) ListAuditEvents(_ context.Context, filter models.AuditFilt
 }
 
 func (m *MemoryStore) CountAuditEvents(_ context.Context, filter models.AuditFilter) (int64, error) {
+	if filter.Kitchen == "" {
+		return 0, ErrKitchenRequired
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var count int64
 	for _, e := range m.auditEvents {
-		if filter.Kitchen != "" && e.Kitchen != filter.Kitchen {
+		if e.Kitchen != filter.Kitchen {
 			continue
 		}
 		if filter.UserID != "" && e.UserID != filter.UserID {
@@ -1657,11 +1690,14 @@ func (m *MemoryStore) ListApprovals(_ context.Context, kitchen, status string, l
 // ── Notification Channel Store ──────────────────────────────
 
 func (m *MemoryStore) ListChannels(_ context.Context, kitchen string) ([]models.NotificationChannel, error) {
+	if kitchen == "" {
+		return nil, ErrKitchenRequired
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var result []models.NotificationChannel
 	for _, ch := range m.channels {
-		if ch.Kitchen == kitchen || kitchen == "" {
+		if ch.Kitchen == kitchen {
 			result = append(result, *ch)
 		}
 	}

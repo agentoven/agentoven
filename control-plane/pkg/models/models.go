@@ -1953,7 +1953,12 @@ type NotificationChannel struct {
 	Kind      ChannelKind            `json:"kind" db:"kind"`
 	Kitchen   string                 `json:"kitchen" db:"kitchen"`
 	URL       string                 `json:"url,omitempty" db:"url"`       // webhook/slack/teams/discord URL
-	Secret    string                 `json:"secret,omitempty" db:"secret"` // HMAC signing secret (webhook)
+	Secret    string                 `json:"secret,omitempty" db:"secret"` // HMAC signing secret (webhook): taken on create and update, never returned by the API
+	// SecretRef names the credential that holds the signing secret where the store keeps secrets in a vault
+	// (Pro): the row holds the name and the delivery reads the value. The server sets it; a client cannot.
+	SecretRef string `json:"secret_ref,omitempty" db:"secret_ref"`
+	// HasSecret is what the API says in place of the secret: deliveries of this channel are signed.
+	HasSecret bool `json:"has_secret,omitempty"`
 	Config    map[string]interface{} `json:"config,omitempty"`             // kind-specific config
 	Events    []string               `json:"events"`                       // events to subscribe to
 	Active    bool                   `json:"active" db:"active"`

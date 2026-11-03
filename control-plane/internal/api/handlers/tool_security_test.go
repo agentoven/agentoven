@@ -226,3 +226,123 @@ func TestAToolPackToolCannotBeRepointedOrRemovedThroughTheGenericToolsAPI(t *tes
 		t.Errorf("an ordinary edit: %d", w.Code)
 	}
 }
+
+// A tool's authentication is one of three shapes. Anything else (OAuth client credentials, custom header
+// sets, a field no type takes) is refused with a 400 in every edition, so no secret is stored in a field
+// nothing reads, and the refusal does not repeat the value.
+func TestAnAuthConfigNothingCanSendIsRefusedInEveryEdition(t *testing.T) {
+	h, s := newTestHandlers(t) // no vault: the community edition validates too
+	for name, auth := range map[string]string{
+		"oauth client secret": `{"type":"oauth2","client_id":"id","client_secret":"CLIENT-SECRET-77","token_url":"https://idp.example.test/token"}`,
+		"custom headers":      `{"type":"headers","headers":{"Authorization":"Bearer HDR-SECRET-88"}}`,
+		"headers on a bearer": `{"type":"bearer","token":"t-12345678","headers":{"X-Secret":"HDR-SECRET-88"}}`,
+		"password on bearer":  `{"type":"bearer","password":"PW-SECRET-99"}`,
+		"header injection":    `{"type":"api-key","header":"X-A\r\nX-B: c","key":"k-12345678"}`,
+	} {
+		body := `{"name":"bad","endpoint":"https://93.184.216.34/mcp","auth_config":` + auth + `}`
+		w := callAgentAPI(h.RegisterMCPTool, http.MethodPost, "/api/v1/tools", nil, body)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: register answered %d, want 400: %s", name, w.Code, w.Body)
+		}
+		if strings.Contains(w.Body.String(), "SECRET") {
+			t.Errorf("%s: the refusal repeats a value: %s", name, w.Body)
+		}
+		if tool, _ := s.GetTool(context.Background(), "default", "bad"); tool != nil {
+			t.Errorf("%s: a refused tool was stored", name)
+		}
+		bulk := `{"tools":[{"name":"bad","endpoint":"https://93.184.216.34/mcp","auth_config":` + auth + `}]}`
+		if c := callAgentAPI(h.BulkRegisterMCPTools, http.MethodPost, "/api/v1/tools/bulk", nil, bulk).Code; c != http.StatusBadRequest {
+			t.Errorf("%s: bulk answered %d", name, c)
+		}
+	}
+	// An update cannot add one either.
+	callAgentAPI(h.RegisterMCPTool, http.MethodPost, "/api/v1/tools", nil, `{"name":"fine","endpoint":"https://93.184.216.34/mcp"}`)
+	if c := callAgentAPI(h.UpdateMCPTool, http.MethodPut, "/api/v1/tools/fine", map[string]string{"toolName": "fine"}, `{"auth_config":{"type":"oauth2","client_secret":"CLIENT-SECRET-77"}}`).Code; c != http.StatusBadRequest {
+		t.Errorf("update with oauth: %d", c)
+	}
+	if tool, _ := s.GetTool(context.Background(), "default", "fine"); len(tool.AuthConfig) != 0 {
+		t.Errorf("%v", tool.AuthConfig)
+	}
+}
+
+// Basic authentication is a user name (kept in the row) and a password (sealed in the vault like a token).
+func TestABasicPasswordIsSealedInTheVaultAndTheUserNameStays(t *testing.T) {
+	h, _, _ := vaultHandlers(t)
+	st := h.Store
+	ctx := context.Background()
+	w := callAgentAPI(h.RegisterMCPTool, http.MethodPost, "/api/v1/tools", nil,
+		`{"name":"erp","endpoint":"https://93.184.216.34/mcp","auth_config":{"type":"basic","username":"svc-agentoven","password":"ERP-PASSWORD-1"}}`)
+	if w.Code != http.StatusCreated || strings.Contains(w.Body.String(), "ERP-PASSWORD") {
+		t.Fatalf("register: %d %s", w.Code, w.Body)
+	}
+	tool, _ := st.GetTool(ctx, "default", "erp")
+	if _, literal := tool.AuthConfig["password"]; literal || tool.AuthConfig["credential_ref"] != "tool-erp" || tool.AuthConfig["username"] != "svc-agentoven" || tool.AuthConfig["type"] != "basic" {
+		t.Fatalf("the row holds the user name and a reference: %v", tool.AuthConfig)
+	}
+	if c, err := st.GetKitchenCredential(ctx, "default", "tool-erp"); err != nil || c.Value != "ERP-PASSWORD-1" {
+		t.Fatalf("the credential holds the password: %v %v", c, err)
+	}
+}
+
+// A tool saved before these rules with a client secret or a header set has it moved into credentials, the
+// row keeps only names, nothing is lost, and the pass is safe to run twice.
+func TestAToolWithAnUnsupportedAuthConfigHasItsSecretsMovedToTheVault(t *testing.T) {
+	h, _, _ := vaultHandlers(t)
+	st := h.Store
+	ctx := context.Background()
+	if ks, _ := st.ListKitchens(ctx); len(ks) == 0 {
+		_ = st.CreateKitchen(ctx, &models.Kitchen{ID: "default", Name: "default"})
+	}
+	mk := func(id, name string, auth map[string]interface{}) {
+		if err := st.CreateTool(ctx, &models.MCPTool{ID: id, Name: name, Kitchen: "default", Endpoint: "https://tools.example.test/mcp", Transport: "http", Enabled: true, AuthConfig: auth}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("o1", "oauthy", map[string]interface{}{"type": "oauth2", "client_id": "id-1", "client_secret": "CLIENT-SECRET-77", "token_url": "https://idp.example.test/token"})
+	mk("h1", "hdrs", map[string]interface{}{"type": "headers", "headers": map[string]interface{}{"Authorization": "Bearer HDR-SECRET-88"}})
+	mk("b1", "basicold", map[string]interface{}{"type": "basic", "username": "svc", "password": "OLD-BASIC-PW"})
+	mk("n1", "clean", map[string]interface{}{"type": "bearer", "credential_ref": "already"})
+	// A bearer that also carries a client secret keeps working: its token is sealed as on any save.
+	mk("m1", "mixed", map[string]interface{}{"type": "bearer", "token": "MIXED-TOKEN-55", "client_secret": "CLIENT-SECRET-66"})
+
+	rep, err := h.SealAllTools(ctx, true)
+	if err != nil || len(rep.Moved) != 4 {
+		t.Fatalf("dry run lists the four tools holding secrets: %+v %v", rep, err)
+	}
+	rep, err = h.SealAllTools(ctx, false)
+	if err != nil || len(rep.Moved) != 4 || len(rep.Failed) != 0 {
+		t.Fatalf("seal: %+v %v", rep, err)
+	}
+	for _, name := range []string{"oauthy", "hdrs", "basicold", "clean"} {
+		tool, _ := st.GetTool(ctx, "default", name)
+		for k, v := range tool.AuthConfig {
+			if s, _ := v.(string); strings.Contains(s, "SECRET") || strings.Contains(s, "OLD-BASIC") || k == "headers" || k == "client_secret" || k == "password" {
+				t.Errorf("%s still holds %s in its row: %v", name, k, tool.AuthConfig)
+			}
+		}
+	}
+	o, _ := st.GetTool(ctx, "default", "oauthy")
+	if o.AuthConfig["client_secret_ref"] != "tool-oauthy-client_secret" || o.AuthConfig["client_id_ref"] != "tool-oauthy-client_id" || o.AuthConfig["token_url_ref"] == nil || o.AuthConfig["type"] != "oauth2" {
+		t.Errorf("the row keeps names of credentials: %v", o.AuthConfig)
+	}
+	if c, err := st.GetKitchenCredential(ctx, "default", "tool-oauthy-client_secret"); err != nil || c.Value != "CLIENT-SECRET-77" {
+		t.Errorf("nothing is lost: %v %v", c, err)
+	}
+	if c, err := st.GetKitchenCredential(ctx, "default", "tool-hdrs-headers"); err != nil || !strings.Contains(c.Value, "HDR-SECRET-88") {
+		t.Errorf("a header set is kept as JSON: %v %v", c, err)
+	}
+	b, _ := st.GetTool(ctx, "default", "basicold")
+	if b.AuthConfig["credential_ref"] != "tool-basicold" || b.AuthConfig["username"] != "svc" {
+		t.Errorf("a basic tool with a literal password is sealed as any other: %v", b.AuthConfig)
+	}
+	mx, _ := st.GetTool(ctx, "default", "mixed")
+	if mx.AuthConfig["credential_ref"] != "tool-mixed" || mx.AuthConfig["type"] != "bearer" || mx.AuthConfig["token"] != nil || mx.AuthConfig["client_secret_ref"] != "tool-mixed-client_secret" {
+		t.Errorf("the token of a supported shape is sealed as a token, the stray as a stray: %v", mx.AuthConfig)
+	}
+	if c, err := st.GetKitchenCredential(ctx, "default", "tool-mixed"); err != nil || c.Value != "MIXED-TOKEN-55" {
+		t.Errorf("%v %v", c, err)
+	}
+	if rep, _ = h.SealAllTools(ctx, false); len(rep.Moved) != 0 {
+		t.Errorf("a second pass moves nothing: %+v", rep)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/agentoven/agentoven/control-plane/internal/store"
+	"github.com/agentoven/agentoven/control-plane/pkg/toolauth"
 )
 
 // sqlStater is implemented by a database driver's error (pgconn.PgError has SQLState()). The control
@@ -27,7 +28,10 @@ func respondCreateError(w http.ResponseWriter, err error, what string) {
 	var nf *store.ErrNotFound
 	var cf *store.ErrConflict
 	var st sqlStater
+	var bad *toolauth.InvalidError
 	switch {
+	case errors.As(err, &bad):
+		respondError(w, http.StatusBadRequest, bad.Error())
 	case errors.As(err, &nf):
 		respondError(w, http.StatusNotFound, nf.Error())
 	case errors.As(err, &cf):

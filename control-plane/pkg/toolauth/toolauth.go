@@ -6,10 +6,14 @@
 //
 //	stored:   {"type": "bearer",  "credential_ref": "firecrawl-api-key"}
 //	          {"type": "api-key", "credential_ref": "acme-key", "header": "X-Api-Key"}
+//	          {"type": "basic",   "credential_ref": "erp-password", "username": "svc-agentoven"}
 //	resolved: {"type": "bearer",  "token": "<value>"}                 (in memory, for one call)
 //
-// A tool registered with a literal token (older tools, or one posted directly to the tools API)
-// still works, and is redacted whenever it is returned.
+// Those three are the authentication a tool can have, and Validate refuses every other shape: a field
+// nothing sends is a secret stored for nothing (an OAuth client secret, a set of custom headers).
+// A tool registered with a literal secret (older tools, or one posted directly to the tools API) still
+// works, is moved into the credential vault where there is one (LiteralSecret finds it), and is redacted
+// whenever it is returned.
 package toolauth
 
 import (
@@ -88,6 +92,8 @@ func Resolve(ctx context.Context, creds CredentialReader, kitchen string, cfg ma
 		out["token"] = cred.Value
 	case "api-key", "api_key":
 		out["header"], out["key"] = cfg["header"], cred.Value
+	case "basic":
+		out["username"], out["password"] = cfg["username"], cred.Value
 	default:
 		return nil, fmt.Errorf("credential %q: unsupported auth type %q", ref, authType)
 	}
@@ -112,20 +118,24 @@ func Apply(req *http.Request, cfg map[string]interface{}) {
 			req.Header.Set(header, key)
 		}
 	case "basic":
-		// basic auth would be set via URL or explicit header
+		user, _ := cfg["username"].(string)
+		pass, _ := cfg["password"].(string)
+		if user != "" || pass != "" {
+			req.SetBasicAuth(user, pass)
+		}
 	}
 }
 
 // Redacted is the form of an auth config that is safe to return: a credential's name is kept
-// (it is not a secret and says what the tool uses), and any literal secret is hidden.
+// (it is not a secret and says what the tool uses, nor is a user name), and any literal secret is hidden.
 func Redacted(cfg map[string]interface{}) map[string]interface{} {
 	if cfg == nil {
 		return nil
 	}
 	out := make(map[string]interface{}, len(cfg))
 	for k, v := range cfg {
-		switch k {
-		case "type", "header", "credential_ref":
+		switch {
+		case k == "type" || k == "header" || k == "username" || k == "credential_ref" || strings.HasSuffix(k, "_ref"):
 			out[k] = v
 		default:
 			// token, key, password, secret, and anything else a caller put here.
@@ -159,7 +169,7 @@ const minScrub = 6
 // Values returns the secret values in a resolved auth config (the token or key that is about to be sent).
 func Values(resolved map[string]interface{}) []string {
 	var out []string
-	for _, k := range []string{"token", "key"} {
+	for _, k := range []string{"token", "key", "password"} {
 		if v, _ := resolved[k].(string); len(v) >= minScrub {
 			out = append(out, v)
 		}

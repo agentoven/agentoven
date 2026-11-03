@@ -200,7 +200,28 @@ type countingDriver interface {
 	SendCounting(ctx context.Context, channel *models.NotificationChannel, event Event) (int, error)
 }
 
+// withSigningSecret returns the channel as a delivery needs it: a channel whose secret is kept in a credential
+// (SecretRef, Pro) gets the value for this one delivery, on a copy, so the stored channel and every response
+// stay free of it. A secret that cannot be read stops the delivery: a webhook that is meant to be signed is
+// never sent unsigned in its place.
+func (s *Service) withSigningSecret(ctx context.Context, channel *models.NotificationChannel) (*models.NotificationChannel, error) {
+	if channel.SecretRef == "" || channel.Secret != "" {
+		return channel, nil
+	}
+	cred, err := s.store.GetKitchenCredential(ctx, channel.Kitchen, channel.SecretRef)
+	if err != nil || cred == nil || cred.Value == "" {
+		return nil, fmt.Errorf("the signing secret of channel %q cannot be read; the message was not sent unsigned", channel.Name)
+	}
+	cp := *channel
+	cp.Secret = cred.Value
+	return &cp, nil
+}
+
 func (s *Service) sendThrough(ctx context.Context, driver contracts.ChannelDriver, channel *models.NotificationChannel, event Event, result *models.NotifyResult) error {
+	channel, err := s.withSigningSecret(ctx, channel)
+	if err != nil {
+		return err
+	}
 	if cd, ok := driver.(countingDriver); ok {
 		n, err := cd.SendCounting(ctx, channel, event)
 		result.Recipients = n

@@ -114,9 +114,19 @@ func TestHealthCheck(t *testing.T) {
 
 	// HealthCheck() iterates over registered providers in the store,
 	// not drivers directly. With no providers registered, result should be empty.
-	result := mr.HealthCheck(context.Background())
+	result := mr.HealthCheck(context.Background(), "default")
 	if len(result) != 0 {
 		t.Errorf("HealthCheck() with no providers: got %d results, want 0", len(result))
+	}
+}
+
+// A health check is of one kitchen's providers: with no kitchen it reports an error and checks nobody's,
+// where it used to ask the store for every kitchen's.
+func TestHealthCheckNeedsAKitchen(t *testing.T) {
+	mr := newTestRouter(t)
+	result := mr.HealthCheck(context.Background(), "")
+	if len(result) != 1 || result["error"] == "" {
+		t.Errorf("HealthCheck() with no kitchen: %v", result)
 	}
 }
 
@@ -124,7 +134,7 @@ func TestHealthCheck_UnknownDriver(t *testing.T) {
 	// HealthCheck iterates store providers. Without providers, nothing to check.
 	// This test verifies the method doesn't panic with no providers.
 	mr := newTestRouter(t)
-	result := mr.HealthCheck(context.Background())
+	result := mr.HealthCheck(context.Background(), "default")
 	if result == nil {
 		t.Error("HealthCheck() should return non-nil map")
 	}

@@ -510,7 +510,11 @@ func (h *Handlers) reviewSkill(w http.ResponseWriter, r *http.Request, approve b
 	if approve {
 		meaning = contracts.MeaningApproved
 	}
-	sig, signedOK := h.signDecision(w, r, contracts.GateSkillApproval, name, meaning, nil)
+	var signed map[string]interface{}
+	if req.Note != "" {
+		signed = map[string]interface{}{"note": req.Note} // the note goes into the skill's record, so it is what is signed
+	}
+	sig, signedOK := h.signDecision(w, r, contracts.GateSkillApproval, name, meaning, signed)
 	if !signedOK {
 		return
 	}

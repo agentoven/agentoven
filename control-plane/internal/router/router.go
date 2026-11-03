@@ -392,10 +392,11 @@ func (mr *ModelRouter) ListDiscoveryCapableDrivers() map[string]ModelDiscoveryDr
 	return result
 }
 
-// HealthCheck pings all configured providers and returns their status.
-func (mr *ModelRouter) HealthCheck(ctx context.Context) map[string]string {
-	// Cross-kitchen admin view — empty kitchen means "no filter" in the store layer.
-	providers, err := mr.store.ListProviders(ctx, "")
+// HealthCheck pings the providers of one kitchen and returns their status. It used to ask the store for
+// every kitchen's providers with an empty kitchen, which the stores no longer accept (an empty kitchen is
+// an error, not "all"); nothing called it for the installation as a whole, so it names its kitchen.
+func (mr *ModelRouter) HealthCheck(ctx context.Context, kitchen string) map[string]string {
+	providers, err := mr.store.ListProviders(ctx, kitchen)
 	if err != nil {
 		return map[string]string{"error": err.Error()}
 	}

@@ -6127,10 +6127,7 @@ func (h *Handlers) ListChannels(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if channels == nil {
-		channels = []models.NotificationChannel{}
-	}
-	respondJSON(w, http.StatusOK, channels)
+	respondJSON(w, http.StatusOK, shownChannels(channels))
 }
 
 // GetChannel returns a single notification channel.
@@ -6142,7 +6139,7 @@ func (h *Handlers) GetChannel(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	respondJSON(w, http.StatusOK, channel)
+	respondJSON(w, http.StatusOK, shownChannel(*channel))
 }
 
 // CreateChannel creates a new notification channel.
@@ -6153,6 +6150,10 @@ func (h *Handlers) CreateChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if ch.SecretRef != "" {
+		respondChannelBodyError(w, errServerSetRef)
+		return
+	}
 	ch.Kitchen = middleware.GetKitchen(r.Context())
 	if ch.Name == "" {
 		respondError(w, http.StatusBadRequest, "Channel name is required")
@@ -6173,7 +6174,7 @@ func (h *Handlers) CreateChannel(w http.ResponseWriter, r *http.Request) {
 		respondCreateError(w, err, "create the channel")
 		return
 	}
-	respondJSON(w, http.StatusCreated, ch)
+	respondJSON(w, http.StatusCreated, shownChannel(ch))
 }
 
 // UpdateChannel updates an existing notification channel.
@@ -6187,15 +6188,20 @@ func (h *Handlers) UpdateChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var update models.NotificationChannel
-	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid request body")
+	update, secret, err := decodeChannelUpdate(r.Body)
+	if err != nil {
+		respondChannelBodyError(w, err)
 		return
 	}
 
 	existing.Kind = update.Kind
 	existing.URL = update.URL
-	existing.Secret = update.Secret
+	switch secret {
+	case secretReplace:
+		existing.Secret = update.Secret
+	case secretRemove:
+		existing.Secret, existing.SecretRef = "", ""
+	}
 	existing.Config = update.Config
 	existing.Events = update.Events
 	existing.Active = update.Active
@@ -6205,7 +6211,7 @@ func (h *Handlers) UpdateChannel(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	respondJSON(w, http.StatusOK, existing)
+	respondJSON(w, http.StatusOK, shownChannel(*existing))
 }
 
 // DeleteChannel removes a notification channel.

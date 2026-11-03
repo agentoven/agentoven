@@ -91,6 +91,12 @@ func TestAToolApprovalOnAPausedRunIsSignedAgainstTheCallsItWasShown(t *testing.T
 	}
 
 	fs.refuse, fs.signer = nil, "ana"
+	// The note is part of what is signed, so the challenge for a decision with a note carries it (the dashboard
+	// sends the same payload it sends with the resume call).
+	shown, err = h.DescribeDecision(context.Background(), contracts.GateToolApproval, "default", "run-1", map[string]interface{}{"note": "too much"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec = resume(h, "run-1", `{"approved":false,"note":"too much"}`)
 	// There is no model behind this run, so applying the rejection fails after the signature: that is
 	// reported to the signer as not applied, and the signature stays on record.
@@ -147,3 +153,49 @@ func TestAnUnpausedRunHasNothingToSign(t *testing.T) {
 }
 
 func timeNow() time.Time { return time.Now().UTC() }
+
+// The free-text note of a decision is what the model is told on a refusal ("Human denied this tool call: <note>"),
+// so it is part of what is signed: the same decision with another note is another signature, and a decision
+// with no note digests as it always did.
+func TestTheNoteOfAToolOrBudgetDecisionIsSigned(t *testing.T) {
+	h, j := runRig(t)
+	h.RegisterOwnDecisionGates()
+	ctx := context.Background()
+	beginRun(t, j, "run-n1")
+	if err := j.MarkPaused(ctx, "run-n1", executor.PendingApproval{Turn: 1, GatedNames: []string{"refund"},
+		ToolCalls: []executor.ToolCall{{ID: "c1", Name: "refund", Arguments: map[string]interface{}{"amount": 40}}}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	beginRun(t, j, "run-n2")
+	if err := j.MarkBudgetPaused(ctx, "run-n2", models.BudgetPause{Turn: 5, Dimension: "cost_usd", Spent: 4.9, Cap: 5, Scope: "run"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ gate, run string }{{contracts.GateToolApproval, "run-n1"}, {contracts.GateBudgetExtension, "run-n2"}} {
+		digest := func(payload map[string]interface{}) string {
+			s, err := h.DescribeDecision(ctx, c.gate, "default", c.run, payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return s.Digest
+		}
+		none, blank := digest(nil), digest(map[string]interface{}{"note": "  "})
+		wrong, other := digest(map[string]interface{}{"note": "wrong order"}), digest(map[string]interface{}{"note": "wrong customer"})
+		if none != blank {
+			t.Errorf("%s: a blank note is no note", c.gate)
+		}
+		if wrong == none || wrong == other {
+			t.Errorf("%s: the note is part of what is signed", c.gate)
+		}
+		if again := digest(map[string]interface{}{"note": "wrong order"}); again != wrong {
+			t.Errorf("%s: the same note digests the same", c.gate)
+		}
+	}
+	// The handler asks for the same digest the challenge showed, whichever way the decision goes.
+	shown, _ := h.DescribeDecision(ctx, contracts.GateToolApproval, "default", "run-n1", map[string]interface{}{"note": "wrong order"})
+	fs := &fakeSigner{signer: "ana"}
+	h.SetDecisionSigner(fs)
+	resume(h, "run-n1", `{"approved":false,"note":"wrong order"}`)
+	if len(fs.got) != 1 || fs.got[0].Digest != shown.Digest || fs.got[0].Display["note"] != "wrong order" {
+		t.Fatalf("subjects: %+v", fs.got)
+	}
+}

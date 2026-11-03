@@ -98,3 +98,30 @@ func TestEveryGateThisPackageDecidesHasADescriber(t *testing.T) {
 		t.Fatalf("gates = %v, want %v", got, want)
 	}
 }
+
+// The note of a skill review is appended to the skill's record, so it is signed with the decision.
+func TestASkillReviewNoteIsSigned(t *testing.T) {
+	h, s := newTestHandlers(t)
+	if err := s.CreateSkill(context.Background(), &models.Skill{ID: "s2", Kitchen: "default", Name: "ocr-tools", Status: models.SkillStatusNeedsReview,
+		Manifest: &models.SkillManifest{Name: "ocr-tools"}, VerificationVerdict: "needs_review", VerificationReasoning: "reads images"}); err != nil {
+		t.Fatal(err)
+	}
+	h.RegisterOwnDecisionGates()
+	describe := func(payload map[string]interface{}) string {
+		sub, err := h.DescribeDecision(context.Background(), contracts.GateSkillApproval, "default", "ocr-tools", payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sub.Digest
+	}
+	if describe(nil) == describe(map[string]interface{}{"note": "looks fine"}) || describe(map[string]interface{}{"note": "a"}) == describe(map[string]interface{}{"note": "b"}) {
+		t.Fatal("the note is part of what is signed")
+	}
+	fs := &fakeSigner{refuse: &contracts.AuthError{Status: 403, Code: "signature_required", Message: "sign it"}}
+	h.SetDecisionSigner(fs)
+	req := withChiParam(withKitchen(httptest.NewRequest("POST", "/api/v1/skills/ocr-tools/reject", strings.NewReader(`{"note":"looks fine"}`)), "default"), "name", "ocr-tools")
+	h.RejectSkill(httptest.NewRecorder(), req)
+	if len(fs.got) != 1 || fs.got[0].Digest != describe(map[string]interface{}{"note": "looks fine"}) {
+		t.Fatalf("the handler asks to sign the note it will record: %+v", fs.got)
+	}
+}

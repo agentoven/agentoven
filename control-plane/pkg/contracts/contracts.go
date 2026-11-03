@@ -53,8 +53,9 @@ type ModelRouterService interface {
 	// GetCostSummary returns cost tracking data for a kitchen.
 	GetCostSummary(kitchen string) *models.CostSummary
 
-	// HealthCheck pings all configured providers and returns their status.
-	HealthCheck(ctx context.Context) map[string]string
+	// HealthCheck pings the configured providers of a kitchen and returns their status. The kitchen is
+	// required: there is no call that reads every kitchen's providers.
+	HealthCheck(ctx context.Context, kitchen string) map[string]string
 }
 
 // ── MCP Gateway Service ─────────────────────────────────────
