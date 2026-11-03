@@ -13,6 +13,73 @@ env:
   GO_VERSION: '1.27'
 
 jobs:
+  # ── Preflight: optional publish secrets and "is this the newest release?" ──
+  #
+  # A registry token that is not set must not turn the whole release red: the publish job that
+  # needs it is skipped, with a warning annotation and a line in the run summary, and everything
+  # else (binaries, image, GitHub Release) still ships. A token that IS set and is rejected by the
+  # registry still fails its job: that is a real problem and stays visible.
+  #
+  # The same job decides whether this tag may move the "latest" markers (the GitHub Release
+  # "Latest" badge, the :latest image tag). Pushing an old version tag (a back-fill) must not.
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    outputs:
+      pypi: ${{ steps.tokens.outputs.pypi }}
+      crates: ${{ steps.tokens.outputs.crates }}
+      homebrew: ${{ steps.tokens.outputs.homebrew }}
+      latest: ${{ steps.latest.outputs.latest }}
+      prerelease: ${{ steps.latest.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Check optional publish secrets
+        id: tokens
+        env:
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          check() { # output-name, secret-name, secret-value, what-is-skipped
+            if [ -n "$3" ]; then
+              echo "$1=true" >> "$GITHUB_OUTPUT"
+              echo "- $2 is set: $4 will run" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "$1=false" >> "$GITHUB_OUTPUT"
+              echo "::warning title=$2 is not set::$4 is skipped. Add the repository secret $2 and re-run the workflow to publish."
+              echo "- **$2 is not set: $4 is skipped.**" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+          {
+            echo "### Optional publish secrets"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          check pypi     PYPI_TOKEN           "$PYPI_TOKEN"           "Publish Python SDK (PyPI)"
+          check crates   CARGO_REGISTRY_TOKEN "$CARGO_REGISTRY_TOKEN" "Publish Rust crates (crates.io)"
+          check homebrew HOMEBREW_TAP_TOKEN   "$HOMEBREW_TAP_TOKEN"   "Update Homebrew Formula"
+
+      - name: Is this the newest release?
+        id: latest
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" == *-* ]]; then
+            # v1.2.3-rc.1 and friends are pre-releases and never "latest".
+            LATEST=false
+            PRERELEASE=true
+          else
+            PRERELEASE=false
+            HIGHEST=$(git tag -l 'v[0-9]*' | grep -v -- '-' | sort -V | tail -n 1)
+            if [ "$HIGHEST" = "$TAG" ]; then LATEST=true; else LATEST=false; fi
+            echo "highest stable tag: $HIGHEST"
+          fi
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "- $TAG: latest=$LATEST, prerelease=$PRERELEASE" >> "$GITHUB_STEP_SUMMARY"
+
   # ── Build CLI binaries (Rust) ────────────────────────────────
   cli:
     name: CLI (${{ matrix.target }})
@@ -205,7 +272,9 @@ jobs:
   # ── Publish Python SDK to PyPI ────────────────────────────────
   python-publish:
     name: Publish Python SDK
-    needs: [python-wheels, python-sdist]
+    needs: [preflight, python-wheels, python-sdist]
+    # Skipped (with a warning from the preflight job) when PYPI_TOKEN is not set.
+    if: needs.preflight.outputs.pypi == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/setup-python@v5
@@ -228,6 +297,9 @@ jobs:
   # ── Publish Rust crates to crates.io ────────────────────────
   crates-publish:
     name: Publish Rust crates
+    needs: [preflight]
+    # Skipped (with a warning from the preflight job) when CARGO_REGISTRY_TOKEN is not set.
+    if: needs.preflight.outputs.crates == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -236,30 +308,30 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Publish a2a-ao
-        run: cargo publish -p a2a-ao --no-verify
+      - name: Publish crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Wait for a2a-ao to index
-        run: sleep 30
-
-      - name: Publish agentoven-core
-        run: cargo publish -p agentoven-core --no-verify
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Wait for agentoven-core to index
-        run: sleep 30
-
-      - name: Publish agentoven-cli
-        run: cargo publish -p agentoven-cli --no-verify
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          # In dependency order. A crate version is published once, so a re-run of the same tag
+          # skips the crates that are already on crates.io instead of failing on them.
+          for crate in a2a-ao agentoven-core agentoven-cli; do
+            version=$(cargo metadata --no-deps --format-version 1 \
+              | jq -r --arg c "$crate" '.packages[] | select(.name == $c) | .version')
+            code=$(curl -s -o /dev/null -w '%{http_code}' -A 'agentoven-release-ci' \
+              "https://crates.io/api/v1/crates/${crate}/${version}")
+            if [ "$code" = "200" ]; then
+              echo "$crate $version is already on crates.io: skipping"
+              continue
+            fi
+            cargo publish -p "$crate" --no-verify
+            # Let the index pick the crate up before the next one depends on it.
+            sleep 30
+          done
 
   # ── Build & push Docker image to GHCR ─────────────────────────
   docker:
     name: Docker Image
+    needs: [preflight]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -284,9 +356,10 @@ jobs:
           context: control-plane
           push: true
           platforms: linux/amd64,linux/arm64
+          # :latest only moves for the newest stable release (an old tag must not move it back).
           tags: |
             ghcr.io/agentoven/agentoven:${{ steps.version.outputs.version }}
-            ghcr.io/agentoven/agentoven:latest
+            ${{ needs.preflight.outputs.latest == 'true' && 'ghcr.io/agentoven/agentoven:latest' || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -412,9 +485,24 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ── Create GitHub Release ────────────────────────────────────
+  #
+  # Runs whenever the CLI and server binaries were built, even if a registry publish (PyPI,
+  # crates.io, npm, GHCR) failed or was skipped, so a pushed v* tag always gets a GitHub Release
+  # with whatever artifacts were built. The job summary lists what did not publish.
   release:
     name: Create Release
-    needs: [cli, server, python-publish, docker, npm-publish, crates-publish]
+    needs:
+      - preflight
+      - cli
+      - server
+      - python-wheels
+      - python-sdist
+      - typescript-sdk
+      - python-publish
+      - docker
+      - npm-publish
+      - crates-publish
+    if: ${{ always() && needs.cli.result == 'success' && needs.server.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -423,6 +511,19 @@ jobs:
         with:
           merge-multiple: true
           path: dist
+
+      - name: Summarise the pipeline
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          {
+            echo "### Release pipeline"
+            echo
+            echo "| Job | Result |"
+            echo "| --- | --- |"
+            echo "$NEEDS" | jq -r 'to_entries[] | select(.key != "preflight") | "| \(.key) | \(.value.result) |"'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result != "success") | "::warning title=\(.key) did not publish::result: \(.value.result)"'
 
       - name: Extract release notes from CHANGELOG
         id: notes
@@ -435,22 +536,35 @@ jobs:
           else
             # Use heredoc delimiter for multiline
             EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
-            echo "body<<$EOF" >> "$GITHUB_OUTPUT"
-            echo "$NOTES" >> "$GITHUB_OUTPUT"
-            echo "$EOF" >> "$GITHUB_OUTPUT"
+            {
+              echo "body<<$EOF"
+              echo "$NOTES"
+              echo "$EOF"
+            } >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.ref_name }}
           files: dist/**/*
           body: ${{ steps.notes.outputs.body }}
           generate_release_notes: ${{ steps.notes.outputs.body == '' }}
+          # Only the newest stable tag is marked Latest; an old tag pushed later never takes it back.
+          make_latest: ${{ needs.preflight.outputs.latest }}
+          prerelease: ${{ needs.preflight.outputs.prerelease }}
 
   # ── Update Homebrew tap ──────────────────────────────────────
   homebrew:
     name: Update Homebrew Formula
-    needs: [release]
+    needs: [preflight, release]
+    # Only for the newest stable release (the formula must not be moved back to an old tag), and
+    # skipped (with a warning from the preflight job) when HOMEBREW_TAP_TOKEN is not set.
+    if: >-
+      ${{ always()
+      && needs.release.result == 'success'
+      && needs.preflight.outputs.homebrew == 'true'
+      && needs.preflight.outputs.latest == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Get version
@@ -460,7 +574,7 @@ jobs:
       - name: Download source tarball and compute SHA
         id: sha
         run: |
-          curl -sL "https://github.com/agentoven/agentoven/archive/refs/tags/${GITHUB_REF#refs/tags/}.tar.gz" \
+          curl -fsSL "https://github.com/agentoven/agentoven/archive/refs/tags/${GITHUB_REF#refs/tags/}.tar.gz" \
             -o source.tar.gz
           echo "sha256=$(shasum -a 256 source.tar.gz | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
 
@@ -483,5 +597,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/agentoven.rb
-          git commit -m "agentoven ${{ steps.version.outputs.version }}"
-          git push
+          if git diff --cached --quiet; then
+            echo "Formula already at ${{ steps.version.outputs.version }}: nothing to commit"
+          else
+            git commit -m "agentoven ${{ steps.version.outputs.version }}"
+            git push
+          fi

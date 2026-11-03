@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+# A new push to a pull request supersedes the run in flight; every push to main keeps its own run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
@@ -28,16 +36,21 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # Each step runs even when an earlier one failed, so one run reports every Rust problem
+      # (a format failure used to hide the clippy and test results behind it).
       - name: Format check
         run: cargo fmt --all -- --check
 
       - name: Clippy
+        if: ${{ !cancelled() }}
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Build
+        if: ${{ !cancelled() }}
         run: cargo build --workspace
 
       - name: Test
+        if: ${{ !cancelled() }}
         run: cargo test --workspace
 
   # ── Go Control Plane ─────────────────────────────────────────
@@ -91,95 +104,23 @@ jobs:
 
       - name: Run integration tests
         working-directory: control-plane
+        env:
+          # The smoke test registers a tool at localhost:3001; the egress guard refuses loopback
+          # tool endpoints unless the host is allowed (ADR-0037).
+          AGENTOVEN_TOOL_EGRESS_ALLOW: localhost
+          # The server keeps its snapshot and keys here, not in the runner's home.
+          AGENTOVEN_DATA_DIR: ${{ runner.temp }}/agentoven-data
         run: |
-          # Start server in background (in-memory store, no PG needed)
-          ./agentoven-server &
+          # Start the server in the background (in-memory store, no PG needed).
+          ./agentoven-server > "$RUNNER_TEMP/server.log" 2>&1 &
           SERVER_PID=$!
-          sleep 2
-
-          BASE="http://localhost:8080/api/v1"
-
-          echo "=== Health check ==="
-          curl -sf http://localhost:8080/health | jq .
-
-          echo "=== Create provider ==="
-          curl -sf -X POST "$BASE/models/providers" \
-            -H 'Content-Type: application/json' \
-            -d '{"name":"test-ollama","kind":"ollama","endpoint":"http://localhost:11434","models":["llama3"],"config":{}}' \
-            | jq .
-
-          echo "=== List providers ==="
-          curl -sf "$BASE/models/providers" | jq .
-
-          echo "=== Update provider ==="
-          curl -sf -X PUT "$BASE/models/providers/test-ollama" \
-            -H 'Content-Type: application/json' \
-            -d '{"is_default":true,"config":{"cost_per_1k_input":0.001}}' \
-            | jq .
-
-          echo "=== Create tool ==="
-          curl -sf -X POST "$BASE/tools" \
-            -H 'Content-Type: application/json' \
-            -d '{"name":"search","endpoint":"http://localhost:3001/mcp","transport":"http","description":"Search tool","enabled":true}' \
-            | jq .
-
-          echo "=== Update tool (toggle enabled) ==="
-          curl -sf -X PUT "$BASE/tools/search" \
-            -H 'Content-Type: application/json' \
-            -d '{"enabled":false}' \
-            | jq .
-
-          echo "=== Create agent with ingredients ==="
-          curl -sf -X POST "$BASE/agents" \
-            -H 'Content-Type: application/json' \
-            -d '{
-              "name":"test-agent",
-              "description":"Integration test agent",
-              "framework":"custom",
-              "model_provider":"test-ollama",
-              "model_name":"llama3",
-              "skills":["summarize"],
-              "ingredients":[
-                {"name":"system-prompt","kind":"prompt","config":{"text":"You are a test assistant."},"required":true}
-              ]
-            }' \
-            | jq .
-
-          echo "=== Get agent ==="
-          curl -sf "$BASE/agents/test-agent" | jq .
-
-          echo "=== Bake agent ==="
-          BAKE_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/agents/test-agent/bake")
-          echo "Bake returned: $BAKE_STATUS"
-          # Bake should succeed (202) — ollama provider doesn't need API key
-          [ "$BAKE_STATUS" = "202" ] || { echo "FAIL: expected 202"; kill $SERVER_PID; exit 1; }
-
-          sleep 1
-          echo "=== Agent status after bake ==="
-          curl -sf "$BASE/agents/test-agent" | jq '{name: .name, status: .status}'
-
-          echo "=== Create agent without model (should fail bake) ==="
-          curl -sf -X POST "$BASE/agents" \
-            -H 'Content-Type: application/json' \
-            -d '{"name":"bad-agent","description":"No model"}' \
-            | jq .
-
-          BAKE_FAIL=$(curl -s -o /tmp/bake_err.json -w "%{http_code}" -X POST "$BASE/agents/bad-agent/bake")
-          echo "Bake bad-agent returned: $BAKE_FAIL"
-          cat /tmp/bake_err.json | jq .
-          [ "$BAKE_FAIL" = "400" ] || { echo "FAIL: expected 400"; kill $SERVER_PID; exit 1; }
-
-          echo "=== List traces ==="
-          curl -sf "$BASE/traces" | jq 'length'
-
-          echo "=== Cleanup ==="
-          curl -sf -X DELETE "$BASE/agents/test-agent"
-          curl -sf -X DELETE "$BASE/agents/bad-agent"
-          curl -sf -X DELETE "$BASE/tools/search"
-          curl -sf -X DELETE "$BASE/models/providers/test-ollama"
-
-          echo "✅ All integration tests passed"
-          kill $SERVER_PID
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          if ! ../scripts/ci/control-plane-smoke.sh http://localhost:8080; then
+            echo "::group::server log"
+            cat "$RUNNER_TEMP/server.log"
+            echo "::endgroup::"
+            exit 1
+          fi
 
   # ── Dashboard ────────────────────────────────────────────────
   dashboard:
