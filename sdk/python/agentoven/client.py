@@ -136,10 +136,12 @@ class AgentOvenClient(TaskMethods):
         url: str = "http://localhost:8080",
         api_key: Optional[str] = None,
         kitchen: str = "default",
+        timeout: Optional[float] = None,
     ) -> None:
         self._url = url.rstrip("/")
         self._api_key = api_key
         self._kitchen = kitchen
+        self._timeout = _resolve_timeout(timeout)
         self._native = _NativeClient(url=url, api_key=api_key, kitchen=kitchen)
 
     # ── Delegation to native client (OSS operations) ──────────────────────
@@ -228,7 +230,7 @@ class AgentOvenClient(TaskMethods):
 
     def with_kitchen(self, kitchen: str) -> "AgentOvenClient":
         """Return a cloned client bound to a different kitchen."""
-        return AgentOvenClient(url=self._url, api_key=self._api_key, kitchen=kitchen)
+        return AgentOvenClient(url=self._url, api_key=self._api_key, kitchen=kitchen, timeout=self._timeout)
 
     def resolve_recipe_kitchen(
         self, recipe_name: str, candidate_kitchens: list[str]
@@ -633,8 +635,8 @@ class AgentOvenClient(TaskMethods):
 
     def get_recipe(self, name: str, kitchen: Optional[str] = None) -> dict[str, Any]:
         if kitchen is None:
-            return self._get(f"/api/v1/recipes/{name}")
-        return self.with_kitchen(kitchen)._get(f"/api/v1/recipes/{name}")
+            return self._get(f"/api/v1/recipes/{_seg(name)}")
+        return self.with_kitchen(kitchen)._get(f"/api/v1/recipes/{_seg(name)}")
 
     def get_recipe_runs(self, name: str, kitchen: Optional[str] = None) -> str:
         native = self._native if kitchen is None else self.with_kitchen(kitchen)._native
@@ -651,13 +653,13 @@ class AgentOvenClient(TaskMethods):
         return self._get("/api/v1/kitchens")
 
     def get_kitchen(self, kitchen_id: str) -> dict[str, Any]:
-        return self._get(f"/api/v1/kitchens/{kitchen_id}")
+        return self._get(f"/api/v1/kitchens/{_seg(kitchen_id)}")
 
     def create_kitchen(self, name: str, display_name: str = "") -> dict[str, Any]:
         return self._post("/api/v1/kitchens", {"name": name, "display_name": display_name or name})
 
     def delete_kitchen(self, kitchen_id: str) -> dict[str, Any]:
-        return self._delete(f"/api/v1/kitchens/{kitchen_id}")
+        return self._delete(f"/api/v1/kitchens/{_seg(kitchen_id)}")
 
     # ── User directory (Pro) ──────────────────────────────────────────────
 
@@ -666,7 +668,7 @@ class AgentOvenClient(TaskMethods):
         return self._get("/api/v1/users")
 
     def get_user(self, user_id: str) -> dict[str, Any]:
-        return self._get(f"/api/v1/users/{user_id}")
+        return self._get(f"/api/v1/users/{_seg(user_id)}")
 
     def create_user(self, email: str, role: str, name: str = "") -> dict[str, Any]:
         """Add a person to the user directory. ``role`` is one of ``PERSON_ROLES``: ``restaurateur`` (the
@@ -675,10 +677,10 @@ class AgentOvenClient(TaskMethods):
         return self._post("/api/v1/users", {"email": email, "role": role, "name": name})
 
     def update_user(self, user_id: str, **fields: Any) -> dict[str, Any]:
-        return self._put(f"/api/v1/users/{user_id}", fields)
+        return self._put(f"/api/v1/users/{_seg(user_id)}", fields)
 
     def delete_user(self, user_id: str) -> dict[str, Any]:
-        return self._delete(f"/api/v1/users/{user_id}")
+        return self._delete(f"/api/v1/users/{_seg(user_id)}")
 
     # ── Guardrails (Pro) ─────────────────────────────────────────────────
 
@@ -811,13 +813,13 @@ class AgentOvenClient(TaskMethods):
         return self._get(path)
 
     def get_session(self, session_id: str) -> dict[str, Any]:
-        return self._get(f"/api/v1/sessions/{session_id}")
+        return self._get(f"/api/v1/sessions/{_seg(session_id)}")
 
     def create_session(self, agent_name: str, **kwargs: Any) -> dict[str, Any]:
         return self._post("/api/v1/sessions", {"agent_name": agent_name, **kwargs})
 
     def delete_session(self, session_id: str) -> dict[str, Any]:
-        return self._delete(f"/api/v1/sessions/{session_id}")
+        return self._delete(f"/api/v1/sessions/{_seg(session_id)}")
 
     # ── Service accounts (Pro) ───────────────────────────────────────────
 
@@ -839,7 +841,7 @@ class AgentOvenClient(TaskMethods):
         return self._post("/api/v1/service-accounts", body)
 
     def delete_service_account(self, sa_id: str) -> dict[str, Any]:
-        return self._delete(f"/api/v1/service-accounts/{sa_id}")
+        return self._delete(f"/api/v1/service-accounts/{_seg(sa_id)}")
 
     # ── Schedules (Pro) ──────────────────────────────────────────────────
 
@@ -847,7 +849,7 @@ class AgentOvenClient(TaskMethods):
         return self._get("/api/v1/schedules")
 
     def get_schedule(self, schedule_id: str) -> dict[str, Any]:
-        return self._get(f"/api/v1/schedules/{schedule_id}")
+        return self._get(f"/api/v1/schedules/{_seg(schedule_id)}")
 
     def create_schedule(
         self,
@@ -873,10 +875,10 @@ class AgentOvenClient(TaskMethods):
         )
 
     def update_schedule(self, schedule_id: str, **fields: Any) -> dict[str, Any]:
-        return self._put(f"/api/v1/schedules/{schedule_id}", fields)
+        return self._put(f"/api/v1/schedules/{_seg(schedule_id)}", fields)
 
     def delete_schedule(self, schedule_id: str) -> dict[str, Any]:
-        return self._delete(f"/api/v1/schedules/{schedule_id}")
+        return self._delete(f"/api/v1/schedules/{_seg(schedule_id)}")
 
     # ── Inbound triggers (Pro, ADR-0047) ─────────────────────────────────
     # A trigger starts a recipe or an agent from an event that arrives from outside, as a service account
@@ -974,7 +976,7 @@ class AgentOvenClient(TaskMethods):
         return self._get("/api/v1/test-suites")
 
     def get_test_suite(self, suite_id: str) -> dict[str, Any]:
-        return self._get(f"/api/v1/test-suites/{suite_id}")
+        return self._get(f"/api/v1/test-suites/{_seg(suite_id)}")
 
     def create_test_suite(self, suite: dict[str, Any]) -> dict[str, Any]:
         """Create a test suite.
@@ -1000,27 +1002,27 @@ class AgentOvenClient(TaskMethods):
         return self._post("/api/v1/test-suites", suite)
 
     def update_test_suite(self, suite_id: str, suite: dict[str, Any]) -> dict[str, Any]:
-        return self._put(f"/api/v1/test-suites/{suite_id}", suite)
+        return self._put(f"/api/v1/test-suites/{_seg(suite_id)}", suite)
 
     def delete_test_suite(self, suite_id: str) -> dict[str, Any]:
-        return self._delete(f"/api/v1/test-suites/{suite_id}")
+        return self._delete(f"/api/v1/test-suites/{_seg(suite_id)}")
 
     def run_test_suite(self, suite_id: str, trigger: str = "manual") -> dict[str, Any]:
         """Trigger an immediate (ad-hoc) run of a test suite."""
-        return self._post(f"/api/v1/test-suites/{suite_id}/run", {"trigger": trigger})
+        return self._post(f"/api/v1/test-suites/{_seg(suite_id)}/run", {"trigger": trigger})
 
     def list_test_runs(self, suite_id: str) -> list[dict[str, Any]]:
         """Lists runs for one suite. The server has no top-level
         ``GET /api/v1/test-runs`` — only this route, nested under the suite —
         so unlike an earlier version of this method, ``suite_id`` is
         required, not optional."""
-        return self._get(f"/api/v1/test-suites/{suite_id}/runs")
+        return self._get(f"/api/v1/test-suites/{_seg(suite_id)}/runs")
 
     def get_test_run(self, suite_id: str, run_id: str) -> dict[str, Any]:
-        return self._get(f"/api/v1/test-suites/{suite_id}/runs/{run_id}")
+        return self._get(f"/api/v1/test-suites/{_seg(suite_id)}/runs/{_seg(run_id)}")
 
     def cancel_test_run(self, run_id: str) -> dict[str, Any]:
-        return self._post(f"/api/v1/test-runs/{run_id}/cancel", {})
+        return self._post(f"/api/v1/test-runs/{_seg(run_id)}/cancel", {})
 
     # ── World schemas (Pro, ADR-0032) ─────────────────────────────────────
 
@@ -1028,16 +1030,13 @@ class AgentOvenClient(TaskMethods):
         return self._get("/api/v1/world-schemas")
 
     def get_world_schema(self, schema_id: str) -> dict[str, Any]:
-        return self._get(f"/api/v1/world-schemas/{schema_id}")
+        return self._get(f"/api/v1/world-schemas/{_seg(schema_id)}")
 
     def create_world_schema(self, schema: dict[str, Any]) -> dict[str, Any]:
         return self._post("/api/v1/world-schemas", schema)
 
     def save_world_schema(self, schema_id: str, schema: dict[str, Any]) -> dict[str, Any]:
-        return self._put(f"/api/v1/world-schemas/{schema_id}", schema)
-
-    def delete_world_schema(self, schema_id: str) -> dict[str, Any]:
-        return self._delete(f"/api/v1/world-schemas/{schema_id}")
+        return self._put(f"/api/v1/world-schemas/{_seg(schema_id)}", schema)
 
     # ── Scenarios (Pro, ADR-0032) ──────────────────────────────────────────
 
@@ -1045,16 +1044,16 @@ class AgentOvenClient(TaskMethods):
         return self._get("/api/v1/scenarios")
 
     def get_scenario(self, scenario_id: str) -> dict[str, Any]:
-        return self._get(f"/api/v1/scenarios/{scenario_id}")
+        return self._get(f"/api/v1/scenarios/{_seg(scenario_id)}")
 
     def create_scenario(self, scenario: dict[str, Any]) -> dict[str, Any]:
         return self._post("/api/v1/scenarios", scenario)
 
     def save_scenario(self, scenario_id: str, scenario: dict[str, Any]) -> dict[str, Any]:
-        return self._put(f"/api/v1/scenarios/{scenario_id}", scenario)
+        return self._put(f"/api/v1/scenarios/{_seg(scenario_id)}", scenario)
 
     def delete_scenario(self, scenario_id: str) -> dict[str, Any]:
-        return self._delete(f"/api/v1/scenarios/{scenario_id}")
+        return self._delete(f"/api/v1/scenarios/{_seg(scenario_id)}")
 
     def run_scenarios(self, req: dict[str, Any]) -> dict[str, Any]:
         """Submits a scenario run. Leave ``scenario_ids`` out of ``req`` to
@@ -1069,7 +1068,7 @@ class AgentOvenClient(TaskMethods):
         return self._post("/api/v1/scenario-runs", req)
 
     def get_scenario_run(self, run_id: str) -> dict[str, Any]:
-        return self._get(f"/api/v1/scenario-runs/{run_id}")
+        return self._get(f"/api/v1/scenario-runs/{_seg(run_id)}")
 
     def list_scenario_runs(self) -> list[dict[str, Any]]:
         return self._get("/api/v1/scenario-runs")
@@ -1077,10 +1076,10 @@ class AgentOvenClient(TaskMethods):
     def get_scenario_run_episodes(self, run_id: str) -> list[dict[str, Any]]:
         """The per-episode detail behind a scenario run's aggregate
         pass_rate — one entry per rollout, each with its own graded verdict."""
-        return self._get(f"/api/v1/scenario-runs/{run_id}/episodes")
+        return self._get(f"/api/v1/scenario-runs/{_seg(run_id)}/episodes")
 
     def cancel_scenario_run(self, run_id: str) -> dict[str, Any]:
-        return self._post(f"/api/v1/scenario-runs/{run_id}/cancel", {})
+        return self._post(f"/api/v1/scenario-runs/{_seg(run_id)}/cancel", {})
 
     # ── Workloads / K8s (Pro) ────────────────────────────────────────────
 
@@ -1088,7 +1087,7 @@ class AgentOvenClient(TaskMethods):
         return self._get("/api/v1/workloads")
 
     def get_workload(self, workload_id: str) -> dict[str, Any]:
-        return self._get(f"/api/v1/workloads/{workload_id}")
+        return self._get(f"/api/v1/workloads/{_seg(workload_id)}")
 
     # ── Agent Environments (Pro) ─────────────────────────────────────────
     # Per-agent environment deployments: bake with provider/model overrides,
@@ -1096,11 +1095,11 @@ class AgentOvenClient(TaskMethods):
 
     def list_agent_environments(self, agent_name: str) -> list[dict[str, Any]]:
         """List all environment deployments for an agent."""
-        return self._get(f"/api/v1/agents/{agent_name}/environments")
+        return self._get(f"/api/v1/agents/{_seg(agent_name)}/environments")
 
     def get_agent_environment(self, agent_name: str, env_slug: str) -> dict[str, Any]:
         """Get a specific environment deployment for an agent."""
-        return self._get(f"/api/v1/agents/{agent_name}/environments/{env_slug}")
+        return self._get(f"/api/v1/agents/{_seg(agent_name)}/environments/{_seg(env_slug)}")
 
     def upsert_agent_environment(
         self,
@@ -1138,11 +1137,11 @@ class AgentOvenClient(TaskMethods):
             body["disabled_guardrails"] = disabled_guardrails
         if backend_endpoint is not None:
             body["backend_endpoint"] = backend_endpoint
-        return self._put(f"/api/v1/agents/{agent_name}/environments/{env_slug}", body)
+        return self._put(f"/api/v1/agents/{_seg(agent_name)}/environments/{_seg(env_slug)}", body)
 
     def delete_agent_environment(self, agent_name: str, env_slug: str) -> dict[str, Any]:
         """Initiate cool-down / removal of an agent environment deployment."""
-        return self._delete(f"/api/v1/agents/{agent_name}/environments/{env_slug}")
+        return self._delete(f"/api/v1/agents/{_seg(agent_name)}/environments/{_seg(env_slug)}")
 
     # ── Scoped API keys (Pro) ───────────────────────────────────────────
 
@@ -1170,16 +1169,16 @@ class AgentOvenClient(TaskMethods):
         return self._post("/api/v1/keys", body)
 
     def get_scoped_key(self, key_id: str) -> dict[str, Any]:
-        return self._get(f"/api/v1/keys/{key_id}")
+        return self._get(f"/api/v1/keys/{_seg(key_id)}")
 
     def revoke_scoped_key(self, key_id: str) -> dict[str, Any]:
-        return self._post(f"/api/v1/keys/{key_id}/revoke", {})
+        return self._post(f"/api/v1/keys/{_seg(key_id)}/revoke", {})
 
     def get_scoped_key_usage(self, key_id: str) -> dict[str, Any]:
-        return self._get(f"/api/v1/keys/{key_id}/usage")
+        return self._get(f"/api/v1/keys/{_seg(key_id)}/usage")
 
     def delete_scoped_key(self, key_id: str) -> dict[str, Any]:
-        return self._delete(f"/api/v1/keys/{key_id}")
+        return self._delete(f"/api/v1/keys/{_seg(key_id)}")
 
     # ── Credentials (Pro) ───────────────────────────────────────────────
 
@@ -1190,7 +1189,7 @@ class AgentOvenClient(TaskMethods):
         return self._post("/api/v1/credentials", {"name": name, "value": value, "label": label})
 
     def delete_credential(self, credential_name: str) -> dict[str, Any]:
-        return self._delete(f"/api/v1/credentials/{credential_name}")
+        return self._delete(f"/api/v1/credentials/{_seg(credential_name)}")
 
     # ── Audit (OSS route, exposed here for convenience) ───────────────────
 
@@ -1226,7 +1225,7 @@ class AgentOvenClient(TaskMethods):
         return self._get("/api/v1/traces?" + query)
 
     def get_trace(self, trace_id: str) -> dict[str, Any]:
-        return self._get(f"/api/v1/traces/{trace_id}")
+        return self._get(f"/api/v1/traces/{_seg(trace_id)}")
 
     def trace_timeline(self, trace_id: str, limit: Optional[int] = None, cursor: Optional[str] = None) -> dict[str, Any]:
         """The trace laid out on a clock, computed by the server: each span's depth, offset and duration, the
@@ -2338,7 +2337,7 @@ class AgentOvenClient(TaskMethods):
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(url, data=data, headers={**self._headers(), **(headers or {})}, method=method)
         try:
-            with urllib.request.urlopen(req) as resp:
+            with _OPENER.open(req, timeout=self._timeout) as resp:
                 return resp.read(), {k.lower(): v for k, v in resp.headers.items()}
         except urllib.error.HTTPError as exc:
             raw = exc.read()

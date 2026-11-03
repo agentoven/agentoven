@@ -306,3 +306,20 @@ client.get_cache(); client.purge_cache("faq-bot"); client.remove_cache_policy("f
 `scope`, `unit`, `period`, `resets_at`) are `AgentOvenAPIError`s; the SDK does not retry for you. Lowering a budget or
 creating one needs no signature; raising or removing one needs `password=` or `signing_token=` (record id from
 `budget_record_id`). See [docs/budgets-limits-cache.md](../../docs/budgets-limits-cache.md).
+
+
+## Timeouts, redirects and the route contract
+
+A request gives up after 120 seconds (an invocation waits for a model): `AgentOvenClient(timeout=30)`, or
+`AGENTOVEN_TIMEOUT=30` in the environment. A redirect is refused with an `AgentOvenAPIError` that names the new
+location (Python's urllib would send your API key to it); use that URL as the server URL. Ids and names are
+escaped as one path segment, so a name such as `../../x` cannot choose another route.
+
+`register` / `register_agent` brings a retired agent (one that was deleted) back with the same name and id: it
+creates when the agent is absent or retired and updates when it is live. There is no `delete_world_schema`: the
+server has no such route.
+
+`tests/test_route_contract.py` reads every call the client makes and checks its verb and path against
+`sdk/fixtures/server-routes.json`, the server's route list generated from its router (Pro repository:
+`UPDATE_SDK_ROUTES=1 go test ./internal/routeguard -run SDKRoute`). A method for a route the server does not have
+fails the build.

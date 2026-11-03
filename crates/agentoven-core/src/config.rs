@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// AgentOven configuration — stored at `~/.agentoven/config.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AgentOvenConfig {
     /// Control plane URL.
     #[serde(default = "default_url")]
@@ -30,6 +30,10 @@ pub struct AgentOvenConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kitchen: Option<String>,
 
+    /// Seconds one request may take (`AGENTOVEN_TIMEOUT` overrides); unset means the client's default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+
     /// Server edition discovered from /api/v1/info (cached).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edition: Option<String>,
@@ -47,9 +51,26 @@ impl Default for AgentOvenConfig {
             token: None,
             token_expires_at: None,
             kitchen: None,
+            timeout_secs: None,
             edition: None,
             telemetry: TelemetryConfig::default(),
         }
+    }
+}
+
+impl std::fmt::Debug for AgentOvenConfig {
+    // The API key and the login token are never printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentOvenConfig")
+            .field("url", &self.url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[set]"))
+            .field("token", &self.token.as_ref().map(|_| "[set]"))
+            .field("token_expires_at", &self.token_expires_at)
+            .field("kitchen", &self.kitchen)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("edition", &self.edition)
+            .field("telemetry", &self.telemetry)
+            .finish()
     }
 }
 
@@ -108,6 +129,9 @@ impl AgentOvenConfig {
         if let Ok(kitchen) = std::env::var("AGENTOVEN_KITCHEN") {
             cfg.kitchen = Some(kitchen);
         }
+        if let Some(secs) = std::env::var("AGENTOVEN_TIMEOUT").ok().and_then(|v| v.parse().ok()) {
+            cfg.timeout_secs = Some(secs);
+        }
 
         cfg
     }
@@ -123,14 +147,22 @@ impl AgentOvenConfig {
     pub fn save(&self) -> anyhow::Result<()> {
         let path = Self::config_path()
             .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+        self.save_to(&path)
+    }
 
+    /// Save config to `path`. The file holds the API key and the login token, so it is written readable by
+    /// its owner only (0600, and its directory 0700), including when it already existed with wider rights.
+    pub fn save_to(&self, path: &std::path::Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+            }
         }
-
         let content = toml::to_string_pretty(self)?;
-        std::fs::write(&path, content)?;
-        Ok(())
+        write_private(path, &content)
     }
 
     /// Update a single field and save.
@@ -161,5 +193,62 @@ impl AgentOvenConfig {
             }
         }
         self.api_key.as_deref()
+    }
+}
+
+/// Write `content` to a file only its owner can read.
+fn write_private(path: &std::path::Path, content: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    #[cfg(unix)]
+    {
+        // `mode` applies to a new file only: tighten one that already existed before anything is written.
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(content.as_bytes())?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+
+    #[test]
+    fn debug_output_never_shows_the_key_or_the_token() {
+        let cfg = AgentOvenConfig {
+            api_key: Some("sk-live-SECRET".into()),
+            token: Some("jwt-SECRET".into()),
+            ..Default::default()
+        };
+        let shown = format!("{cfg:?}");
+        assert!(!shown.contains("SECRET"), "{shown}");
+        assert!(shown.contains("[set]"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_config_file_is_private_even_when_it_existed_with_wider_rights() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ao-cfg-{}", std::process::id()));
+        let path = dir.join("nested").join("config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let cfg = AgentOvenConfig { api_key: Some("k".into()), ..Default::default() };
+        cfg.save_to(&path).unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("api_key"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

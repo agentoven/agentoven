@@ -1,0 +1,22 @@
+# ADR-0037: Tool egress guard, store errors, retired agents and the SDK route contract: fixes from the 2026-11-03 adversarial review
+
+**Status:** Accepted (built 2026-11-03)
+**Date:** 2026-11-03
+**Scope:** OSS control plane (`pkg/netguard`, `internal/api/handlers`, `internal/mcpgw`, `internal/notify`), the three SDKs and the Rust CLI.
+**Pro counterpart:** [ADR-0052](../../agentoven-pro/ADR/0052-identity-and-surface-hardening-2026-11-03.md)
+
+## Decisions
+
+1. **A tool cannot be pointed at the control plane's own network.** `pkg/netguard` refuses endpoints that resolve to loopback, private, link-local, carrier-grade NAT or cloud-metadata addresses. It is applied when a tool is registered or updated (`POST/PUT /tools`, `/tools/bulk`: 400) and at every call (MCP gateway HTTP/SSE, remote MCP over streamable HTTP, notification tools) by dialling only the address it checked, so DNS rebinding gets no further. `AGENTOVEN_TOOL_EGRESS_ALLOW` (names, addresses, `*.suffix`) allows private hosts for every kitchen; an edition adds a per-kitchen list with `netguard.SetKitchenAllow` (Pro wires the kitchen's tool-pack egress allowlist). Metadata is never allowed. A failing allowlist lookup allows nothing. Redirects are followed only to the same host. Proxy environment variables are ignored.
+2. **Tool registration.** `enabled:false` is honoured on create and bulk, an update without `enabled` leaves it, the masked `auth_config` written back keeps the stored secret, and with a vault (Pro) a literal token or key is sealed into a kitchen credential (`tool-<name>`, `credential_ref` in the row; `Handlers.SealAllTools` migrates older tools). A bulk request is validated whole before anything is created.
+3. **Store errors.** `respondCreateError`: `ErrNotFound` 404, `ErrConflict` or a raw unique violation (recognised through `SQLState()`, no driver imported) 409, anything else a 500 without the driver's text. Used by agent, recipe, provider, tool, prompt, channel and scoped-key creates.
+4. **Retired agents.** `GET /agents` omits retired agents unless `status=retired` or `include_retired=true`; `PUT` on one is 409; creating one again is the store's decision (Pro revives it under its id, ADR-0052). The SDKs' `register` creates when the agent is absent or retired.
+5. **SDK route contract.** `sdk/fixtures/server-routes.json` is the server's route list, generated from the real server's chi tree by Pro's `internal/routeguard` test (`UPDATE_SDK_ROUTES=1 go test ./internal/routeguard -run SDKRoute`); OSS `pkg/server` test `TestSDKRouteFixtureHasEveryCommunityRoute` keeps it from missing a community route. Each SDK has a test that reads its call sites and fails for a verb and path the server lacks: `sdk/python/tests/test_route_contract.py`, `sdk/typescript/test/route-contract.test.ts`, `crates/agentoven-core/tests/route_contract.rs`. Fixed by it: Rust `retire_agent` (was `POST /agents/{name}/retire`, now `DELETE /agents/{name}`), Python and TypeScript `delete_world_schema` (removed: the server has no such route). The guardrail methods (`toggle_guardrail`, `get_guardrail`, exception removal by id) were corrected by ADR-0032's work.
+6. **SDK transport.** Python and Rust time out (default 120 s; `timeout=` / `with_timeout`, `AGENTOVEN_TIMEOUT`, `timeout_secs`), TypeScript too (`timeoutMs`); Python and Rust refuse a redirect instead of sending the key to it; TypeScript reads an error body once (a proxy's HTML page is an `AgentOvenAPIError`, not "Body is unusable"); every id and name is escaped as one path segment in all three; the Rust config file is written 0600 (directory 0700) and `Debug` of the client and config never prints the key or token.
+
+## Not done
+
+- The route contract reads call sites: a path held in a variable is not seen, and the Rust scanner finds a verb by the next calls in the source (66 calls today). The CLI crate's own HTTP calls and the dashboard's `api.ts` are not covered.
+- `internal/api/handlers` webhook-style channels and the guardrail webhook keep their own address checks; they are not folded into `pkg/netguard`.
+- The Python SDK's native `register` is the Rust core: it picks up the retired-agent rule when the extension is rebuilt (`maturin`), which was not done here; the Rust test covers it.
+- `delete_world_schema` is removed rather than the server gaining a delete route: a delete needs a store method, a permission and an ADR of its own.

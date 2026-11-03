@@ -289,15 +289,20 @@ function errorText(detail: unknown): string {
 
 const seg = encodeURIComponent;
 
+/** How long one request may take before it is abandoned (`timeoutMs` in the client options changes it). */
+export const DEFAULT_TIMEOUT_MS = 120_000;
+
 export class ProClient {
   private readonly baseUrl: string;
   private readonly apiKey?: string;
   private readonly kitchen: string;
+  private readonly timeoutMs: number;
 
   constructor(options: AgentOvenClientOptions = {}) {
     this.baseUrl = (options.url ?? 'http://localhost:8080').replace(/\/$/, '');
     this.apiKey = options.apiKey;
     this.kitchen = options.kitchen ?? 'default';
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   }
 
   /** Returns a cloned client bound to a specific kitchen. */
@@ -306,6 +311,7 @@ export class ProClient {
       url: this.baseUrl,
       apiKey: this.apiKey,
       kitchen,
+      timeoutMs: this.timeoutMs,
     });
   }
 
@@ -341,7 +347,7 @@ export class ProClient {
   }
 
   async getKitchen(kitchenId: string): Promise<Kitchen> {
-    return this.get(`/api/v1/kitchens/${kitchenId}`);
+    return this.get(`/api/v1/kitchens/${seg(kitchenId)}`);
   }
 
   async createKitchen(name: string, displayName?: string): Promise<Kitchen> {
@@ -349,16 +355,16 @@ export class ProClient {
   }
 
   async deleteKitchen(kitchenId: string): Promise<void> {
-    await this.delete(`/api/v1/kitchens/${kitchenId}`);
+    await this.delete(`/api/v1/kitchens/${seg(kitchenId)}`);
   }
 
   async listKitchenMembers(kitchenId: string): Promise<KitchenMember[]> {
-    return this.get(`/api/v1/kitchens/${kitchenId}/members`);
+    return this.get(`/api/v1/kitchens/${seg(kitchenId)}/members`);
   }
 
   async addKitchenMember(kitchenId: string, userId: string, role: KitchenRole): Promise<KitchenMember> {
     checkRole(role, KITCHEN_ROLES, 'a kitchen member');
-    return this.post(`/api/v1/kitchens/${kitchenId}/members`, { user_id: userId, role });
+    return this.post(`/api/v1/kitchens/${seg(kitchenId)}/members`, { user_id: userId, role });
   }
 
   // ── User directory ─────────────────────────────────────────────────────────
@@ -368,7 +374,7 @@ export class ProClient {
   }
 
   async getUser(userId: string): Promise<User> {
-    return this.get(`/api/v1/users/${userId}`);
+    return this.get(`/api/v1/users/${seg(userId)}`);
   }
 
   /** `role` is one of `PERSON_ROLES`: `restaurateur` (the installation's owner) or a kitchen role. The retired `admin` is refused. */
@@ -378,11 +384,11 @@ export class ProClient {
   }
 
   async updateUser(userId: string, fields: Partial<Pick<User, 'name' | 'role'>>): Promise<User> {
-    return this.put(`/api/v1/users/${userId}`, fields);
+    return this.put(`/api/v1/users/${seg(userId)}`, fields);
   }
 
   async deleteUser(userId: string): Promise<void> {
-    await this.delete(`/api/v1/users/${userId}`);
+    await this.delete(`/api/v1/users/${seg(userId)}`);
   }
 
   // ── Guardrails ─────────────────────────────────────────────────────────────
@@ -946,7 +952,7 @@ export class ProClient {
   }
 
   async getSession(sessionId: string): Promise<Session> {
-    return this.get(`/api/v1/sessions/${sessionId}`);
+    return this.get(`/api/v1/sessions/${seg(sessionId)}`);
   }
 
   async createSession(agentName: string, data?: unknown): Promise<Session> {
@@ -954,7 +960,7 @@ export class ProClient {
   }
 
   async deleteSession(sessionId: string): Promise<void> {
-    await this.delete(`/api/v1/sessions/${sessionId}`);
+    await this.delete(`/api/v1/sessions/${seg(sessionId)}`);
   }
 
   // ── Service accounts ───────────────────────────────────────────────────────
@@ -976,7 +982,7 @@ export class ProClient {
   }
 
   async deleteServiceAccount(saId: string): Promise<void> {
-    await this.delete(`/api/v1/service-accounts/${saId}`);
+    await this.delete(`/api/v1/service-accounts/${seg(saId)}`);
   }
 
   // ── Schedules ──────────────────────────────────────────────────────────────
@@ -986,7 +992,7 @@ export class ProClient {
   }
 
   async getSchedule(scheduleId: string): Promise<Schedule> {
-    return this.get(`/api/v1/schedules/${scheduleId}`);
+    return this.get(`/api/v1/schedules/${seg(scheduleId)}`);
   }
 
   async createSchedule(req: CreateScheduleRequest): Promise<Schedule> {
@@ -994,11 +1000,11 @@ export class ProClient {
   }
 
   async updateSchedule(scheduleId: string, fields: Partial<CreateScheduleRequest>): Promise<Schedule> {
-    return this.put(`/api/v1/schedules/${scheduleId}`, fields);
+    return this.put(`/api/v1/schedules/${seg(scheduleId)}`, fields);
   }
 
   async deleteSchedule(scheduleId: string): Promise<void> {
-    await this.delete(`/api/v1/schedules/${scheduleId}`);
+    await this.delete(`/api/v1/schedules/${seg(scheduleId)}`);
   }
 
   // ── Inbound triggers (ADR-0047) ────────────────────────────────────────────
@@ -1081,7 +1087,7 @@ export class ProClient {
   }
 
   async getTestSuite(id: string): Promise<TestSuite> {
-    return this.get(`/api/v1/test-suites/${id}`);
+    return this.get(`/api/v1/test-suites/${seg(id)}`);
   }
 
   async createTestSuite(suite: Omit<TestSuite, 'id' | 'created_at'>): Promise<TestSuite> {
@@ -1089,15 +1095,15 @@ export class ProClient {
   }
 
   async updateTestSuite(id: string, suite: Partial<TestSuite>): Promise<TestSuite> {
-    return this.put(`/api/v1/test-suites/${id}`, suite);
+    return this.put(`/api/v1/test-suites/${seg(id)}`, suite);
   }
 
   async deleteTestSuite(id: string): Promise<void> {
-    return this.delete(`/api/v1/test-suites/${id}`);
+    return this.delete(`/api/v1/test-suites/${seg(id)}`);
   }
 
   async runTestSuite(id: string, trigger = 'manual'): Promise<{ run_id: string; status: string }> {
-    return this.post(`/api/v1/test-suites/${id}/run`, { trigger });
+    return this.post(`/api/v1/test-suites/${seg(id)}/run`, { trigger });
   }
 
   /**
@@ -1106,15 +1112,15 @@ export class ProClient {
    * version of this method, `suiteId` is required, not optional.
    */
   async listTestRuns(suiteId: string): Promise<TestRun[]> {
-    return this.get(`/api/v1/test-suites/${suiteId}/runs`);
+    return this.get(`/api/v1/test-suites/${seg(suiteId)}/runs`);
   }
 
   async getTestRun(suiteId: string, runId: string): Promise<TestRun> {
-    return this.get(`/api/v1/test-suites/${suiteId}/runs/${runId}`);
+    return this.get(`/api/v1/test-suites/${seg(suiteId)}/runs/${seg(runId)}`);
   }
 
   async cancelTestRun(runId: string): Promise<void> {
-    return this.post(`/api/v1/test-runs/${runId}/cancel`, {});
+    return this.post(`/api/v1/test-runs/${seg(runId)}/cancel`, {});
   }
 
   // ── World schemas (Pro, ADR-0032) ────────────────────────────────────────────
@@ -1124,7 +1130,7 @@ export class ProClient {
   }
 
   async getWorldSchema(id: string): Promise<WorldSchema> {
-    return this.get(`/api/v1/world-schemas/${id}`);
+    return this.get(`/api/v1/world-schemas/${seg(id)}`);
   }
 
   async createWorldSchema(schema: WorldSchema): Promise<{ schema: WorldSchema; issues: unknown[] }> {
@@ -1132,11 +1138,7 @@ export class ProClient {
   }
 
   async saveWorldSchema(id: string, schema: WorldSchema): Promise<{ schema: WorldSchema; issues: unknown[] }> {
-    return this.put(`/api/v1/world-schemas/${id}`, schema);
-  }
-
-  async deleteWorldSchema(id: string): Promise<void> {
-    return this.delete(`/api/v1/world-schemas/${id}`);
+    return this.put(`/api/v1/world-schemas/${seg(id)}`, schema);
   }
 
   // ── Scenarios (Pro, ADR-0032) ─────────────────────────────────────────────────
@@ -1146,7 +1148,7 @@ export class ProClient {
   }
 
   async getScenario(id: string): Promise<Scenario> {
-    return this.get(`/api/v1/scenarios/${id}`);
+    return this.get(`/api/v1/scenarios/${seg(id)}`);
   }
 
   async createScenario(scenario: Scenario): Promise<Scenario> {
@@ -1154,11 +1156,11 @@ export class ProClient {
   }
 
   async saveScenario(id: string, scenario: Scenario): Promise<Scenario> {
-    return this.put(`/api/v1/scenarios/${id}`, scenario);
+    return this.put(`/api/v1/scenarios/${seg(id)}`, scenario);
   }
 
   async deleteScenario(id: string): Promise<void> {
-    return this.delete(`/api/v1/scenarios/${id}`);
+    return this.delete(`/api/v1/scenarios/${seg(id)}`);
   }
 
   /**
@@ -1172,7 +1174,7 @@ export class ProClient {
   }
 
   async getScenarioRun(runId: string): Promise<ScenarioRun> {
-    return this.get(`/api/v1/scenario-runs/${runId}`);
+    return this.get(`/api/v1/scenario-runs/${seg(runId)}`);
   }
 
   async listScenarioRuns(): Promise<ScenarioRun[]> {
@@ -1182,11 +1184,11 @@ export class ProClient {
   /** The per-episode detail behind a scenario run's aggregate pass_rate —
    *  one entry per rollout, each with its own graded verdict. */
   async getScenarioRunEpisodes(runId: string): Promise<EpisodeRecord[]> {
-    return this.get(`/api/v1/scenario-runs/${runId}/episodes`);
+    return this.get(`/api/v1/scenario-runs/${seg(runId)}/episodes`);
   }
 
   async cancelScenarioRun(runId: string): Promise<void> {
-    return this.post(`/api/v1/scenario-runs/${runId}/cancel`, {});
+    return this.post(`/api/v1/scenario-runs/${seg(runId)}/cancel`, {});
   }
 
   // ── Workloads (K8s) ────────────────────────────────────────────────────────
@@ -1196,29 +1198,29 @@ export class ProClient {
   }
 
   async getWorkload(workloadId: string): Promise<Workload> {
-    return this.get(`/api/v1/workloads/${workloadId}`);
+    return this.get(`/api/v1/workloads/${seg(workloadId)}`);
   }
 
   // ── Agent environments (Pro) ───────────────────────────────────────────────
 
   /** List all environment deployments for an agent. */
   async listAgentEnvironments(agentName: string): Promise<AgentEnvironment[]> {
-    return this.get(`/api/v1/agents/${agentName}/environments`);
+    return this.get(`/api/v1/agents/${seg(agentName)}/environments`);
   }
 
   /** Get a specific environment deployment. */
   async getAgentEnvironment(agentName: string, envSlug: string): Promise<AgentEnvironment> {
-    return this.get(`/api/v1/agents/${agentName}/environments/${envSlug}`);
+    return this.get(`/api/v1/agents/${seg(agentName)}/environments/${seg(envSlug)}`);
   }
 
   /** Create or update an agent environment deployment. */
   async upsertAgentEnvironment(agentName: string, envSlug: string, req: UpsertAgentEnvironmentRequest): Promise<AgentEnvironment> {
-    return this.put(`/api/v1/agents/${agentName}/environments/${envSlug}`, req);
+    return this.put(`/api/v1/agents/${seg(agentName)}/environments/${seg(envSlug)}`, req);
   }
 
   /** Initiate cool-down / removal of an agent environment deployment. */
   async deleteAgentEnvironment(agentName: string, envSlug: string): Promise<void> {
-    return this.delete(`/api/v1/agents/${agentName}/environments/${envSlug}`);
+    return this.delete(`/api/v1/agents/${seg(agentName)}/environments/${seg(envSlug)}`);
   }
 
   // ── Scoped API keys (Pro) ─────────────────────────────────────────────────
@@ -1242,19 +1244,19 @@ export class ProClient {
   }
 
   async getScopedKey(keyId: string): Promise<ScopedAPIKey> {
-    return this.get(`/api/v1/keys/${keyId}`);
+    return this.get(`/api/v1/keys/${seg(keyId)}`);
   }
 
   async revokeScopedKey(keyId: string): Promise<Record<string, unknown>> {
-    return this.post(`/api/v1/keys/${keyId}/revoke`, {});
+    return this.post(`/api/v1/keys/${seg(keyId)}/revoke`, {});
   }
 
   async getScopedKeyUsage(keyId: string): Promise<Record<string, unknown>> {
-    return this.get(`/api/v1/keys/${keyId}/usage`);
+    return this.get(`/api/v1/keys/${seg(keyId)}/usage`);
   }
 
   async deleteScopedKey(keyId: string): Promise<void> {
-    await this.delete(`/api/v1/keys/${keyId}`);
+    await this.delete(`/api/v1/keys/${seg(keyId)}`);
   }
 
   // ── Credentials (Pro) ────────────────────────────────────────────────────
@@ -1268,7 +1270,7 @@ export class ProClient {
   }
 
   async deleteCredential(credentialName: string): Promise<void> {
-    await this.delete(`/api/v1/credentials/${credentialName}`);
+    await this.delete(`/api/v1/credentials/${seg(credentialName)}`);
   }
 
   // ── License (Pro) ────────────────────────────────────────────────────────
@@ -2152,12 +2154,12 @@ export class ProClient {
 
   /** Long-running tasks: start, watch, resume and cancel (`pro.tasks.start(agent, input)`). */
   get tasks(): Tasks {
-    return new Tasks({ url: this.baseUrl, apiKey: this.apiKey, kitchen: this.kitchen });
+    return new Tasks({ url: this.baseUrl, apiKey: this.apiKey, kitchen: this.kitchen, timeoutMs: this.timeoutMs });
   }
 
   /** Upload a file once and name it in messages by `blob_ref` (`pro.blobs.upload(bytes)`). */
   get blobs(): Blobs {
-    return new Blobs({ url: this.baseUrl, apiKey: this.apiKey, kitchen: this.kitchen });
+    return new Blobs({ url: this.baseUrl, apiKey: this.apiKey, kitchen: this.kitchen, timeoutMs: this.timeoutMs });
   }
 
   private headers(kitchenOverride?: string): Record<string, string> {
@@ -2179,14 +2181,18 @@ export class ProClient {
       method,
       headers: { ...this.headers(kitchenOverride), ...extraHeaders },
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(this.timeoutMs),
     });
 
     if (!res.ok) {
-      let detail: unknown;
+      // The body is read once: a failed res.json() has consumed it, and reading it again throws
+      // "Body is unusable", which hid every proxy's HTML 502 page behind a TypeError.
+      const raw = await res.text().catch(() => '');
+      let detail: unknown = raw;
       try {
-        detail = await res.json();
+        detail = JSON.parse(raw);
       } catch {
-        detail = await res.text();
+        /* not JSON (a gateway's error page): keep the text */
       }
       if (res.status === 400 && errorText(detail).includes(NO_AUDIO)) {
         throw new AudioModalityError(res.status, detail);

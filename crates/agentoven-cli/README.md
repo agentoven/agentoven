@@ -106,6 +106,14 @@ The CLI reads from environment variables:
 | `AGENTOVEN_URL` | `http://localhost:8080` | Control plane URL |
 | `AGENTOVEN_API_KEY` | — | API key for authentication |
 | `AGENTOVEN_KITCHEN` | `default` | Active kitchen (workspace) |
+| `AGENTOVEN_TIMEOUT` | `120` | Seconds one request may take (also `timeout_secs` in the config file) |
+
+`~/.agentoven/config.toml` holds your API key and login token, so it is written readable by you only (mode 0600,
+its directory 0700), including when an older version left it wider. The key and token never appear in debug output.
+`agentoven agent retire` is `DELETE /api/v1/agents/{name}`; registering the same name again brings the agent back.
+A name is escaped as one path segment, and a redirect from the control plane is an error, not followed (it would carry
+your key to the new address). `crates/agentoven-core/tests/route_contract.rs` checks every call against the server's
+route list (`sdk/fixtures/server-routes.json`).
 
 ## License
 

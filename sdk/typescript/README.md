@@ -263,3 +263,19 @@ await pro.getCache(); await pro.purgeCache('faq-bot'); await pro.removeCachePoli
 `scope`, `unit`, `period`, `resetsAt`) extend `AgentOvenAPIError`; the SDK does not retry for you. Lowering a budget or
 creating one needs no signature; raising or removing one needs `password` or `signingToken` (record id from
 `budgetRecordId`). See [docs/budgets-limits-cache.md](../../docs/budgets-limits-cache.md).
+
+
+## Timeouts, error bodies and the route contract
+
+A request gives up after 120 seconds (an invocation waits for a model): `new ProClient({ timeoutMs: 30_000 })`. A
+failure whose body is not JSON (a proxy's HTML 502 page) is an `AgentOvenAPIError` whose `detail` is the text. Ids
+and names are escaped as one path segment, so a name such as `../../x` cannot choose another route.
+
+`registerAgent` brings a retired agent (one that was deleted) back with the same name and id: it creates when the
+agent is absent or retired and updates when it is live. There is no `deleteWorldSchema`: the server has no such
+route.
+
+`test/route-contract.test.ts` reads every call the client makes and checks its verb and path against
+`sdk/fixtures/server-routes.json`, the server's route list generated from its router (Pro repository:
+`UPDATE_SDK_ROUTES=1 go test ./internal/routeguard -run SDKRoute`). A method for a route the server does not have
+fails the build.

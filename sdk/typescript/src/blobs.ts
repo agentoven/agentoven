@@ -20,6 +20,8 @@ export interface BlobsOptions {
   url: string;
   apiKey?: string;
   kitchen?: string;
+  /** How long one request may take, in milliseconds (default 120 000). */
+  timeoutMs?: number;
 }
 
 export interface UploadOptions {
@@ -61,8 +63,10 @@ export class Blobs {
   private readonly baseUrl: string;
   private readonly apiKey?: string;
   private readonly kitchen: string;
+  private readonly timeoutMs: number;
 
   constructor(opts: BlobsOptions) {
+    this.timeoutMs = opts.timeoutMs ?? 120_000;
     this.baseUrl = opts.url.replace(/\/+$/, '');
     this.apiKey = opts.apiKey;
     this.kitchen = opts.kitchen ?? 'default';
@@ -93,7 +97,7 @@ export class Blobs {
   private async send(method: string, path: string, body?: Uint8Array, headers: Record<string, string> = {}): Promise<Response> {
     const h: Record<string, string> = { 'X-Kitchen': this.kitchen, 'X-Kitchen-Id': this.kitchen, ...headers };
     if (this.apiKey) h['Authorization'] = `Bearer ${this.apiKey}`;
-    const res = await fetch(`${this.baseUrl}${path}`, { method, headers: h, body: body as BodyInit | undefined });
+    const res = await fetch(`${this.baseUrl}${path}`, { method, headers: h, body: body as BodyInit | undefined, signal: AbortSignal.timeout(this.timeoutMs) });
     if (!res.ok) {
       let detail: unknown;
       const text = await res.text();

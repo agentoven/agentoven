@@ -12,6 +12,8 @@ export interface AgentOvenClientOptions {
   apiKey?: string;
   /** Kitchen (workspace) name. Default: "default" */
   kitchen?: string;
+  /** How long one request may take, in milliseconds. Default 120 000: an invocation waits for a model. */
+  timeoutMs?: number;
 }
 
 export interface RegisterAgentOptions {

@@ -26,6 +26,8 @@ export interface TasksOptions {
   kitchen?: string;
   /** Replaces `fetch` (tests, proxies). */
   fetch?: typeof fetch;
+  /** How long one request may take, in milliseconds (default 120 000). */
+  timeoutMs?: number;
 }
 
 export type TaskStatus =
@@ -173,8 +175,10 @@ export class Tasks {
   private readonly apiKey?: string;
   private readonly kitchen: string;
   private readonly fetchFn: typeof fetch;
+  private readonly timeoutMs: number;
 
   constructor(opts: TasksOptions) {
+    this.timeoutMs = opts.timeoutMs ?? 120_000;
     this.baseUrl = opts.url.replace(/\/+$/, '');
     this.apiKey = opts.apiKey;
     this.kitchen = opts.kitchen ?? 'default';
@@ -325,6 +329,7 @@ export class Tasks {
       method,
       headers: this.headers(extra),
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(this.timeoutMs),
     });
     if (!res.ok) throw await this.failure(res);
     const text = await res.text();
