@@ -1,6 +1,6 @@
 {
   "name": "@agentoven/sdk",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "description": "AgentOven TypeScript SDK — enterprise agent orchestration",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -53,12 +53,12 @@
     "vitest": "^2.0.0"
   },
   "optionalDependencies": {
-    "@agentoven/sdk-win32-x64-msvc": "0.9.5",
-    "@agentoven/sdk-darwin-x64": "0.9.5",
-    "@agentoven/sdk-linux-x64-gnu": "0.9.5",
-    "@agentoven/sdk-darwin-arm64": "0.9.5",
-    "@agentoven/sdk-linux-arm64-gnu": "0.9.5",
-    "@agentoven/sdk-linux-x64-musl": "0.9.5"
+    "@agentoven/sdk-win32-x64-msvc": "0.9.6",
+    "@agentoven/sdk-darwin-x64": "0.9.6",
+    "@agentoven/sdk-linux-x64-gnu": "0.9.6",
+    "@agentoven/sdk-darwin-arm64": "0.9.6",
+    "@agentoven/sdk-linux-arm64-gnu": "0.9.6",
+    "@agentoven/sdk-linux-x64-musl": "0.9.6"
   },
   "engines": {
     "node": ">= 18"

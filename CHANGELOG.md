@@ -9,6 +9,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.9.6] — 2026-11-03
+
+### 🔖 Agent versions move only when what runs changes
+
+- **A version is a bake of a configuration.** The first bake of an agent is `0.1.0`; a bake whose configuration differs takes the next minor version; a bake that changes nothing writes nothing; moving a version between environments never changes it. Every version is kept as it was baked. Version names must be `MAJOR.MINOR.PATCH`, above the latest, or equal to the current one with the same configuration (ADR-0036).
+- **Editing a baked agent saves a draft.** `PUT /agents/{name}` on a baked agent changes nothing that runs until a bake or re-cook applies it; the dashboard marks unbaked edits. The configuration that counts as "what runs" covers every behaviour field, and a test fails when a new agent field is not classified. `PUT` now keeps `context_budget`, `reasoning_strategy`, `summary_*`, `approval_tools` and `subagents` (it used to drop them) and clears `skills`, `approval_tools` and `subagents` with `[]`.
+- A bake no longer overwrites edits made while it ran (the tail writes status only), concurrent re-cooks are serialised, and an update from a stale copy is refused with 409.
+
+### ✅ Configuration is checked against what exists
+
+- **One checker** (`pkg/refcheck`) validates an agent or recipe on create, update, bake, re-cook and run: models of a provider, prompts, tools, skills, scenarios, subagents, compaction model (`summary_provider` is new), channels, environments, unknown fields, wrong types, out-of-range numbers, duplicates, circular steps. A bad configuration is a `422` with `{code: "invalid_configuration", problems}`; each problem has a path, the bad value and the nearest valid values. Another kitchen's resources read as "does not exist". `GET /agents/{name}/validate` and `GET /recipes/{name}/validate` list problems of what is already saved; saved agents with bad references keep running and are refused at their next bake.
+- **Dropdowns, not free text,** in both dashboards for everything that refers to something that exists; a custom model id is offered only after choosing a provider that takes open model lists.
+- **SDKs and CLI** have an optional client-side `validate` with did-you-mean, sharing one 71-case fixture with the server.
+- Behaviour changes: a sub-recipe step must name an existing recipe; the top-level `skills` list must be registered skills; bake failures answer `422` (was `400`).
+
+### 🛡️ Guardrail actions, more detectors and more places to check
+
+- A rule can **block** (as before, still the default), **redact** or **mask** (typed placeholders; the redacted text is what continues; originals are kept out of traces, spans, audit events, the journal, call captures and sessions), **warn**, or **require approval** for tool calls.
+- Validated detectors: cards (Luhn), IBAN, Aadhaar, PAN, UK NINO and NHS numbers, SSN rules, EU VAT and Spanish DNI, IPs, phones, cloud/GitHub/Slack/JWT/PEM keys; regex rules on a linear-time engine with size limits; unicode-normalised matching.
+- Guardrails now also judge **retrieved chunks**, **tool results**, **delegation** and **A2A messages** (all part kinds, one canonical text); the model's reply is judged before anything keeps it, including text beside tool calls; every model call passes one chain (guardrails, cache, spend gate, rate limits, provider). `POST /api/v1/guardrails/test` and `GET /api/v1/guardrails/kinds`.
+- Behaviour changes: `credit_card` and `ssn` now validate, so numbers failing the check are no longer flagged.
+
+### 📄 Documents and media
+
+- **Word, Excel, HTML, CSV, RTF and PDF pages are read in-process** (sheet/range/row addressing, hidden text dropped, zip/XML/PDF bombs bounded) and become text before a provider that cannot read them natively. `POST /api/v1/documents/extract`, `/ocr` (scanned pages through the kitchen's vision model; confidence is `unverified` unless a second model agrees) and `/fields` (JSON-schema fields, each with a page and a quote that is checked against the text).
+- **A blob API** (`/api/v1/blobs`) for large media by reference, kitchen scoped; images, PDF, audio and video as typed content parts; Gemini Files, LiteLLM and Ollama pass-through; background tasks take `content_parts`.
+
+### 🧰 Tools and secrets
+
+- **Tool packs seam**: a `native` tool transport and a per-call tool approval policy, so installable packs (Pro) can run governed tools; a tool owned by a pack cannot be edited through `/tools`.
+- Tool authentication is `bearer`, `api-key` or `basic` and nothing else; secrets are sealed in the vault when there is one. Endpoints in the private, loopback, link-local and metadata ranges are refused at registration and at every call unless allowlisted (`pkg/netguard`).
+- Secret references from a kitchen resolve only through that kitchen's `vault://` names; `env://` and `k8s://` references are platform-level.
+- **Provider keys are pinned to the provider's host**: changing the endpoint of a provider that holds a key needs the key re-entered or a platform permission, and redirects to another host are refused.
+
+### 🔐 Kitchen isolation and security fixes
+
+- Every route that takes an id (recipe runs, gates, approvals, sessions, test runs, workloads, guardrails, tasks, traces, blobs, keys, saved views) checks that the id belongs to the caller's kitchen; an empty kitchen is an error, not "all". A cross-kitchen walker test fails for any new unclassified by-id route.
+- `/models/route` and the raw model routes take the kitchen from the caller and validate `agent_ref` (an unknown agent is `404`); the MCP gateway follows `AGENTOVEN_REQUIRE_AUTH` like every other route and takes its kitchen from the identity; A2A bodies are bounded and every part kind is guarded; LangFuse ingest is bounded.
+- Community authentication is unchanged: the opt-in flag still decides, and nothing in this release makes authentication mandatory in the community edition. Enterprise-only enforcement is provided through seams (route guard, after-authentication hook, trace-content guard).
+- Refusals are `402`/`429`/`403`/`503` on every route (streams, sessions, voice, provider test), a streamed call that dies is charged for what was generated, and one provider's refusals no longer open the circuit for every kitchen.
+
+### ⏱️ Long runs and budgets
+
+- Task journal on PostgreSQL with leases fenced against frozen replicas, a spend reserve with a ledger, signed budget raises, rate limits (memory or PostgreSQL), an opt-in exact-match response cache, and delegation held to the target's own guardrails. A run with approvals waiting is announced through an observer and an expirer seam so a person is told, reminded and escalated, and an unanswered gate is refused, never approved.
+
+### 🧑‍💻 SDKs and CLI
+
+- `register_agent` creates or updates; tools can be registered; blobs, tasks, replay, datasets, signing, secrets, guardrails, documents, triggers, budgets and limits, approvals and validation are available from Python, TypeScript and the Rust CLI. A route-contract test checks every SDK call against the server's route list; clients time out (120 s default), do not follow redirects with the key, escape path segments, and the Rust config file is written `0600`.
+
 ### 🔭 Traces you can search, compare and rate; recipes you archive instead of delete
 
 - **Traces got the tools a tracing product has.** The list filters by agent, recipe, status, model, provider, tag, session, text (input, output, agent, ID), cost, latency and time, sorts by time, cost, latency or tokens, and pages with a total. `GET /api/v1/traces/stats` gives the count, error count, tokens, cost and p50/p95 latency of whatever a filter matches, and `/traces/sessions` groups traces into conversations. The dashboard has all of it, with the filters kept in the address, a summary strip, a Sessions tab and Export.
