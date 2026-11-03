@@ -39,6 +39,14 @@
   },
   {
    "method": "DELETE",
+   "path": "/api/v1/chat-identities/mine/{id}"
+  },
+  {
+   "method": "DELETE",
+   "path": "/api/v1/chat-identities/{id}"
+  },
+  {
+   "method": "DELETE",
    "path": "/api/v1/credentials/{credentialName}"
   },
   {
@@ -219,6 +227,10 @@
   },
   {
    "method": "GET",
+   "path": "/api/v1/agents/{agentName}/draft/diff"
+  },
+  {
+   "method": "GET",
    "path": "/api/v1/agents/{agentName}/environments"
   },
   {
@@ -364,6 +376,14 @@
   {
    "method": "GET",
    "path": "/api/v1/channels/{channelName}/ws"
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/chat-identities"
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/chat-identities/mine"
   },
   {
    "method": "GET",
@@ -1156,6 +1176,22 @@
   {
    "method": "POST",
    "path": "/api/v1/channels/{channelName}/ws-ticket"
+  },
+  {
+   "method": "POST",
+   "path": "/api/v1/chat-identities"
+  },
+  {
+   "method": "POST",
+   "path": "/api/v1/chat-identities/confirm"
+  },
+  {
+   "method": "POST",
+   "path": "/api/v1/chat-identities/link-requests"
+  },
+  {
+   "method": "POST",
+   "path": "/api/v1/chat-identities/proposals"
   },
   {
    "method": "POST",

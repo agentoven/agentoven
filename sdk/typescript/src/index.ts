@@ -99,7 +99,7 @@ export {
   KITCHEN_ROLES, PERSON_ROLES, BUDGET_UNITS, BUDGET_PERIODS, LIMIT_SCOPES, CACHE_MODES, budgetRecordId,
   TRIGGER_KINDS, TRIGGER_DELIVERY_STATUSES,
 } from './pro-client.js';
-export type { AgentRecord, ConfigValidation, AgentValidation, RecipeValidation } from './pro-client.js';
+export type { AgentRecord, ConfigValidation, AgentValidation, RecipeValidation, AgentDraftDiff, DraftChange } from './pro-client.js';
 export type {
   TraceListFilters, TraceView, TraceTimeline, TimelineSpan, TraceAudit,
   Signing, SigningChallenge, SigningTokenReply, SignatureRecord, ApproverPolicy,

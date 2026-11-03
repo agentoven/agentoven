@@ -371,6 +371,31 @@ export interface RecipeValidation extends ConfigValidation {
   recipe: string;
 }
 
+/** One difference between a baked agent and the agent as its draft will leave it (`GET /agents/{name}/draft/diff`). */
+export interface DraftChange {
+  /** The field's JSON path (`max_turns`, `bot.max_actions`), or the list an element belongs to (`guardrails`). */
+  field: string;
+  /** Names an element of the guardrails (its id) or ingredients (`kind:name`). */
+  key?: string;
+  kind: "added" | "changed" | "removed";
+  /** Secrets are masked on both sides: a changed secret is a `changed` whose sides both read `****`. */
+  before: unknown;
+  after: unknown;
+  /** For a changed element: the fields inside it that differ, as paths relative to the element. */
+  details?: DraftChange[];
+}
+
+/** The server's answer for `GET /agents/{name}/draft/diff`. */
+export interface AgentDraftDiff {
+  agent: string;
+  has_draft: boolean;
+  baked: boolean;
+  baked_version?: string;
+  /** Whether the draft would move the behaviour fingerprint, which is what makes a bake write a new version. */
+  changes_behaviour: boolean;
+  changes: DraftChange[];
+}
+
 function validation(all: readonly Problem[]): ConfigValidation {
   const { errors, warnings } = split(all);
   return { valid: errors.length === 0, problems: errors, warnings };
@@ -746,6 +771,14 @@ export class ProClient {
    */
   async agentValidate(name: string, opts?: { kitchen?: string }): Promise<AgentValidation> {
     return this.get(`/api/v1/agents/${seg(name)}/validate`, opts?.kitchen);
+  }
+
+  /**
+   * What the next bake of a stored agent would change: `GET /agents/{name}/draft/diff`. Read-only; secrets come
+   * back masked, and an agent without a draft has `has_draft: false` and no changes.
+   */
+  async agentDraftDiff(name: string, opts?: { kitchen?: string }): Promise<AgentDraftDiff> {
+    return this.get(`/api/v1/agents/${seg(name)}/draft/diff`, opts?.kitchen);
   }
 
   /** `agentValidate` for a stored recipe: `GET /recipes/{name}/validate`. */

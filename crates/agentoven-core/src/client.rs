@@ -443,6 +443,19 @@ impl AgentOvenClient {
         Ok(resp.json().await?)
     }
 
+    /// What the next bake of an agent would change: the baked configuration against the one its draft
+    /// leaves (`GET /api/v1/agents/{name}/draft/diff`). Secrets come back masked; an agent without a
+    /// draft has `has_draft: false` and no changes.
+    pub async fn agent_draft_diff(&self, name: &str) -> anyhow::Result<serde_json::Value> {
+        let url = self.url(&format!("/api/v1/agents/{name}/draft/diff", name = seg(name)));
+        let resp = self
+            .authed_request(self.http.get(url))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
     /// Get the A2A Agent Card for an agent.
     pub async fn agent_card(&self, name: &str) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/agents/{name}/card", name = seg(name)));

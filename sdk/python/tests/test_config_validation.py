@@ -326,6 +326,14 @@ def test_agent_validate_and_recipe_validate_read_the_servers_verdict(api, client
     assert api.requests[-1]["path"] == "/api/v1/recipes/r%2F1/validate"     # a name is one path segment
 
 
+def test_agent_draft_diff_reads_what_the_next_bake_would_change(api, client):
+    diff = {"agent": "a 1", "has_draft": True, "baked": True, "baked_version": "0.1.0", "changes_behaviour": True,
+            "changes": [{"field": "max_turns", "kind": "changed", "before": 5, "after": 9}]}
+    api.reply("GET", "/api/v1/agents/a%201/draft/diff", diff)
+    assert client.agent_draft_diff("a 1") == diff
+    assert api.requests[-1]["path"] == "/api/v1/agents/a%201/draft/diff"
+
+
 def test_validate_agent_returns_errors_and_warnings_together(api, client):
     got = client.validate_agent({"name": "a1", "model_provider": "flaky", "model_name": "gpt-4o", "summary_model": "gpt-4oo", "summary_provider": "flaky"})
     assert [(p.path, p.severity) for p in got] == [("model_provider", "warning"), ("summary_provider", "warning"), ("summary_model", "error")]

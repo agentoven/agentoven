@@ -211,6 +211,15 @@ class AgentOvenClient(TaskMethods):
         as dicts. It changes nothing; an agent that already runs keeps running whatever this says."""
         return self._get(f"/api/v1/agents/{_seg(name)}/validate")
 
+    def agent_draft_diff(self, name: str) -> dict[str, Any]:
+        """What the next bake of the agent would change (``GET /api/v1/agents/{name}/draft/diff``): the baked
+        configuration against the one its draft leaves. ``{"agent", "has_draft", "baked", "baked_version",
+        "changes_behaviour", "changes"}``; each change is ``{"field", "kind", "before", "after"}`` with ``kind`` one of
+        ``added``, ``changed`` or ``removed``, a ``key`` for an element of the guardrails or ingredients, and
+        ``details`` for the fields inside a changed element. Secrets come back masked. An agent without a draft
+        has no changes. It changes nothing."""
+        return self._get(f"/api/v1/agents/{_seg(name)}/draft/diff")
+
     def recipe_validate(self, name: str) -> dict[str, Any]:
         """:meth:`agent_validate` for a recipe (``GET /api/v1/recipes/{name}/validate``)."""
         return self._get(f"/api/v1/recipes/{_seg(name)}/validate")

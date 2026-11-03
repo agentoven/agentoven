@@ -154,6 +154,16 @@ describe('agentValidate and recipeValidate', () => {
   });
 });
 
+describe('agentDraftDiff', () => {
+  it('reads what the next bake of a stored agent would change', async () => {
+    const diff = { agent: 'a b', has_draft: true, baked: true, baked_version: '0.1.0', changes_behaviour: true, changes: [{ field: 'max_turns', kind: 'changed', before: 5, after: 9 }] };
+    api.reply('GET', '/api/v1/agents/a%20b/draft/diff', diff);
+    expect(await pro.agentDraftDiff('a b')).toEqual(diff);
+    expect(calls()).toEqual(['GET /api/v1/agents/a%20b/draft/diff']);
+    expect(api.last.headers['x-kitchen']).toBe('acme');
+  });
+});
+
 describe('validate: true on an agent', () => {
   const typo = { name: 'support', model_provider: 'anthropic', model_name: 'claude-haiku-4-5', summary_provider: 'anthropic', summary_model: 'claude-hiku-4-5' };
 
