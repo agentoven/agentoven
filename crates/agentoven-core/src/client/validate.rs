@@ -37,9 +37,25 @@ const EDIT_TEXT: [&str; 11] = [
 /// Numbers that mean "unchanged" at zero.
 const EDIT_POSITIVE: [&str; 2] = ["max_turns", "context_budget"];
 /// Lists that mean "unchanged" when empty.
-const EDIT_NONEMPTY_LISTS: [&str; 2] = ["ingredients", "skills"];
+const EDIT_NONEMPTY_LISTS: [&str; 1] = ["ingredients"];
 /// Lists where only null means "unchanged": an empty list clears.
-const EDIT_CLEARABLE_LISTS: [&str; 3] = ["guardrails", "approval_tools", "subagents"];
+const EDIT_CLEARABLE_LISTS: [&str; 4] = ["skills", "guardrails", "approval_tools", "subagents"];
+/// The optional settings an explicit JSON null clears (the control plane's `clearableFields`). The lists that
+/// clear with `[]` are not here: a null list is "no opinion" there, as it always was.
+const EDIT_NULL_CLEARS: [&str; 12] = [
+    "description",
+    "framework",
+    "backup_provider",
+    "backup_model",
+    "execution_mode",
+    "max_turns",
+    "bot",
+    "ingredients",
+    "context_budget",
+    "reasoning_strategy",
+    "summary_provider",
+    "summary_model",
+];
 /// Strings where "" clears: the summary model is "not part of the edit" only when it is absent.
 const EDIT_CLEARABLE_TEXT: [&str; 2] = ["summary_provider", "summary_model"];
 
@@ -51,6 +67,10 @@ fn apply_edit(agent: &mut Value, edit: &Value) {
     };
     for (k, v) in e {
         let k = k.as_str();
+        if v.is_null() && EDIT_NULL_CLEARS.contains(&k) {
+            a.remove(k);
+            continue;
+        }
         let takes = if EDIT_TEXT.contains(&k) {
             v.as_str().is_some_and(|s| !s.is_empty())
         } else if EDIT_POSITIVE.contains(&k) {
@@ -251,6 +271,23 @@ mod tests {
     use crate::refcheck::ConfigurationError;
     use crate::testing::{fake_control_plane, json as reply, Log, Reply, Routes};
     use crate::ApiError;
+
+    /// The cases every implementation of an edit runs (`sdk/fixtures/agent-edit-cases.json`): the control
+    /// plane, the Python and TypeScript SDKs and this client.
+    #[test]
+    fn edits_follow_the_shared_cases() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../sdk/fixtures/agent-edit-cases.json");
+        let fixture: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("the fixture")).unwrap();
+        let cases = fixture["cases"].as_array().expect("cases");
+        assert!(cases.len() >= 9, "the fixture shrank");
+        for case in cases {
+            let mut agent = case["agent"].clone();
+            apply_edit(&mut agent, &case["edit"]);
+            assert_eq!(agent, case["result"], "case {}", case["name"]);
+        }
+    }
 
     /// A kitchen with two providers, a search tool, an accepted skill and two agents.
     fn kitchen() -> Vec<(&'static str, Reply)> {

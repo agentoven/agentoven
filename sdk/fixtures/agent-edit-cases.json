@@ -1,0 +1,60 @@
+{
+ "comment": "How an edit (the body of PUT /api/v1/agents/{name}) is laid over an agent. The control plane (pkg/models AgentEdit.Apply, with NullFields for the nulls), the Python and TypeScript SDKs and the Rust client run the same cases: result is the agent afterwards, and a field not listed in it is absent. A JSON null in an edit clears an optional setting; a null for a list is no opinion. Edit it and all four test suites together.",
+ "version": 1,
+ "cases": [
+  {
+   "name": "a field left out stays",
+   "agent": {"description": "d", "backup_provider": "p2", "backup_model": "m2", "max_turns": 5},
+   "edit": {"description": "new"},
+   "result": {"description": "new", "backup_provider": "p2", "backup_model": "m2", "max_turns": 5}
+  },
+  {
+   "name": "null clears the backup",
+   "agent": {"description": "d", "backup_provider": "p2", "backup_model": "m2", "max_turns": 5},
+   "edit": {"backup_provider": null, "backup_model": null},
+   "result": {"description": "d", "max_turns": 5}
+  },
+  {
+   "name": "null clears a number and a text and a bot",
+   "agent": {"max_turns": 5, "context_budget": 900, "framework": "f", "bot": {"tier": "browser"}, "reasoning_strategy": "react"},
+   "edit": {"max_turns": null, "context_budget": null, "framework": null, "bot": null, "reasoning_strategy": null},
+   "result": {}
+  },
+  {
+   "name": "an empty string is still no opinion",
+   "agent": {"description": "d", "backup_model": "m2"},
+   "edit": {"description": "", "backup_model": ""},
+   "result": {"description": "d", "backup_model": "m2"}
+  },
+  {
+   "name": "an empty string clears the summary model, null does too",
+   "agent": {"summary_provider": "anthropic", "summary_model": "haiku"},
+   "edit": {"summary_provider": null, "summary_model": ""},
+   "result": {"summary_model": ""}
+  },
+  {
+   "name": "a list clears with [] and a null list is no opinion",
+   "agent": {"skills": ["s1"], "guardrails": [{"id": "g1"}], "approval_tools": ["t"], "subagents": ["a"]},
+   "edit": {"skills": [], "guardrails": null, "approval_tools": null, "subagents": []},
+   "result": {"skills": [], "guardrails": [{"id": "g1"}], "approval_tools": ["t"], "subagents": []}
+  },
+  {
+   "name": "ingredients clear with null and not with []",
+   "agent": {"ingredients": [{"name": "t", "kind": "tool"}]},
+   "edit": {"ingredients": []},
+   "result": {"ingredients": [{"name": "t", "kind": "tool"}]}
+  },
+  {
+   "name": "null clears the ingredients",
+   "agent": {"ingredients": [{"name": "t", "kind": "tool"}]},
+   "edit": {"ingredients": null},
+   "result": {}
+  },
+  {
+   "name": "the model cannot be cleared here, the server refuses the null",
+   "agent": {"model_provider": "anthropic", "model_name": "haiku"},
+   "edit": {"model_name": null},
+   "result": {"model_provider": "anthropic", "model_name": "haiku"}
+  }
+ ]
+}

@@ -161,28 +161,29 @@ export interface RecipeConfig {
 
 /**
  * What a write may change about an agent (the body of `PUT /agents/{name}`): a field left out is unchanged, `[]` clears
- * a list, `""` clears `summary_provider` and `summary_model`.
+ * a list, `""` clears `summary_provider` and `summary_model`, and `null` clears an optional setting (the ones typed
+ * `| null` below; the model and the mode cannot be cleared, the server refuses `null` for them).
  */
 export interface AgentEdit {
-  description?: string;
-  framework?: string;
+  description?: string | null;
+  framework?: string | null;
   model_provider?: string;
   model_name?: string;
-  backup_provider?: string;
-  backup_model?: string;
+  backup_provider?: string | null;
+  backup_model?: string | null;
   mode?: string;
-  execution_mode?: string;
-  max_turns?: number;
+  execution_mode?: string | null;
+  max_turns?: number | null;
   behavior?: string;
   runtime?: string;
-  bot?: AgentConfig['bot'];
-  ingredients?: AgentConfig['ingredients'];
+  bot?: AgentConfig['bot'] | null;
+  ingredients?: AgentConfig['ingredients'] | null;
   skills?: string[];
   guardrails?: AgentConfig['guardrails'];
-  context_budget?: number;
-  reasoning_strategy?: string;
-  summary_provider?: string;
-  summary_model?: string;
+  context_budget?: number | null;
+  reasoning_strategy?: string | null;
+  summary_provider?: string | null;
+  summary_model?: string | null;
   approval_tools?: string[];
   subagents?: string[];
   [extra: string]: unknown;
@@ -1063,26 +1064,35 @@ export function checkRecipe(recipe: RecipeConfig, catalog: Catalog, opts: CheckO
 
 // ── an agent's edits and draft (what a PUT or a bake would leave) ──
 
+// The optional settings an explicit null clears (the server's clearableFields). The lists that clear with `[]` are not
+// here: a null list is "no opinion" there, as it always was.
+const CLEARABLE_BY_NULL = ['description', 'framework', 'backup_provider', 'backup_model', 'execution_mode', 'max_turns', 'bot',
+  'ingredients', 'context_budget', 'reasoning_strategy', 'summary_provider', 'summary_model'] as const;
+
 /**
  * The agent with `edit` laid over it, the way the server applies an edit: what the edit sets wins, what it leaves out
  * stays. `""` is "not part of this edit" for every field except `summary_provider` and `summary_model`, where it clears
- * the setting; `[]` clears `skills`, `approval_tools`, `subagents` and `guardrails`, but not `ingredients`.
+ * the setting; `[]` clears `skills`, `approval_tools`, `subagents` and `guardrails`, but not `ingredients`. A field sent
+ * as `null` is cleared, for the optional settings (`backup_provider`, `backup_model`, `description`, `max_turns`, ...).
  */
 export function applyEdit(agent: AgentConfig, edit: AgentEdit): AgentConfig {
   const out: AgentConfig = { ...agent };
   for (const f of ['description', 'framework', 'model_provider', 'model_name', 'backup_provider', 'backup_model', 'mode', 'execution_mode', 'behavior', 'runtime', 'reasoning_strategy'] as const) {
-    if (strOf(edit[f]) !== '') out[f] = edit[f];
+    if (strOf(edit[f]) !== '') out[f] = edit[f] as string;
   }
-  if (numOf(edit.max_turns) > 0) out.max_turns = edit.max_turns;
-  if (numOf(edit.context_budget) > 0) out.context_budget = edit.context_budget;
+  if (numOf(edit.max_turns) > 0) out.max_turns = edit.max_turns as number;
+  if (numOf(edit.context_budget) > 0) out.context_budget = edit.context_budget as number;
   if (isObj(edit.bot)) out.bot = edit.bot;
   if (Array.isArray(edit.ingredients) && edit.ingredients.length > 0) out.ingredients = edit.ingredients;
-  if (Array.isArray(edit.skills) && edit.skills.length > 0) out.skills = edit.skills;
+  if (Array.isArray(edit.skills)) out.skills = edit.skills;
   if (Array.isArray(edit.guardrails)) out.guardrails = edit.guardrails;
   if (typeof edit.summary_provider === 'string') out.summary_provider = edit.summary_provider;
   if (typeof edit.summary_model === 'string') out.summary_model = edit.summary_model;
   if (Array.isArray(edit.approval_tools)) out.approval_tools = edit.approval_tools;
   if (Array.isArray(edit.subagents)) out.subagents = edit.subagents;
+  for (const f of CLEARABLE_BY_NULL) {
+    if (edit[f] === null) delete out[f];
+  }
   return out;
 }
 

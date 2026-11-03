@@ -1,8 +1,14 @@
 package models
 
+import (
+	"bytes"
+	"encoding/json"
+)
+
 // AgentEdit is what a person may change about an agent without baking it: every field a PUT or a
 // re-cook accepts. A field left out (empty, or nil for the guardrails) means "unchanged"; an empty
-// guardrail list removes them all.
+// guardrail list removes them all. An optional field is cleared by sending JSON null for it (Cleared
+// lists those); the fields an agent cannot run without cannot be cleared (see NullFields).
 //
 // An agent that has never been baked has nothing running, so an edit applies to it directly. An agent
 // that has been baked runs what was last baked: an edit is kept as Agent.Draft and the next bake or
@@ -36,6 +42,139 @@ type AgentEdit struct {
 	// ApprovalTools and Subagents follow the guardrails' rule: nil is unchanged, an empty list clears.
 	ApprovalTools []string `json:"approval_tools"`
 	Subagents     []string `json:"subagents"`
+
+	// Cleared names the optional fields this edit sets to nothing, because the request carried JSON null for
+	// them (owner decision A4, 2026-11-03). It is kept in the draft so that clearing a field of a baked agent
+	// waits for the next bake like any other edit. A field is never both set and cleared: a later edit that
+	// sets it takes it off the list (Merge).
+	Cleared []string `json:"cleared,omitempty"`
+}
+
+// clearableFields are the optional fields an explicit JSON null clears. The lists that already clear with
+// an empty list (skills, guardrails, approval_tools, subagents) are not here: a client that marshals a nil
+// slice sends null for "no opinion", and reading that as "remove them all" would wipe a guardrail by accident.
+var clearableFields = []string{
+	"description", "framework", "backup_provider", "backup_model", "execution_mode", "max_turns", "bot",
+	"ingredients", "context_budget", "reasoning_strategy", "summary_provider", "summary_model",
+}
+
+// requiredFields are the settings an agent cannot run without; null for one is refused rather than ignored,
+// so that nobody believes the field was cleared.
+var requiredFields = []string{"model_provider", "model_name", "mode", "behavior", "runtime"}
+
+// NullFields reads which of the body's top-level fields are JSON null. cleared are the optional fields
+// to clear; refused are the required ones, which cannot be.
+func NullFields(body []byte) (cleared, refused []string) {
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(body, &raw) != nil {
+		return nil, nil
+	}
+	isNull := func(k string) bool {
+		v, ok := raw[k]
+		return ok && bytes.Equal(bytes.TrimSpace(v), []byte("null"))
+	}
+	for _, k := range clearableFields {
+		if isNull(k) {
+			cleared = append(cleared, k)
+		}
+	}
+	for _, k := range requiredFields {
+		if isNull(k) {
+			refused = append(refused, k)
+		}
+	}
+	return cleared, refused
+}
+
+// sets reports whether the edit gives the named field a value.
+func (e AgentEdit) sets(name string) bool {
+	switch name {
+	case "description":
+		return e.Description != ""
+	case "framework":
+		return e.Framework != ""
+	case "backup_provider":
+		return e.BackupProvider != ""
+	case "backup_model":
+		return e.BackupModel != ""
+	case "execution_mode":
+		return e.ExecutionMode != ""
+	case "max_turns":
+		return e.MaxTurns > 0
+	case "bot":
+		return e.Bot != nil
+	case "ingredients":
+		return len(e.Ingredients) > 0
+	case "context_budget":
+		return e.ContextBudget > 0
+	case "reasoning_strategy":
+		return e.ReasoningStrategy != ""
+	case "summary_provider":
+		return e.SummaryProvider != nil
+	case "summary_model":
+		return e.SummaryModel != nil
+	}
+	return false
+}
+
+// clearOnEdit takes the named field out of the edit, for a draft that is cleared after it set the field.
+func (e *AgentEdit) clearOnEdit(name string) {
+	switch name {
+	case "description":
+		e.Description = ""
+	case "framework":
+		e.Framework = ""
+	case "backup_provider":
+		e.BackupProvider = ""
+	case "backup_model":
+		e.BackupModel = ""
+	case "execution_mode":
+		e.ExecutionMode = ""
+	case "max_turns":
+		e.MaxTurns = 0
+	case "bot":
+		e.Bot = nil
+	case "ingredients":
+		e.Ingredients = nil
+	case "context_budget":
+		e.ContextBudget = 0
+	case "reasoning_strategy":
+		e.ReasoningStrategy = ""
+	case "summary_provider":
+		e.SummaryProvider = nil
+	case "summary_model":
+		e.SummaryModel = nil
+	}
+}
+
+// clearOnAgent sets the named field of a to nothing.
+func clearOnAgent(a *Agent, name string) {
+	switch name {
+	case "description":
+		a.Description = ""
+	case "framework":
+		a.Framework = ""
+	case "backup_provider":
+		a.BackupProvider = ""
+	case "backup_model":
+		a.BackupModel = ""
+	case "execution_mode":
+		a.ExecutionMode = ""
+	case "max_turns":
+		a.MaxTurns = 0
+	case "bot":
+		a.Bot = nil
+	case "ingredients":
+		a.Ingredients = nil
+	case "context_budget":
+		a.ContextBudget = 0
+	case "reasoning_strategy":
+		a.ReasoningStrategy = ""
+	case "summary_provider":
+		a.SummaryProvider = ""
+	case "summary_model":
+		a.SummaryModel = ""
+	}
 }
 
 // IsEmpty reports whether the edit changes nothing.
@@ -49,7 +188,7 @@ func (e AgentEdit) isZero() bool {
 		e.MaxTurns <= 0 && e.Behavior == "" && e.Runtime == "" && e.Bot == nil &&
 		len(e.Ingredients) == 0 && e.Skills == nil && e.Guardrails == nil &&
 		e.ContextBudget <= 0 && e.ReasoningStrategy == "" && e.SummaryProvider == nil && e.SummaryModel == nil &&
-		e.ApprovalTools == nil && e.Subagents == nil
+		e.ApprovalTools == nil && e.Subagents == nil && len(e.Cleared) == 0
 }
 
 // Merge lays o over e: what o sets wins, what it leaves out stays as it was. It is how a second edit
@@ -118,6 +257,20 @@ func (e *AgentEdit) Merge(o AgentEdit) {
 	if o.Subagents != nil {
 		e.Subagents = o.Subagents
 	}
+	// A field the later edit sets is no longer cleared; a field it clears is no longer set.
+	kept := e.Cleared[:0:0]
+	for _, name := range e.Cleared {
+		if !o.sets(name) {
+			kept = append(kept, name)
+		}
+	}
+	e.Cleared = kept
+	for _, name := range o.Cleared {
+		e.clearOnEdit(name)
+		if !contains(e.Cleared, name) {
+			e.Cleared = append(e.Cleared, name)
+		}
+	}
 }
 
 // Apply writes the edit onto a, field by field, leaving alone what the edit leaves out. Ingredients
@@ -185,6 +338,11 @@ func (e AgentEdit) Apply(a *Agent) {
 	}
 	if e.Subagents != nil {
 		a.Subagents = e.Subagents
+	}
+	for _, name := range e.Cleared {
+		if !e.sets(name) { // an edit that sets a field and clears it is read as setting it
+			clearOnAgent(a, name)
+		}
 	}
 }
 

@@ -101,7 +101,7 @@ describe('refcheck beyond the fixture', () => {
       subagents: ['writer'], ingredients: [{ kind: 'tool', name: 'search' }],
     };
     const edited = applyEdit(agent, { model_name: '', summary_model: '', summary_provider: '', subagents: [], skills: [], ingredients: [] });
-    expect(edited).toMatchObject({ model_name: 'claude-haiku-4-5', summary_model: '', summary_provider: '', subagents: [], skills: ['pdf-reader'] });
+    expect(edited).toMatchObject({ model_name: 'claude-haiku-4-5', summary_model: '', summary_provider: '', subagents: [], skills: [] });
     expect(edited.ingredients).toHaveLength(1);
     expect(applyEdit(agent, { summary_model: undefined }).summary_model).toBe('gpt-4o');
     expect(agent.summary_model).toBe('gpt-4o'); // the original is left alone

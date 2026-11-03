@@ -65,3 +65,70 @@ func TestTheDraftKeepsSecretsAndTheAPIHidesThem(t *testing.T) {
 		t.Fatalf("a secret leaks through the draft: %s", shown)
 	}
 }
+
+// JSON null clears an optional field of an agent that was never baked at once (owner decision A4).
+func TestNullClearsAnOptionalFieldOfAnUnbakedAgent(t *testing.T) {
+	a := &Agent{Name: "a", BackupProvider: "p2", BackupModel: "m2", Description: "d", MaxTurns: 7, ContextBudget: 900, SummaryModel: "s"}
+	cleared, refused := NullFields([]byte(`{"backup_provider":null,"backup_model":null,"max_turns":null,"summary_model":null,"description":"kept"}`))
+	if len(refused) != 0 || strings.Join(cleared, ",") != "backup_provider,backup_model,max_turns,summary_model" {
+		t.Fatalf("cleared %v refused %v", cleared, refused)
+	}
+	a.Edit(AgentEdit{Description: "kept", Cleared: cleared})
+	if a.BackupProvider != "" || a.BackupModel != "" || a.MaxTurns != 0 || a.SummaryModel != "" || a.Description != "kept" || a.ContextBudget != 900 {
+		t.Fatalf("only the named fields clear and the rest stays: %+v", a)
+	}
+}
+
+// On a baked agent the clear waits in the draft, survives storage, and a later edit that sets the field wins.
+func TestNullOnABakedAgentWaitsInTheDraftAndASetLaterWins(t *testing.T) {
+	a := bakedAgent()
+	a.BackupProvider, a.BackupModel = "p2", "m2"
+	if !a.Edit(AgentEdit{Cleared: []string{"backup_provider", "backup_model"}}) {
+		t.Fatal("the clear must be kept as a draft")
+	}
+	if a.BackupProvider != "p2" || a.BackupModel != "m2" {
+		t.Fatalf("a draft must not change what runs: %+v", a)
+	}
+	if w := a.WithDraft(); w.BackupProvider != "" || w.BackupModel != "" {
+		t.Fatalf("the agent as it will be has no backup: %+v", w)
+	}
+	raw, _ := json.Marshal(a.Draft)
+	var back AgentEdit
+	if err := json.Unmarshal(raw, &back); err != nil || len(back.Cleared) != 2 {
+		t.Fatalf("the clear is lost in storage: %s %v", raw, err)
+	}
+	// A second edit sets one of them again: it is no longer cleared.
+	a.Edit(AgentEdit{BackupProvider: "p3"})
+	w := a.WithDraft()
+	if w.BackupProvider != "p3" || w.BackupModel != "" {
+		t.Fatalf("the later set wins and the other stays cleared: %+v", w)
+	}
+	// And a clear after a set drops the set.
+	a.Edit(AgentEdit{Cleared: []string{"backup_provider"}})
+	if w := a.WithDraft(); w.BackupProvider != "" || a.Draft.BackupProvider != "" {
+		t.Fatalf("a clear after a set removes it: %+v / %+v", w, a.Draft)
+	}
+	a.ApplyDraft()
+	if a.BackupProvider != "" || a.BackupModel != "" || a.Draft != nil {
+		t.Fatalf("a bake applies the clear: %+v", a)
+	}
+}
+
+// The fields an agent cannot run without are refused, the lists keep their rule (null is "no opinion").
+func TestNullFieldsRefusesRequiredAndLeavesLists(t *testing.T) {
+	cleared, refused := NullFields([]byte(`{"model_name":null,"mode":null,"skills":null,"guardrails":null,"approval_tools":null,"backup_model":null}`))
+	if strings.Join(refused, ",") != "model_name,mode" || strings.Join(cleared, ",") != "backup_model" {
+		t.Fatalf("cleared %v refused %v", cleared, refused)
+	}
+	if c, r := NullFields([]byte(`not json`)); c != nil || r != nil {
+		t.Fatal("a body that is not JSON clears nothing")
+	}
+	// A string "null" is a value, not a clear.
+	if c, _ := NullFields([]byte(`{"description":"null"}`)); len(c) != 0 {
+		t.Fatalf("the text null is not JSON null: %v", c)
+	}
+	// An edit that only clears is not empty.
+	if (&AgentEdit{Cleared: []string{"description"}}).IsEmpty() {
+		t.Fatal("a clear is an edit")
+	}
+}

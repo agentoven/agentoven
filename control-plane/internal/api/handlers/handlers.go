@@ -438,6 +438,13 @@ func (h *Handlers) updateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	edit := req.AgentEdit
+	// JSON null for an optional field clears it (owner decision A4); for a field the agent cannot run without
+	// it is refused, not ignored, so nobody believes it was cleared.
+	var refused []string
+	if edit.Cleared, refused = models.NullFields(body); len(refused) > 0 {
+		respondError(w, http.StatusBadRequest, strings.Join(refused, ", ")+" cannot be cleared: the agent cannot run without it. Send a new value instead")
+		return
+	}
 
 	// Judge the agent as it would be with the edit before keeping any of it. An execution mode is
 	// only accepted for a bot, which must be able to move into a confined mode.
@@ -1065,12 +1072,23 @@ func (h *Handlers) recookAgent(w http.ResponseWriter, r *http.Request) {
 		Tags    map[string]string `json:"tags"`
 		Version string            `json:"version"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
-		respondError(w, http.StatusBadRequest, "Invalid request body: "+err.Error())
+	body, ok := readConfigBody(w, r)
+	if !ok {
 		return
+	}
+	if len(bytes.TrimSpace(body)) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			respondError(w, http.StatusBadRequest, "Invalid request body: "+err.Error())
+			return
+		}
 	}
 	if req.Version != "" && !models.ValidVersion(req.Version) {
 		respondError(w, http.StatusBadRequest, "version must be MAJOR.MINOR.PATCH, digits only (for example 1.2.0)")
+		return
+	}
+	var refused []string
+	if req.Cleared, refused = models.NullFields(body); len(refused) > 0 {
+		respondError(w, http.StatusBadRequest, strings.Join(refused, ", ")+" cannot be cleared: the agent cannot run without it. Send a new value instead")
 		return
 	}
 

@@ -1303,13 +1303,20 @@ def _str_of(m: Mapping[str, Any], key: str) -> str:
 # ── Drafts and edits (what a write leaves, what the next bake runs) ──────
 
 
+# The optional settings an explicit null clears (the server's ``clearableFields``). The lists that clear with ``[]``
+# are not here: a null list is "no opinion" there, as it always was.
+_CLEARABLE_BY_NULL = ("description", "framework", "backup_provider", "backup_model", "execution_mode", "max_turns", "bot",
+                      "ingredients", "context_budget", "reasoning_strategy", "summary_provider", "summary_model")
+
+
 def apply_edit(agent: Mapping[str, Any], edit: Mapping[str, Any]) -> Dict[str, Any]:
     """The agent with an edit written onto it, field by field, leaving alone what the edit leaves out.
 
-    This is the server's ``AgentEdit.Apply``: an empty string, a zero and an empty list leave a field as it was;
-    ``guardrails``, ``approval_tools`` and ``subagents`` (a list, ``[]`` clears, absent is unchanged) and
-    ``summary_provider`` / ``summary_model`` (a string, ``""`` clears) are applied whenever they are present. The
-    inputs are not changed.
+    This is the server's ``AgentEdit.Apply``: an empty string, a zero and an empty ``ingredients`` list leave a
+    field as it was; ``skills``, ``guardrails``, ``approval_tools`` and ``subagents`` (a list, ``[]`` clears,
+    absent is unchanged) and ``summary_provider`` / ``summary_model`` (a string, ``""`` clears) are applied
+    whenever they are present. A field the edit sends as ``None`` (JSON null) is cleared, for the optional
+    settings in ``_CLEARABLE_BY_NULL``. The inputs are not changed.
     """
     out = dict(agent)
     for key in ("description", "framework", "model_provider", "model_name", "backup_provider", "backup_model",
@@ -1322,12 +1329,14 @@ def apply_edit(agent: Mapping[str, Any], edit: Mapping[str, Any]) -> Dict[str, A
             out[key] = v
     if edit.get("bot") is not None:
         out["bot"] = edit["bot"]
-    for key in ("ingredients", "skills"):
-        if edit.get(key):
-            out[key] = edit[key]
-    for key in ("guardrails", "approval_tools", "subagents", "summary_provider", "summary_model"):
+    if edit.get("ingredients"):
+        out["ingredients"] = edit["ingredients"]
+    for key in ("skills", "guardrails", "approval_tools", "subagents", "summary_provider", "summary_model"):
         if edit.get(key) is not None:
             out[key] = edit[key]
+    for key in _CLEARABLE_BY_NULL:
+        if key in edit and edit[key] is None:
+            out.pop(key, None)
     return out
 
 

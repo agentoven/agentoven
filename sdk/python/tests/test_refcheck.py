@@ -132,7 +132,7 @@ def test_apply_edit_and_with_draft_follow_the_servers_rules():
     assert got["max_turns"] == 5           # a zero leaves it
     assert "draft" not in got and "draft" in stored
     after = refcheck.apply_edit(stored, {"skills": [], "approval_tools": ["t"]})
-    assert after["approval_tools"] == ["t"] and "skills" not in after   # an empty skills list leaves skills unchanged
+    assert after["approval_tools"] == ["t"] and after["skills"] == []   # an empty skills list clears them, as on the server
     assert refcheck.with_draft({"name": "plain"}) == {"name": "plain"}
 
 
