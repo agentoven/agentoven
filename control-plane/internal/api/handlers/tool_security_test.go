@@ -187,3 +187,42 @@ func TestToolsRegisteredBeforeTheVaultAreSealedByTheStartupPass(t *testing.T) {
 		t.Error("no vault: want an error")
 	}
 }
+
+func TestAToolPackToolCannotBeRepointedOrRemovedThroughTheGenericToolsAPI(t *testing.T) {
+	h, s := newTestHandlers(t)
+	ctx := context.Background()
+	if err := s.CreateTool(ctx, &models.MCPTool{ID: "p1", Name: "pack_orders_get", Kitchen: "default", Endpoint: "pack://orders/get",
+		Transport: models.MCPTransportNative, Skill: "pack-orders", Capabilities: []string{"tool"}, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	params := map[string]string{"toolName": "pack_orders_get"}
+	for _, body := range []string{
+		`{"transport":"http","endpoint":"http://127.0.0.1:1/x","skill":""}`, `{"endpoint":"https://evil.example/x"}`,
+		`{"enabled":false}`, `{"description":"x"}`, `{"auth_config":{"type":"bearer","token":"t"}}`,
+	} {
+		if w := callAgentAPI(h.UpdateMCPTool, http.MethodPut, "/api/v1/tools/pack_orders_get", params, body); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "tool_managed") {
+			t.Errorf("PUT %s: %d %s", body, w.Code, w.Body.String())
+		}
+	}
+	if w := callAgentAPI(h.DeleteMCPTool, http.MethodDelete, "/api/v1/tools/pack_orders_get", params, ""); w.Code != http.StatusForbidden {
+		t.Errorf("DELETE: %d", w.Code)
+	}
+	got, _ := s.GetTool(ctx, "default", "pack_orders_get")
+	if got == nil || got.Transport != models.MCPTransportNative || got.Endpoint != "pack://orders/get" || !got.Enabled {
+		t.Errorf("the row must be untouched: %+v", got)
+	}
+	// An ordinary tool still edits, and nobody can register or turn a tool into a native one.
+	callAgentAPI(h.RegisterMCPTool, http.MethodPost, "/api/v1/tools", nil, `{"name":"plain","endpoint":"https://tools.example.test/mcp"}`)
+	if w := callAgentAPI(h.UpdateMCPTool, http.MethodPut, "/api/v1/tools/plain", map[string]string{"toolName": "plain"}, `{"transport":"native","endpoint":"pack://orders/get"}`); w.Code != http.StatusBadRequest {
+		t.Errorf("making a plain tool native: %d", w.Code)
+	}
+	if w := callAgentAPI(h.RegisterMCPTool, http.MethodPost, "/api/v1/tools", nil, `{"name":"n","transport":"native","endpoint":"pack://orders/get"}`); w.Code != http.StatusBadRequest {
+		t.Errorf("registering a native tool: %d", w.Code)
+	}
+	if w := callAgentAPI(h.BulkRegisterMCPTools, http.MethodPost, "/api/v1/tools/bulk", nil, `{"tools":[{"name":"n2","transport":"native","endpoint":"pack://orders/get"}]}`); w.Code != http.StatusBadRequest {
+		t.Errorf("bulk registering a native tool: %d", w.Code)
+	}
+	if w := callAgentAPI(h.UpdateMCPTool, http.MethodPut, "/api/v1/tools/plain", map[string]string{"toolName": "plain"}, `{"description":"fine"}`); w.Code != http.StatusOK {
+		t.Errorf("an ordinary edit: %d", w.Code)
+	}
+}

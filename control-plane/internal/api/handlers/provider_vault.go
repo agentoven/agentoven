@@ -10,6 +10,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/agentoven/agentoven/control-plane/internal/secretref"
+	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	"github.com/agentoven/agentoven/control-plane/pkg/middleware"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 )
@@ -52,6 +53,46 @@ func (h *Handlers) checkVaultRef(ctx context.Context, kitchen, ref string) error
 	}
 	if _, err := v.Read(ctx, kitchen, name); err != nil {
 		return fmt.Errorf("secret_ref %q: no credential named %q in this kitchen", ref, name)
+	}
+	return nil
+}
+
+// externalRef is a reference to the installation's own secrets (env://, k8s://) rather than to a
+// credential in the vault.
+func externalRef(ref string) bool {
+	return ref != "" && !strings.HasPrefix(ref, secretref.VaultScheme)
+}
+
+// checkExternalRefs refuses an env:// or k8s:// reference that a person other than a platform
+// administrator is adding to a provider, when the edition has a vault to put the key in instead.
+// Those references read the control plane's own environment or cluster secrets and the provider's
+// endpoint is chosen by whoever edits the provider, so a Chef who could set one would hand the
+// installation's secrets to a host they chose (the same hole as a trigger's env:// password). A
+// reference the provider already held stays, and the community edition, which has no vault and one
+// administrator, keeps them.
+func (h *Handlers) checkExternalRefs(r *http.Request, old, p *models.ModelProvider) error {
+	if h.keyVault() == nil {
+		return nil
+	}
+	// No identity means no authentication is configured (a single-operator install): nobody to restrict.
+	if id := middleware.GetIdentity(r.Context()); id == nil || contracts.IsPlatformAdmin(id.Role) {
+		return nil
+	}
+	held := map[string]bool{}
+	if old != nil {
+		held[old.SecretRef] = true
+		for _, k := range old.APIKeys {
+			held[k.SecretRef] = true
+		}
+	}
+	refs := []string{p.SecretRef}
+	for _, k := range p.APIKeys {
+		refs = append(refs, k.SecretRef)
+	}
+	for _, ref := range refs {
+		if externalRef(ref) && !held[ref] {
+			return errors.New("an env:// or k8s:// secret_ref names the installation's own secrets and is set by a platform administrator; keep the key in the kitchen's vault (vault://<name>)")
+		}
 	}
 	return nil
 }

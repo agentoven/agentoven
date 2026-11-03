@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -229,5 +230,51 @@ func TestSealKeysMovesExistingProvidersAndIsSafeToRepeat(t *testing.T) {
 	}
 	if !v.has("default", "provider-old") || v.has("default", "provider-ext") {
 		t.Error("wrong credentials in the vault")
+	}
+}
+
+func TestAChefCannotPointAProviderAtTheInstallationsOwnSecrets(t *testing.T) {
+	h, _, _ := vaultHandlers(t)
+	t.Setenv("LEAKME_SECRET", "hunter2-platform-secret")
+	send := func(role, method, path, body string, params map[string]string, fn http.HandlerFunc) int {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req = asRole(withKitchen(req, "default"), role)
+		for k, v := range params {
+			req = withChiParam(req, k, v)
+		}
+		w := httptest.NewRecorder()
+		fn(w, req)
+		return w.Code
+	}
+	create := func(role, name, body string) int {
+		return send(role, http.MethodPost, "/api/v1/providers", body, nil, h.CreateProvider)
+	}
+	update := func(role, name, body string) int {
+		return send(role, http.MethodPut, "/api/v1/providers/"+name, body, map[string]string{"providerName": name}, h.UpdateProvider)
+	}
+	for _, scheme := range []string{"env://LEAKME_SECRET", "k8s://kube-system/token/key", "env://DATABASE_URL"} {
+		if code := create("chef", "x", `{"name":"x","kind":"openai","secret_ref":"`+scheme+`"}`); code != http.StatusForbidden {
+			t.Errorf("a chef created a provider with %s: %d", scheme, code)
+		}
+		if code := create("head_chef", "x", `{"name":"x2","kind":"openai","api_keys":[{"label":"a","secret_ref":"`+scheme+`","enabled":true}]}`); code != http.StatusForbidden {
+			t.Errorf("a pool entry with %s: %d", scheme, code)
+		}
+	}
+	// A platform administrator may.
+	if code := create("admin", "ops", `{"name":"ops","kind":"openai","secret_ref":"env://LEAKME_SECRET"}`); code != http.StatusCreated && code != http.StatusNoContent {
+		t.Fatalf("an administrator creates a provider on an env reference: %d", code)
+	}
+	// A chef editing it leaves the administrator's reference alone, but cannot point it elsewhere.
+	if code := update("chef", "ops", `{"endpoint":"https://proxy.example/v1"}`); code != http.StatusOK {
+		t.Errorf("editing something else must still work: %d", code)
+	}
+	if code := update("chef", "ops", `{"secret_ref":"env://LEAKME_SECRET"}`); code != http.StatusOK {
+		t.Errorf("re-sending the reference it already holds is not a change: %d", code)
+	}
+	if code := update("chef", "ops", `{"secret_ref":"env://AGENTOVEN_SA_SECRET"}`); code != http.StatusForbidden {
+		t.Errorf("a chef repointed an administrator's provider at another environment variable: %d", code)
+	}
+	if code := update("chef", "ops", `{"api_keys":[{"key":"k","label":"a","secret_ref":"k8s://a/b/c","enabled":true}]}`); code != http.StatusForbidden {
+		t.Errorf("a chef added an env/k8s pool entry: %d", code)
 	}
 }

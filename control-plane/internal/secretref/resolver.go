@@ -14,8 +14,10 @@ package secretref
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +54,25 @@ func VaultRef(name string) string { return VaultScheme + name }
 func VaultName(ref string) (string, bool) {
 	name, ok := strings.CutPrefix(ref, VaultScheme)
 	return name, ok && name != ""
+}
+
+// ErrNotKitchenRef is returned for a reference a kitchen may not supply.
+var ErrNotKitchenRef = errors.New("a secret reference must look like vault://<name>: env:// and k8s:// references name the installation's own secrets and are not available to a kitchen")
+
+var kitchenCredName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$`)
+
+// KitchenVaultName returns the credential a reference supplied by a kitchen (a trigger, a tool pack, a
+// channel, a bot, a judge: anything a Chef or Head Chef configures) names. A kitchen reaches its own
+// vault and nothing else: env:// would read the control plane's process environment (its database URL,
+// signing keys, every provider key) and k8s:// the cluster's secrets, and hand the value to a host the
+// kitchen chose. The error never repeats the reference: someone who pasted a literal secret must not
+// see it echoed into a response or a log.
+func KitchenVaultName(ref string) (string, error) {
+	name, ok := strings.CutPrefix(ref, VaultScheme)
+	if !ok || !kitchenCredName.MatchString(name) {
+		return "", ErrNotKitchenRef
+	}
+	return name, nil
 }
 
 type kitchenKey struct{}
@@ -217,10 +238,13 @@ func (r *Resolver) InvalidateAll() {
 	r.cache = sync.Map{}
 }
 
-// ResolveFor resolves a reference on behalf of one kitchen: a vault:// reference reads that kitchen's
-// credential. It exists so code outside this module, which cannot name WithKitchen, can resolve a
-// reference without it silently falling back to the default kitchen (the agentic-bot gate releases
-// credentials this way).
+// ResolveFor resolves a reference a kitchen supplied, on behalf of that kitchen: only a vault:// reference
+// is accepted and it reads that kitchen's credential, never the default kitchen's (see KitchenVaultName
+// for why env:// and k8s:// are refused). Resolve, which takes any scheme, is for references an operator
+// set (a platform provider's key); anything a person in a kitchen typed goes through here.
 func (r *Resolver) ResolveFor(ctx context.Context, kitchen, ref string) (string, error) {
+	if _, err := KitchenVaultName(ref); err != nil {
+		return "", err
+	}
 	return r.Resolve(WithKitchen(ctx, kitchen), ref)
 }

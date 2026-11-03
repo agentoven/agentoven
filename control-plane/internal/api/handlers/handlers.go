@@ -1856,6 +1856,10 @@ func (h *Handlers) CreateProvider(w http.ResponseWriter, r *http.Request) {
 	req.Kitchen = middleware.GetKitchen(r.Context())
 	req.CreatedAt = time.Now().UTC()
 
+	if err := h.checkExternalRefs(r, nil, &req); err != nil {
+		respondError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	if err := h.checkVaultRef(r.Context(), req.Kitchen, req.SecretRef); err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
@@ -1971,6 +1975,7 @@ func (h *Handlers) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	_ = json.Unmarshal(body, &sent)
 	keysBefore := providerKeySignature(provider)
 	oldOwned := ownedKeyNames(provider) // before a pool in the request replaces the stored one
+	heldSecretRef, heldPool := provider.SecretRef, append([]models.APIKeyEntry(nil), provider.APIKeys...)
 
 	if req.Kind != "" {
 		provider.Kind = req.Kind
@@ -2029,6 +2034,17 @@ func (h *Handlers) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		provider.APIKeys = pool
+	}
+	// What the request would leave the provider pointing at is checked against what it pointed at before.
+	if req.SecretRef != "" || req.APIKeys != nil {
+		candidate := *provider
+		if req.SecretRef != "" {
+			candidate.SecretRef = req.SecretRef
+		}
+		if err := h.checkExternalRefs(r, &models.ModelProvider{SecretRef: heldSecretRef, APIKeys: heldPool}, &candidate); err != nil {
+			respondError(w, http.StatusForbidden, err.Error())
+			return
+		}
 	}
 	// Point the provider at an external secret (k8s:// or env://) instead of keeping a key in the
 	// database. Sending nothing leaves it as it is.
@@ -2337,13 +2353,9 @@ func (h *Handlers) RegisterMCPTool(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Tool 'name' is required")
 		return
 	}
-	// Validate transport if provided
-	if req.Transport != "" {
-		validTransports := map[string]bool{"http": true, "sse": true, "stdio": true}
-		if !validTransports[req.Transport] {
-			respondError(w, http.StatusBadRequest, "Invalid transport: must be 'http', 'sse', or 'stdio'")
-			return
-		}
+	if !validRegisteredTransport(req.Transport) {
+		respondError(w, http.StatusBadRequest, "Invalid transport: must be 'http', 'sse', or 'stdio'")
+		return
 	}
 
 	kitchen := middleware.GetKitchen(r.Context())
@@ -2408,6 +2420,10 @@ func (h *Handlers) BulkRegisterMCPTools(w http.ResponseWriter, r *http.Request) 
 			respondError(w, http.StatusBadRequest, fmt.Sprintf("Tool at index %d missing 'name'", i))
 			return
 		}
+		if tool.Transport == models.MCPTransportNative {
+			respondError(w, http.StatusBadRequest, fmt.Sprintf("Tool '%s': a native tool is created only by the tool pack that runs it", tool.Name))
+			return
+		}
 		tool.ID = uuid.New().String()
 		tool.Kitchen = kitchen
 		tool.Enabled = req.Tools[i].enabledOnCreate()
@@ -2466,10 +2482,36 @@ func (h *Handlers) GetMCPTool(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, toolauth.RedactTool(*tool))
 }
 
+// validRegisteredTransport says whether a tool may be registered with this transport; empty
+// means the default. The native transport is not one: a native tool is run by the control plane itself
+// and only the edition that runs it (tool packs) creates one.
+func validRegisteredTransport(t string) bool {
+	return t == "" || t == "http" || t == "sse" || t == "stdio"
+}
+
+// refuseManagedTool answers 403 for a tool an edition manages (transport native: a tool pack's tool) and
+// reports that it did. Such a tool's endpoint, transport and schema are what the edition's governance
+// (its egress policy, SQL validation, pinned base URL, approvals) is built on, so they are changed only
+// through that edition's own API; if the generic tools API could rewrite them, a role with ordinary tool
+// permissions could point a governed tool at any endpoint through the plain HTTP path.
+func refuseManagedTool(w http.ResponseWriter, tool *models.MCPTool) bool {
+	if tool.Transport != models.MCPTransportNative {
+		return false
+	}
+	respondJSON(w, http.StatusForbidden, map[string]string{
+		"error":   "tool_managed",
+		"message": "This tool belongs to a tool pack and is changed only through the tool pack (its upgrade, secrets and tool switches), not through /tools.",
+	})
+	return true
+}
+
 func (h *Handlers) DeleteMCPTool(w http.ResponseWriter, r *http.Request) {
 	toolName := chi.URLParam(r, "toolName")
 	kitchen := middleware.GetKitchen(r.Context())
 
+	if tool, err := h.Store.GetTool(r.Context(), kitchen, toolName); err == nil && refuseManagedTool(w, tool) {
+		return
+	}
 	if err := h.Store.DeleteTool(r.Context(), kitchen, toolName); err != nil {
 		respondCreateError(w, err, "delete the tool")
 		return
@@ -2495,6 +2537,10 @@ func (h *Handlers) UpdateMCPTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if refuseManagedTool(w, tool) {
+		return
+	}
+
 	var body toolBody
 	if raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)); err != nil || body.decode(raw) != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
@@ -2502,6 +2548,10 @@ func (h *Handlers) UpdateMCPTool(w http.ResponseWriter, r *http.Request) {
 	}
 	req := body.MCPTool
 
+	if req.Transport == models.MCPTransportNative {
+		respondError(w, http.StatusBadRequest, "Invalid transport: a native tool is created only by the tool pack that runs it")
+		return
+	}
 	if req.Description != "" {
 		tool.Description = req.Description
 	}
