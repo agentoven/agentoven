@@ -67,8 +67,20 @@ const (
 	// event into a run's input, in a GxP kitchen (owner decision S12, 2026-11-03). What the trigger does to
 	// the record is shown before and after.
 	GateTriggerChange = "trigger_change"
-	MeaningApproved    = "approved"
-	MeaningRejected    = "rejected"
+	// GateJudgeEnable switches an online judge on (owner decision S15, 2026-11-03). A judge reads the prompt
+	// and reply of live traces and sends them to a model provider, so turning one on is the go-live of that
+	// processing: the person is shown the judge's whole configuration, the provider and model, what it reads
+	// and what it may spend. Switching one off only protects and is not a gate.
+	GateJudgeEnable = "judge_enable"
+	// GateExperimentAccept accepts or rejects the result of an experiment that compared two agent versions
+	// (Pro ADR-0060). A Head Chef signs, shown the statistics and the interval the result stands on.
+	GateExperimentAccept = "experiment_accept"
+	// GatePromotionHoldRelease lifts the hold a firing alert rule placed on promoting an agent (Pro ADR-0060).
+	// Placing a hold only protects and is not a gate; a Head Chef signs the release, shown the rule and the
+	// alert that placed it.
+	GatePromotionHoldRelease = "promotion_hold_release"
+	MeaningApproved          = "approved"
+	MeaningRejected          = "rejected"
 )
 
 // DecisionSubject is what a person is shown and what a signature is bound to.
