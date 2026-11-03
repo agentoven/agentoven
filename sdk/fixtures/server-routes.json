@@ -487,6 +487,18 @@
   },
   {
    "method": "GET",
+   "path": "/api/v1/experiments"
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/experiments/{id}"
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/experiments/{id}/results"
+  },
+  {
+   "method": "GET",
    "path": "/api/v1/guardrail-endpoints"
   },
   {
@@ -1292,6 +1304,18 @@
   {
    "method": "POST",
    "path": "/api/v1/evals/mcp"
+  },
+  {
+   "method": "POST",
+   "path": "/api/v1/experiments"
+  },
+  {
+   "method": "POST",
+   "path": "/api/v1/experiments/{id}/cancel"
+  },
+  {
+   "method": "POST",
+   "path": "/api/v1/experiments/{id}/decision"
   },
   {
    "method": "POST",
