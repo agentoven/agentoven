@@ -25,6 +25,7 @@ pub mod guardrails;
 pub mod key;
 pub mod budgets;
 pub mod cache;
+pub mod documents;
 pub mod approvals;
 pub mod legal_hold;
 pub mod limits;
@@ -218,6 +219,10 @@ pub enum Commands {
     #[command(subcommand)]
     Cache(cache::CacheCommands),
 
+    /// 📄 Read a file's text and tables, transcribe scans, extract fields with their quotes.
+    #[command(subcommand)]
+    Documents(documents::DocumentsCommands),
+
     /// 🗝  Secrets and where they live: create, link, rotate, bind to skills, migrate between providers (Pro).
     #[command(subcommand)]
     Secret(secret::SecretCommands),
@@ -308,6 +313,9 @@ pub async fn execute(cli: Cli) -> anyhow::Result<()> {
         Commands::Cache(cmd) => {
             cache::execute(cmd, signing::client_with(url, api_key, kitchen)?, matches!(output, OutputFormat::Json)).await
         }
+        Commands::Documents(cmd) => {
+            documents::execute(cmd, signing::client_with(url, api_key, kitchen)?, matches!(output, OutputFormat::Json)).await
+        }
         Commands::Secret(cmd) => secret::execute(cmd, signing::client_with(url, api_key, kitchen)?).await,
         Commands::Guardrails(cmd) => guardrails::execute(cmd, signing::client_with(url, api_key, kitchen)?).await,
         Commands::Task(cmd) => task::execute(cmd, task::Globals { url, api_key, kitchen }).await,
@@ -370,7 +378,7 @@ mod tests {
     #[test]
     fn the_new_commands_are_well_formed() {
         let root = Cli::command();
-        for name in ["dataset", "signature", "legal-hold", "key", "secret", "trace", "kitchen", "service-account", "recipe", "budgets", "limits", "cache", "trigger"] {
+        for name in ["dataset", "signature", "legal-hold", "key", "secret", "trace", "kitchen", "service-account", "recipe", "budgets", "limits", "cache", "trigger", "documents"] {
             let sub = root.find_subcommand(name).unwrap_or_else(|| panic!("no {name}")).clone();
             sub.debug_assert();
         }

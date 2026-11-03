@@ -180,6 +180,8 @@ export type {
 
 
 export { Blobs, blobPart } from './blobs.js';
+export { Documents } from './documents.js';
+export type { DocumentsOptions, DocumentBlock, ExtractedDocument, ExtractOptions, OcrResult, OcrOptions, OcrConfidence, ExtractedField, FieldsResult, FieldsOptions, FieldStatus } from './documents.js';
 export { signWebhook } from './triggers.js';
 export type { Blob, BlobPart, BlobsOptions, UploadOptions } from './blobs.js';
 export { Tasks, TASK_PAUSE_GATES } from './tasks.js';

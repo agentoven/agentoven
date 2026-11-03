@@ -315,6 +315,29 @@ impl AgentOvenClient {
         Ok((text, headers))
     }
 
+    /// Send a file as the raw request body (an upload) and return the JSON reply. A refusal is an
+    /// [`ApiError`], as for [`Self::call_json`].
+    pub(super) async fn call_bytes(
+        &self,
+        path: &str,
+        data: Vec<u8>,
+        content_type: &str,
+    ) -> anyhow::Result<Value> {
+        let resp = self
+            .authed_request(self.http.request(Method::POST, self.url(path)))
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(data)
+            .send()
+            .await?;
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(ApiError::from_response(status.as_u16(), &text, &headers).into());
+        }
+        Ok(serde_json::from_str(&text)?)
+    }
+
     /// Send one request, optionally with a signing token in the `X-Signing-Token` header, and return the
     /// JSON reply (`{}` for an empty one). A refusal is an [`ApiError`]. This is the way to call a
     /// decision this client has no method for.

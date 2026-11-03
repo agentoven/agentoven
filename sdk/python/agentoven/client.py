@@ -63,6 +63,7 @@ from agentoven.modalities import (
 )
 
 if TYPE_CHECKING:
+    from agentoven.documents import Documents
     from agentoven.notifications import NotificationConnection
     from agentoven.realtime import RealtimeConnection
 
@@ -1843,6 +1844,13 @@ class AgentOvenClient(TaskMethods):
         return self._post(f"/api/v1/keys/{_seg(key_id)}/owner", {"owner_email": owner_email})
 
     @property
+    def documents(self) -> "Documents":
+        """Read a file's text and tables, transcribe scans, extract fields with their quotes (``client.documents.extract(path)``)."""
+        from agentoven.documents import Documents
+
+        return Documents(self)
+
+    @property
     def blobs(self) -> "Blobs":
         """Upload a file once and name it in messages by ``blob_ref`` (``client.blobs.upload(path)``)."""
         from agentoven.blobs import Blobs
@@ -2330,11 +2338,21 @@ class AgentOvenClient(TaskMethods):
         raw, response_headers = self._send(method, path, None, headers)
         return raw.decode("utf-8"), response_headers
 
+    def _request_bytes(self, method: str, path: str, data: bytes, content_type: str) -> Any:
+        """Send a file as the raw request body (an upload); the reply is JSON."""
+        raw, _ = self._send(method, path, None, {"Content-Type": content_type}, raw=data)
+        return json.loads(raw) if raw else {}
+
     def _send(
-        self, method: str, path: str, body: Optional[dict[str, Any]], headers: Optional[dict[str, str]]
+        self,
+        method: str,
+        path: str,
+        body: Optional[dict[str, Any]],
+        headers: Optional[dict[str, str]],
+        raw: Optional[bytes] = None,
     ) -> tuple[bytes, dict[str, str]]:
         url = self._url + path
-        data = json.dumps(body).encode() if body is not None else None
+        data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
         req = urllib.request.Request(url, data=data, headers={**self._headers(), **(headers or {})}, method=method)
         try:
             with _OPENER.open(req, timeout=self._timeout) as resp:

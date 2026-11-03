@@ -61,6 +61,17 @@ _EXT_MIME = {
     ".mpeg": "video/mpeg",
     ".mpg": "video/mpeg",
     ".avi": "video/x-msvideo",
+    # documents the control plane reads into text before the model call
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".csv": "text/csv",
+    ".tsv": "text/tab-separated-values",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".rtf": "application/rtf",
+    ".txt": "text/plain",
 }
 # .webm is both an audio and a video container; the caller's intent decides.
 _WEBM = {"audio": "audio/webm", "video": "video/webm"}

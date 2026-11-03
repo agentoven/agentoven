@@ -71,6 +71,17 @@ const EXT_MIME: Record<string, string> = {
   mpeg: 'video/mpeg',
   mpg: 'video/mpeg',
   avi: 'video/x-msvideo',
+  // documents the control plane reads into text before the model call
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  html: 'text/html',
+  htm: 'text/html',
+  csv: 'text/csv',
+  tsv: 'text/tab-separated-values',
+  md: 'text/markdown',
+  markdown: 'text/markdown',
+  rtf: 'application/rtf',
+  txt: 'text/plain',
 };
 
 type Prefer = 'audio' | 'video' | undefined;

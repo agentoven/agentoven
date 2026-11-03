@@ -29,6 +29,7 @@ from agentoven._native import (
 from agentoven import flow
 from agentoven.flow import Flow, FlowError
 from agentoven.blobs import Blob, Blobs
+from agentoven.documents import Documents
 from agentoven.client import (
     BUDGET_PERIODS,
     BUDGET_UNITS,
@@ -69,6 +70,7 @@ from agentoven.realtime import RealtimeError, RealtimeEvent, RealtimeSession
 __all__ = [
     "Blob",
     "Blobs",
+    "Documents",
     # Full client (OSS + Pro REST coverage) — use this in new code
     "AgentOvenClient",
     "AgentOvenAPIError",

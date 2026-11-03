@@ -26,6 +26,7 @@
  */
 
 import { Blobs } from './blobs.js';
+import { Documents } from './documents.js';
 import { Tasks } from './tasks.js';
 import { Flow } from './flow.js';
 import { audioClipFromWire, audioFromBytes } from './media.js';
@@ -2160,6 +2161,11 @@ export class ProClient {
   /** Upload a file once and name it in messages by `blob_ref` (`pro.blobs.upload(bytes)`). */
   get blobs(): Blobs {
     return new Blobs({ url: this.baseUrl, apiKey: this.apiKey, kitchen: this.kitchen, timeoutMs: this.timeoutMs });
+  }
+
+  /** Read a file's text and tables, transcribe scans, extract fields with their quotes (`pro.documents.extract(bytes, { name })`). */
+  get documents(): Documents {
+    return new Documents({ url: this.baseUrl, apiKey: this.apiKey, kitchen: this.kitchen, timeoutMs: this.timeoutMs });
   }
 
   private headers(kitchenOverride?: string): Record<string, string> {

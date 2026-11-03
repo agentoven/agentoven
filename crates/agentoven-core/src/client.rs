@@ -17,6 +17,8 @@ use pro::seg;
 pub mod approvals;
 /// Budgets, rate limits and the response cache (Pro, ADR-0051).
 pub mod controls;
+/// Read a file's text and tables, transcribe scans, extract fields with their quotes (ADR-0039).
+pub mod documents;
 pub mod guardrails;
 pub mod secrets;
 pub mod toolpacks;
