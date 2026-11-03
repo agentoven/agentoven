@@ -1,0 +1,101 @@
+[
+  {
+    "name": "claims-reader",
+    "description": "Reads a claim case in Salesforce",
+    "framework": "agentoven",
+    "mode": "managed",
+    "model_provider": "YOUR_PROVIDER",
+    "model_name": "YOUR_MODEL",
+    "max_turns": 6,
+    "ingredients": [
+      {
+        "name": "model",
+        "kind": "model",
+        "config": {
+          "provider": "YOUR_PROVIDER",
+          "model": "YOUR_MODEL"
+        },
+        "required": true
+      },
+      {
+        "name": "instructions",
+        "kind": "prompt",
+        "config": {
+          "text": "You read insurance claim cases in Salesforce. Given a case number, call sf_soql_query with a SELECT of Id, CaseNumber, Subject, Description, Priority and AccountId from Case where CaseNumber is that number. Answer with the case's facts only."
+        },
+        "required": true
+      },
+      {
+        "name": "sf_soql_query",
+        "kind": "tool",
+        "required": true
+      }
+    ]
+  },
+  {
+    "name": "claims-triager",
+    "description": "Proposes severity and the incident text",
+    "framework": "agentoven",
+    "mode": "managed",
+    "model_provider": "YOUR_PROVIDER",
+    "model_name": "YOUR_MODEL",
+    "max_turns": 6,
+    "ingredients": [
+      {
+        "name": "model",
+        "kind": "model",
+        "config": {
+          "provider": "YOUR_PROVIDER",
+          "model": "YOUR_MODEL"
+        },
+        "required": true
+      },
+      {
+        "name": "instructions",
+        "kind": "prompt",
+        "config": {
+          "text": "You triage a claim case for an operations team. From the case facts decide severity (low, medium, high) and write the short description of a ServiceNow incident that operations should open. Do not call tools. Answer as: TRIAGE severity=<..>; incident short_description='<...>'."
+        },
+        "required": true
+      }
+    ]
+  },
+  {
+    "name": "claims-filer",
+    "description": "Files the incident and notes it on the case (both writes wait for approval)",
+    "framework": "agentoven",
+    "mode": "managed",
+    "model_provider": "YOUR_PROVIDER",
+    "model_name": "YOUR_MODEL",
+    "max_turns": 6,
+    "ingredients": [
+      {
+        "name": "model",
+        "kind": "model",
+        "config": {
+          "provider": "YOUR_PROVIDER",
+          "model": "YOUR_MODEL"
+        },
+        "required": true
+      },
+      {
+        "name": "instructions",
+        "kind": "prompt",
+        "config": {
+          "text": "You file ServiceNow incidents for claim cases. Call sn_incident_create with the short_description from the triage, a description with the case number and facts, urgency 1 for high severity, 2 for medium, 3 for low, and impact 2. Then call sf_add_case_comment on the case with the new incident number. Both calls wait for a person's approval; do not retry a denied call."
+        },
+        "required": true
+      },
+      {
+        "name": "sn_incident_create",
+        "kind": "tool",
+        "required": true
+      },
+      {
+        "name": "sf_add_case_comment",
+        "kind": "tool",
+        "required": true
+      }
+    ]
+  }
+]

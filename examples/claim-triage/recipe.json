@@ -1,0 +1,39 @@
+{
+  "name": "claim-triage",
+  "description": "A Salesforce claim case becomes a ServiceNow incident after a person approves",
+  "version": "1.0.0",
+  "steps": [
+    {
+      "name": "read_case",
+      "kind": "agent",
+      "agent": "claims-reader"
+    },
+    {
+      "name": "assess",
+      "kind": "agent",
+      "agent": "claims-triager",
+      "depends_on": [
+        "read_case"
+      ]
+    },
+    {
+      "name": "approve_incident",
+      "kind": "human_gate",
+      "depends_on": [
+        "assess"
+      ],
+      "approver_roles": [
+        "head_chef",
+        "chef"
+      ]
+    },
+    {
+      "name": "file_incident",
+      "kind": "agent",
+      "agent": "claims-filer",
+      "depends_on": [
+        "approve_incident"
+      ]
+    }
+  ]
+}

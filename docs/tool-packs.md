@@ -13,9 +13,13 @@ A tool pack is a named, versioned set of tools for one kind of system. You insta
 | Pack | Tools | Secrets |
 |---|---|---|
 | `postgres-readonly` | `query`, `list_tables`, `describe_table` (all read) | `dsn`: `postgres://user:password@host:5432/db?sslmode=require` of a role that can only `SELECT` |
+| `servicenow` | incidents (create, get, update, search, work note), change requests (get, create), user and group lookup, CMDB CI lookup, knowledge search | basic (`username`, `password`), OAuth client credentials (`client_id`, `client_secret`) or a bearer `token`. [Details](tool-pack-servicenow.md) |
+| `salesforce` | validated read-only SOQL, record get, create and update for Case, Account, Contact and Opportunity, case comment, Chatter post, describe object | a bearer `token` or OAuth client credentials. [Details](tool-pack-salesforce.md) |
 | `notifications` | `send_email`, `post_slack_message` (both write) | `smtp`: `smtp://user:pass@host:587?from=alerts@example.com&starttls=required`; `slack_webhook`: the incoming-webhook URL. Bind one or both; only the tools whose secret is bound are installed |
 
 `postgres-readonly` reads each statement with PostgreSQL's own parser and runs only one `SELECT`, `VALUES`, `WITH ... SELECT` or `EXPLAIN` (without `ANALYZE`), with no `INTO` and no row locks, calling only built-in functions on an allowlist (aggregates, arithmetic, text, dates, JSON, arrays, a few catalog readers; nothing that reads files, reaches other servers, takes locks or sleeps), in a read-only transaction, with values bound as parameters (`$1`, `$2`, never inside the SQL), a statement timeout and a row cap. A refusal says what to change. **The connection string must name a role that is not a superuser and not a member of `pg_read_server_files`, `pg_write_server_files` or `pg_execute_server_program`:** the pack refuses to connect as one. Beyond that, the role should have `SELECT` on what the agent may see and nothing else.
+
+`servicenow` and `salesforce` are **curated packs**: written by hand against the vendor's documented API, each connecting only to the host its template names (`https://<instance>.service-now.com`, `https://<my_domain>.my.salesforce.com`), with a risk class on every tool, paging, a call budget and the vendor's errors mapped for the model. The format is described in [curated-tool-pack-format.md](curated-tool-pack-format.md). They have been tested against in-process fakes of the documented API shapes, not against a real instance. An example that uses both: [examples/claim-triage](../examples/claim-triage/README.md).
 
 Any REST API with an OpenAPI 3 document can be imported as a pack of its own.
 
