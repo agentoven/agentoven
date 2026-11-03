@@ -59,6 +59,10 @@ const (
 	// The person is shown the policy before and after; elsewhere the change is not signed but its content
 	// is recorded on the audit trail.
 	GateApproverPolicy = "approver_policy"
+	// GateTriggerChange switches an inbound trigger on or off, or changes the mapping that turns an incoming
+	// event into a run's input, in a GxP kitchen (owner decision S12, 2026-11-03). What the trigger does to
+	// the record is shown before and after.
+	GateTriggerChange = "trigger_change"
 	MeaningApproved    = "approved"
 	MeaningRejected    = "rejected"
 )
