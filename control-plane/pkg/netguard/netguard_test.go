@@ -127,3 +127,68 @@ func TestARedirectToAnotherHostIsNotFollowed(t *testing.T) {
 		t.Errorf("the redirect to another host must be returned, not followed: %d", resp.StatusCode)
 	}
 }
+
+// Owner decision S10: a notification channel has its own allowlists. A private host the tools' list admits is
+// still refused for a channel, and the channels' list admits nothing for a tool.
+func TestChannelsHaveTheirOwnAllowlists(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) }))
+	defer srv.Close()
+	call := func(g *Guard) error {
+		resp, err := g.Client("k", 3*time.Second).Get(srv.URL)
+		if err == nil {
+			resp.Body.Close()
+		}
+		return err
+	}
+	ch := Channels()
+	if err := call(ch); !errors.Is(err, ErrRefused) {
+		t.Fatalf("a loopback receiver is refused for channels by default: %v", err)
+	}
+
+	t.Setenv(EnvAllow, "127.0.0.1") // the tools' list
+	if err := call(ch); !errors.Is(err, ErrRefused) {
+		t.Fatalf("the tools' allowlist must not admit a channel: %v", err)
+	}
+	if err := call(Default()); err != nil {
+		t.Fatalf("it still admits a tool: %v", err)
+	}
+
+	t.Setenv(EnvAllow, "")
+	t.Setenv(EnvChannelAllow, "127.0.0.1")
+	if err := call(ch); err != nil {
+		t.Fatalf("the channels' allowlist admits a channel: %v", err)
+	}
+	if err := call(Default()); !errors.Is(err, ErrRefused) {
+		t.Fatalf("the channels' allowlist must not admit a tool: %v", err)
+	}
+	if _, err := ch.Vet(context.Background(), "k", "127.0.0.1"); err != nil {
+		t.Fatalf("Vet follows the same list: %v", err)
+	}
+	t.Setenv(EnvChannelAllow, "")
+	_, err := ch.Vet(context.Background(), "k", "127.0.0.1")
+	if err == nil || !strings.Contains(err.Error(), EnvChannelAllow) {
+		t.Fatalf("a refusal for a channel names the channels' variable: %v", err)
+	}
+	// Metadata addresses stay refused whatever the list says.
+	t.Setenv(EnvChannelAllow, "169.254.169.254")
+	if _, err := ch.Vet(context.Background(), "k", "169.254.169.254"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("metadata is never allowlisted: %v", err)
+	}
+}
+
+// The kitchen's channel list is installed apart from the tools' list.
+func TestTheKitchensChannelListIsSeparate(t *testing.T) {
+	defer func(old *Guard) { defaultMu.Lock(); channels = old; defaultMu.Unlock() }(Channels())
+	SetChannelKitchenAllow(func(_ context.Context, k string) ([]string, error) {
+		if k == "k1" {
+			return []string{"127.0.0.1"}, nil
+		}
+		return nil, nil
+	})
+	if !Channels().allowed(context.Background(), "k1", "127.0.0.1") || Channels().allowed(context.Background(), "k2", "127.0.0.1") {
+		t.Fatal("the channel list is per kitchen")
+	}
+	if Default().allowed(context.Background(), "k1", "127.0.0.1") {
+		t.Fatal("and does not reach the tools' guard")
+	}
+}

@@ -34,8 +34,14 @@ import (
 	"time"
 )
 
-// EnvAllow names the operator's allowlist for every kitchen.
+// EnvAllow names the operator's allowlist for tools, for every kitchen.
 const EnvAllow = "AGENTOVEN_TOOL_EGRESS_ALLOW"
+
+// EnvChannelAllow names the operator's allowlist for notification channels (a webhook, Slack, Teams, Discord,
+// Zapier, an e-mail channel's SMTP host). It is separate from EnvAllow (owner decision S10, 2026-11-03): a
+// private host a tool may call (an internal MCP server) is not thereby a place notifications, which carry
+// what the run produced, may be sent, and the other way round.
+const EnvChannelAllow = "AGENTOVEN_CHANNEL_EGRESS_ALLOW"
 
 // ErrRefused is wrapped by every refusal, so a caller can tell a policy decision from a network failure.
 var ErrRefused = errors.New("destination not allowed")
@@ -104,6 +110,9 @@ type Guard struct {
 	// IgnoreEnv leaves AGENTOVEN_TOOL_EGRESS_ALLOW out: a guard with its own installation list (Allow)
 	// is not widened by the setting that belongs to tools.
 	IgnoreEnv bool
+	// EnvName is the environment variable holding the operator's list for this guard; empty means
+	// AGENTOVEN_TOOL_EGRESS_ALLOW. The channel guard reads AGENTOVEN_CHANNEL_EGRESS_ALLOW.
+	EnvName string
 }
 
 var (
@@ -122,7 +131,25 @@ func Default() *Guard {
 func SetKitchenAllow(f func(ctx context.Context, kitchen string) ([]string, error)) {
 	defaultMu.Lock()
 	defer defaultMu.Unlock()
-	def = &Guard{KitchenAllow: f, Resolver: def.Resolver, Dialer: def.Dialer, Allow: def.Allow, IgnoreEnv: def.IgnoreEnv}
+	def = &Guard{KitchenAllow: f, Resolver: def.Resolver, Dialer: def.Dialer, Allow: def.Allow, IgnoreEnv: def.IgnoreEnv, EnvName: def.EnvName}
+}
+
+var channels = &Guard{EnvName: EnvChannelAllow}
+
+// Channels is the guard notification channels send through: the same rules as Default, with its own
+// allowlists, AGENTOVEN_CHANNEL_EGRESS_ALLOW for the operator and the list SetChannelKitchenAllow installs for
+// the kitchen. Neither list is shared with tools (owner decision S10).
+func Channels() *Guard {
+	defaultMu.RLock()
+	defer defaultMu.RUnlock()
+	return channels
+}
+
+// SetChannelKitchenAllow lets an edition add a per-kitchen channel allowlist. Call it before serving.
+func SetChannelKitchenAllow(f func(ctx context.Context, kitchen string) ([]string, error)) {
+	defaultMu.Lock()
+	defer defaultMu.Unlock()
+	channels = &Guard{KitchenAllow: f, Resolver: channels.Resolver, Dialer: channels.Dialer, Allow: channels.Allow, IgnoreEnv: channels.IgnoreEnv, EnvName: channels.EnvName}
 }
 
 // NormHost is a host name as lists compare it: lower case, without a trailing dot.
@@ -145,9 +172,17 @@ func HostAllowed(list []string, host string) bool {
 	return false
 }
 
-func envAllow() []string {
+// envName is the variable the operator's list for this guard is read from.
+func (g *Guard) envName() string {
+	if g.EnvName == "" {
+		return EnvAllow
+	}
+	return g.EnvName
+}
+
+func (g *Guard) envAllow() []string {
 	var out []string
-	for _, h := range strings.Split(os.Getenv(EnvAllow), ",") {
+	for _, h := range strings.Split(os.Getenv(g.envName()), ",") {
 		if h = strings.TrimSpace(h); h != "" {
 			out = append(out, h)
 		}
@@ -158,7 +193,7 @@ func envAllow() []string {
 // allowed says whether host is on a list that admits a name: the environment's, the kitchen's, or the
 // guard's own.
 func (g *Guard) allowed(ctx context.Context, kitchen, host string) bool {
-	if !g.IgnoreEnv && HostAllowed(envAllow(), host) {
+	if !g.IgnoreEnv && HostAllowed(g.envAllow(), host) {
 		return true
 	}
 	if HostAllowed(g.Allow, host) {
@@ -235,11 +270,11 @@ func (g *Guard) Vet(ctx context.Context, kitchen, host string) ([]netip.Addr, er
 	for _, ip := range ips {
 		switch {
 		case IPIsMetadata(ip):
-			return nil, fmt.Errorf("%w: %s resolves to a cloud metadata address, which no tool may reach", ErrRefused, host)
+			return nil, fmt.Errorf("%w: %s resolves to a cloud metadata address, which nothing may reach", ErrRefused, host)
 		case ip.Zone() != "":
 			return nil, fmt.Errorf("%w: %s resolves to an address with a zone identifier", ErrRefused, host)
 		case !allowlisted && !g.allowsAddr(ip) && IPBlocked(ip):
-			return nil, fmt.Errorf("%w: %s resolves to a private or local address; allowlist the host for this kitchen (or set %s) first", ErrRefused, host, EnvAllow)
+			return nil, fmt.Errorf("%w: %s resolves to a private or local address; allowlist the host for this kitchen (or set %s) first", ErrRefused, host, g.envName())
 		}
 	}
 	return ips, nil

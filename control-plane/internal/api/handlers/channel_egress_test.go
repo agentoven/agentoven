@@ -13,6 +13,7 @@ import (
 // once instead of as a delivery that never arrives. (Delivery checks again at dial time; see internal/notify.)
 func TestAChannelCannotBeSavedAtAPrivateAddress(t *testing.T) {
 	t.Setenv(netguard.EnvAllow, "") // the package's TestMain allows loopback for the other tests
+	t.Setenv(netguard.EnvChannelAllow, "")
 	h, s := newTestHandlers(t)
 	create := func(body string) (int, string) {
 		w := callAgentAPI(h.CreateChannel, http.MethodPost, "/api/v1/channels", nil, body)
@@ -50,8 +51,12 @@ func TestAChannelCannotBeSavedAtAPrivateAddress(t *testing.T) {
 		t.Errorf("a name that does not resolve is not refused at save time (the dial still checks it): %d %s", code, body)
 	}
 
-	// An allowlisted host may be private.
+	// An allowlisted host may be private, on the channels' list; the tools' list does not count (owner decision S10).
 	t.Setenv(netguard.EnvAllow, "127.0.0.1")
+	if code, _ := create(`{"name":"local","kind":"webhook","url":"http://127.0.0.1:9/hook"}`); code != http.StatusBadRequest {
+		t.Errorf("the tools' allowlist must not admit a channel: %d", code)
+	}
+	t.Setenv(netguard.EnvChannelAllow, "127.0.0.1")
 	if code, body := create(`{"name":"local","kind":"webhook","url":"http://127.0.0.1:9/hook"}`); code != http.StatusCreated {
 		t.Errorf("allowlisted: %d %s", code, body)
 	}
@@ -59,6 +64,7 @@ func TestAChannelCannotBeSavedAtAPrivateAddress(t *testing.T) {
 
 func TestAChannelCannotBeEditedToAPrivateAddress(t *testing.T) {
 	t.Setenv(netguard.EnvAllow, "")
+	t.Setenv(netguard.EnvChannelAllow, "")
 	h, s := newTestHandlers(t)
 	if w := callAgentAPI(h.CreateChannel, http.MethodPost, "/api/v1/channels", nil, `{"name":"ops","kind":"webhook","url":"https://hooks.example.test/x"}`); w.Code != http.StatusCreated {
 		t.Fatalf("%d %s", w.Code, w.Body)

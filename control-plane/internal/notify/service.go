@@ -474,7 +474,7 @@ func channelSubscribes(ch *models.NotificationChannel, eventType string) bool {
 // with optional HMAC-SHA256 signing. This is the default OSS driver.
 type WebhookChannelDriver struct {
 	// client is for tests that stand in for the network. In production it is nil and every send goes
-	// through the egress guard (pkg/netguard): a channel's URL is chosen by whoever may create channels
+	// through the channel egress guard (netguard.Channels, its own allowlists): a channel's URL is chosen by whoever may create channels
 	// and called from inside the deployment, so it may not reach loopback, private, link-local or cloud
 	// metadata addresses unless the operator or the kitchen allowlisted the host.
 	client *http.Client
@@ -484,7 +484,7 @@ type WebhookChannelDriver struct {
 // redirect (a receiver must not be able to bounce the control plane to an internal address) and keeps
 // no connection between deliveries.
 func guardedClient(kitchen string) *http.Client {
-	return netguard.Default().ClientWith(kitchen, netguard.HTTPOptions{Timeout: 15 * time.Second, NoKeepAlive: true})
+	return netguard.Channels().ClientWith(kitchen, netguard.HTTPOptions{Timeout: 15 * time.Second, NoKeepAlive: true})
 }
 
 func (d *WebhookChannelDriver) httpClient(kitchen string) *http.Client {

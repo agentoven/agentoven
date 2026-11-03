@@ -36,14 +36,19 @@ func TestAWebhookChannelAtAPrivateAddressIsRefusedUnlessAllowlisted(t *testing.T
 		t.Errorf("a refusal is a policy decision, not a network failure: it must not be retried with a pause (took %v)", time.Since(start))
 	}
 
+	// The tools' allowlist does not admit a channel (owner decision S10); the channels' own does.
 	t.Setenv(netguard.EnvAllow, "127.0.0.1")
+	if err := d.Send(context.Background(), ch, ev); !errors.Is(err, netguard.ErrRefused) || hits.Load() != 0 {
+		t.Fatalf("the tools' allowlist must not admit a channel: err=%v hits=%d", err, hits.Load())
+	}
+	t.Setenv(netguard.EnvChannelAllow, "127.0.0.1")
 	if err := d.Send(context.Background(), ch, ev); err != nil || hits.Load() != 1 {
 		t.Fatalf("an allowlisted host is reached: err=%v hits=%d", err, hits.Load())
 	}
 }
 
 func TestAWebhookChannelNeverReachesTheMetadataServiceEvenIfAllowlisted(t *testing.T) {
-	t.Setenv(netguard.EnvAllow, "169.254.169.254")
+	t.Setenv(netguard.EnvChannelAllow, "169.254.169.254")
 	d := &WebhookChannelDriver{}
 	ch := &models.NotificationChannel{Name: "w", Kind: models.ChannelWebhook, Kitchen: "default", URL: "http://169.254.169.254/latest/meta-data/"}
 	if err := d.Send(context.Background(), ch, NewEvent(EventGateWaiting, "default", "r", "x", "y", nil)); !errors.Is(err, netguard.ErrRefused) {
@@ -60,7 +65,7 @@ func TestAWebhookChannelDoesNotFollowARedirect(t *testing.T) {
 		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
 	}))
 	defer front.Close()
-	t.Setenv(netguard.EnvAllow, "127.0.0.1")
+	t.Setenv(netguard.EnvChannelAllow, "127.0.0.1")
 	d := &WebhookChannelDriver{}
 	ch := &models.NotificationChannel{Name: "w", Kind: models.ChannelWebhook, Kitchen: "default", URL: front.URL}
 	_ = d.Send(context.Background(), ch, NewEvent(EventGateWaiting, "default", "r", "x", "y", nil))
