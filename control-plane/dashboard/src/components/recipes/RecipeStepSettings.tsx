@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Plus, X } from 'lucide-react';
 import type { WireStep } from '../../lib/recipeFlow';
+import { RecipeField } from '../ReferenceFields';
 
 const field = 'w-full h-10 px-3 rounded-[10px] bg-[var(--ao-bg)] border border-[var(--ao-border)] text-sm outline-none focus:border-[var(--ao-brand)]';
 const label = 'flex flex-col gap-1.5 text-[13px] font-medium text-slate-300';
@@ -64,15 +65,10 @@ export default function RecipeStepSettings({ step, recipes, self, onChange }: {
 }) {
   const ref = String(step.recipe_ref ?? '');
   const picked = recipes.find((r) => r.name === ref);
-  const choices = recipes.filter((r) => r.name !== self);
   return (
     <>
-      <label className={label}>Recipe to run
-        <select aria-label="Recipe to run" value={ref} className={field} onChange={(e) => onChange({ recipe_ref: e.target.value })}>
-          <option value="">Choose a recipe…</option>
-          {ref && !picked && <option value={ref}>{ref} (not found)</option>}
-          {choices.map((r) => <option key={r.name} value={r.name}>{r.name}</option>)}
-        </select>
+      <div className={label}>Recipe to run
+        <RecipeField label="Recipe to run" self={self} value={ref} onChange={(v) => onChange({ recipe_ref: v })} />
         {picked ? (
           <span className="text-xs font-normal text-[var(--ao-text-muted)]">
             {picked.description ? `${picked.description} · ` : ''}{picked.steps} step{picked.steps === 1 ? '' : 's'} ·{' '}
@@ -81,7 +77,7 @@ export default function RecipeStepSettings({ step, recipes, self, onChange }: {
         ) : (
           <span className="text-xs font-normal text-[var(--ao-text-muted)]">It runs to the end before the next step starts, and this step fails if it fails.</span>
         )}
-      </label>
+      </div>
 
       <MappingEditor
         title="What it receives"

@@ -1,6 +1,8 @@
 import { NavLink } from 'react-router-dom';
 import { useEffect, type ReactNode } from 'react';
 import { X as XIcon } from 'lucide-react';
+import type { Problem } from '../api';
+import { ProblemList } from './ProblemList';
 
 // ── Status Badge ──────────────────────────────────────────────
 
@@ -173,18 +175,19 @@ export function Spinner() {
 
 // ── Error Banner ──────────────────────────────────────────────
 
-export function ErrorBanner({ message, onRetry }: { message: string; onRetry?: () => void }) {
+export function ErrorBanner({ message, onRetry, problems, warnings }: { message: string; onRetry?: () => void; problems?: Problem[]; warnings?: Problem[] }) {
   return (
-    <div className="mx-8 mt-4 p-4 rounded-lg bg-red-500/10 border border-red-500/30 flex items-center justify-between">
-      <span className="text-sm text-red-400">{message}</span>
-      {onRetry && (
-        <button
-          onClick={onRetry}
-          className="text-xs text-red-400 hover:text-red-300 underline"
-        >
-          Retry
-        </button>
-      )}
+    <div className="mx-8 mt-4 p-4 rounded-lg bg-red-500/10 border border-red-500/30">
+      <div className="flex items-center justify-between">
+        <span className="text-sm text-red-400">{message}</span>
+        {onRetry && (
+          <button onClick={onRetry} className="text-xs text-red-400 hover:text-red-300 underline">
+            Retry
+          </button>
+        )}
+      </div>
+      {/* A refused configuration: every problem, with the field it is in and what it was probably meant to be. */}
+      {(problems?.length || warnings?.length) ? <div className="mt-3"><ProblemList problems={problems} warnings={warnings} /></div> : null}
     </div>
   );
 }

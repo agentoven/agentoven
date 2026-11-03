@@ -234,7 +234,7 @@ func RunRecipeFlow(t *testing.T, srv *server.Server) {
 	}
 	newRun := func(name string) (recipe, run string) {
 		recipe = name + "-" + uuid.New().String()[:6]
-		if c, b := owner("POST", "/api/v1/recipes", fmt.Sprintf(`{"name":%q,"description":"one gate","version":"1.0.0","steps":[{"name":"gate","kind":"human_gate","notify":[]}]}`, recipe)); c != http.StatusCreated && c != http.StatusOK {
+		if c, b := owner("POST", "/api/v1/recipes", fmt.Sprintf(`{"name":%q,"description":"one gate","version":"1.0.0","steps":[{"name":"gate","kind":"human_gate"}]}`, recipe)); c != http.StatusCreated && c != http.StatusOK {
 			t.Fatalf("create recipe: %d %v", c, b)
 		}
 		c, b := owner("POST", "/api/v1/recipes/"+recipe+"/bake", `{"input":"x"}`)

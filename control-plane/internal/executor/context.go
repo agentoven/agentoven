@@ -302,6 +302,9 @@ func (e *Executor) summarize(ctx context.Context, st *runState, oldSummary strin
 		Strategy:  models.RoutingFallback,
 		AgentRef:  st.agent.Name + "_summarizer",
 		MaxTokens: &maxOut,
+		// The provider the owner chose for the summarizer, and no other: with none chosen the router picks
+		// one that lists the model, as it always did.
+		PinnedProvider: st.agent.SummaryProvider,
 	})
 	if err != nil || strings.TrimSpace(resp.Content) == "" {
 		log.Warn().Err(err).Str("trace_id", st.traceID).Msg("Summarizing call failed; condensing without the model")

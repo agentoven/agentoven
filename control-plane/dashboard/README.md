@@ -71,3 +71,14 @@ export default defineConfig([
   },
 ])
 ```
+
+## Reference fields (dropdowns that only offer what exists)
+
+A field that names something in the kitchen (a provider and model, a skill, a tool, a prompt, an agent, a recipe, a channel, an
+environment, a credential, a role) is chosen from a dropdown, never typed. The shared pieces are the same files in both
+dashboards: `src/components/ReferenceSelect.tsx` (single, multiple and provider-then-model selects), `ReferenceFields.tsx` (each
+field wired to its list), `src/hooks/references.ts` (one cached hook per kind of thing, per kitchen) and `src/lib/references.ts`
+(options, states, the "did you mean" port of `control-plane/pkg/refcheck/nearest.go`, and the value that names nothing). A value
+that names nothing shows as a red chip with the nearest values and blocks Save until it is replaced or removed; the server
+(HTTP 422 `invalid_configuration`) stays the authority and its problems are shown on the fields and in the banner.
+`npm test` runs the pure tests and renders the dropdowns to HTML with esbuild and `react-dom/server` (no jsdom).

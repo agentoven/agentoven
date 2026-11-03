@@ -95,10 +95,11 @@ export type { AttachmentOptions, AudioClip, AudioInput, ContentPart, ContentPart
 
 // Pro REST client
 export {
-  ProClient, AgentOvenAPIError, AudioModalityError, OidcSigningRequired, RateLimitedError, BudgetExceededError, SIGNING_TOKEN_HEADER, SIGNING_GATES,
+  ProClient, AgentOvenAPIError, ConfigurationError, AudioModalityError, OidcSigningRequired, RateLimitedError, BudgetExceededError, SIGNING_TOKEN_HEADER, SIGNING_GATES,
   KITCHEN_ROLES, PERSON_ROLES, BUDGET_UNITS, BUDGET_PERIODS, LIMIT_SCOPES, CACHE_MODES, budgetRecordId,
   TRIGGER_KINDS, TRIGGER_DELIVERY_STATUSES,
 } from './pro-client.js';
+export type { AgentRecord, ConfigValidation, AgentValidation, RecipeValidation } from './pro-client.js';
 export type {
   TraceListFilters, TraceView, TraceTimeline, TimelineSpan, TraceAudit,
   Signing, SigningChallenge, SigningTokenReply, SignatureRecord, ApproverPolicy,
@@ -111,6 +112,15 @@ export type {
   ToolPackSwitch, ToolPackManifest, ToolPackTool, ToolPackInstall, InstallToolPackRequest, OpenApiPreview, ImportOpenApiRequest,
   Trigger, TriggerKind, TriggerDelivery, TriggerDeliveryStatus, TriggerFireResult, CreateTriggerRequest,
 } from './pro-client.js';
+
+// Reference checks: does what an agent or a recipe names exist in the kitchen? (the same checks the server makes)
+export { checkAgent, checkRecipe, nearest, introduced, split, isBlocking, applyEdit, withDraft } from './refcheck.js';
+export type {
+  AgentConfig, AgentEdit, Catalog, CatalogAgent, CatalogNames, CatalogProvider, CatalogSkill, CatalogTool,
+  CheckOptions, Problem, ProblemCode, ProblemKind, RecipeConfig, Severity,
+} from './refcheck.js';
+export { loadCatalog } from './refcheck-catalog.js';
+export type { CatalogSource, PromptSummary, SkillSummary, AgentSummary } from './refcheck-catalog.js';
 
 // Re-export all types
 export type {

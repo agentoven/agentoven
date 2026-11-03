@@ -242,6 +242,7 @@ type Agent struct {
 	Behavior          AgentBehavior     `json:"behavior,omitempty" db:"behavior"`
 	ContextBudget     int               `json:"context_budget,omitempty" db:"context_budget"`         // max tokens for sliding context window (default: 16000)
 	SummaryModel      string            `json:"summary_model,omitempty" db:"summary_model"`           // cheap model for context compression (e.g. "gpt-4o-mini")
+	SummaryProvider   string            `json:"summary_provider,omitempty" db:"summary_provider"`     // provider that serves SummaryModel; empty: any provider that lists the model (as before)
 	ReasoningStrategy ReasoningStrategy `json:"reasoning_strategy,omitempty" db:"reasoning_strategy"` // "react", "plan-and-execute", "reflexion"
 
 	// OutputSchema, when set, constrains the agent's final text response to

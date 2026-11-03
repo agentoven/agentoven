@@ -22,6 +22,8 @@ pub mod documents;
 pub mod guardrails;
 pub mod secrets;
 pub mod toolpacks;
+/// Check a configuration against the kitchen before sending it, and read the control plane's own verdict.
+pub mod validate;
 /// Inbound triggers: start a recipe or an agent from a webhook, a mailbox or a folder (Pro, ADR-0047).
 pub mod triggers;
 
@@ -59,6 +61,9 @@ pub struct AgentOvenClient {
 
     /// Current kitchen (workspace) context.
     kitchen_id: Option<String>,
+
+    /// Check agents and recipes against the kitchen before sending them (see [`Self::with_validation`]).
+    validate: bool,
 }
 
 impl AgentOvenClient {
@@ -69,6 +74,7 @@ impl AgentOvenClient {
             http: http_client(DEFAULT_TIMEOUT),
             api_key: None,
             kitchen_id: None,
+            validate: false,
         })
     }
 
@@ -163,6 +169,12 @@ impl AgentOvenClient {
         if let Some(ref bm) = agent.backup_model {
             obj.insert("backup_model".into(), bm.clone().into());
         }
+        if let Some(ref sp) = agent.summary_provider {
+            obj.insert("summary_provider".into(), sp.clone().into());
+        }
+        if let Some(ref sm) = agent.summary_model {
+            obj.insert("summary_model".into(), sm.clone().into());
+        }
         if let Some(ref sp) = agent.system_prompt {
             obj.insert("system_prompt".into(), sp.clone().into());
         }
@@ -191,15 +203,13 @@ impl AgentOvenClient {
             obj.insert("mode".into(), serde_json::to_value(&agent.mode)?);
         }
 
-        let resp = if exists {
+        self.precheck_agent_write(&body).await?;
+        let request = if exists {
             self.authed_request(self.http.put(item_url))
         } else {
             self.authed_request(self.http.post(url))
-        }
-        .json(&body)
-        .send()
-        .await?
-        .error_for_status()?;
+        };
+        let resp = self.send_checked(request.json(&body)).await?;
         Ok(resp.json().await?)
     }
 
@@ -230,17 +240,19 @@ impl AgentOvenClient {
     }
 
     /// Bake (deploy) an agent to an environment.
+    ///
+    /// The control plane refuses an agent whose configuration names things the kitchen does not have (a
+    /// provider, a model, a tool, a skill, a prompt, a subagent): the error is a
+    /// [`crate::ConfigurationError`] listing every problem. With [`Self::with_validation`] the client checks
+    /// the stored agent (its draft applied) first and does not send the bake.
     pub async fn bake(&self, agent: &Agent, environment: &str) -> anyhow::Result<Agent> {
+        self.precheck_agent_bake(&agent.name, None).await?;
         let url = self.url(&format!("/api/v1/agents/{}/bake", seg(&agent.name)));
-        let resp = self
-            .authed_request(self.http.post(url))
-            .json(&serde_json::json!({
-                "version": agent.version,
-                "environment": environment,
-            }))
-            .send()
-            .await?
-            .error_for_status()?;
+        let request = self.authed_request(self.http.post(url)).json(&serde_json::json!({
+            "version": agent.version,
+            "environment": environment,
+        }));
+        let resp = self.send_checked(request).await?;
         Ok(resp.json().await?)
     }
 
@@ -267,13 +279,18 @@ impl AgentOvenClient {
     ) -> anyhow::Result<serde_json::Value> {
         let url = self.url("/api/v1/recipes");
         let body = serde_json::json!({"name": name, "description": description, "steps": steps});
+        self.precheck_recipe_write(&body).await?;
         let resp = self
             .authed_request(self.http.post(url))
             .json(&body)
             .send()
             .await?;
         let status = resp.status();
+        let headers = resp.headers().clone();
         let text = resp.text().await?;
+        if status.as_u16() == 422 {
+            return Err(pro::failure(422, &text, &headers));
+        }
         if !status.is_success() {
             anyhow::bail!("{status}: {text}");
         }
@@ -285,12 +302,8 @@ impl AgentOvenClient {
     /// [`Self::create_recipe_steps`].
     pub async fn create_recipe(&self, recipe: &Recipe) -> anyhow::Result<Recipe> {
         let url = self.url("/api/v1/recipes");
-        let resp = self
-            .authed_request(self.http.post(url))
-            .json(recipe)
-            .send()
-            .await?
-            .error_for_status()?;
+        self.precheck_recipe_write(&serde_json::to_value(recipe)?).await?;
+        let resp = self.send_checked(self.authed_request(self.http.post(url)).json(recipe)).await?;
         Ok(resp.json().await?)
     }
 
@@ -300,32 +313,30 @@ impl AgentOvenClient {
         recipe_name: &str,
         input: serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
+        self.precheck_recipe_run(recipe_name, None).await?;
         let url = self.url(&format!("/api/v1/recipes/{recipe_name}/bake", recipe_name = seg(recipe_name)));
         let body = serde_json::json!({"input": input});
-        let resp = self
-            .authed_request(self.http.post(url))
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()?;
+        let resp = self.send_checked(self.authed_request(self.http.post(url)).json(&body)).await?;
         Ok(resp.json().await?)
     }
 
     // ── Agent Lifecycle ──────────────────────────────────────
 
-    /// Update an existing agent.
+    /// Update an existing agent. `updates` may carry `context_budget`, `reasoning_strategy`, `summary_provider`,
+    /// `summary_model` (a string; `""` clears it), `approval_tools` and `subagents` (a list; `[]` clears,
+    /// absent leaves it as it is) as well as the fields it always took.
+    ///
+    /// A configuration that names things the kitchen does not have is refused with a
+    /// [`crate::ConfigurationError`]. With [`Self::with_validation`] the edit is checked here first; the edit is
+    /// all the client has, so it is judged on its own (a model without its provider is a note, not a refusal).
     pub async fn update_agent(
         &self,
         name: &str,
         updates: serde_json::Value,
     ) -> anyhow::Result<Agent> {
+        self.precheck_agent_write(&updates).await?;
         let url = self.url(&format!("/api/v1/agents/{name}", name = seg(name)));
-        let resp = self
-            .authed_request(self.http.put(url))
-            .json(&updates)
-            .send()
-            .await?
-            .error_for_status()?;
+        let resp = self.send_checked(self.authed_request(self.http.put(url)).json(&updates)).await?;
         Ok(resp.json().await?)
     }
 
@@ -339,19 +350,17 @@ impl AgentOvenClient {
         Ok(())
     }
 
-    /// Re-cook an agent with edits.
+    /// Re-cook an agent with edits. Refused like a bake ([`Self::bake`]) when the result names things the
+    /// kitchen does not have; with [`Self::with_validation`] the stored agent, its draft and these edits are
+    /// checked here first.
     pub async fn recook_agent(
         &self,
         name: &str,
         edits: serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
+        self.precheck_agent_bake(name, Some(&edits)).await?;
         let url = self.url(&format!("/api/v1/agents/{name}/recook", name = seg(name)));
-        let resp = self
-            .authed_request(self.http.post(url))
-            .json(&edits)
-            .send()
-            .await?
-            .error_for_status()?;
+        let resp = self.send_checked(self.authed_request(self.http.post(url)).json(&edits)).await?;
         Ok(resp.json().await?)
     }
 
@@ -1254,6 +1263,18 @@ impl AgentOvenClient {
     }
 
     // ── Internal ─────────────────────────────────────────────
+
+    /// Send a request that changes a configuration. A 422 that lists problems comes back as a
+    /// [`crate::ConfigurationError`]; any other failure status is the HTTP error it always was.
+    async fn send_checked(&self, request: reqwest::RequestBuilder) -> anyhow::Result<reqwest::Response> {
+        let resp = request.send().await?;
+        if resp.status().as_u16() == 422 {
+            let headers = resp.headers().clone();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(pro::failure(422, &text, &headers));
+        }
+        Ok(resp.error_for_status()?)
+    }
 
     fn url(&self, path: &str) -> Url {
         self.base_url.join(path).expect("Invalid URL path")

@@ -247,6 +247,10 @@
   },
   {
    "method": "GET",
+   "path": "/api/v1/agents/{agentName}/validate"
+  },
+  {
+   "method": "GET",
    "path": "/api/v1/agents/{agentName}/versions"
   },
   {
@@ -628,6 +632,10 @@
   {
    "method": "GET",
    "path": "/api/v1/recipes/{recipeName}/runs/{runId}"
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/recipes/{recipeName}/validate"
   },
   {
    "method": "GET",

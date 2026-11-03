@@ -22,8 +22,20 @@ type AgentEdit struct {
 	Runtime        AgentRuntime  `json:"runtime,omitempty"`
 	Bot            *BotConfig    `json:"bot,omitempty"`
 	Ingredients    []Ingredient  `json:"ingredients,omitempty"`
-	Skills         []string      `json:"skills,omitempty"`
+	Skills         []string      `json:"skills"`     // nil: unchanged, empty: none (like the guardrails)
 	Guardrails     []Guardrail   `json:"guardrails"` // nil: unchanged, empty: none (no omitempty, or the difference is lost)
+
+	// The settings below are the ones a PUT silently dropped once the edit became a draft: a person who set
+	// them in the dashboard saw them accepted and never saw them take effect.
+	ContextBudget     int               `json:"context_budget,omitempty"`
+	ReasoningStrategy ReasoningStrategy `json:"reasoning_strategy,omitempty"`
+	// SummaryProvider and SummaryModel are the model that summarizes the agent's history. A pointer, so
+	// that "" (use the primary model again) is told from "not part of this edit".
+	SummaryProvider *string `json:"summary_provider,omitempty"`
+	SummaryModel    *string `json:"summary_model,omitempty"`
+	// ApprovalTools and Subagents follow the guardrails' rule: nil is unchanged, an empty list clears.
+	ApprovalTools []string `json:"approval_tools"`
+	Subagents     []string `json:"subagents"`
 }
 
 // IsEmpty reports whether the edit changes nothing.
@@ -35,7 +47,9 @@ func (e AgentEdit) isZero() bool {
 	return e.Description == "" && e.Framework == "" && e.ModelProvider == "" && e.ModelName == "" &&
 		e.BackupProvider == "" && e.BackupModel == "" && e.Mode == "" && e.ExecutionMode == "" &&
 		e.MaxTurns <= 0 && e.Behavior == "" && e.Runtime == "" && e.Bot == nil &&
-		len(e.Ingredients) == 0 && len(e.Skills) == 0 && e.Guardrails == nil
+		len(e.Ingredients) == 0 && e.Skills == nil && e.Guardrails == nil &&
+		e.ContextBudget <= 0 && e.ReasoningStrategy == "" && e.SummaryProvider == nil && e.SummaryModel == nil &&
+		e.ApprovalTools == nil && e.Subagents == nil
 }
 
 // Merge lays o over e: what o sets wins, what it leaves out stays as it was. It is how a second edit
@@ -80,11 +94,29 @@ func (e *AgentEdit) Merge(o AgentEdit) {
 	if len(o.Ingredients) > 0 {
 		e.Ingredients = o.Ingredients
 	}
-	if len(o.Skills) > 0 {
+	if o.Skills != nil {
 		e.Skills = o.Skills
 	}
 	if o.Guardrails != nil {
 		e.Guardrails = o.Guardrails
+	}
+	if o.ContextBudget > 0 {
+		e.ContextBudget = o.ContextBudget
+	}
+	if o.ReasoningStrategy != "" {
+		e.ReasoningStrategy = o.ReasoningStrategy
+	}
+	if o.SummaryProvider != nil {
+		e.SummaryProvider = o.SummaryProvider
+	}
+	if o.SummaryModel != nil {
+		e.SummaryModel = o.SummaryModel
+	}
+	if o.ApprovalTools != nil {
+		e.ApprovalTools = o.ApprovalTools
+	}
+	if o.Subagents != nil {
+		e.Subagents = o.Subagents
 	}
 }
 
@@ -130,11 +162,29 @@ func (e AgentEdit) Apply(a *Agent) {
 	if len(e.Ingredients) > 0 {
 		a.Ingredients = RestoreRedactedIngredients(e.Ingredients, a.Ingredients)
 	}
-	if len(e.Skills) > 0 {
+	if e.Skills != nil {
 		a.Skills = e.Skills
 	}
 	if e.Guardrails != nil {
 		a.Guardrails = RestoreRedactedGuardrails(e.Guardrails, a.Guardrails)
+	}
+	if e.ContextBudget > 0 {
+		a.ContextBudget = e.ContextBudget
+	}
+	if e.ReasoningStrategy != "" {
+		a.ReasoningStrategy = e.ReasoningStrategy
+	}
+	if e.SummaryProvider != nil {
+		a.SummaryProvider = *e.SummaryProvider
+	}
+	if e.SummaryModel != nil {
+		a.SummaryModel = *e.SummaryModel
+	}
+	if e.ApprovalTools != nil {
+		a.ApprovalTools = e.ApprovalTools
+	}
+	if e.Subagents != nil {
+		a.Subagents = e.Subagents
 	}
 }
 

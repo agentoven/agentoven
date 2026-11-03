@@ -308,6 +308,43 @@ creating one needs no signature; raising or removing one needs `password=` or `s
 `budget_record_id`). See [docs/budgets-limits-cache.md](../../docs/budgets-limits-cache.md).
 
 
+## Checking a configuration against the kitchen
+
+An agent names a provider, a model, a summarizer (compaction) model, skills, tools, prompts and subagents; a recipe
+names agents, steps, channels, credentials, environments. The control plane refuses a write or a bake that names
+something the kitchen does not have, with HTTP 422 and the list of every problem, each with the field, the bad value
+and the nearest valid ones. The SDK raises it as `ConfigurationError` (an `AgentOvenAPIError`) with `.problems` and
+`.warnings` (lists of `agentoven.refcheck.Problem`: `path`, `code`, `severity`, `kind`, `value`, `within`,
+`suggestions`).
+
+```python
+from agentoven import AgentBuilder, AgentOvenClient, ConfigurationError
+
+spec = (AgentBuilder("support-bot")
+        .model("anthropic", "claude-sonnet-4-5")
+        .summary_model("anthropic", "claude-hiku-4-5")      # the compaction model; a typo
+        .skills("pdf-reader"))
+try:
+    client.create_agent(spec, validate=True)                # checked here first; nothing is sent when it fails
+except ConfigurationError as e:
+    for p in e.problems:
+        print(p.path, p.value, p.suggestions)               # summary_model claude-hiku-4-5 ['claude-haiku-4-5']
+```
+
+`validate=True` (on `register`, `create_agent`, `update_agent`, `bake`, `create_recipe`, `update_recipe`, `run_recipe`,
+`bake_recipe`) runs the same rules before sending, against the lists the client reads (`client.load_catalog()`). It is
+off by default and the server stays the authority: it checks again whatever the client did. A list you may not read
+(403, 404, a Pro-only route) is left unchecked, never treated as empty; scenarios are checked only where the server
+lists them, and recipe approver roles are not checked from the SDK. A warning (a disabled optional tool, a provider
+whose last test failed, a model id an OpenRouter, LiteLLM or Ollama provider does not list) never refuses a write.
+No authentication is needed beyond what the server already asks for.
+
+Without sending anything: `client.validate_agent(agent_or_dict_or_builder)` and `client.validate_recipe(recipe)`
+return the problems (errors and warnings; `agentoven.refcheck.split` separates them), `client.agent_validate(name)`
+and `client.recipe_validate(name)` ask the server about a stored agent or recipe as its next bake would judge it, and
+`agentoven.refcheck.check_agent` / `check_recipe` / `nearest` are the pure functions (they run the cases in
+`sdk/fixtures/refcheck-cases.json`, as the Go implementation, the TypeScript SDK and the Rust client do).
+
 ## Timeouts, redirects and the route contract
 
 A request gives up after 120 seconds (an invocation waits for a model): `AgentOvenClient(timeout=30)`, or

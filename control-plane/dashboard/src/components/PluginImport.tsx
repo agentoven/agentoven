@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
 import { pluginImport, type ImportRequest, type ImportResponse, type PluginLocation } from '../api';
 import { Button, Modal, Spinner, StatusBadge } from './UI';
+import { CredentialField } from './ReferenceFields';
 
 // Import a Claude Code or Codex plugin from a git location: review what it would register (a dry
 // run, nothing is sent to a model), choose the skills, then import. Used by the Skills page.
@@ -210,15 +211,15 @@ function ReviewStep({ location, onBack, onClose }: { location: PluginLocation; o
           {servers.some((s) => s.needs_credential) && (
             <div className="space-y-2">
               <p className="text-xs text-[var(--ao-text-muted)]">
-                These servers need a key. Name the kitchen credential that holds it; a server left blank is skipped.
+                These servers need a key. Choose the kitchen credential that holds it; a server left blank is skipped.
               </p>
               {servers.filter((s) => s.needs_credential).map((s) => (
                 <div key={s.name} className="flex items-center gap-3">
                   <label htmlFor={`cred-${s.name}`} className="w-40 shrink-0 text-xs truncate" title={s.endpoint}>{s.name}</label>
-                  <input
-                    id={`cred-${s.name}`} value={creds[s.name] ?? ''} className={inputCls} placeholder="credential name"
-                    onChange={(e) => setCreds((c) => ({ ...c, [s.name]: e.target.value }))}
-                  />
+                  <div className="flex-1 min-w-0">
+                    <CredentialField id={`cred-${s.name}`} label={`Credential for ${s.name}`} value={creds[s.name] ?? ''} placeholder="Skip this server"
+                      onChange={(v) => setCreds((c) => ({ ...c, [s.name]: v }))} />
+                  </div>
                 </div>
               ))}
             </div>

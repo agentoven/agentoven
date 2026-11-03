@@ -167,6 +167,17 @@ impl Ingredient {
         }
     }
 
+    /// Use a skill of the kitchen (it must be accepted to run).
+    pub fn skill(name: impl Into<String>) -> IngredientBuilder {
+        IngredientBuilder {
+            kind: IngredientKind::Skill,
+            name: name.into(),
+            provider: None,
+            role: None,
+            config: None,
+        }
+    }
+
     /// Attach an evaluation scenario to the agent (run by the scenario environment, Pro).
     pub fn scenario(name: impl Into<String>) -> IngredientBuilder {
         IngredientBuilder {
@@ -202,4 +213,6 @@ pub enum IngredientKind {
     Retriever,
     /// Evaluation scenario the agent is run against.
     Scenario,
+    /// A skill of the kitchen the agent may use.
+    Skill,
 }

@@ -1,0 +1,2500 @@
+{
+ "comment": "Cases for the reference checks of an agent or a recipe against what a kitchen has. The Go validator (control-plane/pkg/refcheck), the Python SDK, the TypeScript SDK and the Rust client run the same cases: a problem is identified by path, code, severity, kind, value and within; suggestions are compared when a case lists them. Generated once from the Go implementation and reviewed by hand; edit it and all four test suites together.",
+ "version": 1,
+ "catalogs": {
+  "base": {
+   "providers": [
+    {
+     "name": "anthropic",
+     "kind": "anthropic",
+     "models": [
+      "claude-haiku-4-5",
+      "claude-sonnet-4-5",
+      "claude-opus-4-1"
+     ]
+    },
+    {
+     "name": "openai",
+     "kind": "openai",
+     "models": [
+      "gpt-4o",
+      "gpt-4o-mini"
+     ]
+    },
+    {
+     "name": "router",
+     "kind": "openrouter",
+     "models": [
+      "anthropic/claude-haiku-4.5"
+     ]
+    },
+    {
+     "name": "local",
+     "kind": "ollama",
+     "models": [
+      "llama3"
+     ]
+    },
+    {
+     "name": "bare",
+     "kind": "openai",
+     "models": []
+    },
+    {
+     "name": "flaky",
+     "kind": "openai",
+     "models": [
+      "gpt-4o"
+     ],
+     "healthy": false
+    }
+   ],
+   "prompts": {
+    "support-system": 3,
+    "triage": 1
+   },
+   "tools": [
+    {
+     "name": "search",
+     "enabled": true,
+     "capabilities": [
+      "tool"
+     ]
+    },
+    {
+     "name": "mailer",
+     "enabled": true,
+     "capabilities": [
+      "notify"
+     ]
+    },
+    {
+     "name": "crm",
+     "enabled": false,
+     "capabilities": [
+      "tool"
+     ]
+    },
+    {
+     "name": "pager",
+     "enabled": true,
+     "capabilities": [
+      "tool",
+      "notify"
+     ]
+    }
+   ],
+   "skills": [
+    {
+     "name": "pdf-reader",
+     "status": "accepted"
+    },
+    {
+     "name": "web-research",
+     "status": "accepted"
+    },
+    {
+     "name": "shady",
+     "status": "pending"
+    }
+   ],
+   "agents": [
+    {
+     "name": "triage-bot",
+     "status": "ready"
+    },
+    {
+     "name": "writer",
+     "status": "ready"
+    },
+    {
+     "name": "old-bot",
+     "status": "retired"
+    },
+    {
+     "name": "tired-bot",
+     "status": "cooled"
+    }
+   ],
+   "recipes": [
+    "onboarding",
+    "nightly"
+   ],
+   "channels": [
+    "ops-slack",
+    "oncall"
+   ],
+   "environments": [
+    "dev",
+    "prod"
+   ],
+   "credentials": [
+    "partner-key"
+   ],
+   "scenarios": {
+    "known": false,
+    "names": []
+   },
+   "roles": {
+    "known": false,
+    "names": []
+   }
+  },
+  "closed": {
+   "providers": [
+    {
+     "name": "anthropic",
+     "kind": "anthropic",
+     "models": [
+      "claude-haiku-4-5",
+      "claude-sonnet-4-5",
+      "claude-opus-4-1"
+     ]
+    },
+    {
+     "name": "openai",
+     "kind": "openai",
+     "models": [
+      "gpt-4o",
+      "gpt-4o-mini"
+     ]
+    }
+   ],
+   "prompts": {
+    "support-system": 3,
+    "triage": 1
+   },
+   "tools": [
+    {
+     "name": "search",
+     "enabled": true,
+     "capabilities": [
+      "tool"
+     ]
+    },
+    {
+     "name": "mailer",
+     "enabled": true,
+     "capabilities": [
+      "notify"
+     ]
+    },
+    {
+     "name": "crm",
+     "enabled": false,
+     "capabilities": [
+      "tool"
+     ]
+    },
+    {
+     "name": "pager",
+     "enabled": true,
+     "capabilities": [
+      "tool",
+      "notify"
+     ]
+    }
+   ],
+   "skills": [
+    {
+     "name": "pdf-reader",
+     "status": "accepted"
+    },
+    {
+     "name": "web-research",
+     "status": "accepted"
+    },
+    {
+     "name": "shady",
+     "status": "pending"
+    }
+   ],
+   "agents": [
+    {
+     "name": "triage-bot",
+     "status": "ready"
+    },
+    {
+     "name": "writer",
+     "status": "ready"
+    },
+    {
+     "name": "old-bot",
+     "status": "retired"
+    },
+    {
+     "name": "tired-bot",
+     "status": "cooled"
+    }
+   ],
+   "recipes": [
+    "onboarding",
+    "nightly"
+   ],
+   "channels": [
+    "ops-slack",
+    "oncall"
+   ],
+   "environments": [
+    "dev",
+    "prod"
+   ],
+   "credentials": [
+    "partner-key"
+   ],
+   "scenarios": {
+    "known": false,
+    "names": []
+   },
+   "roles": {
+    "known": false,
+    "names": []
+   }
+  },
+  "pro": {
+   "providers": [
+    {
+     "name": "anthropic",
+     "kind": "anthropic",
+     "models": [
+      "claude-haiku-4-5",
+      "claude-sonnet-4-5",
+      "claude-opus-4-1"
+     ]
+    },
+    {
+     "name": "openai",
+     "kind": "openai",
+     "models": [
+      "gpt-4o",
+      "gpt-4o-mini"
+     ]
+    },
+    {
+     "name": "router",
+     "kind": "openrouter",
+     "models": [
+      "anthropic/claude-haiku-4.5"
+     ]
+    },
+    {
+     "name": "local",
+     "kind": "ollama",
+     "models": [
+      "llama3"
+     ]
+    },
+    {
+     "name": "bare",
+     "kind": "openai",
+     "models": []
+    },
+    {
+     "name": "flaky",
+     "kind": "openai",
+     "models": [
+      "gpt-4o"
+     ],
+     "healthy": false
+    }
+   ],
+   "prompts": {
+    "support-system": 3,
+    "triage": 1
+   },
+   "tools": [
+    {
+     "name": "search",
+     "enabled": true,
+     "capabilities": [
+      "tool"
+     ]
+    },
+    {
+     "name": "mailer",
+     "enabled": true,
+     "capabilities": [
+      "notify"
+     ]
+    },
+    {
+     "name": "crm",
+     "enabled": false,
+     "capabilities": [
+      "tool"
+     ]
+    },
+    {
+     "name": "pager",
+     "enabled": true,
+     "capabilities": [
+      "tool",
+      "notify"
+     ]
+    }
+   ],
+   "skills": [
+    {
+     "name": "pdf-reader",
+     "status": "accepted"
+    },
+    {
+     "name": "web-research",
+     "status": "accepted"
+    },
+    {
+     "name": "shady",
+     "status": "pending"
+    }
+   ],
+   "agents": [
+    {
+     "name": "triage-bot",
+     "status": "ready"
+    },
+    {
+     "name": "writer",
+     "status": "ready"
+    },
+    {
+     "name": "old-bot",
+     "status": "retired"
+    },
+    {
+     "name": "tired-bot",
+     "status": "cooled"
+    }
+   ],
+   "recipes": [
+    "onboarding",
+    "nightly"
+   ],
+   "channels": [
+    "ops-slack",
+    "oncall"
+   ],
+   "environments": [
+    "dev",
+    "prod"
+   ],
+   "credentials": [
+    "partner-key"
+   ],
+   "scenarios": {
+    "known": true,
+    "names": [
+     "refund-flow",
+     "triage-eval"
+    ]
+   },
+   "roles": {
+    "known": true,
+    "names": [
+     "head_chef",
+     "chef",
+     "baker",
+     "taster",
+     "auditor",
+     "legal",
+     "finance"
+    ]
+   }
+  },
+  "empty": {
+   "providers": [],
+   "prompts": {},
+   "tools": [],
+   "skills": [],
+   "agents": [],
+   "recipes": [],
+   "channels": [],
+   "environments": [],
+   "credentials": [],
+   "scenarios": {
+    "known": false,
+    "names": []
+   },
+   "roles": {
+    "known": false,
+    "names": []
+   }
+  }
+ },
+ "cases": [
+  {
+   "name": "nearest: one letter typo",
+   "kind": "nearest",
+   "value": "claude-hiku-4-5",
+   "candidates": [
+    "claude-haiku-4-5",
+    "claude-sonnet-4-5"
+   ],
+   "expect": [
+    "claude-haiku-4-5"
+   ]
+  },
+  {
+   "name": "nearest: punctuation and case are ignored",
+   "kind": "nearest",
+   "value": "GPT4o",
+   "candidates": [
+    "gpt-4o",
+    "gpt-4o-mini",
+    "llama3"
+   ],
+   "expect": [
+    "gpt-4o",
+    "gpt-4o-mini"
+   ]
+  },
+  {
+   "name": "nearest: nothing is close",
+   "kind": "nearest",
+   "value": "zzzzzz",
+   "candidates": [
+    "gpt-4o",
+    "llama3"
+   ],
+   "expect": []
+  },
+  {
+   "name": "nearest: at most three, nearest first",
+   "kind": "nearest",
+   "value": "gpt",
+   "candidates": [
+    "gpt-4o-mini",
+    "gpt-4o",
+    "gpt-5",
+    "gpt-3",
+    "llama3"
+   ],
+   "expect": [
+    "gpt-3",
+    "gpt-4o",
+    "gpt-4o-mini"
+   ]
+  },
+  {
+   "name": "nearest: empty value",
+   "kind": "nearest",
+   "value": "",
+   "candidates": [
+    "a"
+   ],
+   "expect": []
+  },
+  {
+   "name": "valid agent with a summarizer",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "model_provider": "anthropic",
+    "model_name": "claude-haiku-4-5",
+    "summary_provider": "anthropic",
+    "summary_model": "claude-haiku-4-5"
+   },
+   "expect": []
+  },
+  {
+   "name": "summary model is a typo of the provider's model",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "model_provider": "anthropic",
+    "model_name": "claude-haiku-4-5",
+    "summary_provider": "anthropic",
+    "summary_model": "claude-hiku-4-5"
+   },
+   "expect": [
+    {
+     "path": "summary_model",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "model",
+     "value": "claude-hiku-4-5",
+     "within": "anthropic",
+     "suggestions": [
+      "claude-haiku-4-5"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "summary model without a provider is found among every provider's models",
+   "kind": "agent",
+   "catalog": "closed",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "summary_model": "gpt-4o-mini"
+   },
+   "expect": []
+  },
+  {
+   "name": "summary model without a provider that nobody serves",
+   "kind": "agent",
+   "catalog": "closed",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "summary_model": "gpt-4o-minni"
+   },
+   "expect": [
+    {
+     "path": "summary_model",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "model",
+     "value": "gpt-4o-minni",
+     "suggestions": [
+      "gpt-4o-mini",
+      "gpt-4o"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "summary model without a provider is not judged while a provider serves any id",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "summary_model": "whatever"
+   },
+   "expect": []
+  },
+  {
+   "name": "model provider is a typo",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "model_provider": "antropic",
+    "model_name": "claude-haiku-4-5"
+   },
+   "expect": [
+    {
+     "path": "model_provider",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "provider",
+     "value": "antropic",
+     "suggestions": [
+      "anthropic"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "model is not in a closed provider's list",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "model_provider": "openai",
+    "model_name": "gpt-4oo"
+   },
+   "expect": [
+    {
+     "path": "model_name",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "model",
+     "value": "gpt-4oo",
+     "within": "openai",
+     "suggestions": [
+      "gpt-4o"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "model unlisted by an open provider is a warning",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "model_provider": "router",
+    "model_name": "openai/gpt-5"
+   },
+   "expect": [
+    {
+     "path": "model_name",
+     "code": "unlisted",
+     "severity": "warning",
+     "kind": "model",
+     "value": "openai/gpt-5",
+     "within": "router"
+    }
+   ]
+  },
+  {
+   "name": "model listed by an open provider passes",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "model_provider": "local",
+    "model_name": "llama3"
+   },
+   "expect": []
+  },
+  {
+   "name": "provider with no list accepts any id",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "model_provider": "bare",
+    "model_name": "anything-at-all"
+   },
+   "expect": []
+  },
+  {
+   "name": "provider whose last test failed is a warning",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "model_provider": "flaky",
+    "model_name": "gpt-4o"
+   },
+   "expect": [
+    {
+     "path": "model_provider",
+     "code": "not_usable",
+     "severity": "warning",
+     "kind": "provider",
+     "value": "flaky"
+    }
+   ]
+  },
+  {
+   "name": "backup model is checked like the primary",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "model_provider": "openai",
+    "model_name": "gpt-4o",
+    "backup_provider": "anthropic",
+    "backup_model": "claude-3"
+   },
+   "expect": [
+    {
+     "path": "backup_model",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "model",
+     "value": "claude-3",
+     "within": "anthropic",
+     "suggestions": []
+    }
+   ]
+  },
+  {
+   "name": "provider without a model is a warning on a write",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "model_provider": "openai"
+   },
+   "expect": [
+    {
+     "path": "model_name",
+     "code": "required",
+     "severity": "warning",
+     "within": "openai"
+    }
+   ]
+  },
+  {
+   "name": "provider without a model is an error at a bake",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {
+    "bake": true
+   },
+   "input": {
+    "name": "a1",
+    "model_provider": "openai"
+   },
+   "expect": [
+    {
+     "path": "model_name",
+     "code": "required",
+     "severity": "error",
+     "within": "openai"
+    }
+   ]
+  },
+  {
+   "name": "model without a provider is only a note",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "model_name": "gpt-4o"
+   },
+   "expect": [
+    {
+     "path": "model_provider",
+     "code": "required",
+     "severity": "warning"
+    }
+   ]
+  },
+  {
+   "name": "a managed agent without any model at a bake",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {
+    "bake": true
+   },
+   "input": {
+    "name": "a1"
+   },
+   "expect": [
+    {
+     "path": "model_provider",
+     "code": "required",
+     "severity": "error",
+     "kind": "model"
+    }
+   ]
+  },
+  {
+   "name": "an external agent needs no model at a bake",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {
+    "bake": true
+   },
+   "input": {
+    "name": "a1",
+    "mode": "external"
+   },
+   "expect": []
+  },
+  {
+   "name": "nothing in an empty kitchen exists",
+   "kind": "agent",
+   "catalog": "empty",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "model_provider": "openai",
+    "model_name": "gpt-4o",
+    "skills": [
+     "pdf-reader"
+    ],
+    "subagents": [
+     "writer"
+    ]
+   },
+   "expect": [
+    {
+     "path": "model_provider",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "provider",
+     "value": "openai",
+     "suggestions": []
+    },
+    {
+     "path": "skills[0]",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "skill",
+     "value": "pdf-reader",
+     "suggestions": []
+    },
+    {
+     "path": "subagents[0]",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "agent",
+     "value": "writer",
+     "suggestions": []
+    }
+   ]
+  },
+  {
+   "name": "skills: a typo, an unapproved skill and a repeat",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "skills": [
+     "pdf-reader",
+     "pdf-reeder",
+     "shady",
+     "pdf-reader"
+    ]
+   },
+   "expect": [
+    {
+     "path": "skills[1]",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "skill",
+     "value": "pdf-reeder",
+     "suggestions": [
+      "pdf-reader"
+     ]
+    },
+    {
+     "path": "skills[2]",
+     "code": "not_usable",
+     "severity": "warning",
+     "kind": "skill",
+     "value": "shady"
+    },
+    {
+     "path": "skills[3]",
+     "code": "duplicate",
+     "severity": "error",
+     "value": "pdf-reader"
+    }
+   ]
+  },
+  {
+   "name": "approval tools: a disabled tool warns, a typo is refused",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "approval_tools": [
+     "crm",
+     "serch"
+    ]
+   },
+   "expect": [
+    {
+     "path": "approval_tools[0]",
+     "code": "not_usable",
+     "severity": "warning",
+     "kind": "tool",
+     "value": "crm"
+    },
+    {
+     "path": "approval_tools[1]",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "tool",
+     "value": "serch",
+     "suggestions": [
+      "search"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "subagents: retired, absent, itself",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "boss",
+    "subagents": [
+     "writer",
+     "old-bot",
+     "ghost",
+     "boss"
+    ]
+   },
+   "expect": [
+    {
+     "path": "subagents[1]",
+     "code": "not_usable",
+     "severity": "error",
+     "kind": "agent",
+     "value": "old-bot"
+    },
+    {
+     "path": "subagents[2]",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "agent",
+     "value": "ghost",
+     "suggestions": []
+    },
+    {
+     "path": "subagents[3]",
+     "code": "invalid_value",
+     "severity": "error",
+     "value": "boss"
+    }
+   ]
+  },
+  {
+   "name": "subagents: a cooled agent warns",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "boss",
+    "subagents": [
+     "tired-bot"
+    ]
+   },
+   "expect": [
+    {
+     "path": "subagents[0]",
+     "code": "not_usable",
+     "severity": "warning",
+     "kind": "agent",
+     "value": "tired-bot"
+    }
+   ]
+  },
+  {
+   "name": "tool ingredient: required and disabled is an error, optional is a warning",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "ingredients": [
+     {
+      "kind": "tool",
+      "name": "crm",
+      "required": true
+     },
+     {
+      "kind": "tool",
+      "name": "pager",
+      "required": false,
+      "config": {}
+     },
+     {
+      "kind": "tool",
+      "name": "mailer",
+      "required": false
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "ingredients[0].name",
+     "code": "not_usable",
+     "severity": "error",
+     "kind": "tool",
+     "value": "crm"
+    },
+    {
+     "path": "ingredients[2].name",
+     "code": "not_usable",
+     "severity": "warning",
+     "kind": "tool",
+     "value": "mailer"
+    }
+   ]
+  },
+  {
+   "name": "tool ingredient that does not exist is refused even when optional",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "ingredients": [
+     {
+      "kind": "tool",
+      "name": "serch",
+      "required": false
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "ingredients[0].name",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "tool",
+     "value": "serch",
+     "suggestions": [
+      "search"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "tool ingredient named by config.tool_name",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "ingredients": [
+     {
+      "kind": "tool",
+      "name": "x",
+      "required": true,
+      "config": {
+       "tool_name": "searsh"
+      }
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "ingredients[0].config.tool_name",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "tool",
+     "value": "searsh",
+     "suggestions": [
+      "search"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "prompt ingredient: a typo, inline text, a pinned version",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "ingredients": [
+     {
+      "kind": "prompt",
+      "name": "support-systm",
+      "required": true
+     },
+     {
+      "kind": "prompt",
+      "name": "inline",
+      "required": true,
+      "config": {
+       "text": "You are kind."
+      }
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "ingredients[0].name",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "prompt",
+     "value": "support-systm",
+     "suggestions": [
+      "support-system"
+     ]
+    },
+    {
+     "path": "ingredients[1].kind",
+     "code": "duplicate",
+     "severity": "error",
+     "value": "prompt"
+    }
+   ]
+  },
+  {
+   "name": "prompt version pin",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "ingredients": [
+     {
+      "kind": "prompt",
+      "name": "support-system",
+      "config": {
+       "version": 9
+      }
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "ingredients[0].config.version",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "prompt",
+     "value": "9",
+     "within": "support-system"
+    }
+   ]
+  },
+  {
+   "name": "prompt version pin within range",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "ingredients": [
+     {
+      "kind": "prompt",
+      "name": "support-system",
+      "config": {
+       "version": 2
+      }
+     }
+    ]
+   },
+   "expect": []
+  },
+  {
+   "name": "skill ingredient: unknown and unapproved",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "ingredients": [
+     {
+      "kind": "skill",
+      "name": "web-reserch",
+      "required": true
+     },
+     {
+      "kind": "skill",
+      "name": "shady",
+      "required": true
+     },
+     {
+      "kind": "skill",
+      "name": "shady",
+      "required": false
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "ingredients[0].name",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "skill",
+     "value": "web-reserch",
+     "suggestions": [
+      "web-research"
+     ]
+    },
+    {
+     "path": "ingredients[1].name",
+     "code": "not_usable",
+     "severity": "error",
+     "kind": "skill",
+     "value": "shady"
+    },
+    {
+     "path": "ingredients[2].name",
+     "code": "duplicate",
+     "severity": "error",
+     "value": "shady"
+    },
+    {
+     "path": "ingredients[2].name",
+     "code": "not_usable",
+     "severity": "warning",
+     "kind": "skill",
+     "value": "shady"
+    }
+   ]
+  },
+  {
+   "name": "ingredient kind typo",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "ingredients": [
+     {
+      "kind": "tol",
+      "name": "search"
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "ingredients[0].kind",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "ingredient_kind",
+     "value": "tol",
+     "suggestions": [
+      "tool"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "ingredient without a kind",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "ingredients": [
+     {
+      "name": "search"
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "ingredients[0].kind",
+     "code": "required",
+     "severity": "error"
+    }
+   ]
+  },
+  {
+   "name": "model ingredient: provider typo, then model typo",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "ingredients": [
+     {
+      "kind": "model",
+      "name": "m",
+      "config": {
+       "provider": "opnai",
+       "model": "gpt-4o"
+      }
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "ingredients[0].config.provider",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "provider",
+     "value": "opnai",
+     "suggestions": [
+      "openai"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "model ingredient: model typo",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "ingredients": [
+     {
+      "kind": "model",
+      "name": "m",
+      "config": {
+       "provider": "openai",
+       "model": "gpt-4"
+      }
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "ingredients[0].config.model",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "model",
+     "value": "gpt-4",
+     "within": "openai",
+     "suggestions": [
+      "gpt-4o",
+      "gpt-4o-mini"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "model ingredient: wrong types",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "ingredients": [
+     {
+      "kind": "model",
+      "name": "m",
+      "config": {
+       "provider": "openai",
+       "model": "gpt-4o",
+       "temperature": 5,
+       "max_tokens": "lots"
+      }
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "ingredients[0].config.temperature",
+     "code": "out_of_range",
+     "severity": "error",
+     "value": "5"
+    },
+    {
+     "path": "ingredients[0].config.max_tokens",
+     "code": "wrong_type",
+     "severity": "error",
+     "value": "lots"
+    }
+   ]
+  },
+  {
+   "name": "two model ingredients",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "ingredients": [
+     {
+      "kind": "model",
+      "name": "m1",
+      "config": {
+       "provider": "openai",
+       "model": "gpt-4o"
+      }
+     },
+     {
+      "kind": "model",
+      "name": "m2",
+      "config": {
+       "provider": "openai",
+       "model": "gpt-4o-mini"
+      }
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "ingredients[1].kind",
+     "code": "duplicate",
+     "severity": "error",
+     "value": "model"
+    }
+   ]
+  },
+  {
+   "name": "data ingredient needs a uri",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "ingredients": [
+     {
+      "kind": "data",
+      "name": "d"
+     },
+     {
+      "kind": "data",
+      "name": "e",
+      "config": {
+       "uri": 7
+      }
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "ingredients[0].config.uri",
+     "code": "required",
+     "severity": "error"
+    },
+    {
+     "path": "ingredients[1].config.uri",
+     "code": "wrong_type",
+     "severity": "error",
+     "value": "7"
+    }
+   ]
+  },
+  {
+   "name": "vector store backend typo and a missing index",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "ingredients": [
+     {
+      "kind": "vectorstore",
+      "name": "v",
+      "config": {
+       "backend": "pgvectr",
+       "index": "docs"
+      }
+     },
+     {
+      "kind": "vectorstore",
+      "name": "w",
+      "config": {
+       "backend": "pgvector"
+      }
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "ingredients[0].config.backend",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "vectorstore_backend",
+     "value": "pgvectr",
+     "suggestions": [
+      "pgvector"
+     ]
+    },
+    {
+     "path": "ingredients[1].config.index",
+     "code": "required",
+     "severity": "error"
+    }
+   ]
+  },
+  {
+   "name": "retriever names an embedding and a store the agent does not have",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "ingredients": [
+     {
+      "kind": "retriever",
+      "name": "r",
+      "config": {
+       "embedding_ref": "emb",
+       "vectorstore_ref": "docs",
+       "top_k": 0,
+       "score_threshold": 2
+      }
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "ingredients[0].config.top_k",
+     "code": "out_of_range",
+     "severity": "error",
+     "value": "0"
+    },
+    {
+     "path": "ingredients[0].config.score_threshold",
+     "code": "out_of_range",
+     "severity": "error",
+     "value": "2"
+    },
+    {
+     "path": "ingredients[0].config.embedding_ref",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "embedding",
+     "value": "emb",
+     "suggestions": []
+    },
+    {
+     "path": "ingredients[0].config.vectorstore_ref",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "vectorstore",
+     "value": "docs",
+     "suggestions": []
+    }
+   ]
+  },
+  {
+   "name": "retriever that finds its embedding and store",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "ingredients": [
+     {
+      "kind": "embedding",
+      "name": "e",
+      "config": {
+       "provider": "openai",
+       "model": "text-embedding-3-small"
+      }
+     },
+     {
+      "kind": "vectorstore",
+      "name": "v",
+      "config": {
+       "backend": "embedded",
+       "index": "docs"
+      }
+     },
+     {
+      "kind": "retriever",
+      "name": "r",
+      "config": {
+       "embedding_ref": "openai",
+       "vectorstore_ref": "docs"
+      }
+     }
+    ]
+   },
+   "expect": []
+  },
+  {
+   "name": "embedding ingredient needs a provider that exists",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "ingredients": [
+     {
+      "kind": "embedding",
+      "name": "e",
+      "config": {
+       "provider": "opnai",
+       "dimensions": 0
+      }
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "ingredients[0].config.dimensions",
+     "code": "out_of_range",
+     "severity": "error",
+     "value": "0"
+    },
+    {
+     "path": "ingredients[0].config.provider",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "provider",
+     "value": "opnai",
+     "suggestions": [
+      "openai"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "scenario ingredient is not checked where scenarios are unknown",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "ingredients": [
+     {
+      "kind": "scenario",
+      "name": "refund-flow"
+     }
+    ]
+   },
+   "expect": []
+  },
+  {
+   "name": "scenario ingredient against the kitchen's scenarios",
+   "kind": "agent",
+   "catalog": "pro",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "ingredients": [
+     {
+      "kind": "scenario",
+      "name": "refund-flw"
+     },
+     {
+      "kind": "scenario",
+      "name": "x",
+      "config": {
+       "scenario": "triage-eval",
+       "rollouts": 0,
+       "min_pass_rate": 2
+      }
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "ingredients[0].name",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "scenario",
+     "value": "refund-flw",
+     "suggestions": [
+      "refund-flow"
+     ]
+    },
+    {
+     "path": "ingredients[1].config.rollouts",
+     "code": "out_of_range",
+     "severity": "error",
+     "value": "0"
+    },
+    {
+     "path": "ingredients[1].config.min_pass_rate",
+     "code": "out_of_range",
+     "severity": "error",
+     "value": "2"
+    }
+   ]
+  },
+  {
+   "name": "numbers out of range",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "max_turns": -1,
+    "context_budget": 10
+   },
+   "expect": [
+    {
+     "path": "max_turns",
+     "code": "out_of_range",
+     "severity": "error",
+     "value": "-1"
+    },
+    {
+     "path": "context_budget",
+     "code": "out_of_range",
+     "severity": "error",
+     "value": "10"
+    }
+   ]
+  },
+  {
+   "name": "max turns far too high",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "max_turns": 5000
+   },
+   "expect": [
+    {
+     "path": "max_turns",
+     "code": "out_of_range",
+     "severity": "error",
+     "value": "5000"
+    }
+   ]
+  },
+  {
+   "name": "fixed-value settings: typos get suggestions",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "behavior": "agentik",
+    "mode": "managd",
+    "runtime": "langchan",
+    "execution_mode": "dokcer",
+    "reasoning_strategy": "reeact"
+   },
+   "expect": [
+    {
+     "path": "behavior",
+     "code": "invalid_value",
+     "severity": "error",
+     "value": "agentik",
+     "suggestions": [
+      "agentic"
+     ]
+    },
+    {
+     "path": "mode",
+     "code": "invalid_value",
+     "severity": "error",
+     "value": "managd",
+     "suggestions": [
+      "managed"
+     ]
+    },
+    {
+     "path": "runtime",
+     "code": "invalid_value",
+     "severity": "error",
+     "value": "langchan",
+     "suggestions": [
+      "langchain"
+     ]
+    },
+    {
+     "path": "execution_mode",
+     "code": "invalid_value",
+     "severity": "error",
+     "value": "dokcer",
+     "suggestions": [
+      "docker"
+     ]
+    },
+    {
+     "path": "reasoning_strategy",
+     "code": "invalid_value",
+     "severity": "error",
+     "value": "reeact",
+     "suggestions": [
+      "react"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "guardrail settings",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "guardrails": [
+     {
+      "kind": "pii_detecton",
+      "stage": "inpt",
+      "action": "blok",
+      "enabled": true
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "guardrails[0].kind",
+     "code": "invalid_value",
+     "severity": "error",
+     "value": "pii_detecton",
+     "suggestions": [
+      "pii_detection"
+     ]
+    },
+    {
+     "path": "guardrails[0].stage",
+     "code": "invalid_value",
+     "severity": "error",
+     "value": "inpt",
+     "suggestions": [
+      "input"
+     ]
+    },
+    {
+     "path": "guardrails[0].action",
+     "code": "invalid_value",
+     "severity": "error",
+     "value": "blok",
+     "suggestions": [
+      "block"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "a name that cannot be part of a URL",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a/b"
+   },
+   "expect": [
+    {
+     "path": "name",
+     "code": "invalid_value",
+     "severity": "error",
+     "value": "a/b"
+    }
+   ]
+  },
+  {
+   "name": "budget cannot be negative",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "budget": {
+     "max_cost_usd": -1,
+     "child_share": 2
+    }
+   },
+   "expect": [
+    {
+     "path": "budget.max_cost_usd",
+     "code": "out_of_range",
+     "severity": "error",
+     "value": "-1"
+    },
+    {
+     "path": "budget.child_share",
+     "code": "out_of_range",
+     "severity": "error",
+     "value": "2"
+    }
+   ]
+  },
+  {
+   "name": "bot tools",
+   "kind": "agent",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "a1",
+    "runtime": "agenticbot",
+    "bot": {
+     "tools": [
+      "search",
+      "serch"
+     ]
+    }
+   },
+   "expect": [
+    {
+     "path": "bot.tools[1]",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "tool",
+     "value": "serch",
+     "suggestions": [
+      "search"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "valid recipe",
+   "kind": "recipe",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "r1",
+    "steps": [
+     {
+      "name": "a",
+      "kind": "agent",
+      "agent_ref": "writer"
+     },
+     {
+      "name": "b",
+      "kind": "agent",
+      "agent": "triage-bot",
+      "depends_on": [
+       "a"
+      ]
+     }
+    ]
+   },
+   "expect": []
+  },
+  {
+   "name": "step agent is a typo, retired, cooled",
+   "kind": "recipe",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "r1",
+    "steps": [
+     {
+      "name": "a",
+      "kind": "agent",
+      "agent_ref": "writr"
+     },
+     {
+      "name": "b",
+      "kind": "agent",
+      "agent_ref": "old-bot"
+     },
+     {
+      "name": "c",
+      "kind": "agent",
+      "agent_ref": "tired-bot"
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "steps[0].agent_ref",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "agent",
+     "value": "writr",
+     "suggestions": [
+      "writer"
+     ]
+    },
+    {
+     "path": "steps[1].agent_ref",
+     "code": "not_usable",
+     "severity": "error",
+     "kind": "agent",
+     "value": "old-bot"
+    },
+    {
+     "path": "steps[2].agent_ref",
+     "code": "not_usable",
+     "severity": "warning",
+     "kind": "agent",
+     "value": "tired-bot"
+    }
+   ]
+  },
+  {
+   "name": "agent and agent_ref disagree",
+   "kind": "recipe",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "r1",
+    "steps": [
+     {
+      "name": "a",
+      "kind": "agent",
+      "agent_ref": "writer",
+      "agent": "triage-bot"
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "steps[0].agent",
+     "code": "invalid_value",
+     "severity": "error",
+     "value": "triage-bot"
+    }
+   ]
+  },
+  {
+   "name": "an agent step needs an agent",
+   "kind": "recipe",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "r1",
+    "steps": [
+     {
+      "name": "a",
+      "kind": "agent"
+     },
+     {
+      "name": "m",
+      "kind": "map",
+      "source_path": "items"
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "steps[0].agent_ref",
+     "code": "required",
+     "severity": "error"
+    },
+    {
+     "path": "steps[1].agent_ref",
+     "code": "required",
+     "severity": "error"
+    }
+   ]
+  },
+  {
+   "name": "steps wait for steps that exist",
+   "kind": "recipe",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "r1",
+    "steps": [
+     {
+      "name": "a",
+      "kind": "agent",
+      "agent_ref": "writer",
+      "depends_on": [
+       "bb",
+       "a"
+      ]
+     },
+     {
+      "name": "b",
+      "kind": "agent",
+      "agent_ref": "writer"
+     },
+     {
+      "name": "b",
+      "kind": "agent",
+      "agent_ref": "writer"
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "steps[0].depends_on[0]",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "step",
+     "value": "bb",
+     "suggestions": [
+      "b"
+     ]
+    },
+    {
+     "path": "steps[0].depends_on[1]",
+     "code": "invalid_value",
+     "severity": "error",
+     "value": "a"
+    },
+    {
+     "path": "steps[2].name",
+     "code": "duplicate",
+     "severity": "error",
+     "value": "b"
+    }
+   ]
+  },
+  {
+   "name": "a circle of dependencies",
+   "kind": "recipe",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "r1",
+    "steps": [
+     {
+      "name": "a",
+      "kind": "agent",
+      "agent_ref": "writer",
+      "depends_on": [
+       "b"
+      ]
+     },
+     {
+      "name": "b",
+      "kind": "agent",
+      "agent_ref": "writer",
+      "depends_on": [
+       "a"
+      ]
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "steps[1].depends_on",
+     "code": "invalid_value",
+     "severity": "error",
+     "value": "a"
+    }
+   ]
+  },
+  {
+   "name": "branch targets",
+   "kind": "recipe",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "r1",
+    "steps": [
+     {
+      "name": "a",
+      "kind": "router",
+      "branches": [
+       {
+        "condition": "x",
+        "next_step": "zz"
+       }
+      ],
+      "default_next": "a"
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "steps[0].branches[0].next_step",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "step",
+     "value": "zz",
+     "suggestions": []
+    }
+   ]
+  },
+  {
+   "name": "sub recipes (a recipe naming itself is the server's cycle check, not a missing recipe)",
+   "kind": "recipe",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "r1",
+    "steps": [
+     {
+      "name": "a",
+      "kind": "sub_recipe",
+      "recipe_ref": "onbording"
+     },
+     {
+      "name": "b",
+      "kind": "sub_recipe",
+      "recipe_ref": "r1"
+     },
+     {
+      "name": "c",
+      "kind": "sub_recipe"
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "steps[0].recipe_ref",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "recipe",
+     "value": "onbording",
+     "suggestions": [
+      "onboarding"
+     ]
+    },
+    {
+     "path": "steps[2].recipe_ref",
+     "code": "required",
+     "severity": "error"
+    }
+   ]
+  },
+  {
+   "name": "notify step channels and tools",
+   "kind": "recipe",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "r1",
+    "steps": [
+     {
+      "name": "n",
+      "kind": "notify",
+      "config": {
+       "message": "hi",
+       "channels": [
+        "ops-slak",
+        "oncall",
+        "oncall"
+       ]
+      },
+      "notify_tools": [
+       "search",
+       "mailer",
+       "pager",
+       "mailr"
+      ]
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "steps[0].notify_tools[0]",
+     "code": "not_usable",
+     "severity": "error",
+     "kind": "tool",
+     "value": "search"
+    },
+    {
+     "path": "steps[0].notify_tools[3]",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "tool",
+     "value": "mailr",
+     "suggestions": [
+      "mailer"
+     ]
+    },
+    {
+     "path": "steps[0].config.channels[0]",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "channel",
+     "value": "ops-slak",
+     "suggestions": [
+      "ops-slack"
+     ]
+    },
+    {
+     "path": "steps[0].config.channels[2]",
+     "code": "duplicate",
+     "severity": "error",
+     "value": "oncall"
+    }
+   ]
+  },
+  {
+   "name": "credentials",
+   "kind": "recipe",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "r1",
+    "steps": [
+     {
+      "name": "a",
+      "kind": "agent",
+      "agent_ref": "writer",
+      "auth_key_ref": "partner-ky"
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "steps[0].auth_key_ref",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "credential",
+     "value": "partner-ky",
+     "suggestions": [
+      "partner-key"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "approvers where roles are unknown are not checked for roles",
+   "kind": "recipe",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "r1",
+    "steps": [
+     {
+      "name": "g",
+      "kind": "human_gate",
+      "approver_roles": [
+       "nobody"
+      ],
+      "approver_emails": [
+       "a@b.co",
+       "not-an-email"
+      ],
+      "approver_domain": "@acme.com"
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "steps[0].approver_emails[1]",
+     "code": "invalid_value",
+     "severity": "error",
+     "value": "not-an-email"
+    },
+    {
+     "path": "steps[0].approver_domain",
+     "code": "invalid_value",
+     "severity": "error",
+     "value": "@acme.com"
+    }
+   ]
+  },
+  {
+   "name": "approver roles against the role table",
+   "kind": "recipe",
+   "catalog": "pro",
+   "options": {},
+   "input": {
+    "name": "r1",
+    "steps": [
+     {
+      "name": "g",
+      "kind": "human_gate",
+      "approver_roles": [
+       "head_chef",
+       "Chef",
+       "admin",
+       "chief",
+       "chef"
+      ]
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "steps[0].approver_roles[3]",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "role",
+     "value": "chief",
+     "suggestions": [
+      "chef"
+     ]
+    },
+    {
+     "path": "steps[0].approver_roles[4]",
+     "code": "duplicate",
+     "severity": "error",
+     "value": "chef"
+    }
+   ]
+  },
+  {
+   "name": "environments",
+   "kind": "recipe",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "r1",
+    "default_environment": "stagin",
+    "steps": []
+   },
+   "expect": [
+    {
+     "path": "default_environment",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "environment",
+     "value": "stagin",
+     "suggestions": []
+    }
+   ]
+  },
+  {
+   "name": "the environment of a run",
+   "kind": "recipe",
+   "catalog": "base",
+   "options": {
+    "environment": "prd"
+   },
+   "input": {
+    "name": "r1",
+    "steps": []
+   },
+   "expect": [
+    {
+     "path": "environment",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "environment",
+     "value": "prd",
+     "suggestions": [
+      "prod"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "loops and kinds",
+   "kind": "recipe",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "r1",
+    "steps": [
+     {
+      "name": "a",
+      "kind": "agent",
+      "agent_ref": "writer",
+      "loop_condition": "x",
+      "max_retries": 99
+     },
+     {
+      "name": "b",
+      "kind": "agnt",
+      "agent_ref": "writer"
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "steps[0].max_iterations",
+     "code": "required",
+     "severity": "error"
+    },
+    {
+     "path": "steps[0].max_retries",
+     "code": "out_of_range",
+     "severity": "error",
+     "value": "99"
+    },
+    {
+     "path": "steps[1].kind",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "step_kind",
+     "value": "agnt",
+     "suggestions": [
+      "agent"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "a step without a name or a kind",
+   "kind": "recipe",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "r1",
+    "steps": [
+     {
+      "agent_ref": "writer"
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "steps[0].name",
+     "code": "required",
+     "severity": "error"
+    },
+    {
+     "path": "steps[0].kind",
+     "code": "required",
+     "severity": "error"
+    }
+   ]
+  },
+  {
+   "name": "question_from names a step",
+   "kind": "recipe",
+   "catalog": "base",
+   "options": {},
+   "input": {
+    "name": "r1",
+    "steps": [
+     {
+      "name": "a",
+      "kind": "rag",
+      "config": {
+       "question_from": "zz"
+      }
+     }
+    ]
+   },
+   "expect": [
+    {
+     "path": "steps[0].config.question_from",
+     "code": "not_found",
+     "severity": "error",
+     "kind": "step",
+     "value": "zz",
+     "suggestions": []
+    }
+   ]
+  }
+ ]
+}

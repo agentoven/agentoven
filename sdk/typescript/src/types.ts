@@ -246,6 +246,8 @@ export interface GuardrailTestResult {
 export interface Environment {
   id: string;
   name: string;
+  /** The machine name (`dev`, `prod`): what a recipe's `default_environment` and a run's `environment` name. */
+  slug?: string;
   kind: EnvironmentKind;
   kitchen: string;
   created_at: string;
@@ -684,6 +686,8 @@ export interface Provider {
   kind: string;
   endpoint?: string;
   models: string[];
+  /** The result of the provider's last connectivity test; absent when it was never tested. */
+  last_test_healthy?: boolean | null;
   /** Stored config (secrets are masked). `config.modalities` holds the overrides. */
   config?: Record<string, unknown>;
   is_default: boolean;

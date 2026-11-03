@@ -5,7 +5,7 @@ import { metaOfStep } from './stepMeta';
 import RecipeStepSettings, { type RecipeOption } from './RecipeStepSettings';
 import WaitStepSettings from './WaitStepSettings';
 import NotifyStepSettings from './NotifyStepSettings';
-import type { NotificationChannel } from '../../api';
+import { AgentField, ToolField } from '../ReferenceFields';
 
 const field = 'w-full h-10 px-3 rounded-[10px] bg-[var(--ao-bg)] border border-[var(--ao-border)] text-sm outline-none focus:border-[var(--ao-brand)]';
 const label = 'flex flex-col gap-1.5 text-[13px] font-medium text-slate-300';
@@ -14,20 +14,13 @@ const WAITS: { minutes: number; text: string }[] = [
   { minutes: 60, text: '1 hour' }, { minutes: 240, text: '4 hours' }, { minutes: 1440, text: '24 hours' }, { minutes: 4320, text: '3 days' }, { minutes: 0, text: 'No limit' },
 ];
 
-export interface AgentOption { name: string; status: string }
 export type { RecipeOption };
 
 interface Props {
   node: FlowNode;
-  agents: AgentOption[];
-  /** Names of tools that can send a message, for "Tell them through". */
-  notifyTools: string[];
-  /** The recipes a "run a recipe" step may pick, and the name of the one being edited. */
+  /** The recipes (with their step counts), to describe the one a "run a recipe" step picked, and the name of the one being edited. */
   recipes?: RecipeOption[];
   self?: string;
-  /** The notification channels a notify step may send to, and a way to read them again after one is made. */
-  channels?: NotificationChannel[];
-  onChannelsChanged?: () => void;
   onChange: (id: string, patch: Partial<WireStep>, config?: Record<string, unknown>) => void;
   onDelete: (id: string) => void;
   /** Gives an approval an Approved and a Rejected path, or takes them away. */
@@ -43,7 +36,7 @@ function Select({ value, onChange, children, label: aria }: { value: string; onC
 }
 
 /** Settings for the selected step, in plain words. */
-export default function StepInspector({ node, agents, notifyTools, recipes = [], self = '', channels = [], onChannelsChanged, onChange, onDelete, onLanes, onApprovalPaths }: Props) {
+export default function StepInspector({ node, recipes = [], self = '', onChange, onDelete, onLanes, onApprovalPaths }: Props) {
   const s = node.step;
   const meta = metaOfStep(s);
   const Icon = meta.icon;
@@ -91,13 +84,10 @@ export default function StepInspector({ node, agents, notifyTools, recipes = [],
 
       {(s.kind === 'agent' || s.kind === 'evaluator') && (
         <>
-          <label className={label}>{s.kind === 'evaluator' ? 'Agent that checks' : 'Agent'}
-            <Select label="Agent" value={s.agent_ref ?? ''} onChange={(v) => set({ agent_ref: v, agent: v })}>
-              <option value="">Choose an agent…</option>
-              {agents.map((a) => <option key={a.name} value={a.name}>{a.name}{a.status !== 'ready' ? ` (${a.status})` : ''}</option>)}
-            </Select>
+          <div className={label}>{s.kind === 'evaluator' ? 'Agent that checks' : 'Agent'}
+            <AgentField label="Agent" value={s.agent_ref ?? ''} onChange={(v) => set({ agent_ref: v, agent: v })} />
             <span className="text-xs font-normal text-[var(--ao-text-muted)]">It receives what the recipe started with and what earlier steps produced.</span>
-          </label>
+          </div>
           <div className="grid grid-cols-2 gap-3">
             <label className={label}>Tries
               <Select label="Tries" value={String(s.max_retries ?? 0)} onChange={(v) => set({ max_retries: Number(v) || undefined })}>
@@ -113,7 +103,7 @@ export default function StepInspector({ node, agents, notifyTools, recipes = [],
         </>
       )}
 
-      {s.kind === 'notify' && <NotifyStepSettings step={s} channels={channels} tools={notifyTools} onConfig={(config) => set({}, config)} onPatch={(patch) => set(patch)} onChannelsChanged={onChannelsChanged} />}
+      {s.kind === 'notify' && <NotifyStepSettings step={s} onConfig={(config) => set({}, config)} onPatch={(patch) => set(patch)} />}
 
       {s.kind === 'wait' && <WaitStepSettings step={s} onConfig={(config) => set({}, config)} />}
 
@@ -158,12 +148,9 @@ export default function StepInspector({ node, agents, notifyTools, recipes = [],
               </label>
             )}
           </fieldset>
-          <label className={label}>Tell them through
-            <Select label="Tell them through" value={(s.notify_tools as string[] | undefined)?.[0] ?? ''} onChange={(v) => set({ notify_tools: v ? [v] : undefined })}>
-              <option value="">No message</option>
-              {notifyTools.map((t) => <option key={t} value={t}>{t}</option>)}
-            </Select>
-          </label>
+          <div className={label}>Tell them through
+            <ToolField label="Tell them through" need="notify" clearable placeholder="No message" value={(s.notify_tools as string[] | undefined)?.[0] ?? ''} onChange={(v) => set({ notify_tools: v ? [v] : undefined })} />
+          </div>
           <div className="flex gap-2.5 p-3 rounded-xl bg-emerald-400/10 border border-emerald-400/30 text-[12.5px] leading-relaxed text-emerald-200">
             <ShieldCheck size={16} className="text-emerald-400 mt-0.5 shrink-0" />
             <span>Who approved and when is written to the audit trail.</span>

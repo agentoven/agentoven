@@ -1,15 +1,20 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Bot, Plus, Flame, Snowflake, Trash2, FlaskConical, AlertTriangle, Sun, RefreshCw, Code, Copy, Check, Shield, Terminal, BrainCircuit, Wrench, Eye, Zap, Braces } from 'lucide-react';
-import { agents, providers, catalog, type Agent, type Ingredient, type IngredientKind, type ModelCapability, APIError } from '../api';
+import { agents, catalog, configurationProblems, type Agent, type Ingredient, type ModelCapability, APIError } from '../api';
+import { describeProblem, type ConfigurationErrors } from '../lib/references';
 import { useAPI, useLocalStorageState } from '../hooks';
+import { useProviderOptions, useReferenceCatalog } from '../hooks/references';
 import {
   PageHeader, Card, StatusBadge, EmptyState,
   Spinner, ErrorBanner, Button, Modal,
 } from '../components/UI';
 import { AgentLogViewer } from '../components/AgentLogViewer';
 import { ActionDropdown, type MenuItem } from '../components/ActionDropdown';
-import { ModelPicker } from '../components/ModelPicker';
+import { ModelReferenceSelect } from '../components/ReferenceSelect';
+import { IngredientsEditor } from '../components/IngredientsEditor';
+import { AgentWiringFields, UnresolvedNotice } from '../components/AgentWiringFields';
+import { agentUnresolved, buildIngredients, parseConfig, rowFromIngredient, rowProblems, type IngredientRow } from '../lib/agentRefs';
 import { AddProviderDrawer } from '../components/AddProviderDrawer';
 
 // ── Catalog Info Helpers ─────────────────────────────────────
@@ -237,7 +242,11 @@ function AgentCard({ agent, onAction, onIntegrate, onRecook, onViewLogs, layout 
     } catch (e) {
       if (e instanceof APIError) {
         setToast({ message: e.message, type: 'error' });
-        if (e.details && e.details.length > 0) {
+        // A refused configuration lists each field that is wrong, with what it was probably meant to be.
+        const refusal = e.configuration;
+        if (refusal) {
+          setBakeError(refusal.problems.map(describeProblem));
+        } else if (e.details && e.details.length > 0) {
           setBakeError(e.details);
         }
       } else if (e instanceof Error) {
@@ -594,19 +603,6 @@ print(card)`,
   );
 }
 
-// ── Ingredient row helper ─────────────────────────────────────
-
-interface IngredientRow {
-  name: string;
-  kind: IngredientKind;
-  configJson: string;
-  required: boolean;
-}
-
-const emptyIngredient = (): IngredientRow => ({
-  name: '', kind: 'tool', configJson: '{}', required: false,
-});
-
 // ── Guardrail row helper ──────────────────────────────────────
 
 interface GuardrailRow {
@@ -638,8 +634,7 @@ const newGuardrailId = (): string =>
 // ── Create Agent Form (inside modal) ──────────────────────────
 
 function AgentForm({ onCreated }: { onCreated: () => void }) {
-  const providersFetch = useCallback(() => providers.list(), []);
-  const { data: providerList, refetch: refetchProviders } = useAPI(providersFetch);
+  const { data: providerList, loading: providersLoading, refetch: refetchProviders } = useProviderOptions();
   const [showAddProvider, setShowAddProvider] = useState(false);
 
   const [form, setForm] = useState({
@@ -647,11 +642,14 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
     model_provider: '', model_name: '',
     backup_provider: '', backup_model: '',
     system_prompt: '',
-    skills: '',
+    skills: [] as string[],
+    approval_tools: [] as string[],
+    subagents: [] as string[],
     mode: 'managed' as 'managed' | 'external',
     max_turns: 10,
     behavior: 'reactive' as 'reactive' | 'agentic',
     context_budget: 16000,
+    summary_provider: '',
     summary_model: '',
     reasoning_strategy: 'react' as 'react' | 'plan-and-execute' | 'reflexion',
     runtime: 'agentoven' as 'agentoven' | 'langchain' | 'langgraph' | 'deepagents' | 'agenticbot' | 'crewai' | 'custom',
@@ -663,12 +661,10 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
   const [guardrails, setGuardrails] = useState<GuardrailRow[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // What the server refused with (422): every problem, kept to mark the fields and to list in the banner.
+  const [refused, setRefused] = useState<ConfigurationErrors | null>(null);
+  const [sentAt, setSentAt] = useState<number[]>([]);
   const [tab, setTab] = useState<'basic' | 'guardrails' | 'ingredients'>('basic');
-
-  const addIngredient = () => setIngredients([...ingredients, emptyIngredient()]);
-  const removeIngredient = (i: number) => setIngredients(ingredients.filter((_, idx) => idx !== i));
-  const updateIngredient = (i: number, patch: Partial<IngredientRow>) =>
-    setIngredients(ingredients.map((ing, idx) => idx === i ? { ...ing, ...patch } : ing));
 
   const addGuardrail = () => setGuardrails([...guardrails, emptyGuardrail()]);
   const removeGuardrail = (i: number) => setGuardrails(guardrails.filter((_, idx) => idx !== i));
@@ -676,15 +672,28 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
     setGuardrails(guardrails.map((g, idx) => idx === i ? { ...g, ...patch } : g));
 
   const selectedProvider = providerList?.find((p) => p.name === form.model_provider);
-  const availableModels = selectedProvider?.models ?? [];
-  const backupProvider = providerList?.find((p) => p.name === form.backup_provider);
-  const backupModels = backupProvider?.models ?? [];
+  const { catalog } = useReferenceCatalog(form.name);
+  const serverProblems = [...(refused?.problems ?? []), ...(refused?.warnings ?? [])];
+  const pick = (...paths: string[]) => serverProblems.filter((p) => paths.includes(p.path));
+  const problemsByRow = rowProblems(serverProblems, sentAt);
+  const blocking = agentUnresolved({
+    model: { provider: form.model_provider, model: form.model_name },
+    backup: { provider: form.backup_provider, model: form.backup_model },
+    summary: form.behavior === 'agentic' ? { provider: form.summary_provider, model: form.summary_model } : { provider: '', model: '' },
+    skills: form.skills,
+    approvalTools: form.mode === 'managed' ? form.approval_tools : [],
+    subagents: form.mode === 'managed' ? form.subagents : [],
+    ingredients,
+  }, catalog);
+  // A row whose settings are not JSON is refused here: it used to be saved as {} without a word.
+  const brokenRow = ingredients.findIndex((r) => !parseConfig(r.configJson).ok);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.name) return;
     setSubmitting(true);
     setErr(null);
+    setRefused(null);
 
     const builtIngredients: Partial<Ingredient>[] = [];
 
@@ -695,14 +704,10 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
       });
     }
 
-    for (const ing of ingredients) {
-      if (!ing.name) continue;
-      let config: Record<string, unknown> = {};
-      try { config = JSON.parse(ing.configJson); } catch { /* ignore */ }
-      builtIngredients.push({ name: ing.name, kind: ing.kind, config, required: ing.required });
-    }
-
-    const skills = form.skills.split(',').map((s) => s.trim()).filter(Boolean);
+    const built = buildIngredients(ingredients, builtIngredients.length);
+    builtIngredients.push(...built.ingredients);
+    setSentAt(built.sentAt);
+    const skills = form.skills;
 
     const builtGuardrails = guardrails.map((g) => {
       let config: Record<string, unknown> = {};
@@ -726,7 +731,10 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
         max_turns: form.mode === 'managed' ? form.max_turns : undefined,
         behavior: form.mode === 'managed' ? form.behavior : undefined,
         context_budget: form.behavior === 'agentic' ? form.context_budget : undefined,
+        summary_provider: form.behavior === 'agentic' && form.summary_provider ? form.summary_provider : undefined,
         summary_model: form.behavior === 'agentic' && form.summary_model ? form.summary_model : undefined,
+        approval_tools: form.mode === 'managed' && form.approval_tools.length > 0 ? form.approval_tools : undefined,
+        subagents: form.mode === 'managed' && form.subagents.length > 0 ? form.subagents : undefined,
         reasoning_strategy: form.behavior === 'agentic' ? form.reasoning_strategy : undefined,
         runtime: form.mode === 'managed' ? form.runtime : undefined,
         entrypoint: form.mode === 'managed' && form.runtime !== 'agentoven' && form.entrypoint ? form.entrypoint : undefined,
@@ -735,6 +743,7 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
       } as any);
       onCreated();
     } catch (e) {
+      setRefused(configurationProblems(e));
       setErr(e instanceof Error ? e.message : 'Failed');
     }
     setSubmitting(false);
@@ -746,7 +755,7 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
 
   return (
     <div>
-      {err && <ErrorBanner message={err} />}
+      {err && <ErrorBanner message={err} problems={refused?.problems} warnings={refused?.warnings} />}
 
       {/* Tabs */}
       <div className="flex gap-1 mb-5 p-1 rounded-lg bg-[var(--ao-bg)]">
@@ -878,9 +887,11 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
                       <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Context Budget (tokens)</label>
                       <input type="number" min={1000} max={128000} value={form.context_budget} onChange={(e) => setForm({ ...form, context_budget: parseInt(e.target.value) || 16000 })} className={inputCls} />
                     </div>
-                    <div>
-                      <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Summary Model</label>
-                      <input value={form.summary_model} onChange={(e) => setForm({ ...form, summary_model: e.target.value })} className={inputCls} placeholder="gpt-4o-mini (optional)" />
+                    <div className="col-span-2">
+                      <span className="block text-xs text-[var(--ao-text-muted)] mb-1">Compaction (summary) model</span>
+                      <ModelReferenceSelect label="Summary model" providers={providerList} loading={providersLoading} providerOptional providerPlaceholder="Same as the primary model (optional)"
+                        provider={form.summary_provider} model={form.summary_model} problems={pick('summary_provider', 'summary_model')}
+                        onChange={(summary_provider, summary_model) => setForm({ ...form, summary_provider, summary_model })} />
                     </div>
                   </div>
                 )}
@@ -890,19 +901,9 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
             {/* Primary model */}
             <div className="p-3 rounded-lg border border-[var(--ao-border)] bg-[var(--ao-bg)]">
               <p className="text-xs font-semibold text-[var(--ao-text-muted)] uppercase tracking-wider mb-3">Primary Model</p>
-              <ModelPicker
-                providers={providerList ?? []}
-                provider={form.model_provider}
-                model={form.model_name}
-                onChange={(provider, model) => setForm({ ...form, model_provider: provider, model_name: model })}
-                onAddProvider={() => setShowAddProvider(true)}
-              />
-              {selectedProvider && availableModels.length === 0 && (
-                <div className="mt-3">
-                  <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Model name</label>
-                  <input value={form.model_name} onChange={(e) => setForm({ ...form, model_name: e.target.value })} className={inputCls} placeholder="gpt-4o" />
-                </div>
-              )}
+              <ModelReferenceSelect label="Model" providers={providerList} loading={providersLoading} provider={form.model_provider} model={form.model_name}
+                problems={pick('model_provider', 'model_name')} onAddProvider={() => setShowAddProvider(true)}
+                onChange={(model_provider, model_name) => setForm({ ...form, model_provider, model_name })} />
               <AddProviderDrawer
                 open={showAddProvider}
                 onClose={() => setShowAddProvider(false)}
@@ -917,28 +918,9 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
             <div className="p-3 rounded-lg border border-amber-500/30 bg-amber-500/5">
               <p className="text-xs font-semibold text-amber-400 uppercase tracking-wider mb-1">Backup Provider (Failover)</p>
               <p className="text-xs text-[var(--ao-text-muted)] mb-3">Automatically routes to this provider when the primary fails or is unavailable.</p>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Backup Provider</label>
-                  <select value={form.backup_provider} onChange={(e) => setForm({ ...form, backup_provider: e.target.value, backup_model: '' })} className={inputCls}>
-                    <option value="">None (no failover)</option>
-                    {providerList?.filter((p) => p.name !== form.model_provider).map((p) => (
-                      <option key={p.name} value={p.name}>{p.name} ({p.kind})</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Backup Model</label>
-                  {backupModels.length > 0 ? (
-                    <select value={form.backup_model} onChange={(e) => setForm({ ...form, backup_model: e.target.value })} className={inputCls}>
-                      <option value="">Select model...</option>
-                      {backupModels.map((m) => <option key={m} value={m}>{m}</option>)}
-                    </select>
-                  ) : (
-                    <input value={form.backup_model} onChange={(e) => setForm({ ...form, backup_model: e.target.value })} className={inputCls} placeholder="claude-3-5-sonnet-20241022" />
-                  )}
-                </div>
-              </div>
+              <ModelReferenceSelect label="Backup model" providers={providerList} loading={providersLoading} providerOptional providerPlaceholder="None (no failover)"
+                provider={form.backup_provider} model={form.backup_model} problems={pick('backup_provider', 'backup_model')}
+                onChange={(backup_provider, backup_model) => setForm({ ...form, backup_provider, backup_model })} />
             </div>
 
             {/* System prompt + skills */}
@@ -946,10 +928,8 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
               <label className="block text-xs text-[var(--ao-text-muted)] mb-1">System Prompt</label>
               <textarea value={form.system_prompt} onChange={(e) => setForm({ ...form, system_prompt: e.target.value })} rows={3} className={`${inputCls} resize-y`} placeholder="You are a helpful assistant that..." />
             </div>
-            <div>
-              <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Skills (comma-separated)</label>
-              <input value={form.skills} onChange={(e) => setForm({ ...form, skills: e.target.value })} className={inputCls} placeholder="summarize, translate, code" />
-            </div>
+            <AgentWiringFields self={form.name} managed={form.mode === 'managed'} skills={form.skills} approvalTools={form.approval_tools} subagents={form.subagents}
+              problems={serverProblems} onChange={(patch) => setForm({ ...form, ...patch })} />
           </>
         )}
 
@@ -1030,47 +1010,23 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
                 <p className="text-sm font-medium">Ingredients</p>
                 <p className="text-xs text-[var(--ao-text-muted)]">Add tools, data sources, and other ingredients. System prompt is added automatically.</p>
               </div>
-              <button type="button" onClick={addIngredient} className="text-xs text-[var(--ao-brand)] hover:text-[var(--ao-brand-light)] flex items-center gap-1">
-                <Plus size={12} /> Add ingredient
-              </button>
             </div>
 
             {ingredients.length === 0 && (
               <p className="text-xs text-[var(--ao-text-muted)] italic py-4 text-center">
-                No extra ingredients. System prompt is added automatically if filled in the Basic tab.
+                No extra ingredients.
               </p>
             )}
 
-            <div className="space-y-2">
-              {ingredients.map((ing, i) => (
-                <div key={i} className="flex flex-wrap gap-2 items-center p-2 rounded-lg border border-[var(--ao-border)] bg-[var(--ao-bg)]">
-                  <select value={ing.kind} onChange={(e) => updateIngredient(i, { kind: e.target.value as IngredientKind })}
-                    className="w-28 px-2 py-1.5 rounded bg-[var(--ao-surface)] border border-[var(--ao-border)] text-xs outline-none">
-                    <option value="model">Model</option>
-                    <option value="tool">Tool</option>
-                    <option value="prompt">Prompt</option>
-                    <option value="data">Data</option>
-                    <option value="observability">Observability</option>
-                  </select>
-                  <input value={ing.name} onChange={(e) => updateIngredient(i, { name: e.target.value })} placeholder="Name"
-                    className="w-32 px-2 py-1.5 rounded bg-[var(--ao-surface)] border border-[var(--ao-border)] text-xs outline-none" />
-                  <input value={ing.configJson} onChange={(e) => updateIngredient(i, { configJson: e.target.value })} placeholder='{"key": "value"}'
-                    className="flex-1 min-w-[120px] px-2 py-1.5 rounded bg-[var(--ao-surface)] border border-[var(--ao-border)] text-xs font-mono outline-none" />
-                  <label className="flex items-center gap-1 text-xs">
-                    <input type="checkbox" checked={ing.required} onChange={(e) => updateIngredient(i, { required: e.target.checked })} /> Req
-                  </label>
-                  <button type="button" onClick={() => removeIngredient(i)} className="text-red-400 hover:text-red-300">
-                    <Trash2 size={14} />
-                  </button>
-                </div>
-              ))}
-            </div>
+            <IngredientsEditor rows={ingredients} onChange={setIngredients} problemsByRow={problemsByRow} />
           </div>
         )}
 
+        <UnresolvedNotice items={blocking} />
+
         {/* Submit */}
         <div className="flex justify-end pt-2 border-t border-[var(--ao-border)]">
-          <Button disabled={submitting || !form.name}>
+          <Button disabled={submitting || !form.name || blocking.length > 0 || brokenRow >= 0}>
             {submitting ? 'Creating...' : 'Create Agent'}
           </Button>
         </div>
@@ -1082,8 +1038,7 @@ function AgentForm({ onCreated }: { onCreated: () => void }) {
 // ── Re-cook Edit Form (pre-filled from existing agent) ────────
 
 export function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => void }) {
-  const providersFetch = useCallback(() => providers.list(), []);
-  const { data: providerList, refetch: refetchProviders } = useAPI(providersFetch);
+  const { data: providerList, loading: providersLoading, refetch: refetchProviders } = useProviderOptions();
   const [showAddProvider, setShowAddProvider] = useState(false);
 
   // Extract system prompt from existing ingredients
@@ -1095,12 +1050,7 @@ export function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => v
   // Extract non-prompt ingredients
   const otherIngredients: IngredientRow[] = (agent.ingredients ?? [])
     .filter((i) => i !== existingSystemPrompt)
-    .map((i) => ({
-      name: i.name,
-      kind: i.kind,
-      configJson: JSON.stringify(i.config ?? {}),
-      required: i.required ?? false,
-    }));
+    .map(rowFromIngredient);
 
   // Extract guardrails
   const existingGuardrails: GuardrailRow[] = (agent.guardrails ?? []).map((g) => ({
@@ -1119,11 +1069,14 @@ export function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => v
     backup_provider: agent.backup_provider || '',
     backup_model: agent.backup_model || '',
     system_prompt: systemPromptText,
-    skills: agent.skills?.join(', ') || '',
+    skills: agent.skills ?? [],
+    approval_tools: agent.approval_tools ?? [],
+    subagents: agent.subagents ?? [],
     mode: agent.mode || 'managed' as 'managed' | 'external',
     max_turns: agent.max_turns || 10,
     behavior: agent.behavior || 'reactive' as 'reactive' | 'agentic',
     context_budget: agent.context_budget || 16000,
+    summary_provider: agent.summary_provider || '',
     summary_model: agent.summary_model || '',
     reasoning_strategy: agent.reasoning_strategy || 'react' as 'react' | 'plan-and-execute' | 'reflexion',
     runtime: (agent.runtime || 'agentoven') as 'agentoven' | 'langchain' | 'langgraph' | 'deepagents' | 'agenticbot' | 'crewai' | 'custom',
@@ -1135,12 +1088,10 @@ export function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => v
   const [guardrails, setGuardrails] = useState<GuardrailRow[]>(existingGuardrails);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // What the server refused with (422): every problem, kept to mark the fields and to list in the banner.
+  const [refused, setRefused] = useState<ConfigurationErrors | null>(null);
+  const [sentAt, setSentAt] = useState<number[]>([]);
   const [tab, setTab] = useState<'basic' | 'guardrails' | 'ingredients'>('basic');
-
-  const addIngredient = () => setIngredients([...ingredients, emptyIngredient()]);
-  const removeIngredient = (i: number) => setIngredients(ingredients.filter((_, idx) => idx !== i));
-  const updateIngredient = (i: number, patch: Partial<IngredientRow>) =>
-    setIngredients(ingredients.map((ing, idx) => idx === i ? { ...ing, ...patch } : ing));
 
   const addGuardrail = () => setGuardrails([...guardrails, emptyGuardrail()]);
   const removeGuardrail = (i: number) => setGuardrails(guardrails.filter((_, idx) => idx !== i));
@@ -1148,14 +1099,27 @@ export function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => v
     setGuardrails(guardrails.map((g, idx) => idx === i ? { ...g, ...patch } : g));
 
   const selectedProvider = providerList?.find((p) => p.name === form.model_provider);
-  const availableModels = selectedProvider?.models ?? [];
-  const backupProvider = providerList?.find((p) => p.name === form.backup_provider);
-  const backupModels = backupProvider?.models ?? [];
+  const { catalog } = useReferenceCatalog(agent.name);
+  const serverProblems = [...(refused?.problems ?? []), ...(refused?.warnings ?? [])];
+  const pick = (...paths: string[]) => serverProblems.filter((p) => paths.includes(p.path));
+  const problemsByRow = rowProblems(serverProblems, sentAt);
+  const blocking = agentUnresolved({
+    model: { provider: form.model_provider, model: form.model_name },
+    backup: { provider: form.backup_provider, model: form.backup_model },
+    summary: form.behavior === 'agentic' ? { provider: form.summary_provider, model: form.summary_model } : { provider: '', model: '' },
+    skills: form.skills,
+    approvalTools: form.mode === 'managed' ? form.approval_tools : [],
+    subagents: form.mode === 'managed' ? form.subagents : [],
+    ingredients,
+  }, catalog);
+  // A row whose settings are not JSON is refused here: it used to be saved as {} without a word.
+  const brokenRow = ingredients.findIndex((r) => !parseConfig(r.configJson).ok);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitting(true);
     setErr(null);
+    setRefused(null);
 
     const builtIngredients: Partial<Ingredient>[] = [];
 
@@ -1166,14 +1130,10 @@ export function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => v
       });
     }
 
-    for (const ing of ingredients) {
-      if (!ing.name) continue;
-      let config: Record<string, unknown> = {};
-      try { config = JSON.parse(ing.configJson); } catch { /* ignore */ }
-      builtIngredients.push({ name: ing.name, kind: ing.kind, config, required: ing.required });
-    }
-
-    const skills = form.skills.split(',').map((s) => s.trim()).filter(Boolean);
+    const built = buildIngredients(ingredients, builtIngredients.length);
+    builtIngredients.push(...built.ingredients);
+    setSentAt(built.sentAt);
+    const skills = form.skills;
 
     const builtGuardrails = guardrails.map((g) => {
       let config: Record<string, unknown> = {};
@@ -1196,7 +1156,12 @@ export function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => v
         max_turns: form.mode === 'managed' ? form.max_turns : undefined,
         behavior: form.mode === 'managed' ? form.behavior : undefined,
         context_budget: form.mode === 'managed' && form.behavior === 'agentic' ? form.context_budget : undefined,
-        summary_model: form.mode === 'managed' && form.behavior === 'agentic' ? (form.summary_model || undefined) : undefined,
+        // Both strings are sent, empty included: "" is how the model that summarizes is cleared.
+        summary_provider: form.mode === 'managed' && form.behavior === 'agentic' ? form.summary_provider : undefined,
+        summary_model: form.mode === 'managed' && form.behavior === 'agentic' ? form.summary_model : undefined,
+        // A list is sent as it is: [] clears it.
+        approval_tools: form.mode === 'managed' ? form.approval_tools : undefined,
+        subagents: form.mode === 'managed' ? form.subagents : undefined,
         reasoning_strategy: form.mode === 'managed' && form.behavior === 'agentic' ? form.reasoning_strategy : undefined,
         runtime: form.mode === 'managed' ? form.runtime : undefined,
         entrypoint: form.mode === 'managed' && form.runtime !== 'agentoven' && form.entrypoint ? form.entrypoint : undefined,
@@ -1205,6 +1170,7 @@ export function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => v
       } as any);
       onDone();
     } catch (e) {
+      setRefused(configurationProblems(e));
       setErr(e instanceof Error ? e.message : 'Re-cook failed');
     }
     setSubmitting(false);
@@ -1224,7 +1190,7 @@ export function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => v
         </p>
       </div>
 
-      {err && <ErrorBanner message={err} />}
+      {err && <ErrorBanner message={err} problems={refused?.problems} warnings={refused?.warnings} />}
 
       {/* Tabs */}
       <div className="flex gap-1 mb-5 p-1 rounded-lg bg-[var(--ao-bg)]">
@@ -1356,9 +1322,11 @@ export function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => v
                       <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Context Budget (tokens)</label>
                       <input type="number" min={1000} max={128000} value={form.context_budget} onChange={(e) => setForm({ ...form, context_budget: parseInt(e.target.value) || 16000 })} className={inputCls} />
                     </div>
-                    <div>
-                      <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Summary Model</label>
-                      <input value={form.summary_model} onChange={(e) => setForm({ ...form, summary_model: e.target.value })} className={inputCls} placeholder="gpt-4o-mini (optional)" />
+                    <div className="col-span-2">
+                      <span className="block text-xs text-[var(--ao-text-muted)] mb-1">Compaction (summary) model</span>
+                      <ModelReferenceSelect label="Summary model" providers={providerList} loading={providersLoading} providerOptional providerPlaceholder="Same as the primary model (optional)"
+                        provider={form.summary_provider} model={form.summary_model} problems={pick('summary_provider', 'summary_model')}
+                        onChange={(summary_provider, summary_model) => setForm({ ...form, summary_provider, summary_model })} />
                     </div>
                   </div>
                 )}
@@ -1368,19 +1336,9 @@ export function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => v
             {/* Primary model */}
             <div className="p-3 rounded-lg border border-[var(--ao-border)] bg-[var(--ao-bg)]">
               <p className="text-xs font-semibold text-[var(--ao-text-muted)] uppercase tracking-wider mb-3">Primary Model</p>
-              <ModelPicker
-                providers={providerList ?? []}
-                provider={form.model_provider}
-                model={form.model_name}
-                onChange={(provider, model) => setForm({ ...form, model_provider: provider, model_name: model })}
-                onAddProvider={() => setShowAddProvider(true)}
-              />
-              {selectedProvider && availableModels.length === 0 && (
-                <div className="mt-3">
-                  <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Model name</label>
-                  <input value={form.model_name} onChange={(e) => setForm({ ...form, model_name: e.target.value })} className={inputCls} placeholder="gpt-4o" />
-                </div>
-              )}
+              <ModelReferenceSelect label="Model" providers={providerList} loading={providersLoading} provider={form.model_provider} model={form.model_name}
+                problems={pick('model_provider', 'model_name')} onAddProvider={() => setShowAddProvider(true)}
+                onChange={(model_provider, model_name) => setForm({ ...form, model_provider, model_name })} />
               <AddProviderDrawer
                 open={showAddProvider}
                 onClose={() => setShowAddProvider(false)}
@@ -1395,28 +1353,9 @@ export function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => v
             <div className="p-3 rounded-lg border border-amber-500/30 bg-amber-500/5">
               <p className="text-xs font-semibold text-amber-400 uppercase tracking-wider mb-1">Backup Provider (Failover)</p>
               <p className="text-xs text-[var(--ao-text-muted)] mb-3">Automatically routes to this provider when the primary fails or is unavailable.</p>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Backup Provider</label>
-                  <select value={form.backup_provider} onChange={(e) => setForm({ ...form, backup_provider: e.target.value, backup_model: '' })} className={inputCls}>
-                    <option value="">None (no failover)</option>
-                    {providerList?.filter((p) => p.name !== form.model_provider).map((p) => (
-                      <option key={p.name} value={p.name}>{p.name} ({p.kind})</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Backup Model</label>
-                  {backupModels.length > 0 ? (
-                    <select value={form.backup_model} onChange={(e) => setForm({ ...form, backup_model: e.target.value })} className={inputCls}>
-                      <option value="">Select model...</option>
-                      {backupModels.map((m) => <option key={m} value={m}>{m}</option>)}
-                    </select>
-                  ) : (
-                    <input value={form.backup_model} onChange={(e) => setForm({ ...form, backup_model: e.target.value })} className={inputCls} placeholder="claude-3-5-sonnet-20241022" />
-                  )}
-                </div>
-              </div>
+              <ModelReferenceSelect label="Backup model" providers={providerList} loading={providersLoading} providerOptional providerPlaceholder="None (no failover)"
+                provider={form.backup_provider} model={form.backup_model} problems={pick('backup_provider', 'backup_model')}
+                onChange={(backup_provider, backup_model) => setForm({ ...form, backup_provider, backup_model })} />
             </div>
 
             {/* System prompt + skills */}
@@ -1424,10 +1363,8 @@ export function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => v
               <label className="block text-xs text-[var(--ao-text-muted)] mb-1">System Prompt</label>
               <textarea value={form.system_prompt} onChange={(e) => setForm({ ...form, system_prompt: e.target.value })} rows={3} className={`${inputCls} resize-y`} placeholder="You are a helpful assistant that..." />
             </div>
-            <div>
-              <label className="block text-xs text-[var(--ao-text-muted)] mb-1">Skills (comma-separated)</label>
-              <input value={form.skills} onChange={(e) => setForm({ ...form, skills: e.target.value })} className={inputCls} placeholder="summarize, translate, code" />
-            </div>
+            <AgentWiringFields self={agent.name} managed={form.mode === 'managed'} skills={form.skills} approvalTools={form.approval_tools} subagents={form.subagents}
+              problems={serverProblems} onChange={(patch) => setForm({ ...form, ...patch })} />
           </>
         )}
 
@@ -1508,9 +1445,6 @@ export function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => v
                 <p className="text-sm font-medium">Ingredients</p>
                 <p className="text-xs text-[var(--ao-text-muted)]">Add tools, data sources, and other ingredients. System prompt is on the Basic tab.</p>
               </div>
-              <button type="button" onClick={addIngredient} className="text-xs text-[var(--ao-brand)] hover:text-[var(--ao-brand-light)] flex items-center gap-1">
-                <Plus size={12} /> Add ingredient
-              </button>
             </div>
 
             {ingredients.length === 0 && (
@@ -1519,39 +1453,18 @@ export function AgentEditForm({ agent, onDone }: { agent: Agent; onDone: () => v
               </p>
             )}
 
-            <div className="space-y-2">
-              {ingredients.map((ing, i) => (
-                <div key={i} className="flex flex-wrap gap-2 items-center p-2 rounded-lg border border-[var(--ao-border)] bg-[var(--ao-bg)]">
-                  <select value={ing.kind} onChange={(e) => updateIngredient(i, { kind: e.target.value as IngredientKind })}
-                    className="w-28 px-2 py-1.5 rounded bg-[var(--ao-surface)] border border-[var(--ao-border)] text-xs outline-none">
-                    <option value="model">Model</option>
-                    <option value="tool">Tool</option>
-                    <option value="prompt">Prompt</option>
-                    <option value="data">Data</option>
-                    <option value="observability">Observability</option>
-                  </select>
-                  <input value={ing.name} onChange={(e) => updateIngredient(i, { name: e.target.value })} placeholder="Name"
-                    className="w-32 px-2 py-1.5 rounded bg-[var(--ao-surface)] border border-[var(--ao-border)] text-xs outline-none" />
-                  <input value={ing.configJson} onChange={(e) => updateIngredient(i, { configJson: e.target.value })} placeholder='{"key": "value"}'
-                    className="flex-1 min-w-[120px] px-2 py-1.5 rounded bg-[var(--ao-surface)] border border-[var(--ao-border)] text-xs font-mono outline-none" />
-                  <label className="flex items-center gap-1 text-xs">
-                    <input type="checkbox" checked={ing.required} onChange={(e) => updateIngredient(i, { required: e.target.checked })} /> Req
-                  </label>
-                  <button type="button" onClick={() => removeIngredient(i)} className="text-red-400 hover:text-red-300">
-                    <Trash2 size={14} />
-                  </button>
-                </div>
-              ))}
-            </div>
+            <IngredientsEditor rows={ingredients} onChange={setIngredients} problemsByRow={problemsByRow} />
           </div>
         )}
+
+        <UnresolvedNotice items={blocking} />
 
         {/* Submit */}
         <div className="flex justify-end gap-3 pt-2 border-t border-[var(--ao-border)]">
           <span className="text-xs text-[var(--ao-text-muted)] self-center">
             Current version: <span className="font-mono text-[var(--ao-brand-light)]">{agent.version || '0.1.0'}</span>
           </span>
-          <Button disabled={submitting}>
+          <Button disabled={submitting || blocking.length > 0 || brokenRow >= 0}>
             {submitting ? 'Re-cooking...' : '🔥 Re-cook Agent'}
           </Button>
         </div>

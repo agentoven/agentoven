@@ -26,7 +26,8 @@ from agentoven._native import (
     Recipe,
     Step,
 )
-from agentoven import flow
+from agentoven import flow, refcheck
+from agentoven.agents import AgentBuilder
 from agentoven.flow import Flow, FlowError
 from agentoven.blobs import Blob, Blobs
 from agentoven.documents import Documents
@@ -46,6 +47,7 @@ from agentoven.client import (
     AgentOvenClient,
     AudioModalityError,
     BudgetExceededError,
+    ConfigurationError,
     DatasetExport,
     OidcSigningRequired,
     RateLimitedError,
@@ -75,6 +77,7 @@ __all__ = [
     "AgentOvenClient",
     "AgentOvenAPIError",
     "AudioModalityError",
+    "ConfigurationError",
     "OidcSigningRequired",
     "RateLimitedError",
     "BudgetExceededError",
@@ -95,6 +98,9 @@ __all__ = [
     "RealtimeError",
     "RealtimeEvent",
     "RealtimeSession",
+    # Reference checks: what a configuration names must exist in the kitchen (see agentoven.refcheck)
+    "AgentBuilder",
+    "refcheck",
     # Recipes built the way the dashboard builds them (see agentoven.flow)
     "Flow",
     "FlowError",

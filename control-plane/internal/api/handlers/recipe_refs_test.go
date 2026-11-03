@@ -58,9 +58,12 @@ func TestACycleThroughOtherRecipesIsRefusedOnCreateAndOnUpdate(t *testing.T) {
 	}
 }
 
-func TestAReferenceToARecipeThatDoesNotExistYetIsAllowed(t *testing.T) {
+// A sub-recipe step names a recipe that has to exist when the recipe is saved (it used to be allowed, with
+// the failure left for the run): the dropdown offers what exists, and the server refuses the rest.
+func TestAReferenceToARecipeThatDoesNotExistIsRefused(t *testing.T) {
 	h, _ := newTestHandlers(t)
-	if w := callAgentAPI(h.CreateRecipe, http.MethodPost, "/api/v1/recipes", nil, recipeBody("early", subStep("later", "not-made-yet"))); w.Code != http.StatusCreated {
+	w := callAgentAPI(h.CreateRecipe, http.MethodPost, "/api/v1/recipes", nil, recipeBody("early", subStep("later", "not-made-yet")))
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), `"path":"steps[0].recipe_ref"`) {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
 }

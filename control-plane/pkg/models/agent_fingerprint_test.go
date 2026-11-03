@@ -13,7 +13,7 @@ import (
 var agentBehaviourFields = map[string]bool{
 	"description": true, "framework": true, "mode": true, "execution_mode": true, "runtime": true,
 	"entrypoint": true, "repo_url": true, "repo_branch": true, "max_turns": true, "behavior": true,
-	"context_budget": true, "summary_model": true, "reasoning_strategy": true, "output_schema": true,
+	"context_budget": true, "summary_model": true, "summary_provider": true, "reasoning_strategy": true, "output_schema": true,
 	"approval_tools": true, "subagents": true, "bot": true, "budget": true, "backend_endpoint": true,
 	"skills": true, "model_provider": true, "model_name": true, "backup_provider": true,
 	"backup_model": true, "guardrails": true, "ingredients": true, "resolved_config": true,

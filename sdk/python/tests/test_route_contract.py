@@ -24,6 +24,12 @@ SHORTHAND = re.compile(rf'\._(?P<verb>{VERBS})\(\s*f?"(?P<path>/[^"]*)"')
 EXPLICIT = re.compile(r'_request(?:_text)?\(\s*"(?P<verb>GET|POST|PUT|DELETE|PATCH)"\s*,\s*f?"(?P<path>/[^"]*)"')
 
 
+# Reads that go through a helper with the path as its argument: the reference checks' catalog reads
+# (refcheck.load_catalog: part("tools", "/api/v1/tools"), _read(client, "/api/v1/scenarios")) and the stored
+# agent or recipe a validate=True check reads (self._stored(f"/api/v1/agents/{...}")). They are all GETs.
+HELPER_READS = re.compile(r'(?:\bpart\(\s*"[a-z]+"\s*,|\b_read\(\s*client\s*,|\._stored\()\s*f?"(?P<path>/[^"]*)"')
+
+
 def normalize(path: str) -> str:
     path = re.sub(r"\{[^}]*\}", "{}", path)  # parameter names and f-string expressions do not matter
     path = path.split("?")[0]
@@ -40,10 +46,11 @@ def client_calls() -> list:
     calls = []
     for src in SOURCES:
         text = src.read_text()
-        for rx in (SHORTHAND, EXPLICIT):
+        for rx in (SHORTHAND, EXPLICIT, HELPER_READS):
             for m in rx.finditer(text):
                 line = text.count("\n", 0, m.start()) + 1
-                calls.append((src.name, line, m.group("verb").upper(), m.group("path")))
+                verb = m.group("verb").upper() if "verb" in rx.groupindex else "GET"
+                calls.append((src.name, line, verb, m.group("path")))
     return calls
 
 
@@ -60,3 +67,16 @@ def test_every_call_the_client_makes_is_a_route_the_server_has():
         if (verb, normalize(path)) not in routes
     ]
     assert not missing, "calls the server has no route for:\n  " + "\n  ".join(missing)
+
+
+def test_the_reference_check_routes_are_called_and_exist():
+    # validate routes (agent_validate / recipe_validate) and the lists load_catalog reads must be seen by the scanner,
+    # or a rename of one would pass this contract unnoticed.
+    seen = {(verb, normalize(path)) for _, _, verb, path in client_calls()}
+    routes = server_routes()
+    wanted = {("GET", "/api/v1/agents/{}/validate"), ("GET", "/api/v1/recipes/{}/validate"),
+              ("POST", "/api/v1/agents"), ("PUT", "/api/v1/agents/{}")}
+    wanted |= {("GET", f"/api/v1/{p}") for p in ("models/providers", "prompts", "tools", "skills", "agents", "recipes",
+                                                  "channels", "environments", "credentials", "scenarios")}
+    assert wanted <= seen, f"not called by the client: {sorted(wanted - seen)}"
+    assert wanted <= routes, f"not routes of the server: {sorted(wanted - routes)}"

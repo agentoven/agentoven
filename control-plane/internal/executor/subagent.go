@@ -416,15 +416,16 @@ func buildSubagent(parent *models.Agent, pres *models.ResolvedIngredients, spec 
 		maxTurns = DefaultMaxTurns
 	}
 	child := &models.Agent{
-		Name:          fmt.Sprintf("%s/%s-%d", parent.Name, label, subagentSeq.Add(1)),
-		Kitchen:       parent.Kitchen,
-		Mode:          models.AgentModeManaged,
-		Status:        models.AgentStatusReady,
-		Description:   prompt,
-		MaxTurns:      maxTurns,
-		Budget:        spec.Budget,
-		ContextBudget: parent.ContextBudget,
-		SummaryModel:  parent.SummaryModel,
+		Name:            fmt.Sprintf("%s/%s-%d", parent.Name, label, subagentSeq.Add(1)),
+		Kitchen:         parent.Kitchen,
+		Mode:            models.AgentModeManaged,
+		Status:          models.AgentStatusReady,
+		Description:     prompt,
+		MaxTurns:        maxTurns,
+		Budget:          spec.Budget,
+		ContextBudget:   parent.ContextBudget,
+		SummaryModel:    parent.SummaryModel,
+		SummaryProvider: parent.SummaryProvider,
 		// The parent's rules bind its subagents; the workspace policy is applied on top by
 		// the executor, as it is for every agent.
 		Guardrails: parent.Guardrails,

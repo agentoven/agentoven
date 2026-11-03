@@ -88,6 +88,15 @@ pub struct Agent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup_model: Option<String>,
 
+    /// Provider that serves the model summarizing the agent's history (compaction). Empty or absent: the
+    /// summary model is looked up among every provider's models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_provider: Option<String>,
+
+    /// The model that summarizes the agent's history (compaction); absent: the primary model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_model: Option<String>,
+
     /// System prompt / instructions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
@@ -167,6 +176,8 @@ pub struct AgentBuilder {
     model_name: String,
     backup_provider: Option<String>,
     backup_model: Option<String>,
+    summary_provider: Option<String>,
+    summary_model: Option<String>,
     system_prompt: Option<String>,
     max_turns: Option<u32>,
     skills: Vec<String>,
@@ -190,6 +201,8 @@ impl AgentBuilder {
             model_name: String::new(),
             backup_provider: None,
             backup_model: None,
+            summary_provider: None,
+            summary_model: None,
             system_prompt: None,
             max_turns: None,
             skills: Vec::new(),
@@ -257,6 +270,26 @@ impl AgentBuilder {
         self
     }
 
+    /// The model that summarizes the agent's history when it outgrows its context (compaction), and the
+    /// provider that serves it. Both are checked against the kitchen's providers when the agent is saved.
+    pub fn summary_model(mut self, provider: impl Into<String>, model: impl Into<String>) -> Self {
+        self.summary_provider = Some(provider.into());
+        self.summary_model = Some(model.into());
+        self
+    }
+
+    /// Only the provider that serves the summary model (see [`Self::summary_model`]).
+    pub fn summary_provider(mut self, provider: impl Into<String>) -> Self {
+        self.summary_provider = Some(provider.into());
+        self
+    }
+
+    /// Only the summary model, without naming its provider: it is then looked up among every provider's models.
+    pub fn summary_model_name(mut self, model: impl Into<String>) -> Self {
+        self.summary_model = Some(model.into());
+        self
+    }
+
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(prompt.into());
         self
@@ -300,6 +333,8 @@ impl AgentBuilder {
             model_name: self.model_name,
             backup_provider: self.backup_provider,
             backup_model: self.backup_model,
+            summary_provider: self.summary_provider,
+            summary_model: self.summary_model,
             system_prompt: self.system_prompt,
             max_turns: self.max_turns,
             skills: self.skills,
@@ -398,6 +433,18 @@ mod tests {
         assert_eq!(agent.status, AgentStatus::Draft);
         assert_eq!(agent.ingredients.len(), 1);
         assert_eq!(agent.tags, vec!["nlp", "summarization"]);
+    }
+
+    #[test]
+    fn the_summary_model_is_a_provider_and_a_model() {
+        let agent = Agent::builder("a").summary_model("anthropic", "claude-haiku-4-5").build();
+        assert_eq!(agent.summary_provider.as_deref(), Some("anthropic"));
+        assert_eq!(agent.summary_model.as_deref(), Some("claude-haiku-4-5"));
+        let json = serde_json::to_value(&agent).unwrap();
+        assert_eq!(json["summary_provider"], "anthropic");
+        // Unset, neither is sent: an update must not clear what it does not mention.
+        let plain = serde_json::to_value(Agent::builder("b").build()).unwrap();
+        assert!(plain.get("summary_provider").is_none() && plain.get("summary_model").is_none());
     }
 
     #[test]

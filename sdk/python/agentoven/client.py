@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -51,6 +52,8 @@ from agentoven._native import (
     Step,
 )
 
+from agentoven import refcheck
+from agentoven.agents import agent_to_wire, recipe_to_wire
 from agentoven.flow import Flow
 from agentoven.tasks import TaskMethods
 from agentoven.media import Attachment, AudioInput, InvokeResult
@@ -63,6 +66,7 @@ from agentoven.modalities import (
 )
 
 if TYPE_CHECKING:
+    from agentoven.agents import AgentBuilder
     from agentoven.documents import Documents
     from agentoven.notifications import NotificationConnection
     from agentoven.realtime import RealtimeConnection
@@ -71,6 +75,7 @@ __all__ = [
     "AgentOvenClient",
     "AgentOvenAPIError",
     "AudioModalityError",
+    "ConfigurationError",
     "OidcSigningRequired",
     "DatasetExport",
     "RealtimeToken",
@@ -147,7 +152,7 @@ class AgentOvenClient(TaskMethods):
 
     # ── Delegation to native client (OSS operations) ──────────────────────
 
-    def register(self, agent: Agent) -> str:
+    def register(self, agent: Agent, *, validate: bool = False) -> str:
         """Register an agent with the control plane: create it, or update it if it exists.
 
         The control plane creates with ``POST /api/v1/agents`` and updates with
@@ -157,12 +162,126 @@ class AgentOvenClient(TaskMethods):
         the fields you set and leaves the others as they are; it does not change
         the agent's version or bake it: the version moves only on a bake whose
         configuration differs from the last one (the first bake is ``0.1.0``).
-        """
-        return self._native.register(agent)
 
-    def register_agent(self, agent: Agent) -> str:
+        A configuration that names things the kitchen does not have (a provider, model, tool, skill, prompt or agent
+        that is not there) is refused by the control plane with a :class:`ConfigurationError` listing every
+        problem with its nearest valid values. ``validate=True`` runs the same check here first, before anything is
+        sent (see :meth:`validate_agent`); the control plane checks again either way.
+        """
+        if validate:
+            self._precheck_agent_write(agent_to_wire(agent))
+        return _native_call(self._native.register, agent)
+
+    def register_agent(self, agent: Agent, *, validate: bool = False) -> str:
         """Same as :meth:`register`: create the agent, or update it if it exists."""
-        return self._native.register_agent(agent)
+        if validate:
+            self._precheck_agent_write(agent_to_wire(agent))
+        return _native_call(self._native.register_agent, agent)
+
+    def create_agent(self, agent: Union[Mapping[str, Any], "AgentBuilder", Agent], *, validate: bool = False) -> dict[str, Any]:
+        """Create an agent from its settings (``POST /api/v1/agents``): a dict of the JSON the API takes, an
+        :class:`~agentoven.agents.AgentBuilder`, or a native ``Agent``. Returns the created agent.
+
+        This reaches every setting, including the ones the native ``Agent`` class does not carry
+        (``summary_provider`` and ``summary_model``, the model that summarizes the agent's history; ``skills``,
+        ``approval_tools``, ``subagents``, ``context_budget``, ``reasoning_strategy``). A configuration that names
+        something the kitchen does not have raises :class:`ConfigurationError`; ``validate=True`` finds that out
+        before sending.
+        """
+        body = agent_to_wire(agent)
+        if validate:
+            self._precheck_agent_write(body, existing=False)
+        return self._post("/api/v1/agents", body)
+
+    def update_agent(self, name: str, fields: Union[Mapping[str, Any], "AgentBuilder", None] = None, *, validate: bool = False, **more: Any) -> dict[str, Any]:
+        """Change the settings of an agent you name (``PUT /api/v1/agents/{name}``). What you leave out stays as it
+        is; a list (``skills``, ``approval_tools``, ``subagents``) of ``[]`` clears it, and a string of ``""``
+        (``summary_model``) clears that. On an agent that has been baked the change waits in its draft for the next
+        bake. ``validate=True`` checks the result against the kitchen before sending: a problem the agent already
+        had is not held against a change that did not cause it, as the control plane does it."""
+        body = agent_to_wire(fields) if fields is not None else {}
+        body.update(more)
+        if validate:
+            self._precheck_agent_write({**body, "name": name})
+        return self._put(f"/api/v1/agents/{_seg(name)}", body)
+
+    def agent_validate(self, name: str) -> dict[str, Any]:
+        """What the control plane says about the agent's configuration now, as its next bake would judge it
+        (``GET /api/v1/agents/{name}/validate``): ``{"agent", "valid", "problems", "warnings"}`` with the problems
+        as dicts. It changes nothing; an agent that already runs keeps running whatever this says."""
+        return self._get(f"/api/v1/agents/{_seg(name)}/validate")
+
+    def recipe_validate(self, name: str) -> dict[str, Any]:
+        """:meth:`agent_validate` for a recipe (``GET /api/v1/recipes/{name}/validate``)."""
+        return self._get(f"/api/v1/recipes/{_seg(name)}/validate")
+
+    def load_catalog(self) -> "refcheck.Catalog":
+        """What this kitchen has (providers and their models, prompts, tools, skills, agents, recipes, channels,
+        environments, credentials, scenarios), read through the list calls. A list you may not read is left
+        unknown, never empty: see :func:`agentoven.refcheck.load_catalog`."""
+        return refcheck.load_catalog(self)
+
+    def validate_agent(self, agent: Union[Mapping[str, Any], "AgentBuilder", Agent], *, bake: bool = False, catalog: Optional["refcheck.Catalog"] = None) -> list["refcheck.Problem"]:
+        """Check an agent's settings against this kitchen without sending them: every problem, errors and
+        warnings together (``Problem.severity``; :func:`agentoven.refcheck.split` separates them). ``bake=True``
+        judges it as a bake would, when gaps that a draft may have are errors. Pass ``catalog`` to reuse one
+        :meth:`load_catalog` for many checks. Not an authority: the control plane decides on a write."""
+        return refcheck.check_agent(agent, catalog or self.load_catalog(), bake=bake)
+
+    def validate_recipe(self, recipe: Any, *, bake: bool = False, environment: str = "", catalog: Optional["refcheck.Catalog"] = None) -> list["refcheck.Problem"]:
+        """:meth:`validate_agent` for a recipe (a dict, a :class:`~agentoven.flow.Flow` or a native ``Recipe``);
+        ``environment`` is the one a run would ask for."""
+        return refcheck.check_recipe(recipe, catalog or self.load_catalog(), bake=bake, environment=environment)
+
+    # The checks behind ``validate=True``. They run the same rules the control plane runs on a write and stop
+    # before anything is sent; they are skippable by leaving ``validate`` out, and never required.
+
+    def _stored(self, path: str) -> Optional[dict[str, Any]]:
+        """The agent or recipe at ``path``, or None when the kitchen has none of that name or this caller may not
+        read it (a pre-check that cannot see the stored copy checks what it was given, or leaves the rest to the
+        server)."""
+        try:
+            return self._get(path)
+        except AgentOvenAPIError as exc:
+            if exc.status_code in (403, 404):
+                return None
+            raise
+
+    @staticmethod
+    def _refuse(what: str, problems: Sequence["refcheck.Problem"]) -> None:
+        errs, warns = refcheck.split(problems)
+        if errs:
+            raise ConfigurationError.from_problems(what, errs, warns)
+
+    def _precheck_agent_write(self, wire: Mapping[str, Any], existing: bool = True) -> None:
+        catalog = self.load_catalog()
+        before = self._stored(f"/api/v1/agents/{_seg(str(wire.get('name', '')))}") if existing and wire.get("name") else None
+        if before is None:
+            self._refuse("the agent's configuration", refcheck.check_agent(wire, catalog))
+            return
+        before = refcheck.with_draft(before)
+        problems = refcheck.check_agent(refcheck.apply_edit(before, wire), catalog)
+        _, warns = refcheck.split(problems)
+        self._refuse("the agent's configuration", refcheck.introduced(refcheck.check_agent(before, catalog), problems) + warns)
+
+    def _precheck_agent_bake(self, name: str) -> None:
+        stored = self._stored(f"/api/v1/agents/{_seg(name)}")
+        if stored is not None:  # an agent the kitchen lacks is the server's 404
+            self._refuse("the agent cannot be baked: its configuration", refcheck.check_agent(refcheck.with_draft(stored), self.load_catalog(), bake=True))
+
+    def _precheck_recipe_write(self, wire: Mapping[str, Any], existing: bool = True) -> None:
+        catalog = self.load_catalog()
+        before = self._stored(f"/api/v1/recipes/{_seg(str(wire.get('name', '')))}") if existing and wire.get("name") else None
+        problems = refcheck.check_recipe(wire, catalog)
+        if before is not None:
+            _, warns = refcheck.split(problems)
+            problems = refcheck.introduced(refcheck.check_recipe(before, catalog), problems) + warns
+        self._refuse("the recipe", problems)
+
+    def _precheck_recipe_run(self, recipe: Union[str, Any], environment: Optional[str]) -> None:
+        stored = self._stored(f"/api/v1/recipes/{_seg(recipe)}") if isinstance(recipe, str) else recipe_to_wire(recipe)
+        if stored is not None:  # a recipe the kitchen lacks is the server's 404
+            self._refuse("the recipe cannot run: it", refcheck.check_recipe(stored, self.load_catalog(), bake=True, environment=environment or ""))
 
     def get_agent(self, name: str) -> Agent:
         return self._native.get_agent(name)
@@ -198,6 +317,8 @@ class AgentOvenClient(TaskMethods):
         version: Optional[str] = None,
         environment: Optional[str] = None,
         input: Optional[str] = None,
+        *,
+        validate: bool = False,
     ) -> str:
         """Start (bake) an agent.
 
@@ -206,8 +327,16 @@ class AgentOvenClient(TaskMethods):
         nothing keeps its version; a bake with a changed configuration takes the next minor version
         (``0.2.0``) and the old version stays readable (:meth:`list_agent_versions`, :meth:`get_agent_version`).
         Editing the agent with :meth:`register` does not bump it. Pass ``version`` to set one yourself.
+
+        A bake refuses an agent (or a recipe) whose configuration names something the kitchen no longer has, with a
+        :class:`ConfigurationError`. ``validate=True`` checks that here first, before anything is sent.
         """
-        return self._native.bake(target, version=version, environment=environment, input=input)
+        if validate:
+            if isinstance(target, Recipe):
+                self._precheck_recipe_run(target, environment)
+            else:
+                self._precheck_agent_bake(target if isinstance(target, str) else target.name)
+        return _native_call(self._native.bake, target, version=version, environment=environment, input=input)
 
     def cool(self, target: Any) -> str:
         """Stop a running agent."""
@@ -252,6 +381,8 @@ class AgentOvenClient(TaskMethods):
         recipe: Union[Flow, Recipe],
         kitchen: Optional[str] = None,
         check_agents: bool = False,
+        *,
+        validate: bool = False,
     ) -> Any:
         """Create a recipe.
 
@@ -259,16 +390,25 @@ class AgentOvenClient(TaskMethods):
         checked first and a ``FlowError`` lists what is wrong; with ``check_agents=True`` every agent it names must
         also exist in the kitchen. Returns the created recipe as a dict. The older ``Recipe``/``Step`` classes
         are still accepted, and return a confirmation string as they always have.
+
+        The control plane refuses a recipe that names an agent, step, recipe, channel, credential, role or
+        environment the kitchen does not have (:class:`ConfigurationError`); ``validate=True`` checks that first,
+        before anything is sent.
         """
         client = self if kitchen is None else self.with_kitchen(kitchen)
+        if validate:
+            client._precheck_recipe_write(recipe_to_wire(recipe), existing=False)
         if isinstance(recipe, Flow):
             agents = [a["name"] for a in client._get("/api/v1/agents")] if check_agents else None
             return client._post("/api/v1/recipes", recipe.to_wire(agents=agents))
-        return client._native.create_recipe(recipe)
+        return _native_call(client._native.create_recipe, recipe)
 
-    def update_recipe(self, recipe: Flow, kitchen: Optional[str] = None, check_agents: bool = False) -> dict[str, Any]:
-        """Replace a recipe's description and steps with those of ``recipe`` (a Flow with the same name)."""
+    def update_recipe(self, recipe: Flow, kitchen: Optional[str] = None, check_agents: bool = False, *, validate: bool = False) -> dict[str, Any]:
+        """Replace a recipe's description and steps with those of ``recipe`` (a Flow with the same name).
+        ``validate=True`` checks the references first, as :meth:`create_recipe` does."""
         client = self if kitchen is None else self.with_kitchen(kitchen)
+        if validate:
+            client._precheck_recipe_write(recipe_to_wire(recipe))
         agents = [a["name"] for a in client._get("/api/v1/agents")] if check_agents else None
         body = recipe.to_wire(agents=agents)
         return client._put(f"/api/v1/recipes/{_seg(recipe.name)}", {"description": body["description"], "steps": body["steps"]})
@@ -305,8 +445,12 @@ class AgentOvenClient(TaskMethods):
         *,
         password: Optional[str] = None,
         signing_token: Optional[str] = None,
+        validate: bool = False,
     ) -> dict[str, Any]:
         """Start a run. Returns at once with ``run_id`` and ``status``; see :meth:`wait_for_recipe_run`.
+
+        A run is refused (:class:`ConfigurationError`) when a step names an agent, recipe or channel the kitchen no
+        longer has, or ``environment`` is not one of its environments. ``validate=True`` checks that first.
 
         An environment can require approval before a recipe runs on it. A Head Chef or Restaurateur may skip that
         approval (never in a GxP kitchen), and on Pro the skip is a signed decision on the ``approval_skip`` gate:
@@ -316,6 +460,8 @@ class AgentOvenClient(TaskMethods):
         environment needs no approval. A scheduled or automated run cannot skip an approval.
         """
         client = self if kitchen is None else self.with_kitchen(kitchen)
+        if validate:
+            client._precheck_recipe_run(name, environment)
         run_input = dict(input or {})
         body: dict[str, Any] = {"input": run_input}
         if environment:
@@ -626,9 +772,11 @@ class AgentOvenClient(TaskMethods):
         headers = self._signing_headers(password, signing_token, "recipe_gate", f"{run_id}:{step}", None, "approved" if approved else "rejected")
         return self._request("POST", f"/api/v1/approvals/{_seg(run_id)}/{_seg(step)}", body, headers)
 
-    def bake_recipe(self, name: str, input: Optional[Any] = None, kitchen: Optional[str] = None) -> str:
-        native = self._native if kitchen is None else self.with_kitchen(kitchen)._native
-        return native.bake_recipe(name, input=input)
+    def bake_recipe(self, name: str, input: Optional[Any] = None, kitchen: Optional[str] = None, *, validate: bool = False) -> str:
+        client = self if kitchen is None else self.with_kitchen(kitchen)
+        if validate:
+            client._precheck_recipe_run(name, None)
+        return _native_call(client._native.bake_recipe, name, input=input)
 
     def list_recipes(self, kitchen: Optional[str] = None) -> str:
         native = self._native if kitchen is None else self.with_kitchen(kitchen)._native
@@ -2394,6 +2542,28 @@ class RealtimeToken:
 _NO_AUDIO = "does not offer the audio modality"
 
 
+_NATIVE_422 = re.compile(r"\(422\): (\{.*\})\s*$", re.DOTALL)
+
+
+def _native_call(fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """Call the native client, and turn its refusal of an invalid configuration into :class:`ConfigurationError`.
+    The native client reports every non-2xx reply as a ``RuntimeError`` whose text ends with the reply's body;
+    any other failure passes through unchanged."""
+    try:
+        return fn(*args, **kwargs)
+    except RuntimeError as exc:
+        m = _NATIVE_422.search(str(exc))
+        body: Any = None
+        if m:
+            try:
+                body = json.loads(m.group(1))
+            except ValueError:
+                pass
+        if isinstance(body, dict) and body.get("code") == "invalid_configuration":
+            raise ConfigurationError(422, body) from exc
+        raise
+
+
 def _budget_ref(provider: Optional[str], agent: Optional[str], api_key: Optional[str], unit: str) -> dict[str, str]:
     """The fields that say which budget: at most one of provider, agent and api_key, and the unit."""
     named = {k: v for k, v in (("provider", provider), ("agent", agent), ("api_key", api_key)) if v}
@@ -2532,6 +2702,42 @@ class AgentOvenAPIError(Exception):
         super().__init__(f"AgentOven API error {status_code}: {detail}")
 
 
+class ConfigurationError(AgentOvenAPIError):
+    """The configuration names things the kitchen does not have, or is not valid (HTTP 422, code
+    ``invalid_configuration``): nothing was saved or started. ``problems`` are what refused it and ``warnings`` is
+    advice that did not (both lists of :class:`agentoven.refcheck.Problem`: the field's ``path``, the bad ``value``,
+    the nearest valid ``suggestions``). ``str()`` is the server's message followed by one line per problem. Raised
+    for any 422 the control plane answers this way, and by ``validate=True`` before anything is sent."""
+
+    def __init__(self, status_code: int, detail: Any) -> None:
+        super().__init__(status_code, detail)
+        body = detail if isinstance(detail, Mapping) else {}
+        self.problems: list[refcheck.Problem] = [refcheck.Problem.from_dict(p) for p in body.get("problems") or [] if isinstance(p, Mapping)]
+        self.warnings: list[refcheck.Problem] = [refcheck.Problem.from_dict(p) for p in body.get("warnings") or [] if isinstance(p, Mapping)]
+
+    @classmethod
+    def from_problems(cls, what: str, problems: Sequence["refcheck.Problem"], warnings: Sequence["refcheck.Problem"] = ()) -> "ConfigurationError":
+        """The error for problems found before sending, worded and shaped as the control plane's 422 would be."""
+        first = problems[0].message if problems else "the configuration is not valid"
+        more = f" (and {len(problems) - 1} more)" if len(problems) > 1 else ""
+        return cls(422, {
+            "error": f"{what} is not valid: {first}{more}",
+            "code": "invalid_configuration",
+            "problems": [p.to_dict() for p in problems],
+            "warnings": [p.to_dict() for p in warnings],
+        })
+
+    @property
+    def message(self) -> str:
+        return _error_text(self.detail)
+
+    def __str__(self) -> str:
+        lines = [f"AgentOven API error {self.status_code}: {self.message}"]
+        lines += [f"  - {p.message or p.path}" for p in self.problems]
+        lines += [f"  - warning: {p.message or p.path}" for p in self.warnings]
+        return "\n".join(lines)
+
+
 class RateLimitedError(AgentOvenAPIError):
     """A rate limit refused the request (HTTP 429, Pro ADR-0051): nothing was done, and the same request is
     expected to be admitted after ``retry_after`` seconds (from the ``Retry-After`` header). ``scope`` is what is
@@ -2613,6 +2819,8 @@ def _refusal_fields(detail: Any) -> dict[str, Any]:
 def _api_error(status: int, detail: Any, headers: Mapping[str, str]) -> AgentOvenAPIError:
     """The error for a non-2xx reply: a typed one for a rate limit and for a budget that is used up."""
     f = _refusal_fields(detail)
+    if status == 422 and f.get("code") == "invalid_configuration":
+        return ConfigurationError(status, detail)
     if status == 429 and (f.get("error") == "rate_limited" or f.get("code") == "rate_limit_exceeded" or "retry-after" in headers):
         try:
             return RateLimitedError(status, detail, int(headers["retry-after"]))

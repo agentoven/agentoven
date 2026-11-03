@@ -265,6 +265,38 @@ creating one needs no signature; raising or removing one needs `password` or `si
 `budgetRecordId`). See [docs/budgets-limits-cache.md](../../docs/budgets-limits-cache.md).
 
 
+## Check a configuration against the kitchen
+
+An agent or a recipe names things: a provider and a model, a compaction model (`summary_provider` + `summary_model`),
+tools, skills, prompts, subagents, steps, channels, credentials. The server refuses a write or a bake that names
+something the kitchen does not have, with HTTP 422, and the SDK raises it as a `ConfigurationError` (an
+`AgentOvenAPIError`) whose `problems` give the `path` of each field, the bad `value` and the nearest valid
+`suggestions`; `warnings` is advice that did not refuse it.
+
+```ts
+import { ConfigurationError, ProClient } from '@agentoven/sdk';
+
+try {
+  await pro.createAgent({ name: 'support', model_provider: 'anthropic', model_name: 'claude-haiku-4-5',
+                          summary_provider: 'anthropic', summary_model: 'claude-hiku-4-5' });
+} catch (e) {
+  if (e instanceof ConfigurationError) for (const p of e.problems) console.log(p.path, p.value, p.suggestions);
+  // summary_model claude-hiku-4-5 [ 'claude-haiku-4-5' ]
+}
+
+// Ask first, with what the kitchen has now (nothing is saved):
+const { valid, problems, warnings } = await pro.validateAgent(agent);        // also validateRecipe(recipe | flow)
+await pro.createAgent(agent, { validate: true });   // also updateAgent, bakeAgent, recookAgent, createRecipe, updateRecipe, runRecipe, bakeRecipe
+await pro.agentValidate('support');                  // the server's verdict on a stored agent (GET /agents/{name}/validate); recipeValidate too
+```
+
+`validate: true` reads the kitchen's lists (`loadCatalog()`), runs the same checks as the server (`checkAgent`,
+`checkRecipe`, `nearest`; pinned to the server's by `sdk/fixtures/refcheck-cases.json`) and throws the same
+`ConfigurationError` before anything is sent. It is off by default and the server remains the authority: a check here
+only saves the round trip. A list you may not read (403) or that your edition does not have (404, for example scenarios
+outside Pro) is left unchecked, never treated as empty; roles have no list, so `approver_roles` is left to the server.
+The native `registerAgent` and `bake` are not pre-checked: use `createAgent`/`bakeAgent` here for that.
+
 ## Timeouts, error bodies and the route contract
 
 A request gives up after 120 seconds (an invocation waits for a model): `new ProClient({ timeoutMs: 30_000 })`. A

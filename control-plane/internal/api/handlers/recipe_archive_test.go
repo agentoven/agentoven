@@ -183,6 +183,9 @@ func (r refusingExecutor) ExecuteRecipe(context.Context, *models.Recipe, string,
 func TestAnExecutorsPermissionRefusalIsA403NotA500(t *testing.T) {
 	x, _ := recipeHandlers(t)
 	makeRecipe(t, x, "gated")
+	if err := x.s.CreateEnvironment(context.Background(), &models.Environment{ID: "e1", Slug: "prod", Name: "Production", Kitchen: "default"}); err != nil {
+		t.Fatal(err)
+	}
 	for err, want := range map[string]int{
 		"permission_denied": http.StatusForbidden,
 		"permission_denied: environment requires approval":      http.StatusForbidden,

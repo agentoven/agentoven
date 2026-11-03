@@ -1,8 +1,12 @@
 import { useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Check, Play } from 'lucide-react';
-import { agents, notificationChannels, recipes, tools, type Recipe } from '../../api';
+import { configurationProblems, recipes, type Recipe } from '../../api';
 import { useAPI } from '../../hooks';
+import { useAgentOptions, useChannelOptions, useRecipeOptions, useToolOptions } from '../../hooks/references';
+import type { ConfigurationErrors } from '../../lib/references';
+import { stepReferenceProblems } from '../../lib/recipeRefs';
+import { ConfigurationBadge } from '../../components/ConfigurationBadge';
 import { Button, ErrorBanner, Spinner } from '../../components/UI';
 import FlowCanvas from '../../components/recipes/FlowCanvas';
 import StepInspector from '../../components/recipes/StepInspector';
@@ -19,10 +23,11 @@ export default function RecipeBuilder() {
   const navigate = useNavigate();
   const canEdit = true;
   const recipe = useAPI(() => recipes.get(name));
-  const agentList = useAPI(() => agents.list());
-  const toolList = useAPI(() => tools.list());
-  const recipeList = useAPI(() => recipes.list());
-  const channelList = useAPI(() => notificationChannels.list());
+  // Each list is read once for every field that needs it (hooks/references); the builder also checks the flow against them.
+  const agentList = useAgentOptions();
+  const notifyTools = useToolOptions('notify');
+  const recipeList = useRecipeOptions(name);
+  const channelList = useChannelOptions();
 
   // What was saved, read back into a flow. Edits live apart from it until they are saved.
   const decoded = useMemo(() => (recipe.data ? decompile((recipe.data.steps ?? []) as WireStep[]) : null), [recipe.data]);
@@ -30,6 +35,7 @@ export default function RecipeBuilder() {
   const [selected, setSelected] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [refusal, setRefusal] = useState<ConfigurationErrors | null>(null);
   const [showRun, setShowRun] = useState(false);
 
   if (recipe.loading && !recipe.data) return <Spinner />;
@@ -37,13 +43,16 @@ export default function RecipeBuilder() {
   if (!recipe.data || !decoded) return <ErrorBanner message="Recipe not found" />;
   const data: Recipe = recipe.data;
 
-  const agentNames = new Set((agentList.data ?? []).map((a) => a.name));
+  // A retired agent cannot run, so a step that names one is as broken as one naming an agent that is gone.
+  const agentNames = new Set((agentList.data ?? []).filter((a) => a.status !== 'retired').map((a) => a.name));
   const flow: FlowNode[] = edited ?? (decoded.ok ? decoded.flow : []);
   const recipeNames = new Set((recipeList.data ?? []).map((r) => r.name));
-  const problems = validate(flow, agentNames, recipeList.data ? { names: recipeNames, self: data.name } : undefined);
+  const problems = [
+    ...validate(flow, agentNames, recipeList.data ? { names: recipeNames, self: data.name } : undefined),
+    ...stepReferenceProblems(flow, { channels: channelList.options, notifyTools: notifyTools.options }),
+  ];
   const problemMap = new Map(problems.filter((p) => p.id).map((p) => [p.id, p.message]));
   const dirty = edited !== null && !sameWire(compile(edited), (data.steps ?? []) as WireStep[]);
-  const notifyTools = (toolList.data ?? []).filter((t) => t.capabilities?.includes('notify')).map((t) => t.name);
 
   const change = (next: FlowNode[]) => { setEdited(next); setError(''); };
   const add = (where: Where, type: StepType) => {
@@ -59,12 +68,13 @@ export default function RecipeBuilder() {
   const update = (id: string, patch: Partial<WireStep>, config?: Record<string, unknown>) => change(updateStep(flow, id, patch, config));
 
   const save = async () => {
-    setSaving(true); setError('');
+    setSaving(true); setError(''); setRefusal(null);
     try {
       await recipes.update(data.name, { description: data.description, steps: compile(flow) as unknown as Recipe['steps'] });
       setEdited(null);
       recipe.refetch();
     } catch (e) {
+      setRefusal(configurationProblems(e));
       setError(e instanceof Error ? e.message : 'The recipe could not be saved.');
     }
     setSaving(false);
@@ -85,6 +95,7 @@ export default function RecipeBuilder() {
           <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1.5 min-w-0">
             <h1 className="text-2xl font-bold tracking-tight [overflow-wrap:anywhere]">{data.name}</h1>
             {dirty && <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-amber-400/15 text-amber-200">Unsaved changes</span>}
+            <ConfigurationBadge key={data.updated_at} load={() => recipes.validate(data.name)} />
             {decoded.ok && flow.length > 0 && (ready
               ? <span className="inline-flex items-center gap-1.5 text-[13px] text-emerald-300"><Check size={15} strokeWidth={2.5} /> Every step is ready to run</span>
               : <span className="text-[13px] text-amber-300">{problems.length === 1 ? '1 step needs attention' : `${problems.length} steps need attention`}</span>)}
@@ -107,7 +118,7 @@ export default function RecipeBuilder() {
           <Link to={`/recipes/${encodeURIComponent(data.name)}/runs`} className="h-11 px-3.5 inline-flex items-center text-sm font-medium border-b-2 border-transparent -mb-px text-[var(--ao-text-muted)] hover:text-[var(--ao-text)]">Runs</Link>
         </nav>
       </div>
-      {error && <div className="px-4 sm:px-8 pt-4"><ErrorBanner message={error} /></div>}
+      {error && <div className="px-4 sm:px-8 pt-4"><ErrorBanner message={error} problems={refusal?.problems} warnings={refusal?.warnings} /></div>}
 
       {!decoded.ok ? (
         <div className="px-4 sm:px-8 py-8 max-w-3xl space-y-4">
@@ -154,7 +165,7 @@ export default function RecipeBuilder() {
           </section>
           <aside aria-label="Step settings" className="flex-[0_0_340px] max-w-full box-border p-5 border-l border-[var(--ao-border)] bg-[var(--ao-surface)]">
             {sel ? (
-              <StepInspector key={sel.id} node={sel} agents={(agentList.data ?? []).map((a) => ({ name: a.name, status: a.status }))} notifyTools={notifyTools} recipes={(recipeList.data ?? []).map((r) => ({ name: r.name, description: r.description, steps: (r.steps ?? []).length }))} self={data.name} channels={channelList.data ?? []} onChannelsChanged={channelList.refetch} onChange={update} onDelete={remove} onLanes={(id, n) => change(resizeLanes(flow, id, n))} onApprovalPaths={(id, on) => change(setApprovalPaths(flow, id, on))} />
+              <StepInspector key={sel.id} node={sel} recipes={(recipeList.data ?? []).map((r) => ({ name: r.name, description: r.description, steps: (r.steps ?? []).length }))} self={data.name} onChange={update} onDelete={remove} onLanes={(id, n) => change(resizeLanes(flow, id, n))} onApprovalPaths={(id, on) => change(setApprovalPaths(flow, id, on))} />
             ) : (
               <div className="text-sm text-[var(--ao-text-muted)]">
                 <div className="text-base font-semibold text-[var(--ao-text)] mb-1">{flow.length === 0 ? 'Start here' : 'Select a step'}</div>

@@ -43,6 +43,7 @@ import (
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	pkgmw "github.com/agentoven/agentoven/control-plane/pkg/middleware"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
+	"github.com/agentoven/agentoven/control-plane/pkg/refcheck"
 	"github.com/agentoven/agentoven/control-plane/pkg/skills"
 	"github.com/agentoven/agentoven/control-plane/pkg/toolauth"
 	"github.com/go-chi/chi/v5"
@@ -104,6 +105,10 @@ type Handlers struct {
 	Catalog         *catalog.Catalog
 	Sessions        contracts.SessionStore
 	Guardrails      contracts.GuardrailService
+	// References lists what only the edition can say a kitchen has (scenarios, roles) for the checks that refuse
+	// an agent or recipe naming something absent (pkg/refcheck). Nil in the community edition: those
+	// references are then not checked.
+	References contracts.KitchenReferences
 	// GuardrailPolicy supplies workspace-level guardrails (Pro). nil: only agents' own apply.
 	GuardrailPolicy contracts.WorkspaceGuardrailSource
 	SkillUploads    *skills.UploadStore
@@ -310,8 +315,12 @@ func (h *Handlers) ListAgents(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) RegisterAgent(w http.ResponseWriter, r *http.Request) {
 	var req models.Agent
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid request body")
+	body, ok := readConfigBody(w, r)
+	if !ok {
+		return
+	}
+	bodyProblems, ok := decodeConfig(w, body, &req, refcheck.ServerFields)
+	if !ok {
 		return
 	}
 
@@ -333,7 +342,7 @@ func (h *Handlers) RegisterAgent(w http.ResponseWriter, r *http.Request) {
 	if req.Mode == "" {
 		req.Mode = models.AgentModeManaged
 	}
-	if req.MaxTurns <= 0 {
+	if req.MaxTurns == 0 { // a negative number is not "unset": the checks below name it
 		req.MaxTurns = 10
 	}
 	if status, err := h.checkBotAgent(&req); err != nil {
@@ -342,6 +351,9 @@ func (h *Handlers) RegisterAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.checkAgentGuardrails(r.Context(), kitchen, req.Guardrails); err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !h.checkAgentWrite(w, r, kitchen, nil, &req, bodyProblems) {
 		return
 	}
 
@@ -411,8 +423,14 @@ func (h *Handlers) updateAgent(w http.ResponseWriter, r *http.Request) {
 		Tags     map[string]string `json:"tags"`
 		Revision int64             `json:"revision"` // the revision the client's edit is based on, optional
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid request body")
+	body, ok := readConfigBody(w, r)
+	if !ok {
+		return
+	}
+	// An agent sent back whole carries fields that are the agent's and not the edit's; those are ignored, a name
+	// that is neither is refused.
+	bodyProblems, ok := decodeConfig(w, body, &req, models.Agent{}, refcheck.ServerFields)
+	if !ok {
 		return
 	}
 	if want := ifMatchRevision(r, req.Revision); want > 0 && want != agent.Revision {
@@ -434,6 +452,12 @@ func (h *Handlers) updateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.checkAgentGuardrails(r.Context(), kitchen, probe.Guardrails); err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// The draft is checked when it is saved, not only when it is baked: what the next bake would run must
+	// name things the kitchen has. What the agent already got wrong is not held against an edit that
+	// leaves it so.
+	if !h.checkAgentWrite(w, r, kitchen, agent.WithDraft(), probe, bodyProblems) {
 		return
 	}
 	// An agent that has been baked runs what was baked: the edit waits in its draft for the next bake
@@ -498,6 +522,10 @@ func (h *Handlers) bakeAgent(w http.ResponseWriter, r *http.Request) {
 	agentName := chi.URLParam(r, "agentName")
 	kitchen := middleware.GetKitchen(r.Context())
 
+	cat, ok := h.refCatalog(w, r.Context(), kitchen)
+	if !ok {
+		return
+	}
 	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
 	if err != nil {
 		if _, ok := err.(*store.ErrNotFound); ok {
@@ -524,6 +552,12 @@ func (h *Handlers) bakeAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	// A bake takes up the edits made since the last one: what runs is what was baked (ADR-0043).
 	agent.ApplyDraft()
+
+	// Everything the agent names must exist in this kitchen, said once and in full (pkg/refcheck); the
+	// resolver below stays as the second line for what only resolving can tell.
+	if !h.checkAgentBake(w, cat, agent) {
+		return
+	}
 
 	// ── Validate & resolve ALL ingredients via the Resolver ──────
 	// This replaces the old manual checks with full ingredient resolution:
@@ -1005,6 +1039,10 @@ func (h *Handlers) recookAgent(w http.ResponseWriter, r *http.Request) {
 	agentName := chi.URLParam(r, "agentName")
 	kitchen := middleware.GetKitchen(r.Context())
 
+	cat, ok := h.refCatalog(w, r.Context(), kitchen)
+	if !ok {
+		return
+	}
 	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
 	if err != nil {
 		if _, ok := err.(*store.ErrNotFound); ok {
@@ -1049,6 +1087,9 @@ func (h *Handlers) recookAgent(w http.ResponseWriter, r *http.Request) {
 	agent.ApplyDraft()
 	if len(req.Tags) > 0 {
 		agent.Tags = mergeTags(agent.Tags, req.Tags) // a copy: the map the store handed out is shared with its own
+	}
+	if !h.checkAgentBake(w, cat, agent) {
+		return
 	}
 
 	// ── Resolve ingredients (same as BakeAgent) ──────────────
@@ -1283,8 +1324,12 @@ func (h *Handlers) ListRecipes(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) CreateRecipe(w http.ResponseWriter, r *http.Request) {
 	var req models.Recipe
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid request body")
+	body, ok := readConfigBody(w, r)
+	if !ok {
+		return
+	}
+	bodyProblems, ok := decodeConfig(w, body, &req)
+	if !ok {
 		return
 	}
 
@@ -1320,6 +1365,9 @@ func (h *Handlers) CreateRecipe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if !h.checkRecipeWrite(w, r, kitchen, nil, &req, bodyProblems) {
+		return
+	}
 	if err := h.checkSubRecipeRefs(r.Context(), kitchen, req.Name, req.Steps); err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
@@ -1373,11 +1421,17 @@ func (h *Handlers) UpdateRecipe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req models.Recipe
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid request body")
+	body, ok := readConfigBody(w, r)
+	if !ok {
+		return
+	}
+	// A recipe sent back whole carries the fields of the stored one; they are the recipe's own, so none is unknown.
+	bodyProblems, ok := decodeConfig(w, body, &req)
+	if !ok {
 		return
 	}
 
+	before := *recipe
 	if req.Description != "" {
 		recipe.Description = req.Description
 	}
@@ -1391,6 +1445,11 @@ func (h *Handlers) UpdateRecipe(w http.ResponseWriter, r *http.Request) {
 				req.Steps[i].Agent = req.Steps[i].AgentRef
 			}
 		}
+		after := before
+		after.Steps = req.Steps
+		if !h.checkRecipeWrite(w, r, kitchen, &before, &after, bodyProblems) {
+			return
+		}
 		if err := h.checkSubRecipeRefs(r.Context(), kitchen, recipe.Name, req.Steps); err != nil {
 			respondError(w, http.StatusBadRequest, err.Error())
 			return
@@ -1400,6 +1459,9 @@ func (h *Handlers) UpdateRecipe(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		recipe.Steps = req.Steps
+	} else if refcheck.New(bodyProblems) != nil {
+		respondInvalidConfig(w, "the recipe", bodyProblems)
+		return
 	}
 	recipe.UpdatedAt = time.Now().UTC()
 
@@ -1575,6 +1637,11 @@ func (h *Handlers) BakeRecipe(w http.ResponseWriter, r *http.Request) {
 		Environment string                 `json:"environment"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
+
+	// What the steps name must still exist, and the environment asked for must be the kitchen's.
+	if !h.checkRecipeRun(w, r, kitchen, recipe, req.Environment) {
+		return
+	}
 
 	// Resolve the executor: Pro sets h.RecipeExecutor for role-gated env execution;
 	// OSS falls back directly to the workflow engine.

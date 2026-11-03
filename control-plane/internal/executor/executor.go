@@ -567,6 +567,8 @@ func (e *Executor) summarizeMessages(ctx context.Context, agent *models.Agent, m
 		Kitchen:  agent.Kitchen,
 		Strategy: models.RoutingFallback,
 		AgentRef: agent.Name + "_summarizer",
+		// See summarize in context.go: the summarizer's own provider when one was chosen.
+		PinnedProvider: agent.SummaryProvider,
 	}
 
 	// Suppress router trace — summary calls are internal, not user-facing.

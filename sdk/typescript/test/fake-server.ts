@@ -24,6 +24,12 @@ export class FakeControlPlane {
     this.rawRoutes.set(`${method} ${path}`, { status, text, headers });
   }
 
+  /** Forget every reply, so a test starts from a server that has no routes (every path is a 404). */
+  reset(): void {
+    this.routes.clear();
+    this.rawRoutes.clear();
+  }
+
   get last(): Recorded {
     return this.requests[this.requests.length - 1];
   }

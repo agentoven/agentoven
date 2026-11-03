@@ -1,6 +1,8 @@
 // AgentOven API client — talks to the Go control plane at /api/v1.
 // In dev, Vite proxies /api → localhost:8080.
 
+import { configurationErrors, type ConfigurationErrors } from './lib/references';
+
 const BASE = '/api/v1';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -41,11 +43,43 @@ export class APIError extends Error {
     this.details = details;
     this.body = body;
   }
+  /** Set when the server refused a configuration (422 `invalid_configuration`): what is wrong, field by field. */
+  get configuration(): ConfigurationErrors | null {
+    return this.status === 422 ? configurationErrors(this.body) : null;
+  }
+}
+
+/** One thing wrong with an agent's or a recipe's configuration, as the server reports it. */
+export interface Problem {
+  /** The field, in the JSON the API takes: `summary_model`, `ingredients[2].config.provider`, `steps[1].agent_ref`. */
+  path: string;
+  code: 'not_found' | 'not_usable' | 'unlisted' | 'unknown_field' | 'wrong_type' | 'out_of_range' | 'duplicate' | 'required' | 'invalid_value';
+  /** Only an error refuses a write; a warning is advice. */
+  severity: 'error' | 'warning';
+  /** What the value should have named: provider, model, tool, skill, agent, channel... */
+  kind?: string;
+  value?: string;
+  within?: string;
+  message: string;
+  /** The nearest valid values, nearest first. */
+  suggestions?: string[];
+}
+
+/** What `GET /agents/{name}/validate` and `GET /recipes/{name}/validate` answer. */
+export interface ValidationReport {
+  valid: boolean;
+  problems: Problem[];
+  warnings: Problem[];
+}
+
+/** The configuration errors in an error from a save, a bake or a run, or null when it is some other failure. */
+export function configurationProblems(e: unknown): ConfigurationErrors | null {
+  return e instanceof APIError ? e.configuration : null;
 }
 
 // ── Ingredients ───────────────────────────────────────────────
 
-export type IngredientKind = 'model' | 'tool' | 'prompt' | 'data' | 'observability' | 'embedding' | 'vectorstore' | 'retriever';
+export type IngredientKind = 'model' | 'tool' | 'prompt' | 'data' | 'observability' | 'embedding' | 'vectorstore' | 'retriever' | 'scenario' | 'skill';
 
 export interface Ingredient {
   id: string;
@@ -79,10 +113,16 @@ export interface Agent {
   // Agentic behavior fields
   behavior: 'reactive' | 'agentic';
   context_budget: number;
+  /** The provider that serves `summary_model`, the model that summarizes a long conversation. Empty: any provider that lists it. */
+  summary_provider?: string;
   summary_model: string;
   reasoning_strategy: 'react' | 'plan-and-execute' | 'reflexion';
   a2a_endpoint: string;
   skills: string[];
+  /** Tools whose calls wait for a person's approval. */
+  approval_tools?: string[];
+  /** The agents this one may delegate to. */
+  subagents?: string[];
   model_provider: string;
   model_name: string;
   backup_provider: string;
@@ -222,6 +262,8 @@ export const agents = {
   logsRecent: (name: string) =>
     request<LogEntry[]>(`/agents/${name}/logs/recent`),
   logsStreamURL: (name: string) => `${BASE}/agents/${name}/logs`,
+  /** What is wrong with the agent's configuration as the next bake would judge it (the draft applied). Changes nothing. */
+  validate: (name: string) => request<ValidationReport & { agent: string }>(`/agents/${encodeURIComponent(name)}/validate`),
 };
 
 // ── Recipes ───────────────────────────────────────────────────
@@ -265,8 +307,10 @@ export const recipes = {
   /** Replaces the description and steps. The server ignores an empty list of steps, so never send one to clear. */
   update: (name: string, recipe: Partial<Recipe>) =>
     request<Recipe>(`/recipes/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify(recipe) }),
-  bake: (name: string, input: Record<string, unknown>) =>
-    request<unknown>(`/recipes/${name}/bake`, { method: 'POST', body: JSON.stringify({ input }) }),
+  bake: (name: string, input: Record<string, unknown>, environment?: string) =>
+    request<unknown>(`/recipes/${name}/bake`, { method: 'POST', body: JSON.stringify({ input, ...(environment ? { environment } : {}) }) }),
+  /** What is wrong with the recipe as the next run would judge it. Changes nothing. */
+  validate: (name: string) => request<ValidationReport & { recipe: string }>(`/recipes/${encodeURIComponent(name)}/validate`),
 };
 
 // ── Providers ─────────────────────────────────────────────────
@@ -956,6 +1000,26 @@ export const catalog = {
     ),
   discoveryDrivers: () =>
     request<{ discovery_capable: string[] }>('/models/discovery/drivers'),
+};
+
+// ── Lists a configuration may refer to, that not every edition has ──
+// Kitchen credentials, environments and scenarios exist only where Pro (or the caller's role) allows them. A
+// route that is absent or refused answers null, never an empty list: a field fed by it then says "cannot be
+// checked here" instead of claiming nothing exists.
+
+async function optionalList<T>(path: string): Promise<T[] | null> {
+  try {
+    return (await request<T[] | null>(path)) ?? [];
+  } catch (e) {
+    if (e instanceof APIError && (e.status === 403 || e.status === 404 || e.status === 405)) return null;
+    throw e;
+  }
+}
+
+export const referenceLists = {
+  environments: () => optionalList<{ slug: string; name?: string }>('/environments'),
+  credentials: () => optionalList<{ name: string }>('/credentials'),
+  scenarios: () => optionalList<{ id: string; name?: string }>('/scenarios'),
 };
 
 // ── Health ────────────────────────────────────────────────────

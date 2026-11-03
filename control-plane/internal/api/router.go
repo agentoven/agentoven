@@ -120,6 +120,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 				// Every route that runs an agent counts against the edition's invocation limit, not only /invoke.
 				r.With(h.LimitTraffic).Post("/test", h.TestAgent)
 				r.Get("/config", h.GetAgentConfig)
+				r.Get("/validate", h.ValidateAgent)
 				r.Get("/process", h.GetAgentProcess)
 
 				// Invoke routes always require a resolved identity — regardless of the
@@ -178,6 +179,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 				r.Delete("/", h.DeleteRecipe)
 				r.Post("/bake", h.BakeRecipe)
 				r.Post("/restore", h.RestoreRecipe)
+				r.Get("/validate", h.ValidateRecipe)
 				r.Get("/history", h.RecipeHistory)
 
 				// Recipe runs

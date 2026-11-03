@@ -111,6 +111,16 @@ pub fn check_retention_mode(mode: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The error for a refused request: a [`crate::ConfigurationError`] (with its problems) for a 422 whose `code`
+/// is `invalid_configuration`, an [`ApiError`] for everything else.
+pub(crate) fn failure(status: u16, text: &str, headers: &reqwest::header::HeaderMap) -> anyhow::Error {
+    let api = ApiError::from_response(status, text, headers);
+    match crate::refcheck::ConfigurationError::from_reply(status, &api.detail) {
+        Some(config) => config.into(),
+        None => api.into(),
+    }
+}
+
 /// A refusal from the control plane: the HTTP status and the server's `error` code and `message`.
 ///
 /// A rate limit (429, `rate_limited`) carries `retry_after` seconds, and a budget that is used up (402,
@@ -310,7 +320,7 @@ impl AgentOvenClient {
         let headers = resp.headers().clone();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(ApiError::from_response(status.as_u16(), &text, &headers).into());
+            return Err(failure(status.as_u16(), &text, &headers));
         }
         Ok((text, headers))
     }
@@ -333,7 +343,7 @@ impl AgentOvenClient {
         let headers = resp.headers().clone();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(ApiError::from_response(status.as_u16(), &text, &headers).into());
+            return Err(failure(status.as_u16(), &text, &headers));
         }
         Ok(serde_json::from_str(&text)?)
     }
@@ -968,6 +978,7 @@ impl AgentOvenClient {
         if let Some(env) = environment {
             body["environment"] = json!(env);
         }
+        self.precheck_recipe_run(recipe, environment).await?;
         let token = match (sig, environment) {
             (Signature::None, _) => None,
             (_, None) => anyhow::bail!(

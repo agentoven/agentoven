@@ -15,6 +15,7 @@ pub mod prompt;
 pub mod provider;
 pub mod rag;
 pub mod recipe;
+pub mod refs;
 pub mod server;
 pub mod service_account;
 pub mod session;
@@ -373,12 +374,11 @@ mod tests {
     use clap::CommandFactory;
 
     /// clap's own consistency check (duplicate names, bad defaults) over the commands added for the Pro
-    /// APIs. It is not run over `agent`: `agent bake --version` already collides with the auto-generated
-    /// `--version` (a pre-existing issue that only clap's debug build asserts on).
+    /// APIs and over `agent`, whose `bake --version` once collided with the auto-generated `--version`.
     #[test]
     fn the_new_commands_are_well_formed() {
         let root = Cli::command();
-        for name in ["dataset", "signature", "legal-hold", "key", "secret", "trace", "kitchen", "service-account", "recipe", "budgets", "limits", "cache", "trigger", "documents"] {
+        for name in ["agent", "dataset", "signature", "legal-hold", "key", "secret", "trace", "kitchen", "service-account", "recipe", "budgets", "limits", "cache", "trigger", "documents"] {
             let sub = root.find_subcommand(name).unwrap_or_else(|| panic!("no {name}")).clone();
             sub.debug_assert();
         }

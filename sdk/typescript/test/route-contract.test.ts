@@ -69,6 +69,24 @@ describe('route contract', () => {
     expect(clientCalls().length).toBeGreaterThan(150);
   });
 
+  it('the configuration checks are among the calls it sees, and the server has them', () => {
+    const seen = new Set(clientCalls().map((c) => `${c.verb} ${normalize(c.path)}`));
+    const routes = serverRoutes();
+    for (const call of [
+      'GET /api/v1/agents/{}/validate',
+      'GET /api/v1/recipes/{}/validate',
+      'POST /api/v1/agents',
+      'PUT /api/v1/agents/{}',
+      'POST /api/v1/agents/{}/bake',
+      'POST /api/v1/agents/{}/recook',
+      'GET /api/v1/skills',
+      'GET /api/v1/prompts',
+    ]) {
+      expect(seen.has(call), `the client makes no ${call}`).toBe(true);
+      expect(routes.has(call), `the server has no ${call}`).toBe(true);
+    }
+  });
+
   it('every call the client makes is a route the server has', () => {
     const routes = serverRoutes();
     const missing = clientCalls()

@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useNavigate, useParams } from 'react-router-dom';
 import { Code, Flame, RefreshCw, Snowflake, Sun, Trash2 } from 'lucide-react';
-import { agents, type Agent } from '../../api';
+import { agents, configurationProblems, type Agent } from '../../api';
+import type { ConfigurationErrors } from '../../lib/references';
 import { useAPI } from '../../hooks';
 import { Button, ErrorBanner, Modal, Spinner, StatusBadge } from '../../components/UI';
 import { ActionDropdown, type MenuItem } from '../../components/ActionDropdown';
+import { ConfigurationBadge } from '../../components/ConfigurationBadge';
 import { IntegrationPanel } from '../Agents';
 
 /** What every tab of an agent's workspace gets from the layout. */
@@ -30,6 +32,7 @@ export default function AgentWorkspace() {
   const [showIntegrate, setShowIntegrate] = useState(false);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
+  const [refusal, setRefusal] = useState<ConfigurationErrors | null>(null);
 
   useEffect(() => { refetch(); }, [name, refetch]);
 
@@ -39,8 +42,8 @@ export default function AgentWorkspace() {
 
   const base = `/agents/${encodeURIComponent(agent.name)}`;
   const act = async (fn: () => Promise<unknown>) => {
-    setBusy(true); setProblem('');
-    try { await fn(); refetch(); } catch (e) { setProblem(e instanceof Error ? e.message : 'That did not work'); }
+    setBusy(true); setProblem(''); setRefusal(null);
+    try { await fn(); refetch(); } catch (e) { setRefusal(configurationProblems(e)); setProblem(e instanceof Error ? e.message : 'That did not work'); }
     setBusy(false);
   };
 
@@ -74,6 +77,7 @@ export default function AgentWorkspace() {
                 {agent.model_provider} / {agent.model_name}
               </span>
             )}
+            <ConfigurationBadge key={agent.updated_at} load={() => agents.validate(agent.name)} fixTo={`${base}/configuration`} />
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {(agent.status === 'draft' || agent.status === 'burnt') && (
@@ -90,7 +94,7 @@ export default function AgentWorkspace() {
             <ActionDropdown items={menu} disabled={busy} label={agent.name} />
           </div>
         </div>
-        {problem && <div className="mt-3"><ErrorBanner message={problem} /></div>}
+        {problem && <div className="mt-3"><ErrorBanner message={problem} problems={refusal?.problems} warnings={refusal?.warnings} /></div>}
         <nav aria-label="Agent sections" className="flex flex-wrap gap-x-1 mt-5">
           {TABS.map((t) => (
             <NavLink

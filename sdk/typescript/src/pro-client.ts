@@ -32,6 +32,11 @@ import { Flow } from './flow.js';
 import { audioClipFromWire, audioFromBytes } from './media.js';
 import { resolveModalities, supportsModality, type AnyModality } from './modalities.js';
 import { connectRealtime, type RealtimeSession, type WebSocketFactory } from './realtime.js';
+import {
+  applyEdit, checkAgent, checkRecipe, introduced, split, withDraft,
+  type AgentConfig, type AgentEdit, type Catalog, type Problem, type RecipeConfig,
+} from './refcheck.js';
+import { loadCatalog, type PromptSummary, type SkillSummary } from './refcheck-catalog.js';
 import type {
   AgentCard,
   AgentEnvironment,
@@ -128,6 +133,47 @@ export class OidcSigningRequired extends AgentOvenAPIError {
   }
 }
 
+/**
+ * A configuration names something this kitchen does not have, or sets what cannot be set (HTTP 422, code
+ * `invalid_configuration`): a model its provider does not list, a tool nobody registered, a typo in a field name, a
+ * step that waits for a step that is not there. Nothing was saved or run. `problems` lists everything that refused it,
+ * each with the `path` of the field, the `value` that is wrong and the nearest valid `suggestions`; `warnings` is advice
+ * that did not refuse it. `message` carries the server's sentence and one line per problem.
+ *
+ * The SDK raises it too when you ask for a check before sending (`validate: true`); the server stays the authority.
+ */
+export class ConfigurationError extends AgentOvenAPIError {
+  readonly problems: Problem[];
+  readonly warnings: Problem[];
+
+  constructor(statusCode: number, detail: unknown) {
+    super(statusCode, detail);
+    this.name = 'ConfigurationError';
+    const d = detail && typeof detail === 'object' ? (detail as { problems?: unknown; warnings?: unknown }) : {};
+    this.problems = Array.isArray(d.problems) ? (d.problems as Problem[]) : [];
+    this.warnings = Array.isArray(d.warnings) ? (d.warnings as Problem[]) : [];
+    const lines = [
+      errorText(detail),
+      ...this.problems.map((p) => `  - ${p.message}`),
+      ...this.warnings.map((p) => `  - warning: ${p.message}`),
+    ];
+    this.message = lines.join('\n');
+  }
+
+  /** The server's sentence, without the per-problem lines. */
+  get reason(): string {
+    return errorText(this.detail);
+  }
+
+  /** The error for a check the SDK made before sending, shaped like the server's answer. */
+  static fromProblems(what: string, problems: readonly Problem[]): ConfigurationError {
+    const { errors, warnings } = split(problems);
+    const first = errors[0]?.message ?? 'the configuration is not valid';
+    const more = errors.length > 1 ? ` (and ${errors.length - 1} more)` : '';
+    return new ConfigurationError(422, { error: `${what} is not valid: ${first}${more}`, code: 'invalid_configuration', problems: errors, warnings });
+  }
+}
+
 /** The fields of a refusal, from either shape the server uses: the API's flat object or the gateway's `{ error: {...} }`. */
 function refusalFields(detail: unknown): Record<string, unknown> {
   if (detail && typeof detail === 'object') {
@@ -181,6 +227,7 @@ export class BudgetExceededError extends AgentOvenAPIError {
 /** The error for a non-2xx reply: a typed one for a rate limit and for a budget that is used up. */
 function apiError(status: number, detail: unknown, headers: Headers): AgentOvenAPIError {
   const f = refusalFields(detail);
+  if (status === 422 && f.code === 'invalid_configuration') return new ConfigurationError(status, detail);
   const retryAfter = headers.get('retry-after');
   if (status === 429 && (f.error === 'rate_limited' || f.code === 'rate_limit_exceeded' || retryAfter !== null)) {
     const n = retryAfter === null ? NaN : Number.parseInt(retryAfter, 10);
@@ -292,6 +339,42 @@ const seg = encodeURIComponent;
 
 /** How long one request may take before it is abandoned (`timeoutMs` in the client options changes it). */
 export const DEFAULT_TIMEOUT_MS = 120_000;
+
+/** An agent as the API returns it: its configuration, and what the server adds. */
+export type AgentRecord = AgentConfig & {
+  name: string;
+  id?: string;
+  status?: string;
+  version?: string;
+  kitchen?: string;
+  /** Edits made to a baked agent, applied by the next bake. */
+  draft?: AgentEdit;
+  revision?: number;
+};
+
+/** The outcome of a check: `valid` when nothing would refuse the configuration. */
+export interface ConfigValidation {
+  valid: boolean;
+  /** What would refuse it (severity `error`). */
+  problems: Problem[];
+  /** Advice that would not (a disabled optional tool, a provider whose last test failed). */
+  warnings: Problem[];
+}
+
+/** The server's answer for `GET /agents/{name}/validate`. */
+export interface AgentValidation extends ConfigValidation {
+  agent: string;
+}
+
+/** The server's answer for `GET /recipes/{name}/validate`. */
+export interface RecipeValidation extends ConfigValidation {
+  recipe: string;
+}
+
+function validation(all: readonly Problem[]): ConfigValidation {
+  const { errors, warnings } = split(all);
+  return { valid: errors.length === 0, problems: errors, warnings };
+}
 
 export class ProClient {
   private readonly baseUrl: string;
@@ -551,6 +634,130 @@ export class ProClient {
     return this.delete(`/api/v1/trace-views/${encodeURIComponent(viewId)}`);
   }
 
+  // ── Agents (REST) ─────────────────────────────────────────────────────────
+  // The native `AgentOvenClient` registers and bakes agents too; these are the same routes over `fetch`, with the
+  // option to check the configuration against the kitchen before sending (`validate: true`). The server checks every
+  // write and every bake either way: a refusal is a `ConfigurationError`.
+
+  /** The kitchen's agents. A retired agent is left out unless `includeRetired`. */
+  async listAgents(opts?: { includeRetired?: boolean; kitchen?: string }): Promise<AgentRecord[]> {
+    return this.get(opts?.includeRetired ? '/api/v1/agents?include_retired=true' : '/api/v1/agents', opts?.kitchen);
+  }
+
+  async getAgent(name: string, opts?: { kitchen?: string }): Promise<AgentRecord> {
+    return this.get(`/api/v1/agents/${seg(name)}`, opts?.kitchen);
+  }
+
+  /**
+   * Register an agent (or bring a retired one back). `validate: true` reads it against the kitchen first: its
+   * providers and models (the compaction model `summary_model` with its `summary_provider` among them), skills,
+   * tools, subagents and ingredients.
+   */
+  async createAgent(agent: AgentConfig, opts?: { validate?: boolean; kitchen?: string }): Promise<AgentRecord> {
+    if (opts?.validate) {
+      const problems = checkAgent(agent, await this.forKitchen(opts.kitchen).loadCatalog());
+      if (split(problems).errors.length > 0) throw ConfigurationError.fromProblems("the agent's configuration", problems);
+    }
+    return this.post('/api/v1/agents', agent, opts?.kitchen);
+  }
+
+  /**
+   * Change an agent: only what `edit` sets changes (`[]` clears a list, `''` clears `summary_model`). `validate: true`
+   * reads the result against the kitchen first, holding it only to what the edit made worse, as the server does.
+   */
+  async updateAgent(name: string, edit: AgentEdit, opts?: { validate?: boolean; kitchen?: string }): Promise<AgentRecord> {
+    if (opts?.validate) {
+      const before = withDraft(await this.getAgent(name, { kitchen: opts.kitchen }));
+      const catalog = await this.forKitchen(opts.kitchen).loadCatalog();
+      const after = checkAgent(applyEdit(before, edit), catalog);
+      const problems = [...introduced(checkAgent(before, catalog), after), ...split(after).warnings];
+      if (split(problems).errors.length > 0) throw ConfigurationError.fromProblems("the agent's configuration", problems);
+    }
+    return this.put(`/api/v1/agents/${seg(name)}`, edit, opts?.kitchen);
+  }
+
+  /**
+   * Bake an agent: what runs becomes its configuration plus its draft. `validate: true` reads that against the kitchen
+   * first, strictly (a managed agent needs a model; nothing already wrong is forgiven).
+   */
+  async bakeAgent(name: string, opts?: { version?: string; environment?: string; validate?: boolean; kitchen?: string }): Promise<AgentRecord> {
+    if (opts?.validate) await this.preflightAgentBake(name, opts.kitchen);
+    const body: Record<string, string> = {};
+    if (opts?.version) body.version = opts.version;
+    if (opts?.environment) body.environment = opts.environment;
+    return this.post(`/api/v1/agents/${seg(name)}/bake`, body, opts?.kitchen);
+  }
+
+  /** Re-cook a baked agent with its draft applied (see `bakeAgent` for `validate`). */
+  async recookAgent(name: string, opts?: { validate?: boolean; kitchen?: string }): Promise<AgentRecord> {
+    if (opts?.validate) await this.preflightAgentBake(name, opts.kitchen);
+    return this.post(`/api/v1/agents/${seg(name)}/recook`, {}, opts?.kitchen);
+  }
+
+  private async preflightAgentBake(name: string, kitchen?: string): Promise<void> {
+    const agent = withDraft(await this.getAgent(name, { kitchen }));
+    const problems = checkAgent(agent, await this.forKitchen(kitchen).loadCatalog(), { bake: true });
+    if (split(problems).errors.length > 0) throw ConfigurationError.fromProblems('the agent cannot be baked: its configuration', problems);
+  }
+
+  /** The prompts of the kitchen (one row per prompt: the latest version). */
+  async listPrompts(opts?: { kitchen?: string }): Promise<PromptSummary[]> {
+    return (await this.get<PromptSummary[] | null>('/api/v1/prompts', opts?.kitchen)) ?? [];
+  }
+
+  /** The skills of the kitchen; only an `accepted` skill runs. */
+  async listSkills(opts?: { kitchen?: string }): Promise<SkillSummary[]> {
+    const reply = await this.get<{ skills?: SkillSummary[] | null } | SkillSummary[] | null>('/api/v1/skills', opts?.kitchen);
+    return (Array.isArray(reply) ? reply : reply?.skills) ?? [];
+  }
+
+  // ── Configuration validation ──────────────────────────────────────────────
+  // What an agent or a recipe names must exist in the kitchen: a model its provider lists, registered tools and skills,
+  // real agents and steps. The server checks every write; these let you ask first, and every one is optional.
+
+  /**
+   * What the kitchen has, for the checks (`checkAgent`, `checkRecipe`): providers and their models, prompts, tools,
+   * skills, agents, recipes, channels, environments, credentials and (Pro) scenarios. A list you may not read (403) or
+   * this edition does not have (404) is left out and its references are not checked, never judged against nothing.
+   */
+  async loadCatalog(): Promise<Catalog> {
+    return loadCatalog(this);
+  }
+
+  /**
+   * Check an agent configuration against the kitchen without saving it. With `bake: true` it is judged as a bake
+   * would judge it (a managed agent needs a model). `problems` are what would refuse it, `warnings` are advice.
+   */
+  async validateAgent(agent: AgentConfig, opts?: { bake?: boolean; environment?: string; kitchen?: string }): Promise<ConfigValidation> {
+    const problems = checkAgent(agent, await this.forKitchen(opts?.kitchen).loadCatalog(), { bake: opts?.bake, environment: opts?.environment });
+    return validation(problems);
+  }
+
+  /** `validateAgent` for a recipe (a `Flow` is written to its wire form first). `environment` is the one a run would ask for. */
+  async validateRecipe(recipe: Partial<Recipe> | Flow, opts?: { bake?: boolean; environment?: string; kitchen?: string }): Promise<ConfigValidation> {
+    const wire = (recipe instanceof Flow ? recipe.toWire() : recipe) as RecipeConfig;
+    const problems = checkRecipe(wire, await this.forKitchen(opts?.kitchen).loadCatalog(), { bake: opts?.bake, environment: opts?.environment });
+    return validation(problems);
+  }
+
+  /**
+   * Ask the server to judge a stored agent as its next bake would (draft applied): `GET /agents/{name}/validate`.
+   * Read-only; an agent saved before the checks existed keeps running whatever this says.
+   */
+  async agentValidate(name: string, opts?: { kitchen?: string }): Promise<AgentValidation> {
+    return this.get(`/api/v1/agents/${seg(name)}/validate`, opts?.kitchen);
+  }
+
+  /** `agentValidate` for a stored recipe: `GET /recipes/{name}/validate`. */
+  async recipeValidate(name: string, opts?: { kitchen?: string }): Promise<RecipeValidation> {
+    return this.get(`/api/v1/recipes/${seg(name)}/validate`, opts?.kitchen);
+  }
+
+  /** This client, or one for `kitchen` when another is asked for. */
+  private forKitchen(kitchen?: string): ProClient {
+    return kitchen && kitchen !== this.kitchen ? this.withKitchen(kitchen) : this;
+  }
+
   // ── Recipes ───────────────────────────────────────────────────────────────
 
   async listRecipes(opts?: { kitchen?: string }): Promise<Recipe[]> {
@@ -563,21 +770,51 @@ export class ProClient {
 
   /**
    * Create a recipe. Pass a `Flow` to build one the way the dashboard does: it is checked first and a `FlowError`
-   * lists what is wrong. With `checkAgents: true` every agent it names must also exist in the kitchen.
+   * lists what is wrong. With `checkAgents: true` every agent it names must also exist in the kitchen. With
+   * `validate: true` the whole recipe is also read against what the kitchen has (agents, nested recipes, channels,
+   * credentials, environments) before it is sent, and a `ConfigurationError` lists what is wrong; the server checks
+   * every write regardless.
    */
-  async createRecipe(recipe: Partial<Recipe> | Flow, opts?: { kitchen?: string; checkAgents?: boolean }): Promise<Recipe> {
+  async createRecipe(recipe: Partial<Recipe> | Flow, opts?: { kitchen?: string; checkAgents?: boolean; validate?: boolean }): Promise<Recipe> {
+    let wire: Partial<Recipe>;
     if (recipe instanceof Flow) {
       const agents = opts?.checkAgents ? await this.agentNames(opts.kitchen) : undefined;
-      return this.post('/api/v1/recipes', recipe.toWire({ agents }), opts?.kitchen);
+      wire = recipe.toWire({ agents }) as Partial<Recipe>;
+    } else {
+      wire = recipe;
     }
-    return this.post('/api/v1/recipes', recipe, opts?.kitchen);
+    if (opts?.validate) await this.preflightRecipeWrite(wire as RecipeConfig, undefined, opts.kitchen);
+    return this.post('/api/v1/recipes', wire, opts?.kitchen);
   }
 
-  /** Replace a recipe's description and steps with those of `flow` (a Flow with the same name). */
-  async updateRecipe(flow: Flow, opts?: { kitchen?: string; checkAgents?: boolean }): Promise<Recipe> {
+  /**
+   * Replace a recipe's description and steps with those of `flow` (a Flow with the same name). `validate: true` reads
+   * the result against the kitchen first, holding it only to what the edit made worse (see `createRecipe`).
+   */
+  async updateRecipe(flow: Flow, opts?: { kitchen?: string; checkAgents?: boolean; validate?: boolean }): Promise<Recipe> {
     const agents = opts?.checkAgents ? await this.agentNames(opts.kitchen) : undefined;
     const { description, steps } = flow.toWire({ agents });
+    if (opts?.validate) {
+      const before = (await this.getRecipe(flow.name, { kitchen: opts.kitchen })) as unknown as RecipeConfig;
+      await this.preflightRecipeWrite({ ...before, description, steps } as RecipeConfig, before, opts.kitchen);
+    }
     return this.put(`/api/v1/recipes/${encodeURIComponent(flow.name)}`, { description, steps }, opts?.kitchen);
+  }
+
+  /** `validate` for a recipe write: refuses with a `ConfigurationError` what the edit made worse (all of it for a create). */
+  private async preflightRecipeWrite(after: RecipeConfig, before: RecipeConfig | undefined, kitchen?: string): Promise<void> {
+    const catalog = await this.forKitchen(kitchen).loadCatalog();
+    let problems = checkRecipe(after, catalog);
+    if (before) problems = [...introduced(checkRecipe(before, catalog), problems), ...split(problems).warnings];
+    if (split(problems).errors.length > 0) throw ConfigurationError.fromProblems('the recipe', problems);
+  }
+
+  /** `validate` for a run: the recipe as stored, judged as a run would judge it, in the environment asked for. */
+  private async preflightRecipeRun(name: string, environment: string | undefined, kitchen?: string): Promise<void> {
+    const recipe = (await this.getRecipe(name, { kitchen })) as unknown as RecipeConfig;
+    const catalog = await this.forKitchen(kitchen).loadCatalog();
+    const problems = checkRecipe(recipe, catalog, { bake: true, environment });
+    if (split(problems).errors.length > 0) throw ConfigurationError.fromProblems('the recipe cannot run: it', problems);
   }
 
   private async agentNames(kitchen?: string): Promise<string[]> {
@@ -619,8 +856,9 @@ export class ProClient {
     name: string,
     input: Record<string, unknown> = {},
     environment?: string,
-    opts?: { kitchen?: string },
+    opts?: { kitchen?: string; validate?: boolean },
   ): Promise<Record<string, unknown>> {
+    if (opts?.validate) await this.preflightRecipeRun(name, environment, opts.kitchen);
     return this.post(
       `/api/v1/recipes/${encodeURIComponent(name)}/bake`,
       { input, ...(environment ? { environment } : {}) },
@@ -637,16 +875,21 @@ export class ProClient {
    * (the SDK signs it, `sign`) or a `signingToken` signed for exactly this recipe, environment and input; it needs
    * `environment`. Leave both out when the environment needs no approval. A scheduled or automated run cannot skip
    * an approval.
+   *
+   * `validate: true` first reads the recipe against what the kitchen has now (its agents, nested recipes, channels,
+   * credentials, and the environment asked for) and throws a `ConfigurationError` instead of starting a run that
+   * would fail; the server makes the same check regardless.
    */
   async runRecipe(
     name: string,
     input: Record<string, unknown> = {},
-    opts?: { environment?: string; kitchen?: string } & Signing,
+    opts?: { environment?: string; kitchen?: string; validate?: boolean } & Signing,
   ): Promise<Record<string, unknown>> {
     if (opts?.password === undefined && !opts?.signingToken) {
-      return this.bakeRecipe(name, input, opts?.environment, { kitchen: opts?.kitchen });
+      return this.bakeRecipe(name, input, opts?.environment, { kitchen: opts?.kitchen, validate: opts?.validate });
     }
     if (!opts?.environment) throw new Error('skipping an approval is signed for one environment: pass environment');
+    if (opts.validate) await this.preflightRecipeRun(name, opts.environment, opts.kitchen);
     const extra = await this.signingHeaders(opts, 'approval_skip', `${name}@${opts.environment}`, { input });
     return this.request(
       'POST',

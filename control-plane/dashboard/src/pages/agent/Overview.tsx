@@ -53,6 +53,9 @@ export default function Overview() {
           <dl className="mt-3">
             <Row k="Primary"><span className="font-mono text-[13px]">{agent.model_provider ? `${agent.model_provider} / ${agent.model_name}` : 'none chosen'}</span></Row>
             {agent.backup_provider && <Row k="Backup if it fails"><span className="font-mono text-[13px]">{agent.backup_provider}{agent.backup_model ? ` / ${agent.backup_model}` : ''}</span></Row>}
+            {agent.summary_model && <Row k="Summarizes long chats with"><span className="font-mono text-[13px]">{agent.summary_provider ? `${agent.summary_provider} / ` : ''}{agent.summary_model}</span></Row>}
+            {(agent.subagents?.length ?? 0) > 0 && <Row k="May delegate to"><span className="font-mono text-[13px]">{agent.subagents?.join(', ')}</span></Row>}
+            {(agent.approval_tools?.length ?? 0) > 0 && <Row k="Needs approval for"><span className="font-mono text-[13px]">{agent.approval_tools?.join(', ')}</span></Row>}
           </dl>
         </Card>
         <Card>

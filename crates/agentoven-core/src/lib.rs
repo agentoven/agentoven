@@ -37,6 +37,7 @@ pub mod client;
 pub mod config;
 pub mod ingredient;
 pub mod recipe;
+pub mod refcheck;
 pub mod router;
 pub mod telemetry;
 
@@ -58,6 +59,7 @@ pub use client::AgentOvenClient;
 pub use config::AgentOvenConfig;
 pub use ingredient::{Ingredient, IngredientKind};
 pub use recipe::{Recipe, Step, StepKind};
+pub use refcheck::{Catalog, ConfigurationError, Problem, Validation};
 pub use router::{ModelProvider, RoutingStrategy};
 
 // Re-export a2a-ao types for convenience

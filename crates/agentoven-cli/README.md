@@ -41,6 +41,7 @@ agentoven status
 | `agentoven agent list` | List all agents in the kitchen |
 | `agentoven agent get <name>` | Show agent details |
 | `agentoven agent bake <name>` | Deploy an agent |
+| `agentoven agent validate <name>` | Check what the agent names (providers, models, tools, skills, prompts, subagents) against the kitchen. Prints each problem with the nearest valid values; exits 1 if any would refuse the agent |
 | `agentoven agent cool <name>` | Pause a running agent |
 | `agentoven agent retire <name>` | Permanently retire an agent |
 | `agentoven agent test <name>` | Interactive A2A REPL |
@@ -52,6 +53,7 @@ agentoven status
 | `agentoven skills analyze <name> [--provider <p>]` | Send a staged skill to a model provider for review (Pro) |
 | `agentoven recipe create` | Create a multi-agent workflow |
 | `agentoven recipe bake <name>` | Execute a recipe |
+| `agentoven recipe validate <name>` | The same check for a recipe: its agents, steps, nested recipes, channels, credentials, environment |
 | `agentoven trace get <id>` | Inspect an execution trace |
 | `agentoven trace cost <id>` | View cost breakdown |
 | `agentoven agent versions <name> [version]` | The versions an agent was baked at, or one of them. A version moves only on a bake with a changed configuration; the first bake is `0.1.0`; edits do not bump it |
@@ -75,6 +77,28 @@ agentoven status
 | `agentoven budgets list\|set\|rm\|ledger\|alerts\|usage` | Period budgets for the kitchen, an agent, a provider or an API key, in dollars or tokens (Pro). Raising or removing one is signed (`--sign`) |
 | `agentoven limits list\|set\|rm` | Rate limits: requests, tokens and invocations per minute (Pro) |
 | `agentoven cache show\|set\|rm\|purge` | The response cache: policy per kitchen or agent, and purge (Pro) |
+
+### Checking names before they are used
+
+The control plane refuses an agent or a recipe that names something the kitchen does not have (HTTP 422), and
+`agent register|update|recook|bake` and `recipe create|bake` print that refusal as a list: the field, the value
+that is wrong, and the nearest values that are right, then exit with a failure status.
+
+```
+$ agentoven agent update bot --summary-model claude-hiku-4-5
+  ✗ the control plane refused the configuration:
+
+  ✗ summary_model = "claude-hiku-4-5" [model]
+      "claude-hiku-4-5" is not a model of provider "anthropic" (did you mean "claude-haiku-4-5"?)
+```
+
+`--validate` on those commands runs the same check here, against the kitchen's lists, before anything is sent. It is
+a convenience, off unless you ask for it; the control plane stays the authority. A list you may not read (403, or a
+Pro-only route on the community edition) is skipped, never treated as empty. `agentoven agent validate <name>` and
+`agentoven recipe validate <name>` ask the control plane about a stored agent or recipe without changing it (an
+agent saved before the checks existed keeps running whatever they say). `--validate` judges an agent as it is
+now, so it cannot be combined with `agent bake --version`. `agent register|update` take `--summary-provider` and
+`--summary-model` for the compaction (summarizer) model.
 
 ### Roles
 

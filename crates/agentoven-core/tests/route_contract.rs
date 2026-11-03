@@ -105,6 +105,15 @@ fn the_scanner_sees_the_clients_calls() {
 }
 
 #[test]
+fn the_scanner_sees_the_validate_calls() {
+    // agent_validate and recipe_validate are covered by the contract below, not skipped by the scanner.
+    let calls = client_calls();
+    for want in ["/api/v1/agents/{}/validate", "/api/v1/recipes/{}/validate"] {
+        assert!(calls.iter().any(|(_, _, verb, path)| *verb == "GET" && normalize(path) == want), "{want} is not in {:?}", calls.iter().map(|c| &c.3).collect::<Vec<_>>());
+    }
+}
+
+#[test]
 fn every_call_the_client_makes_is_a_route_the_server_has() {
     let routes = server_routes();
     let missing: Vec<String> = client_calls()
