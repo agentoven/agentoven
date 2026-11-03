@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/agentoven/agentoven/control-plane/internal/store"
+	pkgmw "github.com/agentoven/agentoven/control-plane/pkg/middleware"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/rs/zerolog/log"
 )
@@ -35,9 +36,9 @@ type ToolSchema struct {
 
 // ToolParameters describes the JSON Schema for tool inputs.
 type ToolParameters struct {
-	Type       string                    `json:"type"`
-	Properties map[string]ToolProperty   `json:"properties"`
-	Required   []string                  `json:"required"`
+	Type       string                  `json:"type"`
+	Properties map[string]ToolProperty `json:"properties"`
+	Required   []string                `json:"required"`
 }
 
 // ToolProperty is a single parameter in the tool schema.
@@ -193,10 +194,8 @@ func (a *Adapter) Invoke(ctx context.Context, req InvokeRequest) InvokeResponse 
 
 // HandleListTools handles GET /langchain/tools
 func (a *Adapter) HandleListTools(w http.ResponseWriter, r *http.Request) {
-	kitchen := r.Header.Get("X-Kitchen")
-	if kitchen == "" {
-		kitchen = "default"
-	}
+	// The kitchen the authenticated request is for (the same one the role check was made in), never the raw header.
+	kitchen := pkgmw.GetKitchen(r.Context())
 
 	tools, err := a.ListTools(r.Context(), kitchen)
 	if err != nil {
@@ -216,9 +215,8 @@ func (a *Adapter) HandleInvoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Kitchen == "" {
-		req.Kitchen = r.Header.Get("X-Kitchen")
-	}
+	// A kitchen named in the body is ignored: the call is made in the request's own kitchen.
+	req.Kitchen = pkgmw.GetKitchen(r.Context())
 
 	resp := a.Invoke(r.Context(), req)
 	w.Header().Set("Content-Type", "application/json")

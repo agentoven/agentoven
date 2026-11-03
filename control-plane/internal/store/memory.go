@@ -1586,7 +1586,7 @@ func (m *MemoryStore) ListApprovals(_ context.Context, kitchen, status string, l
 	defer m.mu.RUnlock()
 	var result []models.ApprovalRecord
 	for _, r := range m.approvals {
-		if kitchen != "" && r.Kitchen != kitchen {
+		if r.Kitchen != kitchen {
 			continue
 		}
 		if status != "" && r.Status != status {
@@ -1619,6 +1619,9 @@ func (m *MemoryStore) GetChannel(_ context.Context, kitchen, name string) (*mode
 	defer m.mu.RUnlock()
 	ch, ok := m.channels[key(kitchen, name)]
 	if !ok {
+	if kitchen == "" {
+		return nil, ErrKitchenRequired
+	}
 		return nil, &ErrNotFound{Entity: "notification_channel", Key: name}
 	}
 	copy := *ch

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/agentoven/agentoven/control-plane/internal/store"
+	pkgmw "github.com/agentoven/agentoven/control-plane/pkg/middleware"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/rs/zerolog/log"
 )
@@ -47,20 +48,20 @@ type LangFuseTrace struct {
 
 // LangFuseGeneration represents a single LLM generation span.
 type LangFuseGeneration struct {
-	ID               string                 `json:"id"`
-	TraceID          string                 `json:"traceId"`
-	Name             string                 `json:"name"`
-	Model            string                 `json:"model,omitempty"`
-	ModelParameters  map[string]interface{} `json:"modelParameters,omitempty"`
-	Input            interface{}            `json:"input,omitempty"`
-	Output           interface{}            `json:"output,omitempty"`
-	Metadata         map[string]interface{} `json:"metadata,omitempty"`
-	Usage            *LangFuseUsage         `json:"usage,omitempty"`
-	Level            string                 `json:"level,omitempty"` // DEBUG, DEFAULT, WARNING, ERROR
-	StatusMessage    string                 `json:"statusMessage,omitempty"`
-	CompletionStart  *time.Time             `json:"completionStartTime,omitempty"`
-	StartTime        time.Time              `json:"startTime"`
-	EndTime          *time.Time             `json:"endTime,omitempty"`
+	ID              string                 `json:"id"`
+	TraceID         string                 `json:"traceId"`
+	Name            string                 `json:"name"`
+	Model           string                 `json:"model,omitempty"`
+	ModelParameters map[string]interface{} `json:"modelParameters,omitempty"`
+	Input           interface{}            `json:"input,omitempty"`
+	Output          interface{}            `json:"output,omitempty"`
+	Metadata        map[string]interface{} `json:"metadata,omitempty"`
+	Usage           *LangFuseUsage         `json:"usage,omitempty"`
+	Level           string                 `json:"level,omitempty"` // DEBUG, DEFAULT, WARNING, ERROR
+	StatusMessage   string                 `json:"statusMessage,omitempty"`
+	CompletionStart *time.Time             `json:"completionStartTime,omitempty"`
+	StartTime       time.Time              `json:"startTime"`
+	EndTime         *time.Time             `json:"endTime,omitempty"`
 }
 
 // LangFuseUsage tracks token usage in LangFuse format.
@@ -82,7 +83,7 @@ type IngestionEvent struct {
 
 // IngestionBatch is the request body for LangFuse's /api/public/ingestion endpoint.
 type IngestionBatch struct {
-	Batch    []IngestionEvent `json:"batch"`
+	Batch    []IngestionEvent       `json:"batch"`
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 
@@ -283,20 +284,28 @@ func (b *Bridge) pushToLangFuse(ctx context.Context, batch IngestionBatch) error
 
 // ── Import: LangFuse → AgentOven ──────────────────────────────
 
+// Limits on one ingestion request: the body is read into memory, and every event becomes a stored trace.
+const (
+	maxIngestBytes  = 4 << 20
+	maxIngestEvents = 1000
+)
+
 // HandleIngest accepts LangFuse-format trace events and stores them
 // as AgentOven traces. This lets external LangChain-instrumented apps
 // send traces to AgentOven for unified observability.
 //
 // POST /langfuse/ingest
 func (b *Bridge) HandleIngest(w http.ResponseWriter, r *http.Request) {
-	kitchen := r.Header.Get("X-Kitchen")
-	if kitchen == "" {
-		kitchen = "default"
-	}
+	// The kitchen the authenticated request is for (the same one the role check was made in), never the raw header.
+	kitchen := pkgmw.GetKitchen(r.Context())
 
 	var batch IngestionBatch
-	if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxIngestBytes)).Decode(&batch); err != nil {
+		http.Error(w, "invalid JSON or body larger than the limit", http.StatusBadRequest)
+		return
+	}
+	if len(batch.Batch) > maxIngestEvents {
+		http.Error(w, "too many events in one batch", http.StatusRequestEntityTooLarge)
 		return
 	}
 
@@ -331,11 +340,11 @@ func (b *Bridge) convertFromLangFuse(kitchen string, event IngestionEvent) *mode
 	}
 
 	return &models.Trace{
-		ID:         lfTrace.ID,
-		AgentName:  lfTrace.Name,
-		Kitchen:    kitchen,
-		Status:     "imported",
-		UserID:     lfTrace.UserID,
+		ID:        lfTrace.ID,
+		AgentName: lfTrace.Name,
+		Kitchen:   kitchen,
+		Status:    "imported",
+		UserID:    lfTrace.UserID,
 		Metadata: map[string]interface{}{
 			"source":     "langfuse",
 			"session_id": lfTrace.SessionID,
@@ -353,10 +362,8 @@ func (b *Bridge) convertFromLangFuse(kitchen string, event IngestionEvent) *mode
 // HandleExport exports all traces for a kitchen to LangFuse.
 // POST /langfuse/export
 func (b *Bridge) HandleExport(w http.ResponseWriter, r *http.Request) {
-	kitchen := r.Header.Get("X-Kitchen")
-	if kitchen == "" {
-		kitchen = "default"
-	}
+	// The kitchen the authenticated request is for (the same one the role check was made in), never the raw header.
+	kitchen := pkgmw.GetKitchen(r.Context())
 
 	traces, err := b.store.ListTraces(r.Context(), kitchen, 1000)
 	if err != nil {

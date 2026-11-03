@@ -76,3 +76,4 @@ What other options were evaluated and why were they rejected?
 | [0029](0029-agentic-bot-runtime-seam.md) | The `agenticbot` runtime seam — OSS hooks for Pro-managed computer-use agents | Accepted | 2026-10-12 |
 | [0031](0031-native-tool-transport-and-tool-approval-seams.md) | The native tool transport and tool-level approval seams — OSS hooks for Pro tool packs | Accepted | 2026-11-03 |
 | [0032](0032-guardrail-actions-and-hops.md) | Guardrail actions (block, redact, mask, warn, require_approval), validated detectors, retrieval hop and custom evaluator seam | Accepted | 2026-11-03 |
+| [0033](0033-route-guard-seam-and-kitchen-scoped-ids.md) | The route guard seam, provider credential pinning and ids that belong to a kitchen | Accepted | 2026-11-03 |

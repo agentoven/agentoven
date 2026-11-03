@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/agentoven/agentoven/control-plane/internal/store"
+	pkgmw "github.com/agentoven/agentoven/control-plane/pkg/middleware"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -263,10 +264,8 @@ func (a *Adapter) Relay(ctx context.Context, kitchen string, req RelayRequest) R
 
 // HandleRegister handles POST /picoclaw/instances
 func (a *Adapter) HandleRegister(w http.ResponseWriter, r *http.Request) {
-	kitchen := r.Header.Get("X-Kitchen")
-	if kitchen == "" {
-		kitchen = "default"
-	}
+	// The kitchen the authenticated request is for (the same one the role check was made in), never the raw header.
+	kitchen := pkgmw.GetKitchen(r.Context())
 
 	var req RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -287,10 +286,8 @@ func (a *Adapter) HandleRegister(w http.ResponseWriter, r *http.Request) {
 
 // HandleListInstances handles GET /picoclaw/instances
 func (a *Adapter) HandleListInstances(w http.ResponseWriter, r *http.Request) {
-	kitchen := r.Header.Get("X-Kitchen")
-	if kitchen == "" {
-		kitchen = "default"
-	}
+	// The kitchen the authenticated request is for (the same one the role check was made in), never the raw header.
+	kitchen := pkgmw.GetKitchen(r.Context())
 
 	// List agents with picoclaw framework tag
 	agents, err := a.store.ListAgents(r.Context(), kitchen)
@@ -312,10 +309,8 @@ func (a *Adapter) HandleListInstances(w http.ResponseWriter, r *http.Request) {
 
 // HandleRelay handles POST /picoclaw/relay
 func (a *Adapter) HandleRelay(w http.ResponseWriter, r *http.Request) {
-	kitchen := r.Header.Get("X-Kitchen")
-	if kitchen == "" {
-		kitchen = "default"
-	}
+	// The kitchen the authenticated request is for (the same one the role check was made in), never the raw header.
+	kitchen := pkgmw.GetKitchen(r.Context())
 
 	var req RelayRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -333,10 +328,8 @@ func (a *Adapter) HandleRelay(w http.ResponseWriter, r *http.Request) {
 
 // HandleHealthCheck handles GET /picoclaw/instances/{name}/health
 func (a *Adapter) HandleHealthCheck(w http.ResponseWriter, r *http.Request) {
-	kitchen := r.Header.Get("X-Kitchen")
-	if kitchen == "" {
-		kitchen = "default"
-	}
+	// The kitchen the authenticated request is for (the same one the role check was made in), never the raw header.
+	kitchen := pkgmw.GetKitchen(r.Context())
 
 	// Extract instance name from URL
 	name := r.URL.Query().Get("name")

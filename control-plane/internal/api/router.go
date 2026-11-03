@@ -62,6 +62,18 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 		MaxAge:           300,
 	}))
 
+	// The edition's route guard (roles). After CORS so a preflight is answered without it, and after
+	// authentication so it sees the identity and the role it holds in the request's kitchen.
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if h.RouteGuard != nil {
+				h.RouteGuard(next).ServeHTTP(w, req)
+				return
+			}
+			next.ServeHTTP(w, req)
+		})
+	})
+
 	// Health & info
 	r.Get("/health", healthHandler)
 	r.Get("/version", versionHandler(cfg))

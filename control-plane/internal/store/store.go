@@ -500,6 +500,12 @@ type ErrConflict struct {
 	Entity string
 	Key    string
 }
+// ErrKitchenRequired is returned by a store call that filters by kitchen when it is given none. An empty
+// kitchen used to mean "every kitchen", so a caller that lost the kitchen on the way (a header read in
+// place of the authenticated one) listed another tenant's records. A caller that really means every kitchen
+// does not exist in the API; an internal sweep names its scope some other way.
+var ErrKitchenRequired = errors.New("a kitchen is required: an empty kitchen is not a wildcard")
+
 
 func (e *ErrConflict) Error() string {
 	return e.Entity + " already exists: " + e.Key

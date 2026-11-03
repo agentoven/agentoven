@@ -10,6 +10,7 @@ import (
 
 	"github.com/agentoven/agentoven/control-plane/internal/store"
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
+	pkgmw "github.com/agentoven/agentoven/control-plane/pkg/middleware"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -218,10 +219,8 @@ func extractInstanceName(agentName string) string {
 
 // HandleCreateGateway handles POST /picoclaw/gateways
 func (m *GatewayManager) HandleCreateGateway(w http.ResponseWriter, r *http.Request) {
-	kitchen := r.Header.Get("X-Kitchen")
-	if kitchen == "" {
-		kitchen = "default"
-	}
+	// The kitchen the authenticated request is for (the same one the role check was made in), never the raw header.
+	kitchen := pkgmw.GetKitchen(r.Context())
 
 	var req CreateGatewayRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

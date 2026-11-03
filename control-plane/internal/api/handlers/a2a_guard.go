@@ -160,7 +160,10 @@ func (h *Handlers) proxyA2AGuarded(w http.ResponseWriter, r *http.Request, backe
 	// work (send, stream) is registered here under the run ID the process will be sent; the other
 	// methods (get, cancel) start nothing and pass through.
 	if agent.IsAgenticBot() {
-		raw, _ := io.ReadAll(r.Body)
+		raw, ok := readA2ABody(w, r)
+		if !ok {
+			return
+		}
 		r.Body = io.NopCloser(bytes.NewReader(raw))
 		if req := parseA2ARequest(raw); req.hasMsg {
 			runID := hostedRunFrom(r.Context())
@@ -191,7 +194,10 @@ func (h *Handlers) proxyA2AGuarded(w http.ResponseWriter, r *http.Request, backe
 		return
 	}
 
-	body, _ := io.ReadAll(r.Body)
+	body, ok := readA2ABody(w, r)
+	if !ok {
+		return
+	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	req := parseA2ARequest(body)
 	if !req.hasMsg {
@@ -210,6 +216,10 @@ func (h *Handlers) proxyA2AGuarded(w http.ResponseWriter, r *http.Request, backe
 	input := req.text
 	if input == "" {
 		input = string(body) // an unfamiliar message shape: check the whole envelope rather than nothing
+	} else if extra := a2aNonTextRequest(body); extra != "" {
+		// File names and text files, data parts: judged with the text. A redaction in them cannot be
+		// written back part by part, so redactA2A refuses the message then (fails closed).
+		input += "\n" + extra
 	}
 	if eval, gErr := h.Guardrails.EvaluateInput(r.Context(), gr, input); gErr != nil {
 		log.Warn().Err(gErr).Str("agent", agent.Name).Msg("Input guardrail evaluation error (A2A)")
@@ -242,6 +252,9 @@ func (h *Handlers) proxyA2AGuarded(w http.ResponseWriter, r *http.Request, backe
 	rec := newBufferedResponse()
 	h.proxyA2ARequest(rec, r, backendURL, agent.Name, agent.Kitchen, agent.IsManaged())
 	out := a2aResponseText(rec.body.Bytes())
+	if extra := a2aNonTextResponse(rec.body.Bytes()); extra != "" && !req.streaming {
+		out = joinNonEmpty([]string{out, extra})
+	}
 	if req.streaming {
 		// An agent with output rules does not stream: the frames are held back, checked,
 		// then released (stream_guard.go).
@@ -289,10 +302,9 @@ func (h *Handlers) a2aFilesInProcess(w http.ResponseWriter, r *http.Request, age
 	if !agent.IsManaged() || agent.IsFrameworkNative() || agent.IsAgenticBot() || r.Body == nil {
 		return false
 	}
-	raw, err := io.ReadAll(r.Body)
-	r.Body = io.NopCloser(bytes.NewReader(raw))
-	if err != nil {
-		return false
+	raw, ok := readA2ABody(w, r)
+	if !ok {
+		return true // answered: too large
 	}
 	var env struct {
 		ID     interface{}            `json:"id"`

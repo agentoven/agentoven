@@ -207,7 +207,8 @@ func NewModelRouter(s store.Store) *ModelRouter {
 	mr := &ModelRouter{
 		store: s,
 		client: &http.Client{
-			Timeout: 120 * time.Second,
+			Timeout:       120 * time.Second,
+			CheckRedirect: refuseCrossHostRedirect,
 		},
 		latencies: make(map[string]int64),
 		costs:     make(map[string]*models.CostSummary),
@@ -309,7 +310,8 @@ func (mr *ModelRouter) clientFor(p *models.ModelProvider) *http.Client {
 		tlsCfg.RootCAs = pool
 	}
 	c := &http.Client{
-		Timeout: mr.client.Timeout,
+		Timeout:       mr.client.Timeout,
+		CheckRedirect: refuseCrossHostRedirect,
 		Transport: &http.Transport{
 			TLSClientConfig:       tlsCfg,
 			MaxIdleConns:          100,
