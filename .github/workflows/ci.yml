@@ -16,6 +16,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # macOS runners ship Python 3.14, newer than the newest PyO3 0.22 supports; build against the stable ABI
+  PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
   RUSTFLAGS: -Dwarnings
 
 jobs:
