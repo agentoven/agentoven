@@ -40,6 +40,7 @@ use agentoven_core::recipe::steps_from_documents;
 /// Top-level discriminator for manifest documents.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind")]
+#[allow(clippy::large_enum_variant)] // parsed once per document, never stored in bulk
 pub enum Manifest {
     Agent(AgentManifest),
     Recipe(RecipeManifest),
@@ -163,11 +164,7 @@ pub async fn execute(args: ApplyArgs) -> anyhow::Result<()> {
         anyhow::bail!("No valid documents found in {}", args.file);
     }
 
-    println!(
-        "  {} Parsed {} resource(s):",
-        "→".dimmed(),
-        manifests.len()
-    );
+    println!("  {} Parsed {} resource(s):", "→".dimmed(), manifests.len());
 
     for m in &manifests {
         match m {
@@ -178,20 +175,15 @@ pub async fn execute(args: ApplyArgs) -> anyhow::Result<()> {
                 r.name.bold(),
                 r.steps.len()
             ),
-            Manifest::ToolSet(t) => println!(
-                "    {} ToolSet ({} tools)",
-                "•".dimmed(),
-                t.tools.len()
-            ),
+            Manifest::ToolSet(t) => {
+                println!("    {} ToolSet ({} tools)", "•".dimmed(), t.tools.len())
+            }
         }
     }
     println!();
 
     if args.dry_run {
-        println!(
-            "  {} Dry run — no changes applied.",
-            "ℹ".blue().bold()
-        );
+        println!("  {} Dry run — no changes applied.", "ℹ".blue().bold());
         return Ok(());
     }
 
@@ -232,11 +224,7 @@ pub async fn execute(args: ApplyArgs) -> anyhow::Result<()> {
             },
             Manifest::ToolSet(t) => match apply_toolset(&client, t).await {
                 Ok(count) => {
-                    println!(
-                        "  {} ToolSet applied ({} tools)",
-                        "✓".green().bold(),
-                        count
-                    );
+                    println!("  {} ToolSet applied ({} tools)", "✓".green().bold(), count);
                     success += 1;
                 }
                 Err(e) => {
@@ -285,9 +273,7 @@ fn parse_manifests(path: &str, content: &str) -> anyhow::Result<Vec<Manifest>> {
             .or_else(|_| parse_json_manifest(content))
             .or_else(|_| parse_toml_manifest(content))
             .map_err(|_| {
-                anyhow::anyhow!(
-                    "Could not detect format. Use .yaml, .json, or .toml extension."
-                )
+                anyhow::anyhow!("Could not detect format. Use .yaml, .json, or .toml extension.")
             })
     }
 }
@@ -433,7 +419,11 @@ async fn apply_recipe(
         println!("  {} {}", "⚠".yellow().bold(), w.dimmed());
     }
     client
-        .create_recipe_steps(&manifest.name, manifest.description.as_deref().unwrap_or(""), steps)
+        .create_recipe_steps(
+            &manifest.name,
+            manifest.description.as_deref().unwrap_or(""),
+            steps,
+        )
         .await?;
     Ok(manifest.name)
 }
@@ -470,7 +460,10 @@ async fn apply_toolset(
         .collect();
 
     // Try bulk endpoint
-    match client.bulk_add_tools(serde_json::json!({ "tools": tools_json })).await {
+    match client
+        .bulk_add_tools(serde_json::json!({ "tools": tools_json }))
+        .await
+    {
         Ok(_) => return Ok(count),
         Err(_) => {
             // Fall back to individual adds

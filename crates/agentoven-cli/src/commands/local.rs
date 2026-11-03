@@ -95,7 +95,8 @@ pub async fn execute(cmd: LocalCommands) -> anyhow::Result<()> {
 
 /// `~/.agentoven/local/`
 fn local_dir() -> anyhow::Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
     let dir = home.join(".agentoven").join("local");
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
@@ -180,10 +181,7 @@ async fn up(
 
     let version = version.unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
 
-    println!(
-        "\n  {} Starting local AgentOven server...",
-        "🏺".to_string()
-    );
+    println!("\n  🏺 Starting local AgentOven server...");
     println!("  Mode:    {}", mode.cyan().bold());
     println!("  Port:    {}", port.to_string().cyan());
     println!("  Version: {}\n", version.cyan());
@@ -206,14 +204,10 @@ async fn up_docker(port: u16, version: &str, no_pg: bool) -> anyhow::Result<()> 
     // Generate a docker-compose.yml tailored for `agentoven local`
     let compose_content = generate_compose(port, version, no_pg);
     std::fs::write(&compose_path, &compose_content)?;
-    println!(
-        "  {} Wrote {}",
-        "✓".green().bold(),
-        compose_path.display()
-    );
+    println!("  {} Wrote {}", "✓".green().bold(), compose_path.display());
 
     // Pull images
-    println!("  {} Pulling images (first run may take a minute)...", "⏳".to_string());
+    println!("  ⏳ Pulling images (first run may take a minute)...");
     let pull = Command::new("docker")
         .args(["compose", "-f"])
         .arg(&compose_path)
@@ -316,7 +310,11 @@ async fn up_binary(port: u16, version: &str, no_pg: bool) -> anyhow::Result<()> 
     if !bin.exists() || !version_matches(&bin, version) {
         download_binary(&bin, version).await?;
     } else {
-        println!("  {} Server binary cached at {}", "✓".green().bold(), bin.display());
+        println!(
+            "  {} Server binary cached at {}",
+            "✓".green().bold(),
+            bin.display()
+        );
     }
 
     // Check if already running
@@ -345,9 +343,7 @@ async fn up_binary(port: u16, version: &str, no_pg: bool) -> anyhow::Result<()> 
             "  {} Binary mode defaults to in-memory store (no PostgreSQL).",
             "ℹ".blue().bold()
         );
-        eprintln!(
-            "  Set DATABASE_URL to use PostgreSQL, or pass --no-pg to silence this."
-        );
+        eprintln!("  Set DATABASE_URL to use PostgreSQL, or pass --no-pg to silence this.");
     }
     cmd.stdout(log_handle);
     cmd.stderr(err_handle);
@@ -370,11 +366,9 @@ async fn up_binary(port: u16, version: &str, no_pg: bool) -> anyhow::Result<()> 
 async fn download_binary(dest: &PathBuf, version: &str) -> anyhow::Result<()> {
     let (os, arch) = detect_platform()?;
     let archive = format!("agentoven-server-{os}-{arch}.tar.gz");
-    let url = format!(
-        "https://github.com/{GITHUB_REPO}/releases/download/v{version}/{archive}"
-    );
+    let url = format!("https://github.com/{GITHUB_REPO}/releases/download/v{version}/{archive}");
 
-    println!("  {} Downloading server v{version}...", "⏳".to_string());
+    println!("  ⏳ Downloading server v{version}...");
     println!("  {}", url.dimmed());
 
     // Download with reqwest
@@ -454,7 +448,7 @@ fn detect_platform() -> anyhow::Result<(&'static str, &'static str)> {
     Ok((os, arch))
 }
 
-fn version_matches(bin: &PathBuf, version: &str) -> bool {
+fn version_matches(bin: &std::path::Path, version: &str) -> bool {
     let version_file = bin.with_extension("version");
     std::fs::read_to_string(version_file)
         .map(|v| v.trim() == version)
@@ -496,13 +490,17 @@ async fn post_start(port: u16) -> anyhow::Result<()> {
     config.edition = Some("community".into());
     config.save()?;
 
-    println!("\n  {} Local AgentOven is ready!", "🟢".to_string());
+    println!("\n  🟢 Local AgentOven is ready!");
     println!();
     println!("    API:       {}", local_url.cyan().bold());
     println!("    Dashboard: {}/dashboard", local_url);
     println!();
     println!("  The CLI is now configured to use this server.");
-    println!("  Try: {} or {}", "agentoven agent list".cyan(), "agentoven status".cyan());
+    println!(
+        "  Try: {} or {}",
+        "agentoven agent list".cyan(),
+        "agentoven status".cyan()
+    );
     println!();
 
     Ok(())
@@ -565,7 +563,10 @@ async fn down_binary() -> anyhow::Result<()> {
             }
             println!("  {} Local server stopped (binary)", "✓".green().bold());
         } else {
-            println!("  {} Server was not running (stale PID file)", "ℹ".blue().bold());
+            println!(
+                "  {} Server was not running (stale PID file)",
+                "ℹ".blue().bold()
+            );
         }
         let _ = std::fs::remove_file(pid_file()?);
     } else {
@@ -597,7 +598,10 @@ async fn status() -> anyhow::Result<()> {
                     print!("{}", table);
                 }
             } else {
-                println!("  Status: {} (docker compose not available)", "unknown".yellow());
+                println!(
+                    "  Status: {} (docker compose not available)",
+                    "unknown".yellow()
+                );
             }
         }
         Some("binary") => {
@@ -677,7 +681,10 @@ async fn logs(lines: usize, follow: bool) -> anyhow::Result<()> {
 // ── RESET ────────────────────────────────────────────────────────────
 
 async fn reset() -> anyhow::Result<()> {
-    println!("\n  {} Resetting local AgentOven data...\n", "⚠".yellow().bold());
+    println!(
+        "\n  {} Resetting local AgentOven data...\n",
+        "⚠".yellow().bold()
+    );
 
     // Stop everything
     down().await.ok();
@@ -709,7 +716,10 @@ async fn reset() -> anyhow::Result<()> {
     // Clear mode file
     let _ = std::fs::remove_file(mode_file()?);
 
-    println!("  {} Reset complete. Run `agentoven local up` to start fresh.\n", "✓".green().bold());
+    println!(
+        "  {} Reset complete. Run `agentoven local up` to start fresh.\n",
+        "✓".green().bold()
+    );
     Ok(())
 }
 

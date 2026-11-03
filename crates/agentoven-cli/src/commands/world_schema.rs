@@ -87,13 +87,20 @@ async fn list() -> anyhow::Result<()> {
     let schemas: Vec<serde_json::Value> = client.raw_get("/api/v1/world-schemas").await?;
 
     if schemas.is_empty() {
-        println!("  (none — create one with {})", "agentoven schema push <file> --create".cyan());
+        println!(
+            "  (none — create one with {})",
+            "agentoven schema push <file> --create".cyan()
+        );
         return Ok(());
     }
 
     println!(
         "  {:<28} {:<8} {:<10} {:<10} {}",
-        "ID".bold(), "VERSION".bold(), "STATUS".bold(), "CLASSES".bold(), "DOMAIN".bold()
+        "ID".bold(),
+        "VERSION".bold(),
+        "STATUS".bold(),
+        "CLASSES".bold(),
+        "DOMAIN".bold()
     );
     println!("  {}", "─".repeat(84).dimmed());
 
@@ -130,7 +137,12 @@ async fn pull(args: PullArgs) -> anyhow::Result<()> {
     match args.out {
         Some(path) => {
             tokio::fs::write(&path, &yaml).await?;
-            println!("\n  {} Wrote {} to {}\n", "✓".green().bold(), args.id.bold(), path.cyan());
+            println!(
+                "\n  {} Wrote {} to {}\n",
+                "✓".green().bold(),
+                args.id.bold(),
+                path.cyan()
+            );
         }
         None => println!("\n{}", yaml),
     }
@@ -167,14 +179,22 @@ async fn push(args: PushArgs) -> anyhow::Result<()> {
             // score recorded under the old one, so say so rather than letting
             // it be discovered later.
             if let Some(v) = saved["schema"]["version"].as_str() {
-                println!("  {} scenarios pinning v{} are validated against this.", "→".dimmed(), v);
+                println!(
+                    "  {} scenarios pinning v{} are validated against this.",
+                    "→".dimmed(),
+                    v
+                );
             }
             print_issues(saved["issues"].as_array());
         }
         Err(e) => {
             println!("\n  {} {}\n", "✗".red().bold(), e.to_string().dimmed());
             if !args.create {
-                println!("  {} pass {} if this schema is new.\n", "→".dimmed(), "--create".cyan());
+                println!(
+                    "  {} pass {} if this schema is new.\n",
+                    "→".dimmed(),
+                    "--create".cyan()
+                );
             }
         }
     }
@@ -188,7 +208,10 @@ async fn validate(args: IdArgs) -> anyhow::Result<()> {
         .await?;
 
     let out: serde_json::Value = client
-        .raw_post(&format!("/api/v1/world-schemas/{}/validate", args.id), &schema)
+        .raw_post(
+            &format!("/api/v1/world-schemas/{}/validate", args.id),
+            &schema,
+        )
         .await?;
 
     println!("\n  Validating {}\n", args.id.bold());
@@ -259,7 +282,10 @@ async fn usage(args: UsageArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let kinds: Vec<&str> = out["kinds"].as_array().map(|k| k.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+    let kinds: Vec<&str> = out["kinds"]
+        .as_array()
+        .map(|k| k.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
     println!(
         "\n  {} {} is used by {} scenario(s) ({})\n",
         "⚠".yellow().bold(),

@@ -129,7 +129,10 @@ impl AgentOvenConfig {
         if let Ok(kitchen) = std::env::var("AGENTOVEN_KITCHEN") {
             cfg.kitchen = Some(kitchen);
         }
-        if let Some(secs) = std::env::var("AGENTOVEN_TIMEOUT").ok().and_then(|v| v.parse().ok()) {
+        if let Some(secs) = std::env::var("AGENTOVEN_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
             cfg.timeout_secs = Some(secs);
         }
 
@@ -243,7 +246,10 @@ mod secret_tests {
         std::fs::write(&path, "old").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        let cfg = AgentOvenConfig { api_key: Some("k".into()), ..Default::default() };
+        let cfg = AgentOvenConfig {
+            api_key: Some("k".into()),
+            ..Default::default()
+        };
         cfg.save_to(&path).unwrap();
         let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&path), 0o600);

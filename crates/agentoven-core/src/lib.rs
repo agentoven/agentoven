@@ -52,7 +52,7 @@ pub use client::controls::{
     USAGE_GROUPS,
 };
 pub use client::pro::{
-    check_role, check_retention_mode, ApiError, DatasetExport, OidcSigningRequired, Signature,
+    check_retention_mode, check_role, ApiError, DatasetExport, OidcSigningRequired, Signature,
     KITCHEN_ROLES, PERSON_ROLES, SIGNING_GATES, SIGNING_TOKEN_HEADER,
 };
 pub use client::AgentOvenClient;

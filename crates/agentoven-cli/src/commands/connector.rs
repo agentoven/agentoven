@@ -132,13 +132,19 @@ async fn list() -> anyhow::Result<()> {
     let connectors: Vec<serde_json::Value> = client.raw_get("/api/v1/connectors").await?;
 
     if connectors.is_empty() {
-        println!("  (none — create one with {})", "agentoven connector push <file> --create".cyan());
+        println!(
+            "  (none — create one with {})",
+            "agentoven connector push <file> --create".cyan()
+        );
         return Ok(());
     }
 
     println!(
         "  {:<24} {:<12} {:<20} {:<10}",
-        "NAME".bold(), "KIND".bold(), "ENVIRONMENTS".bold(), "STATE".bold()
+        "NAME".bold(),
+        "KIND".bold(),
+        "ENVIRONMENTS".bold(),
+        "STATE".bold()
     );
     println!("  {}", "─".repeat(70).dimmed());
 
@@ -148,7 +154,10 @@ async fn list() -> anyhow::Result<()> {
             .map(|m| m.keys().map(|s| s.as_str()).collect())
             .unwrap_or_default();
         let issues = c["issues"].as_array().cloned().unwrap_or_default();
-        let errors = issues.iter().filter(|i| i["level"].as_str() == Some("error")).count();
+        let errors = issues
+            .iter()
+            .filter(|i| i["level"].as_str() == Some("error"))
+            .count();
 
         let state = if errors > 0 {
             format!("{} error(s)", errors).red().to_string()
@@ -197,7 +206,12 @@ async fn pull(args: PullArgs) -> anyhow::Result<()> {
     match args.out {
         Some(path) => {
             tokio::fs::write(&path, &yaml).await?;
-            println!("\n  {} Wrote {} to {}\n", "✓".green().bold(), args.name.bold(), path.cyan());
+            println!(
+                "\n  {} Wrote {} to {}\n",
+                "✓".green().bold(),
+                args.name.bold(),
+                path.cyan()
+            );
         }
         None => println!("\n{}", yaml),
     }
@@ -235,7 +249,11 @@ async fn push(args: PushArgs) -> anyhow::Result<()> {
         Err(e) => {
             println!("\n  {} {}\n", "✗".red().bold(), e.to_string().dimmed());
             if !args.create {
-                println!("  {} pass {} if this connector is new.\n", "→".dimmed(), "--create".cyan());
+                println!(
+                    "  {} pass {} if this connector is new.\n",
+                    "→".dimmed(),
+                    "--create".cyan()
+                );
             }
         }
     }
@@ -248,9 +266,7 @@ async fn validate(args: IdArgs) -> anyhow::Result<()> {
         .raw_get(&format!("/api/v1/connectors/{}", args.name))
         .await?;
 
-    let out: serde_json::Value = client
-        .raw_post("/api/v1/connectors/validate", &rec)
-        .await?;
+    let out: serde_json::Value = client.raw_post("/api/v1/connectors/validate", &rec).await?;
 
     println!("\n  Validating {}\n", args.name.bold());
     print_issues(out["issues"].as_array());
@@ -267,7 +283,11 @@ async fn ready(args: ReadyArgs) -> anyhow::Result<()> {
     );
     let out: serde_json::Value = client.raw_get(&path).await?;
 
-    let what = if args.secrets { "provisioning" } else { "the definition" };
+    let what = if args.secrets {
+        "provisioning"
+    } else {
+        "the definition"
+    };
     println!(
         "\n  Checking {} for {} in {}\n",
         what,

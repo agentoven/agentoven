@@ -113,7 +113,11 @@ pub fn check_retention_mode(mode: &str) -> anyhow::Result<()> {
 
 /// The error for a refused request: a [`crate::ConfigurationError`] (with its problems) for a 422 whose `code`
 /// is `invalid_configuration`, an [`ApiError`] for everything else.
-pub(crate) fn failure(status: u16, text: &str, headers: &reqwest::header::HeaderMap) -> anyhow::Error {
+pub(crate) fn failure(
+    status: u16,
+    text: &str,
+    headers: &reqwest::header::HeaderMap,
+) -> anyhow::Error {
     let api = ApiError::from_response(status, text, headers);
     match crate::refcheck::ConfigurationError::from_reply(status, &api.detail) {
         Some(config) => config.into(),
@@ -169,7 +173,8 @@ impl ApiError {
 
     /// A budget is used up (HTTP 402, `run_budget_exhausted` or `budget_exceeded`).
     pub fn is_budget_exceeded(&self) -> bool {
-        self.status == 402 && (self.code == "run_budget_exhausted" || self.code == "budget_exceeded")
+        self.status == 402
+            && (self.code == "run_budget_exhausted" || self.code == "budget_exceeded")
     }
 
     /// What is limited or whose budget it is: `kitchen`, `agent`, `api_key`, `provider` (or `run`).
@@ -565,6 +570,7 @@ impl AgentOvenClient {
     /// captured results, stopping at the first call with none), `blocked` (the call is returned, not run) or
     /// `live` (only `live_tools`, only idempotent ones, a signed decision on the `live_tool_replay` gate:
     /// pass a [`Signature`]; a password has this method ask [`Self::prepare_live_replay`] what to sign).
+    #[allow(clippy::too_many_arguments)] // one argument per field of the route's body
     pub async fn replay_run(
         &self,
         trace_id: &str,
@@ -1281,7 +1287,7 @@ mod tests {
         let (c, log) = client(routes).await;
         let v = json!({"label": "cooler", "edits": {"temperature": 0.1}});
         let out = c
-            .replay_call("t/1", "s1", &[v.clone()], "why")
+            .replay_call("t/1", "s1", std::slice::from_ref(&v), "why")
             .await
             .unwrap();
         assert_eq!(out["variants"][0]["status"], "completed");
@@ -1310,7 +1316,7 @@ mod tests {
             log.last().body,
             json!({"from_span": "s2", "edits": {"model": "m"}, "tools": "frozen", "live_tools": [], "reason": "r"})
         );
-        assert!(log.last().headers.get("x-signing-token").is_none());
+        assert!(!log.last().headers.contains_key("x-signing-token"));
         c.replay_run("t1", "s2", &json!({}), "blocked", &[], "", Signature::None)
             .await
             .unwrap();
@@ -1597,7 +1603,7 @@ mod tests {
         );
         assert_eq!(log.last().headers["x-signing-token"], "tok.sig");
         c.publish_dataset("ds1", Signature::None).await.unwrap();
-        assert!(log.last().headers.get("x-signing-token").is_none());
+        assert!(!log.last().headers.contains_key("x-signing-token"));
     }
 
     #[tokio::test]
@@ -1825,7 +1831,7 @@ mod tests {
         c.run_recipe("refunds", &json!({}), Some("dev"), Signature::None)
             .await
             .unwrap();
-        assert!(log.last().headers.get("x-signing-token").is_none());
+        assert!(!log.last().headers.contains_key("x-signing-token"));
         assert!(c
             .run_recipe("refunds", &json!({}), None, Signature::Password("pw"))
             .await

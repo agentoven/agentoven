@@ -81,9 +81,7 @@ async fn query(args: QueryArgs) -> anyhow::Result<()> {
 
             // Display sources if requested
             if args.sources {
-                if let Some(sources) = result["sources"]
-                    .as_array()
-                {
+                if let Some(sources) = result["sources"].as_array() {
                     if !sources.is_empty() {
                         println!("  {} ({}):", "Sources".bold(), sources.len());
                         println!("  {}", "─".repeat(60).dimmed());
@@ -94,9 +92,7 @@ async fn query(args: QueryArgs) -> anyhow::Result<()> {
                                 .unwrap_or("(untitled)");
                             let score = src["score"].as_f64().unwrap_or(0.0);
                             println!("  {}. {} (score: {:.3})", i + 1, title.cyan(), score);
-                            if let Some(chunk) =
-                                src["doc"]["content"].as_str()
-                            {
+                            if let Some(chunk) = src["doc"]["content"].as_str() {
                                 let preview = if chunk.len() > 120 {
                                     format!("{}...", &chunk[..120])
                                 } else {
@@ -185,9 +181,7 @@ async fn ingest(args: IngestArgs) -> anyhow::Result<()> {
     match client.rag_ingest(body).await {
         Ok(result) => {
             pb.finish_and_clear();
-            let chunks = result["chunks_created"]
-                .as_u64()
-                .unwrap_or(0);
+            let chunks = result["chunks_created"].as_u64().unwrap_or(0);
             let docs = result["documents_processed"]
                 .as_u64()
                 .unwrap_or(documents.len() as u64);

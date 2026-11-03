@@ -437,7 +437,9 @@ mod tests {
 
     #[test]
     fn the_summary_model_is_a_provider_and_a_model() {
-        let agent = Agent::builder("a").summary_model("anthropic", "claude-haiku-4-5").build();
+        let agent = Agent::builder("a")
+            .summary_model("anthropic", "claude-haiku-4-5")
+            .build();
         assert_eq!(agent.summary_provider.as_deref(), Some("anthropic"));
         assert_eq!(agent.summary_model.as_deref(), Some("claude-haiku-4-5"));
         let json = serde_json::to_value(&agent).unwrap();
@@ -453,7 +455,10 @@ mod tests {
             let f: AgentFramework = serde_json::from_str(&format!("\"{name}\"")).unwrap();
             assert_eq!(f, AgentFramework::Deepagents, "{name}");
         }
-        assert_eq!(serde_json::to_string(&AgentFramework::Deepagents).unwrap(), "\"deepagents\"");
+        assert_eq!(
+            serde_json::to_string(&AgentFramework::Deepagents).unwrap(),
+            "\"deepagents\""
+        );
         // It must not be mistaken for the framework it is built on.
         let lg: AgentFramework = serde_json::from_str("\"langgraph\"").unwrap();
         assert_ne!(lg, AgentFramework::Deepagents);

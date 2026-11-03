@@ -32,7 +32,10 @@ pub async fn execute(args: LoginArgs) -> anyhow::Result<()> {
             let edition = info["edition"].as_str().unwrap_or("community");
 
             if edition == "community" {
-                println!("\n  {} Login is not available for community edition.\n", "ℹ".cyan().bold());
+                println!(
+                    "\n  {} Login is not available for community edition.\n",
+                    "ℹ".cyan().bold()
+                );
                 println!("  Community authentication uses API keys.");
                 println!("  Use these commands instead:\n");
                 println!("    agentoven config set-url <url>     Set the server URL");
@@ -43,7 +46,10 @@ pub async fn execute(args: LoginArgs) -> anyhow::Result<()> {
             }
 
             // Pro/Enterprise login flow
-            println!("\n  🔑 Authenticating with AgentOven {} ...\n", edition.cyan().bold());
+            println!(
+                "\n  🔑 Authenticating with AgentOven {} ...\n",
+                edition.cyan().bold()
+            );
 
             let api_key = if let Some(key) = args.api_key {
                 key
@@ -64,7 +70,12 @@ pub async fn execute(args: LoginArgs) -> anyhow::Result<()> {
                     .unwrap_or_else(|| "(unknown)".to_string())
                     .cyan()
             );
-            println!("  {} Connected to: {} ({})", "→".dimmed(), config.url.cyan(), edition);
+            println!(
+                "  {} Connected to: {} ({})",
+                "→".dimmed(),
+                config.url.cyan(),
+                edition
+            );
         }
         Err(_) => {
             // Server unreachable — fall back to basic login (save key anyway)

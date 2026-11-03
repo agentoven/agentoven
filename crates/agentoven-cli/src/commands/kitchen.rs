@@ -144,7 +144,10 @@ pub async fn bindings(
             } else {
                 out.push_str(&format!(
                     "  {:<38} {:<40} {:<10} {}\n",
-                    "ID".bold(), "GROUP / APP ROLE".bold(), "ROLE".bold(), "LABEL".bold()
+                    "ID".bold(),
+                    "GROUP / APP ROLE".bold(),
+                    "ROLE".bold(),
+                    "LABEL".bold()
                 ));
                 for b in &bs {
                     out.push_str(&format!(
@@ -171,8 +174,14 @@ pub async fn bindings(
             ))
         }
         BindingCommands::Rm(a) => {
-            client.delete_kitchen_binding(&a.kitchen, &a.binding).await?;
-            Ok(format!("  {} Removed binding {}.\n", "✓".green().bold(), a.binding))
+            client
+                .delete_kitchen_binding(&a.kitchen, &a.binding)
+                .await?;
+            Ok(format!(
+                "  {} Removed binding {}.\n",
+                "✓".green().bold(),
+                a.binding
+            ))
         }
     }
 }
@@ -454,11 +463,32 @@ mod tests {
         ])).await;
         let c = agentoven_core::AgentOvenClient::new(&base).unwrap();
         let out = bindings(bindings_cmd(&["ls", "k1"]), &c).await.unwrap();
-        assert!(out.contains("g-1") && out.contains("chef") && out.contains("builders"), "{out}");
-        let out = bindings(bindings_cmd(&["add", "k1", "aad-group", "--role", "taster", "--label", "QA"]), &c).await.unwrap();
+        assert!(
+            out.contains("g-1") && out.contains("chef") && out.contains("builders"),
+            "{out}"
+        );
+        let out = bindings(
+            bindings_cmd(&[
+                "add",
+                "k1",
+                "aad-group",
+                "--role",
+                "taster",
+                "--label",
+                "QA",
+            ]),
+            &c,
+        )
+        .await
+        .unwrap();
         assert!(out.contains("next login"), "{out}");
-        assert_eq!(log.last().body, json!({"claim_value": "aad-group", "role": "taster", "label": "QA"}));
-        bindings(bindings_cmd(&["rm", "k1", "b2"]), &c).await.unwrap();
+        assert_eq!(
+            log.last().body,
+            json!({"claim_value": "aad-group", "role": "taster", "label": "QA"})
+        );
+        bindings(bindings_cmd(&["rm", "k1", "b2"]), &c)
+            .await
+            .unwrap();
         assert_eq!(log.last().method, "DELETE");
     }
 
@@ -467,7 +497,12 @@ mod tests {
         let (base, log) = fake_control_plane(Routes::new()).await;
         let c = agentoven_core::AgentOvenClient::new(&base).unwrap();
         for role in ["admin", "restaurateur", "sous_chef"] {
-            assert!(bindings(bindings_cmd(&["add", "k1", "g", "--role", role]), &c).await.is_err(), "{role}");
+            assert!(
+                bindings(bindings_cmd(&["add", "k1", "g", "--role", role]), &c)
+                    .await
+                    .is_err(),
+                "{role}"
+            );
         }
         assert!(log.is_empty());
     }
@@ -481,6 +516,12 @@ mod tests {
         )])).await;
         let c = agentoven_core::AgentOvenClient::new(&base).unwrap();
         let out = mine(&c).await.unwrap();
-        assert!(out.contains("enforced") && out.contains("acme") && out.contains("head_chef") && out.contains("labs"), "{out}");
+        assert!(
+            out.contains("enforced")
+                && out.contains("acme")
+                && out.contains("head_chef")
+                && out.contains("labs"),
+            "{out}"
+        );
     }
 }

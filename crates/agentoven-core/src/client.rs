@@ -22,10 +22,10 @@ pub mod documents;
 pub mod guardrails;
 pub mod secrets;
 pub mod toolpacks;
-/// Check a configuration against the kitchen before sending it, and read the control plane's own verdict.
-pub mod validate;
 /// Inbound triggers: start a recipe or an agent from a webhook, a mailbox or a folder (Pro, ADR-0047).
 pub mod triggers;
+/// Check a configuration against the kitchen before sending it, and read the control plane's own verdict.
+pub mod validate;
 
 /// How long one request may take before it is abandoned when nothing else is configured. Generous, because
 /// an agent invocation waits for a model; `AGENTOVEN_TIMEOUT` (seconds), the config file's `timeout_secs`
@@ -216,7 +216,11 @@ impl AgentOvenClient {
     /// Get an agent by name and optional version.
     pub async fn get_agent(&self, name: &str, version: Option<&str>) -> anyhow::Result<Agent> {
         let path = match version {
-            Some(v) => format!("/api/v1/agents/{name}/versions/{v}", name = seg(name), v = seg(v)),
+            Some(v) => format!(
+                "/api/v1/agents/{name}/versions/{v}",
+                name = seg(name),
+                v = seg(v)
+            ),
             None => format!("/api/v1/agents/{name}", name = seg(name)),
         };
         let url = self.url(&path);
@@ -248,10 +252,12 @@ impl AgentOvenClient {
     pub async fn bake(&self, agent: &Agent, environment: &str) -> anyhow::Result<Agent> {
         self.precheck_agent_bake(&agent.name, None).await?;
         let url = self.url(&format!("/api/v1/agents/{}/bake", seg(&agent.name)));
-        let request = self.authed_request(self.http.post(url)).json(&serde_json::json!({
-            "version": agent.version,
-            "environment": environment,
-        }));
+        let request = self
+            .authed_request(self.http.post(url))
+            .json(&serde_json::json!({
+                "version": agent.version,
+                "environment": environment,
+            }));
         let resp = self.send_checked(request).await?;
         Ok(resp.json().await?)
     }
@@ -302,8 +308,11 @@ impl AgentOvenClient {
     /// [`Self::create_recipe_steps`].
     pub async fn create_recipe(&self, recipe: &Recipe) -> anyhow::Result<Recipe> {
         let url = self.url("/api/v1/recipes");
-        self.precheck_recipe_write(&serde_json::to_value(recipe)?).await?;
-        let resp = self.send_checked(self.authed_request(self.http.post(url)).json(recipe)).await?;
+        self.precheck_recipe_write(&serde_json::to_value(recipe)?)
+            .await?;
+        let resp = self
+            .send_checked(self.authed_request(self.http.post(url)).json(recipe))
+            .await?;
         Ok(resp.json().await?)
     }
 
@@ -314,9 +323,14 @@ impl AgentOvenClient {
         input: serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
         self.precheck_recipe_run(recipe_name, None).await?;
-        let url = self.url(&format!("/api/v1/recipes/{recipe_name}/bake", recipe_name = seg(recipe_name)));
+        let url = self.url(&format!(
+            "/api/v1/recipes/{recipe_name}/bake",
+            recipe_name = seg(recipe_name)
+        ));
         let body = serde_json::json!({"input": input});
-        let resp = self.send_checked(self.authed_request(self.http.post(url)).json(&body)).await?;
+        let resp = self
+            .send_checked(self.authed_request(self.http.post(url)).json(&body))
+            .await?;
         Ok(resp.json().await?)
     }
 
@@ -336,7 +350,9 @@ impl AgentOvenClient {
     ) -> anyhow::Result<Agent> {
         self.precheck_agent_write(&updates).await?;
         let url = self.url(&format!("/api/v1/agents/{name}", name = seg(name)));
-        let resp = self.send_checked(self.authed_request(self.http.put(url)).json(&updates)).await?;
+        let resp = self
+            .send_checked(self.authed_request(self.http.put(url)).json(&updates))
+            .await?;
         Ok(resp.json().await?)
     }
 
@@ -360,7 +376,9 @@ impl AgentOvenClient {
     ) -> anyhow::Result<serde_json::Value> {
         self.precheck_agent_bake(name, Some(&edits)).await?;
         let url = self.url(&format!("/api/v1/agents/{name}/recook", name = seg(name)));
-        let resp = self.send_checked(self.authed_request(self.http.post(url)).json(&edits)).await?;
+        let resp = self
+            .send_checked(self.authed_request(self.http.post(url)).json(&edits))
+            .await?;
         Ok(resp.json().await?)
     }
 
@@ -447,7 +465,10 @@ impl AgentOvenClient {
     /// leaves (`GET /api/v1/agents/{name}/draft/diff`). Secrets come back masked; an agent without a
     /// draft has `has_draft: false` and no changes.
     pub async fn agent_draft_diff(&self, name: &str) -> anyhow::Result<serde_json::Value> {
-        let url = self.url(&format!("/api/v1/agents/{name}/draft/diff", name = seg(name)));
+        let url = self.url(&format!(
+            "/api/v1/agents/{name}/draft/diff",
+            name = seg(name)
+        ));
         let resp = self
             .authed_request(self.http.get(url))
             .send()
@@ -513,7 +534,10 @@ impl AgentOvenClient {
 
     /// Get a specific model provider.
     pub async fn get_provider(&self, name: &str) -> anyhow::Result<serde_json::Value> {
-        let url = self.url(&format!("/api/v1/models/providers/{name}", name = seg(name)));
+        let url = self.url(&format!(
+            "/api/v1/models/providers/{name}",
+            name = seg(name)
+        ));
         let resp = self
             .authed_request(self.http.get(url))
             .send()
@@ -528,7 +552,10 @@ impl AgentOvenClient {
         name: &str,
         provider: serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
-        let url = self.url(&format!("/api/v1/models/providers/{name}", name = seg(name)));
+        let url = self.url(&format!(
+            "/api/v1/models/providers/{name}",
+            name = seg(name)
+        ));
         let resp = self
             .authed_request(self.http.put(url))
             .json(&provider)
@@ -540,7 +567,10 @@ impl AgentOvenClient {
 
     /// Delete a model provider.
     pub async fn delete_provider(&self, name: &str) -> anyhow::Result<()> {
-        let url = self.url(&format!("/api/v1/models/providers/{name}", name = seg(name)));
+        let url = self.url(&format!(
+            "/api/v1/models/providers/{name}",
+            name = seg(name)
+        ));
         self.authed_request(self.http.delete(url))
             .send()
             .await?
@@ -550,7 +580,10 @@ impl AgentOvenClient {
 
     /// Test a provider's connectivity and credentials.
     pub async fn test_provider(&self, name: &str) -> anyhow::Result<serde_json::Value> {
-        let url = self.url(&format!("/api/v1/models/providers/{name}/test", name = seg(name)));
+        let url = self.url(&format!(
+            "/api/v1/models/providers/{name}/test",
+            name = seg(name)
+        ));
         let resp = self
             .authed_request(self.http.post(url))
             .send()
@@ -561,7 +594,10 @@ impl AgentOvenClient {
 
     /// Discover models available from a provider.
     pub async fn discover_provider(&self, name: &str) -> anyhow::Result<serde_json::Value> {
-        let url = self.url(&format!("/api/v1/models/providers/{name}/discover", name = seg(name)));
+        let url = self.url(&format!(
+            "/api/v1/models/providers/{name}/discover",
+            name = seg(name)
+        ));
         let resp = self
             .authed_request(self.http.post(url))
             .send()
@@ -711,7 +747,10 @@ impl AgentOvenClient {
 
     /// Validate a prompt template.
     pub async fn validate_prompt(&self, name: &str) -> anyhow::Result<serde_json::Value> {
-        let url = self.url(&format!("/api/v1/prompts/{name}/validate", name = seg(name)));
+        let url = self.url(&format!(
+            "/api/v1/prompts/{name}/validate",
+            name = seg(name)
+        ));
         let resp = self
             .authed_request(self.http.post(url))
             .send()
@@ -722,7 +761,10 @@ impl AgentOvenClient {
 
     /// List version history for a prompt.
     pub async fn prompt_versions(&self, name: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-        let url = self.url(&format!("/api/v1/prompts/{name}/versions", name = seg(name)));
+        let url = self.url(&format!(
+            "/api/v1/prompts/{name}/versions",
+            name = seg(name)
+        ));
         let resp = self
             .authed_request(self.http.get(url))
             .send()
@@ -822,7 +864,10 @@ impl AgentOvenClient {
 
     /// List sessions for an agent.
     pub async fn list_sessions(&self, agent_name: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-        let url = self.url(&format!("/api/v1/agents/{agent_name}/sessions", agent_name = seg(agent_name)));
+        let url = self.url(&format!(
+            "/api/v1/agents/{agent_name}/sessions",
+            agent_name = seg(agent_name)
+        ));
         let resp = self
             .authed_request(self.http.get(url))
             .send()
@@ -833,7 +878,10 @@ impl AgentOvenClient {
 
     /// Create a new session for an agent.
     pub async fn create_session(&self, agent_name: &str) -> anyhow::Result<serde_json::Value> {
-        let url = self.url(&format!("/api/v1/agents/{agent_name}/sessions", agent_name = seg(agent_name)));
+        let url = self.url(&format!(
+            "/api/v1/agents/{agent_name}/sessions",
+            agent_name = seg(agent_name)
+        ));
         let resp = self
             .authed_request(self.http.post(url))
             .json(&serde_json::json!({}))
@@ -850,7 +898,10 @@ impl AgentOvenClient {
         session_id: &str,
     ) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!(
-            "/api/v1/agents/{agent_name}/sessions/{session_id}", agent_name = seg(agent_name), session_id = seg(session_id)));
+            "/api/v1/agents/{agent_name}/sessions/{session_id}",
+            agent_name = seg(agent_name),
+            session_id = seg(session_id)
+        ));
         let resp = self
             .authed_request(self.http.get(url))
             .send()
@@ -862,7 +913,10 @@ impl AgentOvenClient {
     /// Delete a session.
     pub async fn delete_session(&self, agent_name: &str, session_id: &str) -> anyhow::Result<()> {
         let url = self.url(&format!(
-            "/api/v1/agents/{agent_name}/sessions/{session_id}", agent_name = seg(agent_name), session_id = seg(session_id)));
+            "/api/v1/agents/{agent_name}/sessions/{session_id}",
+            agent_name = seg(agent_name),
+            session_id = seg(session_id)
+        ));
         self.authed_request(self.http.delete(url))
             .send()
             .await?
@@ -879,7 +933,10 @@ impl AgentOvenClient {
         thinking: bool,
     ) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!(
-            "/api/v1/agents/{agent_name}/sessions/{session_id}/messages", agent_name = seg(agent_name), session_id = seg(session_id)));
+            "/api/v1/agents/{agent_name}/sessions/{session_id}/messages",
+            agent_name = seg(agent_name),
+            session_id = seg(session_id)
+        ));
         let resp = self
             .authed_request(self.http.post(url))
             .json(&serde_json::json!({
@@ -976,7 +1033,10 @@ impl AgentOvenClient {
         limit: Option<u32>,
         cursor: Option<&str>,
     ) -> anyhow::Result<serde_json::Value> {
-        let mut url = self.url(&format!("/api/v1/traces/{trace_id}/timeline", trace_id = seg(trace_id)));
+        let mut url = self.url(&format!(
+            "/api/v1/traces/{trace_id}/timeline",
+            trace_id = seg(trace_id)
+        ));
         {
             let mut query = url.query_pairs_mut();
             if let Some(l) = limit {
@@ -996,7 +1056,10 @@ impl AgentOvenClient {
 
     /// The audit events recorded for a trace and the traces under it, in order, with a coverage note.
     pub async fn trace_audit(&self, trace_id: &str) -> anyhow::Result<serde_json::Value> {
-        let url = self.url(&format!("/api/v1/traces/{trace_id}/audit", trace_id = seg(trace_id)));
+        let url = self.url(&format!(
+            "/api/v1/traces/{trace_id}/audit",
+            trace_id = seg(trace_id)
+        ));
         let resp = self
             .authed_request(self.http.get(url))
             .send()
@@ -1035,7 +1098,10 @@ impl AgentOvenClient {
 
     /// Delete a saved view.
     pub async fn delete_trace_view(&self, view_id: &str) -> anyhow::Result<()> {
-        let url = self.url(&format!("/api/v1/trace-views/{view_id}", view_id = seg(view_id)));
+        let url = self.url(&format!(
+            "/api/v1/trace-views/{view_id}",
+            view_id = seg(view_id)
+        ));
         self.authed_request(self.http.delete(url))
             .send()
             .await?
@@ -1045,7 +1111,10 @@ impl AgentOvenClient {
 
     /// Get a specific trace.
     pub async fn get_trace(&self, trace_id: &str) -> anyhow::Result<serde_json::Value> {
-        let url = self.url(&format!("/api/v1/traces/{trace_id}", trace_id = seg(trace_id)));
+        let url = self.url(&format!(
+            "/api/v1/traces/{trace_id}",
+            trace_id = seg(trace_id)
+        ));
         let resp = self
             .authed_request(self.http.get(url))
             .send()
@@ -1159,7 +1228,11 @@ impl AgentOvenClient {
         signing_token: Option<&str>,
     ) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!(
-            "/api/v1/recipes/{recipe}/runs/{run_id}/gates/{step_name}/approve", recipe = seg(recipe), run_id = seg(run_id), step_name = seg(step_name)));
+            "/api/v1/recipes/{recipe}/runs/{run_id}/gates/{step_name}/approve",
+            recipe = seg(recipe),
+            run_id = seg(run_id),
+            step_name = seg(step_name)
+        ));
         let mut body = serde_json::json!({ "approved": approved });
         if let Some(c) = comment {
             body["comment"] = serde_json::json!(c);
@@ -1279,7 +1352,10 @@ impl AgentOvenClient {
 
     /// Send a request that changes a configuration. A 422 that lists problems comes back as a
     /// [`crate::ConfigurationError`]; any other failure status is the HTTP error it always was.
-    async fn send_checked(&self, request: reqwest::RequestBuilder) -> anyhow::Result<reqwest::Response> {
+    async fn send_checked(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> anyhow::Result<reqwest::Response> {
         let resp = request.send().await?;
         if resp.status().as_u16() == 422 {
             let headers = resp.headers().clone();
@@ -1384,7 +1460,8 @@ mod register_tests {
                     let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
                     let mut first = head.lines().next().unwrap().split_whitespace();
                     let (method, path) = (first.next().unwrap(), first.next().unwrap());
-                    let body = String::from_utf8_lossy(&buf[head_end..head_end + content_len]).to_string();
+                    let body =
+                        String::from_utf8_lossy(&buf[head_end..head_end + content_len]).to_string();
                     recorded
                         .lock()
                         .unwrap()
@@ -1413,7 +1490,11 @@ mod register_tests {
     }
 
     fn calls(seen: &Seen) -> Vec<(String, String)> {
-        seen.lock().unwrap().iter().map(|(m, p, _)| (m.clone(), p.clone())).collect()
+        seen.lock()
+            .unwrap()
+            .iter()
+            .map(|(m, p, _)| (m.clone(), p.clone()))
+            .collect()
     }
 
     #[tokio::test]
@@ -1477,20 +1558,43 @@ mod register_tests {
     #[tokio::test]
     async fn register_brings_a_retired_agent_back_with_post() {
         let routes = HashMap::from([
-            ("GET /api/v1/agents/refund-bot", (200, serde_json::json!({"name": "refund-bot", "status": "retired"}))),
-            ("POST /api/v1/agents", (201, serde_json::to_value(agent()).unwrap())),
+            (
+                "GET /api/v1/agents/refund-bot",
+                (
+                    200,
+                    serde_json::json!({"name": "refund-bot", "status": "retired"}),
+                ),
+            ),
+            (
+                "POST /api/v1/agents",
+                (201, serde_json::to_value(agent()).unwrap()),
+            ),
         ]);
         let (base, seen) = fake_control_plane(routes).await;
-        AgentOvenClient::new(&base).unwrap().register(&agent()).await.unwrap();
+        AgentOvenClient::new(&base)
+            .unwrap()
+            .register(&agent())
+            .await
+            .unwrap();
         let verbs: Vec<String> = calls(&seen).into_iter().map(|(m, _)| m).collect();
-        assert_eq!(verbs, vec!["GET", "POST"], "a retired agent is created again, not updated");
+        assert_eq!(
+            verbs,
+            vec!["GET", "POST"],
+            "a retired agent is created again, not updated"
+        );
     }
 
     #[tokio::test]
     async fn a_name_cannot_walk_to_another_route_and_retire_is_a_delete() {
         let routes = HashMap::from([
-            ("DELETE /api/v1/agents/..%2F..%2Fadmin%2Fx", (200, serde_json::json!({"status": "deleted"}))),
-            ("DELETE /api/v1/agents/refund-bot", (200, serde_json::json!({"status": "deleted"}))),
+            (
+                "DELETE /api/v1/agents/..%2F..%2Fadmin%2Fx",
+                (200, serde_json::json!({"status": "deleted"})),
+            ),
+            (
+                "DELETE /api/v1/agents/refund-bot",
+                (200, serde_json::json!({"status": "deleted"})),
+            ),
         ]);
         let (base, seen) = fake_control_plane(routes).await;
         let client = AgentOvenClient::new(&base).unwrap();
@@ -1499,8 +1603,14 @@ mod register_tests {
         assert_eq!(
             calls(&seen),
             vec![
-                ("DELETE".to_string(), "/api/v1/agents/refund-bot".to_string()),
-                ("DELETE".to_string(), "/api/v1/agents/..%2F..%2Fadmin%2Fx".to_string()),
+                (
+                    "DELETE".to_string(),
+                    "/api/v1/agents/refund-bot".to_string()
+                ),
+                (
+                    "DELETE".to_string(),
+                    "/api/v1/agents/..%2F..%2Fadmin%2Fx".to_string()
+                ),
             ]
         );
     }
@@ -1516,10 +1626,15 @@ mod register_tests {
                 held.push(silent.accept().await.unwrap());
             }
         });
-        let client = AgentOvenClient::new(&base).unwrap().with_timeout(Duration::from_millis(300));
+        let client = AgentOvenClient::new(&base)
+            .unwrap()
+            .with_timeout(Duration::from_millis(300));
         let started = std::time::Instant::now();
         assert!(client.get_agent("x", None).await.is_err());
-        assert!(started.elapsed() < Duration::from_secs(5), "the request must give up");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the request must give up"
+        );
 
         // A redirect to another host would carry the credential there: it is an error, not followed.
         let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1543,12 +1658,17 @@ mod register_tests {
         let client = AgentOvenClient::new(&rbase).unwrap().with_api_key("secret");
         assert!(client.get_agent("x", None).await.is_err());
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(!*hit.lock().unwrap(), "the redirect target must never be contacted");
+        assert!(
+            !*hit.lock().unwrap(),
+            "the redirect target must never be contacted"
+        );
     }
 
     #[test]
     fn debug_of_the_client_hides_the_key() {
-        let c = AgentOvenClient::new("http://localhost:8080").unwrap().with_api_key("sk-SECRET");
+        let c = AgentOvenClient::new("http://localhost:8080")
+            .unwrap()
+            .with_api_key("sk-SECRET");
         assert!(!format!("{c:?}").contains("SECRET"));
     }
 }

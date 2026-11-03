@@ -168,7 +168,8 @@ async fn create_with(client: &AgentOvenClient, args: &CreateArgs) -> anyhow::Res
         println!("  {} {}", "⚠".yellow().bold(), w.dimmed());
     }
     if args.validate {
-        let body = serde_json::json!({"name": args.name, "description": description, "steps": steps});
+        let body =
+            serde_json::json!({"name": args.name, "description": description, "steps": steps});
         refs::gate(client.validate_recipe(&body, &Options::write()).await?)?;
     }
 
@@ -341,12 +342,22 @@ async fn bake_with(client: &AgentOvenClient, args: &RecipeBakeArgs) -> anyhow::R
     };
 
     if args.validate {
-        refs::gate(client.validate_stored_recipe(&args.name, args.environment.as_deref().unwrap_or_default()).await?)?;
+        refs::gate(
+            client
+                .validate_stored_recipe(&args.name, args.environment.as_deref().unwrap_or_default())
+                .await?,
+        )?;
     }
     let signing = args.signing.resolve()?;
-    let started = if args.environment.is_some() || !matches!(signing, super::signing::Signing::None) {
+    let started = if args.environment.is_some() || !matches!(signing, super::signing::Signing::None)
+    {
         client
-            .run_recipe(&args.name, &input, args.environment.as_deref(), signing.signature())
+            .run_recipe(
+                &args.name,
+                &input,
+                args.environment.as_deref(),
+                signing.signature(),
+            )
             .await
     } else {
         client.bake_recipe(&args.name, input).await
@@ -535,7 +546,10 @@ mod tests {
             r.insert(k.to_string(), v);
         }
         let (base, log) = fake_control_plane(r).await;
-        (AgentOvenClient::new(&base).unwrap().with_kitchen("acme"), log)
+        (
+            AgentOvenClient::new(&base).unwrap().with_kitchen("acme"),
+            log,
+        )
     }
 
     /// The lists `--validate` reads: one agent called writer and one environment, prod.
@@ -545,25 +559,40 @@ mod tests {
             ("GET /api/v1/prompts", reply(200, json!([]))),
             ("GET /api/v1/tools", reply(200, json!([]))),
             ("GET /api/v1/skills", reply(200, json!([]))),
-            ("GET /api/v1/agents", reply(200, json!([{"name": "writer", "status": "ready"}]))),
+            (
+                "GET /api/v1/agents",
+                reply(200, json!([{"name": "writer", "status": "ready"}])),
+            ),
             ("GET /api/v1/recipes", reply(200, json!([]))),
             ("GET /api/v1/channels", reply(200, json!([]))),
-            ("GET /api/v1/environments", reply(200, json!([{"slug": "prod"}]))),
+            (
+                "GET /api/v1/environments",
+                reply(200, json!([{"slug": "prod"}])),
+            ),
             ("GET /api/v1/credentials", reply(200, json!([]))),
             ("GET /api/v1/scenarios", reply(404, json!({}))),
         ]
     }
 
     fn writes(log: &Log) -> Vec<String> {
-        log.calls().into_iter().filter(|c| !c.starts_with("GET ")).collect()
+        log.calls()
+            .into_iter()
+            .filter(|c| !c.starts_with("GET "))
+            .collect()
     }
 
     #[test]
     fn validate_flags_parse_and_default_to_off() {
-        assert!(matches!(parse(&["validate", "refunds"]), RecipeCommands::Validate(a) if a.name == "refunds"));
+        assert!(
+            matches!(parse(&["validate", "refunds"]), RecipeCommands::Validate(a) if a.name == "refunds")
+        );
         assert!(matches!(parse(&["create", "refunds"]), RecipeCommands::Create(a) if !a.validate));
-        assert!(matches!(parse(&["create", "refunds", "--validate"]), RecipeCommands::Create(a) if a.validate));
-        assert!(matches!(parse(&["bake", "refunds", "--validate", "--env", "prod"]), RecipeCommands::Bake(a) if a.validate));
+        assert!(
+            matches!(parse(&["create", "refunds", "--validate"]), RecipeCommands::Create(a) if a.validate)
+        );
+        assert!(
+            matches!(parse(&["bake", "refunds", "--validate", "--env", "prod"]), RecipeCommands::Bake(a) if a.validate)
+        );
     }
 
     #[tokio::test]
@@ -571,10 +600,18 @@ mod tests {
         let verdict = json!({"recipe": "refunds", "valid": false, "warnings": [], "problems": [{
             "path": "steps[0].agent_ref", "code": "not_found", "severity": "error", "kind": "agent", "value": "writr",
             "message": "steps[0].agent_ref: \"writr\" is not an agent in this kitchen (did you mean \"writer\"?)", "suggestions": ["writer"]}]});
-        let (client, _) = serve(vec![("GET /api/v1/recipes/refunds/validate", reply(200, verdict))]).await;
+        let (client, _) = serve(vec![(
+            "GET /api/v1/recipes/refunds/validate",
+            reply(200, verdict),
+        )])
+        .await;
         let (text, code) = validate_with(&client, "refunds").await.unwrap();
         assert_eq!(code, 1);
-        assert!(text.contains("steps[0].agent_ref = \"writr\" [agent]") && text.contains("did you mean"), "{text}");
+        assert!(
+            text.contains("steps[0].agent_ref = \"writr\" [agent]")
+                && text.contains("did you mean"),
+            "{text}"
+        );
     }
 
     #[tokio::test]
@@ -584,13 +621,33 @@ mod tests {
         let (client, log) = serve(routes).await;
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("recipe.json");
-        std::fs::write(&file, r#"{"steps": [{"name": "a", "kind": "agent", "agent": "writr"}]}"#).unwrap();
-        let args = CreateArgs { name: "refunds".into(), from: Some(file.to_string_lossy().into()), validate: true };
+        std::fs::write(
+            &file,
+            r#"{"steps": [{"name": "a", "kind": "agent", "agent": "writr"}]}"#,
+        )
+        .unwrap();
+        let args = CreateArgs {
+            name: "refunds".into(),
+            from: Some(file.to_string_lossy().into()),
+            validate: true,
+        };
         let err = create_with(&client, &args).await.unwrap_err();
-        assert!(err.to_string().contains("names things this kitchen does not have"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("names things this kitchen does not have"),
+            "{err}"
+        );
         assert!(writes(&log).is_empty(), "{:?}", log.calls());
         // Off: the recipe is sent and the server answers.
-        create_with(&client, &CreateArgs { validate: false, ..args }).await.unwrap();
+        create_with(
+            &client,
+            &CreateArgs {
+                validate: false,
+                ..args
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(writes(&log), vec!["POST /api/v1/recipes"]);
     }
 
@@ -598,7 +655,10 @@ mod tests {
     async fn bake_with_validate_checks_the_environment_before_running() {
         let mut routes = lists();
         routes.push(("GET /api/v1/recipes/refunds", reply(200, json!({"name": "refunds", "steps": [{"name": "a", "kind": "agent", "agent_ref": "writer"}]}))));
-        routes.push(("POST /api/v1/recipes/refunds/bake", reply(200, json!({"run_id": "run1"}))));
+        routes.push((
+            "POST /api/v1/recipes/refunds/bake",
+            reply(200, json!({"run_id": "run1"})),
+        ));
         let (client, log) = serve(routes).await;
         let args = |env: &str| RecipeBakeArgs {
             name: "refunds".into(),

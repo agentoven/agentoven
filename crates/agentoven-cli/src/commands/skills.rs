@@ -2032,7 +2032,7 @@ mod tests {
             "verified_by_provider": "openai-main",
             "registered_tools": []
         });
-        let list = render_list(&[skill.clone()]);
+        let list = render_list(std::slice::from_ref(&skill));
         assert!(
             list.contains("pdf-tools") && list.contains("needs_review") && list.contains("git")
         );
@@ -2581,10 +2581,11 @@ mod tests {
             .await
             .unwrap();
         assert!(rep.stdout.contains("rejected"));
-        let reqs = log.lock().unwrap();
-        assert_eq!(reqs[0].body, json!({"note": "reviewed ok"}));
-        assert_eq!(reqs[1].body, json!({"note": "too broad"}));
-        drop(reqs);
+        {
+            let reqs = log.lock().unwrap();
+            assert_eq!(reqs[0].body, json!({"note": "reviewed ok"}));
+            assert_eq!(reqs[1].body, json!({"note": "too broad"}));
+        }
 
         let e = run(parse(&["approve", "done"]), &a, false)
             .await

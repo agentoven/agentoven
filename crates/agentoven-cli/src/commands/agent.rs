@@ -715,9 +715,17 @@ async fn register_agent_with_client(agent: &Agent, validate: bool) -> anyhow::Re
     register_with(&client, agent, validate).await
 }
 
-async fn register_with(client: &AgentOvenClient, agent: &Agent, validate: bool) -> anyhow::Result<()> {
+async fn register_with(
+    client: &AgentOvenClient,
+    agent: &Agent,
+    validate: bool,
+) -> anyhow::Result<()> {
     if validate {
-        refs::gate(client.validate_agent(&serde_json::to_value(agent)?, &Options::write()).await?)?;
+        refs::gate(
+            client
+                .validate_agent(&serde_json::to_value(agent)?, &Options::write())
+                .await?,
+        )?;
     }
     match client.register(agent).await {
         Ok(registered) => {
@@ -950,7 +958,12 @@ async fn update(args: UpdateArgs) -> anyhow::Result<()> {
     update_with(&client, &args.name, body, args.validate).await
 }
 
-async fn update_with(client: &AgentOvenClient, name: &str, body: serde_json::Value, validate: bool) -> anyhow::Result<()> {
+async fn update_with(
+    client: &AgentOvenClient,
+    name: &str,
+    body: serde_json::Value,
+    validate: bool,
+) -> anyhow::Result<()> {
     if validate {
         // The edit is all the client has: it is judged on its own, as a write.
         refs::gate(client.validate_agent(&body, &Options::write()).await?)?;
@@ -1074,7 +1087,11 @@ async fn recook(args: RecookArgs) -> anyhow::Result<()> {
 
     let client = AgentOvenClient::from_env()?;
     if args.validate {
-        refs::gate(client.validate_stored_agent(&args.name, Some(&edits)).await?)?;
+        refs::gate(
+            client
+                .validate_stored_agent(&args.name, Some(&edits))
+                .await?,
+        )?;
     }
     match client.recook_agent(&args.name, edits).await {
         Ok(result) => {
@@ -1605,13 +1622,22 @@ mod tests {
             r.insert(k.to_string(), v);
         }
         let (base, log) = fake_control_plane(r).await;
-        (AgentOvenClient::new(&base).unwrap().with_kitchen("acme"), log)
+        (
+            AgentOvenClient::new(&base).unwrap().with_kitchen("acme"),
+            log,
+        )
     }
 
     /// The lists `--validate` reads: one provider, no tools.
     fn lists() -> Vec<(&'static str, Reply)> {
         vec![
-            ("GET /api/v1/models/providers", reply(200, json!([{"name": "anthropic", "kind": "anthropic", "models": ["claude-haiku-4-5"]}]))),
+            (
+                "GET /api/v1/models/providers",
+                reply(
+                    200,
+                    json!([{"name": "anthropic", "kind": "anthropic", "models": ["claude-haiku-4-5"]}]),
+                ),
+            ),
             ("GET /api/v1/prompts", reply(200, json!([]))),
             ("GET /api/v1/tools", reply(200, json!([]))),
             ("GET /api/v1/skills", reply(200, json!([]))),
@@ -1625,7 +1651,10 @@ mod tests {
     }
 
     fn writes(log: &Log) -> Vec<String> {
-        log.calls().into_iter().filter(|c| !c.starts_with("GET ")).collect()
+        log.calls()
+            .into_iter()
+            .filter(|c| !c.starts_with("GET "))
+            .collect()
     }
 
     const PROBLEM: &str = r#"{"path": "summary_model", "code": "not_found", "severity": "error", "kind": "model", "value": "claude-hiku-4-5",
@@ -1637,7 +1666,15 @@ mod tests {
 
     #[test]
     fn the_flags_for_the_summary_model_and_validation_parse() {
-        match parse(&["register", "bot", "--summary-provider", "anthropic", "--summary-model", "claude-haiku-4-5", "--validate"]) {
+        match parse(&[
+            "register",
+            "bot",
+            "--summary-provider",
+            "anthropic",
+            "--summary-model",
+            "claude-haiku-4-5",
+            "--validate",
+        ]) {
             AgentCommands::Register(a) => {
                 assert_eq!(a.summary_provider.as_deref(), Some("anthropic"));
                 assert_eq!(a.summary_model.as_deref(), Some("claude-haiku-4-5"));
@@ -1647,31 +1684,63 @@ mod tests {
         }
         match parse(&["update", "bot", "--summary-model", ""]) {
             AgentCommands::Update(a) => {
-                assert_eq!(a.summary_model.as_deref(), Some(""), "an empty summary model clears it");
+                assert_eq!(
+                    a.summary_model.as_deref(),
+                    Some(""),
+                    "an empty summary model clears it"
+                );
                 assert!(!a.validate, "off unless asked for");
             }
             _ => panic!("not update"),
         }
-        assert!(matches!(parse(&["validate", "bot"]), AgentCommands::Validate(a) if a.name == "bot"));
-        assert!(matches!(parse(&["bake", "bot", "--validate"]), AgentCommands::Bake(a) if a.validate));
-        assert!(matches!(parse(&["recook", "bot", "--validate"]), AgentCommands::Recook(a) if a.validate));
+        assert!(
+            matches!(parse(&["validate", "bot"]), AgentCommands::Validate(a) if a.name == "bot")
+        );
+        assert!(
+            matches!(parse(&["bake", "bot", "--validate"]), AgentCommands::Bake(a) if a.validate)
+        );
+        assert!(
+            matches!(parse(&["recook", "bot", "--validate"]), AgentCommands::Recook(a) if a.validate)
+        );
     }
 
     #[test]
     fn validating_a_bake_of_an_older_version_is_refused_as_ambiguous() {
-        let err = Cli::try_parse_from(["agentoven", "agent", "bake", "bot", "--validate", "--version", "0.1.0"]).err().expect("a conflict");
+        let err = Cli::try_parse_from([
+            "agentoven",
+            "agent",
+            "bake",
+            "bot",
+            "--validate",
+            "--version",
+            "0.1.0",
+        ])
+        .err()
+        .expect("a conflict");
         assert!(err.to_string().contains("cannot be used with"), "{err}");
     }
 
     #[tokio::test]
     async fn agent_validate_prints_each_problem_with_what_was_meant_and_exits_one() {
-        let reply_body = json!({"agent": "bot", "valid": false, "problems": [problem()], "warnings": []});
-        let (client, log) = serve(vec![("GET /api/v1/agents/bot/validate", reply(200, reply_body))]).await;
+        let reply_body =
+            json!({"agent": "bot", "valid": false, "problems": [problem()], "warnings": []});
+        let (client, log) = serve(vec![(
+            "GET /api/v1/agents/bot/validate",
+            reply(200, reply_body),
+        )])
+        .await;
         let (text, code) = validate_with(&client, "bot").await.unwrap();
         assert_eq!(code, 1);
-        assert!(text.contains("summary_model = \"claude-hiku-4-5\""), "{text}");
+        assert!(
+            text.contains("summary_model = \"claude-hiku-4-5\""),
+            "{text}"
+        );
         assert!(text.contains("did you mean: claude-haiku-4-5"), "{text}");
-        assert_eq!(log.calls(), vec!["GET /api/v1/agents/bot/validate"], "read only");
+        assert_eq!(
+            log.calls(),
+            vec!["GET /api/v1/agents/bot/validate"],
+            "read only"
+        );
     }
 
     #[tokio::test]
@@ -1681,7 +1750,10 @@ mod tests {
         let (text, code) = validate_with(&client, "bot").await.unwrap();
         assert_eq!(code, 0);
         assert!(text.contains("agent bot is valid"), "{text}");
-        assert!(validate_with(&client, "nobody").await.is_err(), "a 404 is an error, not a verdict");
+        assert!(
+            validate_with(&client, "nobody").await.is_err(),
+            "a 404 is an error, not a verdict"
+        );
     }
 
     #[tokio::test]
@@ -1689,7 +1761,14 @@ mod tests {
         let mut routes = lists();
         routes.push(("PUT /api/v1/agents/bot", reply(200, json!({}))));
         let (client, log) = serve(routes).await;
-        let err = update_with(&client, "bot", json!({"summary_provider": "anthropic", "summary_model": "claude-hiku-4-5"}), true).await.unwrap_err();
+        let err = update_with(
+            &client,
+            "bot",
+            json!({"summary_provider": "anthropic", "summary_model": "claude-hiku-4-5"}),
+            true,
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("1 problem"), "{err}");
         assert!(writes(&log).is_empty(), "{:?}", log.calls());
     }
@@ -1700,7 +1779,14 @@ mod tests {
         let mut routes = lists();
         routes.push(("PUT /api/v1/agents/bot", reply(200, stored)));
         let (client, log) = serve(routes).await;
-        update_with(&client, "bot", json!({"summary_provider": "anthropic", "summary_model": "claude-haiku-4-5"}), true).await.unwrap();
+        update_with(
+            &client,
+            "bot",
+            json!({"summary_provider": "anthropic", "summary_model": "claude-haiku-4-5"}),
+            true,
+        )
+        .await
+        .unwrap();
         let put = log.all().into_iter().find(|s| s.method == "PUT").unwrap();
         assert_eq!(put.body["summary_model"], "claude-haiku-4-5");
     }
@@ -1709,15 +1795,36 @@ mod tests {
     async fn a_refusal_from_the_server_ends_the_command_with_a_failure_and_lists_the_problems() {
         let body = json!({"error": "summary_model: bad", "code": "invalid_configuration", "problems": [problem()], "warnings": []});
         let (client, log) = serve(vec![("PUT /api/v1/agents/bot", reply(422, body))]).await;
-        let err = update_with(&client, "bot", json!({"summary_model": "claude-hiku-4-5"}), false).await.unwrap_err();
-        assert!(err.to_string().contains("names things this kitchen does not have"), "{err}");
-        assert_eq!(writes(&log), vec!["PUT /api/v1/agents/bot"], "validation was off, so the server judged it");
+        let err = update_with(
+            &client,
+            "bot",
+            json!({"summary_model": "claude-hiku-4-5"}),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("names things this kitchen does not have"),
+            "{err}"
+        );
+        assert_eq!(
+            writes(&log),
+            vec!["PUT /api/v1/agents/bot"],
+            "validation was off, so the server judged it"
+        );
     }
 
     #[tokio::test]
     async fn any_other_failure_still_reports_and_succeeds_as_before() {
-        let (client, _) = serve(vec![("PUT /api/v1/agents/bot", reply(500, json!({"error": "boom"})))]).await;
-        update_with(&client, "bot", json!({"description": "x"}), false).await.unwrap();
+        let (client, _) = serve(vec![(
+            "PUT /api/v1/agents/bot",
+            reply(500, json!({"error": "boom"})),
+        )])
+        .await;
+        update_with(&client, "bot", json!({"description": "x"}), false)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1727,10 +1834,14 @@ mod tests {
         routes.push(("GET /api/v1/agents/bot", reply(404, json!({}))));
         routes.push(("POST /api/v1/agents", reply(201, stored)));
         let (client, log) = serve(routes).await;
-        let bad = Agent::builder("bot").summary_model("anthropic", "claude-hiku-4-5").build();
+        let bad = Agent::builder("bot")
+            .summary_model("anthropic", "claude-hiku-4-5")
+            .build();
         assert!(register_with(&client, &bad, true).await.is_err());
         assert!(writes(&log).is_empty());
-        let good = Agent::builder("bot").summary_model("anthropic", "claude-haiku-4-5").build();
+        let good = Agent::builder("bot")
+            .summary_model("anthropic", "claude-haiku-4-5")
+            .build();
         register_with(&client, &good, true).await.unwrap();
         let post = log.all().into_iter().find(|s| s.method == "POST").unwrap();
         assert_eq!(post.body["summary_provider"], "anthropic");
@@ -1740,10 +1851,21 @@ mod tests {
     async fn bake_with_validate_reads_the_stored_agent_and_refuses_before_baking() {
         // A managed agent with no model anywhere cannot run: refused at a bake, only a warning on a write.
         let mut routes = lists();
-        routes.push(("GET /api/v1/agents/bot", reply(200, serde_json::to_value(Agent::builder("bot").build()).unwrap())));
+        routes.push((
+            "GET /api/v1/agents/bot",
+            reply(
+                200,
+                serde_json::to_value(Agent::builder("bot").build()).unwrap(),
+            ),
+        ));
         routes.push(("POST /api/v1/agents/bot/bake", reply(200, json!({}))));
         let (client, log) = serve(routes).await;
-        let args = BakeArgs { name: "bot".into(), environment: "prod".into(), version: None, validate: true };
+        let args = BakeArgs {
+            name: "bot".into(),
+            environment: "prod".into(),
+            version: None,
+            validate: true,
+        };
         let err = bake_with(&client, &args).await.unwrap_err();
         assert!(err.to_string().contains("1 problem"), "{err}");
         assert!(writes(&log).is_empty(), "{:?}", log.calls());
@@ -1751,12 +1873,26 @@ mod tests {
 
     #[tokio::test]
     async fn bake_with_validate_goes_on_when_the_stored_agent_is_sound() {
-        let sound = Agent::builder("bot").model_provider("anthropic").model_name("claude-haiku-4-5").build();
+        let sound = Agent::builder("bot")
+            .model_provider("anthropic")
+            .model_name("claude-haiku-4-5")
+            .build();
         let mut routes = lists();
-        routes.push(("GET /api/v1/agents/bot", reply(200, serde_json::to_value(&sound).unwrap())));
-        routes.push(("POST /api/v1/agents/bot/bake", reply(200, serde_json::to_value(&sound).unwrap())));
+        routes.push((
+            "GET /api/v1/agents/bot",
+            reply(200, serde_json::to_value(&sound).unwrap()),
+        ));
+        routes.push((
+            "POST /api/v1/agents/bot/bake",
+            reply(200, serde_json::to_value(&sound).unwrap()),
+        ));
         let (client, log) = serve(routes).await;
-        let args = BakeArgs { name: "bot".into(), environment: "prod".into(), version: None, validate: true };
+        let args = BakeArgs {
+            name: "bot".into(),
+            environment: "prod".into(),
+            version: None,
+            validate: true,
+        };
         bake_with(&client, &args).await.unwrap();
         assert_eq!(writes(&log), vec!["POST /api/v1/agents/bot/bake"]);
     }

@@ -64,7 +64,11 @@ async fn install(args: InstallArgs) -> anyhow::Result<()> {
     });
     let out: serde_json::Value = client.raw_post("/api/v1/evals/install", &body).await?;
 
-    println!("\n  {} Eval tools registered → {}", "✓".green().bold(), out["endpoint"].as_str().unwrap_or("-").dimmed());
+    println!(
+        "\n  {} Eval tools registered → {}",
+        "✓".green().bold(),
+        out["endpoint"].as_str().unwrap_or("-").dimmed()
+    );
     for t in out["tools"].as_array().unwrap_or(&vec![]) {
         println!("    {}", t.as_str().unwrap_or("-").cyan());
     }
@@ -74,13 +78,24 @@ async fn install(args: InstallArgs) -> anyhow::Result<()> {
             "\n  {} Evaluator agent {} {}",
             "✓".green().bold(),
             agent.bold(),
-            if created { "created" } else { "already existed" }
+            if created {
+                "created"
+            } else {
+                "already existed"
+            }
         );
         if args.bake && created {
             let _: serde_json::Value = client
-                .raw_post(&format!("/api/v1/agents/{}/bake", agent), &serde_json::json!({}))
+                .raw_post(
+                    &format!("/api/v1/agents/{}/bake", agent),
+                    &serde_json::json!({}),
+                )
                 .await?;
-            println!("  {} Baked — call it over A2A at /agents/{}/a2a", "✓".green().bold(), agent);
+            println!(
+                "  {} Baked — call it over A2A at /agents/{}/a2a",
+                "✓".green().bold(),
+                agent
+            );
         }
     }
     for step in out["next_steps"].as_array().unwrap_or(&vec![]) {

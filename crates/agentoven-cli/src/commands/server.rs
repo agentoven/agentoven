@@ -138,7 +138,11 @@ pub async fn execute(args: ServerArgs) -> anyhow::Result<()> {
     config.edition = Some("community".into());
     config.save()?;
 
-    println!("  {} CLI configured → {}", "✓".green().bold(), local_url.cyan());
+    println!(
+        "  {} CLI configured → {}",
+        "✓".green().bold(),
+        local_url.cyan()
+    );
     println!("  Press {} to stop.", "Ctrl+C".bold());
     println!();
 
@@ -174,10 +178,7 @@ pub async fn execute(args: ServerArgs) -> anyhow::Result<()> {
 /// Find the server binary by checking common locations.
 fn find_server_binary() -> anyhow::Result<String> {
     // 1. Check if `agentoven-server` is in PATH
-    if let Ok(output) = StdCommand::new("which")
-        .arg("agentoven-server")
-        .output()
-    {
+    if let Ok(output) = StdCommand::new("which").arg("agentoven-server").output() {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() {

@@ -90,6 +90,7 @@ pub struct TokenUsage {
 }
 
 /// Trait for model provider implementations.
+#[allow(clippy::double_must_use)] // async_trait adds its own must_use to each method
 #[async_trait]
 pub trait ModelProviderClient: Send + Sync {
     /// Send a chat completion request.

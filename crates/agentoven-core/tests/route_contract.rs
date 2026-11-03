@@ -33,17 +33,28 @@ fn normalize(path: &str) -> String {
         _ => out,
     };
     let trimmed = out.trim_end_matches('/');
-    if trimmed.is_empty() { "/".into() } else { trimmed.into() }
+    if trimmed.is_empty() {
+        "/".into()
+    } else {
+        trimmed.into()
+    }
 }
 
 fn server_routes() -> HashSet<(String, String)> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sdk/fixtures/server-routes.json");
-    let data: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).expect("sdk/fixtures/server-routes.json")).unwrap();
+    let data: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("sdk/fixtures/server-routes.json"))
+            .unwrap();
     data["routes"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|r| (r["method"].as_str().unwrap().to_string(), normalize(r["path"].as_str().unwrap())))
+        .map(|r| {
+            (
+                r["method"].as_str().unwrap().to_string(),
+                normalize(r["path"].as_str().unwrap()),
+            )
+        })
         .collect()
 }
 
@@ -61,11 +72,22 @@ fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
 /// The verb a request builder or helper near `line` sends: the first of these on the lines that follow.
 fn verb_near(lines: &[&str], from: usize) -> Option<&'static str> {
     const TOKENS: [(&str, &str); 10] = [
-        (".get(", "GET"), (".post(", "POST"), (".put(", "PUT"), (".delete(", "DELETE"), (".patch(", "PATCH"),
-        ("get_json(", "GET"), ("post_json(", "POST"), ("put_json(", "PUT"), ("delete_json(", "DELETE"), ("patch_json(", "PATCH"),
+        (".get(", "GET"),
+        (".post(", "POST"),
+        (".put(", "PUT"),
+        (".delete(", "DELETE"),
+        (".patch(", "PATCH"),
+        ("get_json(", "GET"),
+        ("post_json(", "POST"),
+        ("put_json(", "PUT"),
+        ("delete_json(", "DELETE"),
+        ("patch_json(", "PATCH"),
     ];
     for line in lines.iter().skip(from).take(8) {
-        let first = TOKENS.iter().filter_map(|(t, v)| line.find(t).map(|at| (at, *v))).min();
+        let first = TOKENS
+            .iter()
+            .filter_map(|(t, v)| line.find(t).map(|at| (at, *v)))
+            .min();
         if let Some((_, v)) = first {
             return Some(v);
         }
@@ -76,7 +98,10 @@ fn verb_near(lines: &[&str], from: usize) -> Option<&'static str> {
 /// (file, line, verb, path) for every `"/api/v1/..."` literal in non-test code that is sent with a verb.
 fn client_calls() -> Vec<(String, usize, &'static str, String)> {
     let mut files = Vec::new();
-    sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+    sources(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
     let mut calls = Vec::new();
     for file in files {
         let text = fs::read_to_string(&file).unwrap();
@@ -89,7 +114,12 @@ fn client_calls() -> Vec<(String, usize, &'static str, String)> {
                 let after = &rest[at + 1..];
                 let end = after.find('"').unwrap_or(after.len());
                 if let Some(v) = verb_near(&lines, i) {
-                    calls.push((file.file_name().unwrap().to_string_lossy().into(), i + 1, v, after[..end].to_string()));
+                    calls.push((
+                        file.file_name().unwrap().to_string_lossy().into(),
+                        i + 1,
+                        v,
+                        after[..end].to_string(),
+                    ));
                 }
                 rest = &after[end..];
             }
@@ -109,7 +139,13 @@ fn the_scanner_sees_the_validate_calls() {
     // agent_validate and recipe_validate are covered by the contract below, not skipped by the scanner.
     let calls = client_calls();
     for want in ["/api/v1/agents/{}/validate", "/api/v1/recipes/{}/validate"] {
-        assert!(calls.iter().any(|(_, _, verb, path)| *verb == "GET" && normalize(path) == want), "{want} is not in {:?}", calls.iter().map(|c| &c.3).collect::<Vec<_>>());
+        assert!(
+            calls
+                .iter()
+                .any(|(_, _, verb, path)| *verb == "GET" && normalize(path) == want),
+            "{want} is not in {:?}",
+            calls.iter().map(|c| &c.3).collect::<Vec<_>>()
+        );
     }
 }
 
@@ -121,5 +157,9 @@ fn every_call_the_client_makes_is_a_route_the_server_has() {
         .filter(|(_, _, verb, path)| !routes.contains(&(verb.to_string(), normalize(path))))
         .map(|(f, l, v, p)| format!("{f}:{l} {v} {p}"))
         .collect();
-    assert!(missing.is_empty(), "calls the server has no route for:\n  {}", missing.join("\n  "));
+    assert!(
+        missing.is_empty(),
+        "calls the server has no route for:\n  {}",
+        missing.join("\n  ")
+    );
 }

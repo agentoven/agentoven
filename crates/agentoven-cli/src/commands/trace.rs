@@ -265,12 +265,21 @@ pub async fn replay(cmd: ReplayCommands, client: &AgentOvenClient) -> anyhow::Re
                 variants.push(json_arg("--variant", v)?);
             }
             let out = client
-                .replay_call(&a.trace_id, &a.span_id, &variants, a.reason.as_deref().unwrap_or(""))
+                .replay_call(
+                    &a.trace_id,
+                    &a.span_id,
+                    &variants,
+                    a.reason.as_deref().unwrap_or(""),
+                )
                 .await?;
             if a.json {
                 return Ok(format!("{}\n", pretty(&out)));
             }
-            let mut text = format!("\n  🔁 Replay of span {} (trace {})\n", a.span_id.bold(), a.trace_id);
+            let mut text = format!(
+                "\n  🔁 Replay of span {} (trace {})\n",
+                a.span_id.bold(),
+                a.trace_id
+            );
             if let Some(n) = out["notice"].as_str() {
                 text.push_str(&format!("  {} {}\n", "ⓘ".dimmed(), n.dimmed()));
             }
@@ -296,7 +305,10 @@ pub async fn replay(cmd: ReplayCommands, client: &AgentOvenClient) -> anyhow::Re
                     text.push_str(&format!("     {}\n", clip(&c.replace('\n', " "), 160)));
                 }
                 for t in v["tool_calls"].as_array().cloned().unwrap_or_default() {
-                    text.push_str(&format!("     wants tool {} (not run)\n", t["name"].as_str().unwrap_or("?").cyan()));
+                    text.push_str(&format!(
+                        "     wants tool {} (not run)\n",
+                        t["name"].as_str().unwrap_or("?").cyan()
+                    ));
                 }
                 if let Some(t) = v["trace_id"].as_str() {
                     text.push_str(&format!("     {} trace {}\n", "→".dimmed(), t));
@@ -321,29 +333,58 @@ pub async fn replay(cmd: ReplayCommands, client: &AgentOvenClient) -> anyhow::Re
             if a.json {
                 return Ok(format!("{}\n", pretty(&out)));
             }
-            let mut text = format!("\n  🔁 Replay of trace {} from span {} (tools: {})\n", a.trace_id.bold(), a.from_span, a.tools);
+            let mut text = format!(
+                "\n  🔁 Replay of trace {} from span {} (tools: {})\n",
+                a.trace_id.bold(),
+                a.from_span,
+                a.tools
+            );
             if let Some(n) = out["notice"].as_str() {
                 text.push_str(&format!("  {} {}\n", "ⓘ".dimmed(), n.dimmed()));
             }
-            text.push_str(&format!("  status: {}\n\n", out["status"].as_str().unwrap_or("-")));
+            text.push_str(&format!(
+                "  status: {}\n\n",
+                out["status"].as_str().unwrap_or("-")
+            ));
             for st in out["steps"].as_array().cloned().unwrap_or_default() {
                 let kind = st["kind"].as_str().unwrap_or("-");
                 let line = if kind == "tool" {
-                    format!("tool {} [{}]", st["tool"].as_str().unwrap_or("?"), st["source"].as_str().unwrap_or("-"))
+                    format!(
+                        "tool {} [{}]",
+                        st["tool"].as_str().unwrap_or("?"),
+                        st["source"].as_str().unwrap_or("-")
+                    )
                 } else {
-                    clip(&st["content"].as_str().unwrap_or("").replace('\n', " "), 120)
+                    clip(
+                        &st["content"].as_str().unwrap_or("").replace('\n', " "),
+                        120,
+                    )
                 };
-                text.push_str(&format!("  {:>2}. {:<6} {}\n", st["n"].as_u64().unwrap_or(0), kind, line));
+                text.push_str(&format!(
+                    "  {:>2}. {:<6} {}\n",
+                    st["n"].as_u64().unwrap_or(0),
+                    kind,
+                    line
+                ));
             }
             if out["divergence"].is_object() {
-                text.push_str(&format!("\n  {} the run diverged; use --json to see both sides\n", "⚠".yellow().bold()));
+                text.push_str(&format!(
+                    "\n  {} the run diverged; use --json to see both sides\n",
+                    "⚠".yellow().bold()
+                ));
             }
             Ok(text)
         }
         ReplayCommands::Prepare(a) => {
             let edits = parse_edits(&a.edits)?;
             let prep = client
-                .prepare_live_replay(&a.trace_id, &a.from_span, &edits, &a.live_tools, a.reason.as_deref().unwrap_or(""))
+                .prepare_live_replay(
+                    &a.trace_id,
+                    &a.from_span,
+                    &edits,
+                    &a.live_tools,
+                    a.reason.as_deref().unwrap_or(""),
+                )
                 .await?;
             Ok(format!("{}\n", pretty(&prep)))
         }
@@ -630,7 +671,10 @@ async fn timeline(args: TimelineArgs) -> anyhow::Result<()> {
         if sp["orphan"].as_bool().unwrap_or(false) {
             notes.push("orphan".into());
         }
-        if sp["status"].as_str().is_some_and(|s| s == "failed" || s == "error") {
+        if sp["status"]
+            .as_str()
+            .is_some_and(|s| s == "failed" || s == "error")
+        {
             notes.push("failed".red().to_string());
         }
         println!(
@@ -679,7 +723,9 @@ async fn events(args: TraceGetArgs) -> anyhow::Result<()> {
     for e in &events {
         println!(
             "  {:<20} {:<30} {}",
-            e["timestamp"].as_str().map_or("-", |t| &t[..t.len().min(19)]),
+            e["timestamp"]
+                .as_str()
+                .map_or("-", |t| &t[..t.len().min(19)]),
             e["action"].as_str().unwrap_or("-"),
             e["user_email"].as_str().unwrap_or("").dimmed()
         );
@@ -704,7 +750,11 @@ async fn views(cmd: ViewCommands) -> anyhow::Result<()> {
                     "  {}  {}{}",
                     v["id"].as_str().unwrap_or("-").dimmed(),
                     v["name"].as_str().unwrap_or("-").bold(),
-                    if v["shared"].as_bool().unwrap_or(false) { "  (shared)" } else { "" }
+                    if v["shared"].as_bool().unwrap_or(false) {
+                        "  (shared)"
+                    } else {
+                        ""
+                    }
                 );
             }
         }
@@ -724,7 +774,11 @@ async fn views(cmd: ViewCommands) -> anyhow::Result<()> {
             let v = client
                 .save_trace_view(&a.name, serde_json::Value::Object(f), a.shared)
                 .await?;
-            println!("  ✓ saved view {} ({})", a.name.bold(), v["id"].as_str().unwrap_or("-"));
+            println!(
+                "  ✓ saved view {} ({})",
+                a.name.bold(),
+                v["id"].as_str().unwrap_or("-")
+            );
         }
         ViewCommands::Rm(a) => {
             client.delete_trace_view(&a.view_id).await?;
@@ -760,14 +814,26 @@ mod replay_tests {
     async fn client(extra: &[(&str, agentoven_core::testing::Reply)]) -> (AgentOvenClient, Log) {
         colored::control::set_override(false);
         let mut routes = Routes::from([
-            ("POST /api/v1/signatures/challenge".to_string(), reply(200, json!({"subject": {"digest": "d"}, "reauth": "password"}))),
-            ("POST /api/v1/signatures/token".to_string(), reply(200, json!({"signing_token": "tok.sig"}))),
+            (
+                "POST /api/v1/signatures/challenge".to_string(),
+                reply(
+                    200,
+                    json!({"subject": {"digest": "d"}, "reauth": "password"}),
+                ),
+            ),
+            (
+                "POST /api/v1/signatures/token".to_string(),
+                reply(200, json!({"signing_token": "tok.sig"})),
+            ),
         ]);
         for (k, v) in extra {
             routes.insert(k.to_string(), v.clone());
         }
         let (base, log) = fake_control_plane(routes).await;
-        (AgentOvenClient::new(&base).unwrap().with_kitchen("acme"), log)
+        (
+            AgentOvenClient::new(&base).unwrap().with_kitchen("acme"),
+            log,
+        )
     }
 
     #[tokio::test]
@@ -780,7 +846,17 @@ mod replay_tests {
                 {"index": 1, "status": "blocked", "reason": "input guardrail"}]})),
         )]).await;
         let out = replay(
-            replay_cmd(&["call", "t1", "s1", "--variant", r#"{"label":"cooler","edits":{"temperature":0.1}}"#, "--variant", r#"{"edits":{"model":"claude-haiku"}}"#, "--reason", "why"]),
+            replay_cmd(&[
+                "call",
+                "t1",
+                "s1",
+                "--variant",
+                r#"{"label":"cooler","edits":{"temperature":0.1}}"#,
+                "--variant",
+                r#"{"edits":{"model":"claude-haiku"}}"#,
+                "--reason",
+                "why",
+            ]),
             &c,
         )
         .await
@@ -789,21 +865,49 @@ mod replay_tests {
             log.last().body,
             json!({"variants": [{"label": "cooler", "edits": {"temperature": 0.1}}, {"edits": {"model": "claude-haiku"}}], "reason": "why"})
         );
-        assert!(out.contains("This is a replay") && out.contains("cooler") && out.contains("wants tool lookup (not run)"), "{out}");
-        assert!(out.contains("blocked") && out.contains("input guardrail") && out.contains("rt1"), "{out}");
+        assert!(
+            out.contains("This is a replay")
+                && out.contains("cooler")
+                && out.contains("wants tool lookup (not run)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("blocked") && out.contains("input guardrail") && out.contains("rt1"),
+            "{out}"
+        );
     }
 
     #[tokio::test]
     async fn replay_call_reads_variants_from_a_file_and_refuses_bad_json() {
-        let (c, log) = client(&[("POST /api/v1/traces/t1/spans/s1/replay", reply(200, json!({"variants": []})))]).await;
+        let (c, log) = client(&[(
+            "POST /api/v1/traces/t1/spans/s1/replay",
+            reply(200, json!({"variants": []})),
+        )])
+        .await;
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("v.json");
         std::fs::write(&f, r#"[{"edits": {"max_tokens": 50}}]"#).unwrap();
-        replay(replay_cmd(&["call", "t1", "s1", "--variants-file", f.to_str().unwrap()]), &c).await.unwrap();
-        assert_eq!(log.last().body["variants"], json!([{"edits": {"max_tokens": 50}}]));
+        replay(
+            replay_cmd(&["call", "t1", "s1", "--variants-file", f.to_str().unwrap()]),
+            &c,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            log.last().body["variants"],
+            json!([{"edits": {"max_tokens": 50}}])
+        );
         std::fs::write(&f, r#"{"not": "an array"}"#).unwrap();
-        assert!(replay(replay_cmd(&["call", "t1", "s1", "--variants-file", f.to_str().unwrap()]), &c).await.is_err());
-        let e = replay(replay_cmd(&["call", "t1", "s1", "--variant", "{oops"]), &c).await.unwrap_err().to_string();
+        assert!(replay(
+            replay_cmd(&["call", "t1", "s1", "--variants-file", f.to_str().unwrap()]),
+            &c
+        )
+        .await
+        .is_err());
+        let e = replay(replay_cmd(&["call", "t1", "s1", "--variant", "{oops"]), &c)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("--variant"), "{e}");
     }
 
@@ -815,35 +919,114 @@ mod replay_tests {
                 {"n": 1, "kind": "model", "content": "calling lookup"},
                 {"n": 2, "kind": "tool", "tool": "lookup", "source": "frozen"}], "divergence": {"step": 3}})),
         )]).await;
-        let out = replay(replay_cmd(&["run", "t1", "--from-span", "s2", "--edits", r#"{"model":"claude-haiku"}"#]), &c).await.unwrap();
-        assert_eq!(log.last().body, json!({"from_span": "s2", "edits": {"model": "claude-haiku"}, "tools": "frozen", "live_tools": [], "reason": ""}));
-        assert!(out.contains("diverged") && out.contains("tool lookup [frozen]"), "{out}");
+        let out = replay(
+            replay_cmd(&[
+                "run",
+                "t1",
+                "--from-span",
+                "s2",
+                "--edits",
+                r#"{"model":"claude-haiku"}"#,
+            ]),
+            &c,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            log.last().body,
+            json!({"from_span": "s2", "edits": {"model": "claude-haiku"}, "tools": "frozen", "live_tools": [], "reason": ""})
+        );
+        assert!(
+            out.contains("diverged") && out.contains("tool lookup [frozen]"),
+            "{out}"
+        );
         let n = log.len();
-        assert!(replay(replay_cmd(&["run", "t1", "--from-span", "s2", "--tools", "simulated"]), &c).await.is_err());
-        assert!(replay(replay_cmd(&["run", "t1", "--from-span", "s2", "--tools", "live"]), &c).await.is_err());
+        assert!(replay(
+            replay_cmd(&["run", "t1", "--from-span", "s2", "--tools", "simulated"]),
+            &c
+        )
+        .await
+        .is_err());
+        assert!(replay(
+            replay_cmd(&["run", "t1", "--from-span", "s2", "--tools", "live"]),
+            &c
+        )
+        .await
+        .is_err());
         assert_eq!(log.len(), n);
     }
 
     #[tokio::test]
     async fn a_live_replay_with_a_held_token_sends_it_and_prepare_shows_what_to_sign() {
         let (c, log) = client(&[
-            ("POST /api/v1/traces/t1/replay", reply(200, json!({"status": "completed", "steps": []}))),
-            ("POST /api/v1/traces/t1/replay/prepare", reply(200, json!({"gate": "live_tool_replay", "record_id": "t1:s2", "payload": {"x": 1}}))),
-        ]).await;
-        replay(replay_cmd(&["run", "t1", "--from-span", "s2", "--tools", "live", "--live-tool", "lookup", "--signing-token", "held"]), &c).await.unwrap();
+            (
+                "POST /api/v1/traces/t1/replay",
+                reply(200, json!({"status": "completed", "steps": []})),
+            ),
+            (
+                "POST /api/v1/traces/t1/replay/prepare",
+                reply(
+                    200,
+                    json!({"gate": "live_tool_replay", "record_id": "t1:s2", "payload": {"x": 1}}),
+                ),
+            ),
+        ])
+        .await;
+        replay(
+            replay_cmd(&[
+                "run",
+                "t1",
+                "--from-span",
+                "s2",
+                "--tools",
+                "live",
+                "--live-tool",
+                "lookup",
+                "--signing-token",
+                "held",
+            ]),
+            &c,
+        )
+        .await
+        .unwrap();
         assert_eq!(log.last().headers["x-signing-token"], "held");
         assert_eq!(log.last().body["live_tools"], json!(["lookup"]));
-        let out = replay(replay_cmd(&["prepare", "t1", "--from-span", "s2", "--live-tool", "lookup"]), &c).await.unwrap();
-        assert!(out.contains("live_tool_replay") && out.contains("t1:s2"), "{out}");
+        let out = replay(
+            replay_cmd(&[
+                "prepare",
+                "t1",
+                "--from-span",
+                "s2",
+                "--live-tool",
+                "lookup",
+            ]),
+            &c,
+        )
+        .await
+        .unwrap();
+        assert!(
+            out.contains("live_tool_replay") && out.contains("t1:s2"),
+            "{out}"
+        );
     }
 
     #[tokio::test]
     async fn capture_prints_the_call_whole() {
-        let (c, _) = client(&[("GET /api/v1/traces/t1/spans/s1/capture", reply(200, json!({"request": {"messages": []}, "response": {"content": "ok"}})))]).await;
+        let (c, _) = client(&[(
+            "GET /api/v1/traces/t1/spans/s1/capture",
+            reply(
+                200,
+                json!({"request": {"messages": []}, "response": {"content": "ok"}}),
+            ),
+        )])
+        .await;
         let a = match parse(&["capture", "t1", "s1"]) {
             TraceCommands::Capture(a) => a,
             _ => panic!(),
         };
-        assert!(capture(a, &c).await.unwrap().contains("\"content\": \"ok\""));
+        assert!(capture(a, &c)
+            .await
+            .unwrap()
+            .contains("\"content\": \"ok\""));
     }
 }

@@ -84,8 +84,7 @@ async fn list() -> anyhow::Result<()> {
     println!("\n  🤖 Service Accounts:\n");
 
     let client = pro_gate::build_client()?;
-    let accounts: Vec<serde_json::Value> =
-        client.raw_get("/api/v1/service-accounts").await?;
+    let accounts: Vec<serde_json::Value> = client.raw_get("/api/v1/service-accounts").await?;
 
     if accounts.is_empty() {
         println!("  (no service accounts)");
@@ -108,7 +107,10 @@ async fn list() -> anyhow::Result<()> {
             } else {
                 expires
             };
-            println!("  {:<24} {:<12} {:<16} {:<20}", name, role, kitchen, exp_short);
+            println!(
+                "  {:<24} {:<12} {:<16} {:<20}",
+                name, role, kitchen, exp_short
+            );
         }
         println!("\n  {} {} account(s)", "→".dimmed(), accounts.len());
     }
@@ -116,10 +118,7 @@ async fn list() -> anyhow::Result<()> {
 }
 
 async fn create(args: CreateArgs) -> anyhow::Result<()> {
-    println!(
-        "\n  🤖 Creating service account: {}\n",
-        args.name.bold()
-    );
+    println!("\n  🤖 Creating service account: {}\n", args.name.bold());
 
     let body = create_body(&args)?;
 
@@ -139,17 +138,15 @@ async fn create(args: CreateArgs) -> anyhow::Result<()> {
                 println!();
                 println!(
                     "  {}",
-                    "⚠ Save this token — it will not be shown again!".yellow().bold()
+                    "⚠ Save this token — it will not be shown again!"
+                        .yellow()
+                        .bold()
                 );
                 println!("  Token: {}", token.cyan());
             }
         }
         Err(e) => {
-            println!(
-                "  {} Failed: {}",
-                "✗".red().bold(),
-                e.to_string().dimmed()
-            );
+            println!("  {} Failed: {}", "✗".red().bold(), e.to_string().dimmed());
         }
     }
     Ok(())
@@ -157,7 +154,11 @@ async fn create(args: CreateArgs) -> anyhow::Result<()> {
 
 /// The body of a create: the role is checked against the kitchen roles before anything is sent.
 pub fn create_body(args: &CreateArgs) -> anyhow::Result<serde_json::Value> {
-    agentoven_core::check_role(&args.role, &agentoven_core::KITCHEN_ROLES, "a service account")?;
+    agentoven_core::check_role(
+        &args.role,
+        &agentoven_core::KITCHEN_ROLES,
+        "a service account",
+    )?;
     let mut body = serde_json::json!({
         "name": args.name,
         "role": args.role,
@@ -172,7 +173,9 @@ pub fn create_body(args: &CreateArgs) -> anyhow::Result<serde_json::Value> {
 
 async fn owner(args: OwnerArgs) -> anyhow::Result<()> {
     let client = pro_gate::build_client()?;
-    let sa = client.set_service_account_owner(&args.id, &args.email).await?;
+    let sa = client
+        .set_service_account_owner(&args.id, &args.email)
+        .await?;
     println!(
         "  {} Service account {} now belongs to {}.",
         "✓".green().bold(),
@@ -207,11 +210,7 @@ async fn delete(args: DeleteArgs) -> anyhow::Result<()> {
             );
         }
         Err(e) => {
-            println!(
-                "  {} Failed: {}",
-                "✗".red().bold(),
-                e.to_string().dimmed()
-            );
+            println!("  {} Failed: {}", "✗".red().bold(), e.to_string().dimmed());
         }
     }
     Ok(())
@@ -243,17 +242,15 @@ async fn rotate(args: RotateArgs) -> anyhow::Result<()> {
                 println!();
                 println!(
                     "  {}",
-                    "⚠ Save this token — it will not be shown again!".yellow().bold()
+                    "⚠ Save this token — it will not be shown again!"
+                        .yellow()
+                        .bold()
                 );
                 println!("  Token: {}", token.cyan());
             }
         }
         Err(e) => {
-            println!(
-                "  {} Failed: {}",
-                "✗".red().bold(),
-                e.to_string().dimmed()
-            );
+            println!("  {} Failed: {}", "✗".red().bold(), e.to_string().dimmed());
         }
     }
     Ok(())
@@ -288,7 +285,10 @@ mod tests {
         }
         let b = create_body(&args("baker", Some("ana@acme.io"))).unwrap();
         assert_eq!(b["owner_email"], "ana@acme.io");
-        assert!(create_body(&args("baker", None)).unwrap().get("owner_email").is_none());
+        assert!(create_body(&args("baker", None))
+            .unwrap()
+            .get("owner_email")
+            .is_none());
     }
 
     #[test]
@@ -297,9 +297,18 @@ mod tests {
         let cmd = crate::commands::Cli::command();
         let sa = cmd.find_subcommand("service-account").unwrap();
         let create = sa.find_subcommand("create").unwrap();
-        let role = create.get_arguments().find(|a| a.get_id() == "role").unwrap();
+        let role = create
+            .get_arguments()
+            .find(|a| a.get_id() == "role")
+            .unwrap();
         let help = role.get_help().unwrap().to_string();
-        assert!(help.contains("head_chef") && help.contains("taster") && help.contains("legal"), "{help}");
-        assert!(!help.contains("admin,") && !help.contains(", admin"), "{help}");
+        assert!(
+            help.contains("head_chef") && help.contains("taster") && help.contains("legal"),
+            "{help}"
+        );
+        assert!(
+            !help.contains("admin,") && !help.contains(", admin"),
+            "{help}"
+        );
     }
 }

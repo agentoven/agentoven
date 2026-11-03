@@ -115,7 +115,13 @@ async fn list() -> anyhow::Result<()> {
             let agent = s["agent_name"].as_str().unwrap_or("-");
             let cases = s["cases"].as_array().map(|c| c.len()).unwrap_or(0);
             let id = s["id"].as_str().unwrap_or("-");
-            println!("  {:<24} {:<24} {:<8} {:<12}", name, agent, cases, id.dimmed());
+            println!(
+                "  {:<24} {:<24} {:<8} {:<12}",
+                name,
+                agent,
+                cases,
+                id.dimmed()
+            );
         }
         println!("\n  {} {} suite(s)", "→".dimmed(), suites.len());
     }
@@ -182,11 +188,7 @@ async fn create(args: CreateArgs) -> anyhow::Result<()> {
             );
         }
         Err(e) => {
-            println!(
-                "  {} Failed: {}",
-                "✗".red().bold(),
-                e.to_string().dimmed()
-            );
+            println!("  {} Failed: {}", "✗".red().bold(), e.to_string().dimmed());
         }
     }
     Ok(())
@@ -204,11 +206,7 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     {
         Ok(r) => r,
         Err(e) => {
-            println!(
-                "  {} Failed: {}",
-                "✗".red().bold(),
-                e.to_string().dimmed()
-            );
+            println!("  {} Failed: {}", "✗".red().bold(), e.to_string().dimmed());
             return Ok(());
         }
     };
@@ -234,10 +232,7 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     for _ in 0..60 {
         tokio::time::sleep(Duration::from_secs(2)).await;
         result = client
-            .raw_get(&format!(
-                "/api/v1/test-suites/{}/runs/{}",
-                args.id, run_id
-            ))
+            .raw_get(&format!("/api/v1/test-suites/{}/runs/{}", args.id, run_id))
             .await?;
         let status = result["status"].as_str().unwrap_or("");
         if status != "pending" && status != "running" {
@@ -264,8 +259,12 @@ async fn run_status(args: RunStatusArgs) -> anyhow::Result<()> {
     // gives for a scenario run triggered directly.
     if let Some(results) = result["results"].as_array() {
         for r in results {
-            let Some(scenario_id) = r["actual_scenario_id"].as_str() else { continue };
-            let Some(trace_id) = r["trace_id"].as_str() else { continue };
+            let Some(scenario_id) = r["actual_scenario_id"].as_str() else {
+                continue;
+            };
+            let Some(trace_id) = r["trace_id"].as_str() else {
+                continue;
+            };
             println!(
                 "\n  {} episodes for {} (scenario {}):\n",
                 "→".dimmed(),
@@ -323,7 +322,11 @@ fn print_run_result(result: &serde_json::Value) {
     if let Some(results) = result["results"].as_array() {
         for r in results {
             let passed = r["passed"].as_bool().unwrap_or(false);
-            let marker = if passed { "✓".green().bold() } else { "✗".red().bold() };
+            let marker = if passed {
+                "✓".green().bold()
+            } else {
+                "✗".red().bold()
+            };
             let case_name = r["case_name"].as_str().unwrap_or("-");
             let extra = if let Some(scenario_id) = r["actual_scenario_id"].as_str() {
                 format!(" (picked: {})", scenario_id).dimmed().to_string()
@@ -367,11 +370,7 @@ async fn delete(args: DeleteArgs) -> anyhow::Result<()> {
             );
         }
         Err(e) => {
-            println!(
-                "  {} Failed: {}",
-                "✗".red().bold(),
-                e.to_string().dimmed()
-            );
+            println!("  {} Failed: {}", "✗".red().bold(), e.to_string().dimmed());
         }
     }
     Ok(())

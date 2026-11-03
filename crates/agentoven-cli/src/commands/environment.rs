@@ -87,7 +87,8 @@ pub async fn execute(cmd: EnvironmentCommands) -> anyhow::Result<()> {
             delete(args).await
         }
         EnvironmentCommands::Promote(args) => {
-            if !pro_gate::check_pro_feature(PROMOTIONS_FEATURE_NAME, PROMOTIONS_FEATURE_KEY).await? {
+            if !pro_gate::check_pro_feature(PROMOTIONS_FEATURE_NAME, PROMOTIONS_FEATURE_KEY).await?
+            {
                 return Ok(());
             }
             promote(args).await
@@ -99,9 +100,7 @@ async fn list() -> anyhow::Result<()> {
     println!("\n  🌍 Environments:\n");
 
     let client = pro_gate::build_client()?;
-    let resp = client
-        .raw_get("/api/v1/environments")
-        .await?;
+    let resp = client.raw_get("/api/v1/environments").await?;
 
     let envs: Vec<serde_json::Value> = resp;
     if envs.is_empty() {
@@ -171,11 +170,7 @@ async fn create(args: CreateArgs) -> anyhow::Result<()> {
             );
         }
         Err(e) => {
-            println!(
-                "  {} Failed: {}",
-                "✗".red().bold(),
-                e.to_string().dimmed()
-            );
+            println!("  {} Failed: {}", "✗".red().bold(), e.to_string().dimmed());
         }
     }
     Ok(())
@@ -206,11 +201,7 @@ async fn delete(args: DeleteArgs) -> anyhow::Result<()> {
             );
         }
         Err(e) => {
-            println!(
-                "  {} Failed: {}",
-                "✗".red().bold(),
-                e.to_string().dimmed()
-            );
+            println!("  {} Failed: {}", "✗".red().bold(), e.to_string().dimmed());
         }
     }
     Ok(())
@@ -243,11 +234,7 @@ async fn promote(args: PromoteArgs) -> anyhow::Result<()> {
             );
         }
         Err(e) => {
-            println!(
-                "  {} Failed: {}",
-                "✗".red().bold(),
-                e.to_string().dimmed()
-            );
+            println!("  {} Failed: {}", "✗".red().bold(), e.to_string().dimmed());
         }
     }
     Ok(())

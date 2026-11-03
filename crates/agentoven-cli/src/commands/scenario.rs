@@ -216,7 +216,10 @@ async fn list() -> anyhow::Result<()> {
     let scenarios: Vec<serde_json::Value> = client.raw_get("/api/v1/scenarios").await?;
 
     if scenarios.is_empty() {
-        println!("  (no scenarios — create one with {})", "agentoven scenario push <file>".cyan());
+        println!(
+            "  (no scenarios — create one with {})",
+            "agentoven scenario push <file>".cyan()
+        );
         return Ok(());
     }
 
@@ -316,7 +319,11 @@ async fn push(args: PushArgs) -> anyhow::Result<()> {
         Err(e) => {
             println!("\n  {} {}\n", "✗".red().bold(), e.to_string().dimmed());
             if !args.create {
-                println!("  {} pass {} if this scenario is new.\n", "→".dimmed(), "--create".cyan());
+                println!(
+                    "  {} pass {} if this scenario is new.\n",
+                    "→".dimmed(),
+                    "--create".cyan()
+                );
             }
         }
     }
@@ -329,9 +336,11 @@ async fn validate(args: IdArgs) -> anyhow::Result<()> {
         .raw_get(&format!("/api/v1/scenarios/{}", args.id))
         .await?;
 
-    println!("\n  Validating {} against world schema {}\n",
+    println!(
+        "\n  Validating {} against world schema {}\n",
         args.id.bold(),
-        sc["ontology_version"].as_str().unwrap_or("-").cyan());
+        sc["ontology_version"].as_str().unwrap_or("-").cyan()
+    );
     print_issues(sc["issues"].as_array());
     Ok(())
 }
@@ -344,7 +353,11 @@ async fn world(args: IdArgs) -> anyhow::Result<()> {
 
     let empty = vec![];
     let nodes = out["world"]["nodes"].as_array().unwrap_or(&empty);
-    println!("\n  🌍 World for {} — {} node(s)\n", args.id.bold(), nodes.len());
+    println!(
+        "\n  🌍 World for {} — {} node(s)\n",
+        args.id.bold(),
+        nodes.len()
+    );
 
     for n in nodes {
         println!(
@@ -402,7 +415,11 @@ async fn projection(args: ProjectionArgs) -> anyhow::Result<()> {
             };
             println!(
                 "      {:<28} {:<20} {}",
-                format!("{}.{}", p["node"].as_str().unwrap_or("-"), p["property"].as_str().unwrap_or("-")),
+                format!(
+                    "{}.{}",
+                    p["node"].as_str().unwrap_or("-"),
+                    p["property"].as_str().unwrap_or("-")
+                ),
                 value,
                 p["reason"].as_str().unwrap_or("").dimmed()
             );
@@ -444,17 +461,26 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
         "▶".green().bold(),
         id.cyan(),
         run["total"],
-        args.id.clone().unwrap_or_else(|| "its scenario ingredients".into()).bold(),
+        args.id
+            .clone()
+            .unwrap_or_else(|| "its scenario ingredients".into())
+            .bold(),
         args.agent.bold()
     );
     if !args.wait {
-        println!("  {} follow with {}\n", "→".dimmed(), format!("agentoven scenario run-status {}", id).cyan());
+        println!(
+            "  {} follow with {}\n",
+            "→".dimmed(),
+            format!("agentoven scenario run-status {}", id).cyan()
+        );
         return Ok(());
     }
 
     let mut last = -1;
     loop {
-        let r: serde_json::Value = client.raw_get(&format!("/api/v1/scenario-runs/{}", id)).await?;
+        let r: serde_json::Value = client
+            .raw_get(&format!("/api/v1/scenario-runs/{}", id))
+            .await?;
         let done = r["done"].as_i64().unwrap_or(0);
         if done != last {
             println!("  {} {}/{}", "…".dimmed(), done, r["total"]);
@@ -491,8 +517,14 @@ fn print_run(r: &serde_json::Value) {
     );
     println!(
         "  {:<34} {:<6} {:<6} {:<8} {:<10} {:<20} {:<9} {}",
-        "SCENARIO".bold(), "PASS".bold(), "FAIL".bold(), "INVALID".bold(),
-        "PASS RATE".bold(), "95% CI".bold(), "PASS^K".bold(), "COST".bold()
+        "SCENARIO".bold(),
+        "PASS".bold(),
+        "FAIL".bold(),
+        "INVALID".bold(),
+        "PASS RATE".bold(),
+        "95% CI".bold(),
+        "PASS^K".bold(),
+        "COST".bold()
     );
     println!("  {}", "─".repeat(104).dimmed());
     for res in r["results"].as_array().unwrap_or(&vec![]) {
@@ -556,14 +588,22 @@ async fn find(args: FindArgs) -> anyhow::Result<()> {
     println!();
     for (i, r) in results.iter().enumerate() {
         let runnable = r["runnable"].as_bool().unwrap_or(true);
-        let marker = if runnable { "●".green() } else { "○".yellow() };
+        let marker = if runnable {
+            "●".green()
+        } else {
+            "○".yellow()
+        };
         println!(
             "  {} {:<2} {:<36} {}{}",
             marker,
             i + 1,
             r["scenario_id"].as_str().unwrap_or("-").bold(),
             format!("score {:.2}", r["score"].as_f64().unwrap_or(0.0)).dimmed(),
-            if r["live"].as_bool().unwrap_or(false) { "  live".cyan().to_string() } else { String::new() }
+            if r["live"].as_bool().unwrap_or(false) {
+                "  live".cyan().to_string()
+            } else {
+                String::new()
+            }
         );
         if let Some(d) = r["description"].as_str().filter(|d| !d.is_empty()) {
             println!("       {}", d.dimmed());
@@ -584,7 +624,9 @@ async fn find(args: FindArgs) -> anyhow::Result<()> {
 fn encode_query(v: &str) -> String {
     v.bytes()
         .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
             _ => format!("%{:02X}", b),
         })
         .collect()
@@ -592,7 +634,8 @@ fn encode_query(v: &str) -> String {
 
 async fn snapshot(args: SnapshotArgs) -> anyhow::Result<()> {
     let client = pro_gate::build_client()?;
-    let body = serde_json::json!({"environment": args.env, "allow_production": args.allow_production});
+    let body =
+        serde_json::json!({"environment": args.env, "allow_production": args.allow_production});
     let out: serde_json::Value = client
         .raw_post(&format!("/api/v1/scenarios/{}/snapshot", args.id), &body)
         .await?;
@@ -604,7 +647,13 @@ async fn snapshot(args: SnapshotArgs) -> anyhow::Result<()> {
         args.env,
         out["nodes"],
         "→".dimmed(),
-        format!("agentoven scenario verify {} --env {} --before {}", args.id, args.env, out["id"].as_str().unwrap_or("-")).cyan()
+        format!(
+            "agentoven scenario verify {} --env {} --before {}",
+            args.id,
+            args.env,
+            out["id"].as_str().unwrap_or("-")
+        )
+        .cyan()
     );
     Ok(())
 }
@@ -631,7 +680,12 @@ async fn verify(args: VerifyArgs) -> anyhow::Result<()> {
         "failed" => status.red().bold(),
         _ => status.yellow().bold(),
     };
-    println!("\n  {} {} — reward {:.3}\n", args.id.bold(), coloured, verdict["reward"].as_f64().unwrap_or(0.0));
+    println!(
+        "\n  {} {} — reward {:.3}\n",
+        args.id.bold(),
+        coloured,
+        verdict["reward"].as_f64().unwrap_or(0.0)
+    );
     for a in verdict["assertions"].as_array().unwrap_or(&vec![]) {
         let ok = a["satisfied"].as_bool().unwrap_or(false);
         println!(
@@ -655,13 +709,27 @@ async fn runs() -> anyhow::Result<()> {
     let client = pro_gate::build_client()?;
     let runs: Vec<serde_json::Value> = client.raw_get("/api/v1/scenario-runs").await?;
     if runs.is_empty() {
-        println!("\n  (no runs yet — start one with {})\n", "agentoven scenario run <id> --agent <name>".cyan());
+        println!(
+            "\n  (no runs yet — start one with {})\n",
+            "agentoven scenario run <id> --agent <name>".cyan()
+        );
         return Ok(());
     }
-    println!("\n  {:<38} {:<12} {:<20} {:<10} {:<10} {}", "RUN".bold(), "STATUS".bold(), "AGENT".bold(), "EPISODES".bold(), "PASS RATE".bold(), "CREATED".bold());
+    println!(
+        "\n  {:<38} {:<12} {:<20} {:<10} {:<10} {}",
+        "RUN".bold(),
+        "STATUS".bold(),
+        "AGENT".bold(),
+        "EPISODES".bold(),
+        "PASS RATE".bold(),
+        "CREATED".bold()
+    );
     println!("  {}", "─".repeat(110).dimmed());
     for r in &runs {
-        let rate = r["summary"]["pass_rate"].as_f64().map(|v| format!("{:.1}%", v * 100.0)).unwrap_or_else(|| "-".into());
+        let rate = r["summary"]["pass_rate"]
+            .as_f64()
+            .map(|v| format!("{:.1}%", v * 100.0))
+            .unwrap_or_else(|| "-".into());
         println!(
             "  {:<38} {:<12} {:<20} {:<10} {:<10} {}",
             r["id"].as_str().unwrap_or("-"),
@@ -669,7 +737,11 @@ async fn runs() -> anyhow::Result<()> {
             r["request"]["agent_name"].as_str().unwrap_or("-"),
             format!("{}/{}", r["done"], r["total"]),
             rate,
-            r["created_at"].as_str().unwrap_or("-").get(..19).unwrap_or("-")
+            r["created_at"]
+                .as_str()
+                .unwrap_or("-")
+                .get(..19)
+                .unwrap_or("-")
         );
     }
     println!();
@@ -679,7 +751,9 @@ async fn runs() -> anyhow::Result<()> {
 async fn run_status(args: RunStatusArgs) -> anyhow::Result<()> {
     let client = pro_gate::build_client()?;
     if !args.episodes {
-        let r: serde_json::Value = client.raw_get(&format!("/api/v1/scenario-runs/{}", args.run_id)).await?;
+        let r: serde_json::Value = client
+            .raw_get(&format!("/api/v1/scenario-runs/{}", args.run_id))
+            .await?;
         print_run(&r);
         return Ok(());
     }
@@ -725,7 +799,10 @@ async fn run_status(args: RunStatusArgs) -> anyhow::Result<()> {
 async fn run_diff(args: RunDiffArgs) -> anyhow::Result<()> {
     let client = pro_gate::build_client()?;
     let d: serde_json::Value = client
-        .raw_get(&format!("/api/v1/scenario-runs/{}/diff/{}", args.baseline, args.candidate))
+        .raw_get(&format!(
+            "/api/v1/scenario-runs/{}/diff/{}",
+            args.baseline, args.candidate
+        ))
         .await?;
     let diff = &d["diff"];
     let delta = diff["mean_delta"].as_f64().unwrap_or(0.0);
@@ -767,9 +844,16 @@ async fn run_diff(args: RunDiffArgs) -> anyhow::Result<()> {
 async fn run_cancel(args: RunIdArgs) -> anyhow::Result<()> {
     let client = pro_gate::build_client()?;
     client
-        .raw_post::<serde_json::Value>(&format!("/api/v1/scenario-runs/{}/cancel", args.run_id), &serde_json::json!({}))
+        .raw_post::<serde_json::Value>(
+            &format!("/api/v1/scenario-runs/{}/cancel", args.run_id),
+            &serde_json::json!({}),
+        )
         .await?;
-    println!("\n  {} Cancelling {}\n", "■".yellow().bold(), args.run_id.cyan());
+    println!(
+        "\n  {} Cancelling {}\n",
+        "■".yellow().bold(),
+        args.run_id.cyan()
+    );
     Ok(())
 }
 

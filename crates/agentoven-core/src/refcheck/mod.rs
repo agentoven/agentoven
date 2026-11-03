@@ -748,6 +748,7 @@ impl<'a> Checker<'a> {
     }
 
     /// A name that must be one of `set` (when the kitchen's list of that kind was read).
+    #[allow(clippy::wrong_self_convention)] // reads as "the name comes from this set", it checks, it does not convert
     pub fn from_set(&mut self, path: &str, kind: Kind, name: &str, set: &[String]) {
         if self.c.knows(kind) && !contains(set, name) {
             self.not_found(path, kind, name, "", &sorted(set.to_vec()));
