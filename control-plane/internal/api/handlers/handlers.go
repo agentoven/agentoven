@@ -6194,7 +6194,7 @@ func (h *Handlers) ListApprovals(w http.ResponseWriter, r *http.Request) {
 	if approvals == nil {
 		approvals = []models.ApprovalRecord{}
 	}
-	respondJSON(w, http.StatusOK, approvals)
+	respondJSON(w, http.StatusOK, h.approvalsOut(r, approvals))
 }
 
 // GetApproval returns a single approval record by gate key.
@@ -6205,7 +6205,7 @@ func (h *Handlers) GetApproval(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, "approval not found: "+gateKey)
 		return
 	}
-	respondJSON(w, http.StatusOK, record)
+	respondJSON(w, http.StatusOK, h.approvalOut(r, record))
 }
 
 // ApproveGateWithMetadata approves or rejects a gate with full approver identity.

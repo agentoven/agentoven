@@ -21,6 +21,8 @@ var contentTypes = map[reflect.Type]bool{
 	reflect.TypeOf(models.TraceScore{}):  true,
 	reflect.TypeOf(models.Session{}):     true,
 	reflect.TypeOf(models.ChatMessage{}): true,
+	// A gate's inputs and an approver's comments are content (owner decision A3, 2026-11-03).
+	reflect.TypeOf(models.ApprovalRecord{}): true,
 }
 
 // readable marks a response that carries content and whose caller was checked for the right to read
@@ -135,4 +137,18 @@ func (h *Handlers) sessionsOut(r *http.Request, ss []models.Session) interface{}
 		return readable{ss}
 	}
 	return models.PublicSessions(ss)
+}
+
+func (h *Handlers) approvalOut(r *http.Request, a *models.ApprovalRecord) interface{} {
+	if h.canReadTraceContent(r) {
+		return readable{a}
+	}
+	return a.Public()
+}
+
+func (h *Handlers) approvalsOut(r *http.Request, as []models.ApprovalRecord) interface{} {
+	if h.canReadTraceContent(r) {
+		return readable{as}
+	}
+	return models.PublicApprovals(as)
 }
