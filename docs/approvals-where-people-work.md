@@ -35,7 +35,19 @@ Chat buttons can say "I am looking at it" (reminders go quiet for a while, at mo
 
 - **Slack**: create a Slack app with Interactivity on, request URL `https://<server>/hooks/chat/approvals/slack/<kitchen>/<channel name>`, and use the channel's incoming-webhook URL as the channel's `url`. Put the app's signing secret in a vault credential and name it in the channel config: `"config": {"signing_secret_ref": "vault://slack-signing", "slack_team_id": "T0123"}`. Requests are checked with Slack's `v0` signature (constant time, five-minute window) and each is applied once.
 - **Teams**: an incoming webhook for the card, and an outgoing webhook to `https://<server>/hooks/chat/approvals/teams/<kitchen>/<channel name>`; the channel config names the outgoing webhook's security token: `"signing_secret_ref": "vault://teams-token"`, optionally `"teams_tenant_id"`. Say `claim <short id>`, `decline <short id>`, `snooze <short id> 60` to the bot (the short id is in the card).
-- The chat user is recorded as what they are, a name from the chat platform, not an AgentOven person; their claim is audited as such.
+- A chat user nobody linked is recorded as what they are, a name from the chat platform, **unverified**; their claim is audited as a chat actor (`chat:slack:<id>`). A chat user a member has linked (next section) is recorded as that member, marked verified.
+
+## Linking a chat user to a member
+
+So that "claimed by Bo" in the timeline means Bo and not just a name someone typed into Slack, a member can link their chat user to their account once. (Pro ADR-0056.)
+
+1. Open **Govern, Chat identities** in the dashboard (or `POST /api/v1/chat-identities/link-requests` with `platform` (`slack` or `teams`), `workspace` (the Slack team id or the Teams tenant id), `chat_user_id`, and optionally `deliver: "email"`). You get a link that works **once, for you only, for 30 minutes**; with `deliver: "email"` the link is sent to your own address through the kitchen's active e-mail channel instead (it never goes to the channel's shared recipients).
+2. Open the link while logged in as yourself. The chat user is now yours. Opening it as anyone else is refused and does not use it up; a second request for the same chat user replaces the first link.
+3. From then on a claim, "not mine" or snooze from that chat user is on the request's timeline and in the audit trail as you, through Slack or Teams, marked verified (`actor_member` on the timeline event; `actor_verified: true` and `chat_user_id` in the audit details).
+
+A Head Chef (`kitchen:admin`) sees every mapping of the kitchen, registers one for a member (replacing a wrong one), proposes one from the e-mail the chat platform gave for the user (`POST /api/v1/chat-identities/proposals`), and revokes any. A member sees and unlinks their own. A mapping that is pending, revoked, or whose member has left the kitchen counts for nothing: the reply is recorded under the chat name, unverified, exactly as before. **Linking never lets chat decide**: an approve button still only gives the signing link.
+
+What linking proves: that a logged-in member with that e-mail address asked for it and holds the mailbox the link went to. It does not prove that they control the chat account (that would need the link to be delivered inside the chat, which needs a Slack or Teams API call this version does not make). A member could therefore claim a colleague's chat user id; the effect is that the colleague's claims are recorded under the member's name, nothing more, and a Head Chef can see and replace it.
 
 ## See what happened
 
