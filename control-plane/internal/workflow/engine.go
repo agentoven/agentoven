@@ -979,6 +979,18 @@ func (e *Engine) executeStepOnce(ctx context.Context, run *models.RecipeRun, ste
 	}
 }
 
+// stepClient is the client an agent step's call goes through. The engine's own limit is two minutes; a step that
+// names a longer timeout_secs (an agent whose tool waits for a person's approval, ADR-0044) is held to that instead,
+// through the context deadline executeStepOnce sets.
+func (e *Engine) stepClient(step *models.Step) *http.Client {
+	if step.TimeoutSecs > 0 && time.Duration(step.TimeoutSecs)*time.Second > e.client.Timeout {
+		c := *e.client
+		c.Timeout = 0
+		return &c
+	}
+	return e.client
+}
+
 // executeAgentStep calls an agent via the A2A protocol.
 func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, step *models.Step, result *models.StepResult, completed map[string]*models.StepResult, mu *sync.Mutex) error {
 	// Extract parent trace ID for linking step traces to the recipe trace
@@ -1161,7 +1173,7 @@ func (e *Engine) executeAgentStep(ctx context.Context, run *models.RecipeRun, st
 		httpReq.Header.Set("X-AO-Environment", run.Environment)
 	}
 
-	resp, err := e.client.Do(httpReq)
+	resp, err := e.stepClient(step).Do(httpReq)
 	if err != nil {
 		e.createStepTrace(ctx, kitchen, agentRef, recipeName, run.ID, step.Name, "error", stepStart, 0, 0, "", err.Error(), parentTID)
 		return fmt.Errorf("A2A request failed: %w", err)

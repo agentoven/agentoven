@@ -1399,6 +1399,10 @@
   },
   {
    "method": "POST",
+   "path": "/api/v1/internal/tool-calls"
+  },
+  {
+   "method": "POST",
    "path": "/api/v1/judges"
   },
   {

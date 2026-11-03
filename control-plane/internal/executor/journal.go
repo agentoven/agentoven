@@ -160,6 +160,9 @@ type JournalHeader struct {
 	// InitialMessages are the messages the first model call is sent. Without them a run
 	// that dies before finishing its first turn has nothing to resume from.
 	InitialMessages []models.ChatMessage `json:"initial_messages,omitempty"`
+	// Hosted marks a one-call run that exists only to hold a tool call a hosted agent process asked the control
+	// plane to make, while a person decides (hosted_tools.go). It has no model loop to resume.
+	Hosted *HostedCall `json:"hosted,omitempty"`
 }
 
 // journalSchema is the format this binary writes.

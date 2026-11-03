@@ -191,7 +191,9 @@ func (h *Handlers) proxyA2AGuarded(w http.ResponseWriter, r *http.Request, backe
 	// The call to the process is accounted to a run, so its model calls can be held to a budget.
 	hostedCtx, endRun := h.beginHostedRun(r.Context(), agent)
 	defer endRun()
-	r = r.WithContext(hostedCtx)
+	toolCtx, closeTools := h.openToolScope(hostedCtx, agent)
+	defer closeTools()
+	r = r.WithContext(toolCtx)
 
 	// Every run of a bot is registered with the bot manager before it starts. A message that starts
 	// work (send, stream) is registered here under the run ID the process will be sent; the other

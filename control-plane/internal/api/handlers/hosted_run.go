@@ -63,3 +63,6 @@ func (h *Handlers) respondHostedStopped(w http.ResponseWriter, agentName, runID 
 		"usage":     out.Usage,
 	})
 }
+
+// newScopeRunID names the run of a tool scope when no model-gateway run scope is open for the call.
+func newScopeRunID() string { return uuid.New().String() }

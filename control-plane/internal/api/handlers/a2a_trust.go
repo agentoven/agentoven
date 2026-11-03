@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/agentoven/agentoven/control-plane/internal/api/middleware"
+	"github.com/agentoven/agentoven/control-plane/internal/toolbroker"
 	"github.com/agentoven/agentoven/control-plane/pkg/a2aauth"
 	"github.com/rs/zerolog/log"
 )
@@ -18,6 +19,10 @@ func (h *Handlers) signPodRequest(req *http.Request, kitchen, agent string) {
 	}
 	if id := hostedRunFrom(req.Context()); id != "" {
 		req.Header.Set(RunIDHeader, id)
+	}
+	// The token the process asks tool calls with, for this one relayed call (ADR-0044).
+	if tok := toolTokenFrom(req.Context()); tok != "" {
+		req.Header.Set(toolbroker.Header, tok)
 	}
 }
 

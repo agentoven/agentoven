@@ -38,6 +38,7 @@ import (
 	"github.com/agentoven/agentoven/control-plane/internal/secretref"
 	"github.com/agentoven/agentoven/control-plane/internal/store"
 	inttelemetry "github.com/agentoven/agentoven/control-plane/internal/telemetry"
+	"github.com/agentoven/agentoven/control-plane/internal/toolbroker"
 	"github.com/agentoven/agentoven/control-plane/internal/workflow"
 	"github.com/agentoven/agentoven/control-plane/pkg/audio"
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
@@ -114,6 +115,8 @@ type Handlers struct {
 	SkillUploads    *skills.UploadStore
 	// A2ASecret is the key the control plane's tokens for agent pods are derived from (a2aauth).
 	A2ASecret []byte
+	// ToolBroker issues the run tokens hosted processes use to ask the control plane to run a tool call (ADR-0044).
+	ToolBroker *toolbroker.Broker
 
 	// Notifier sends notifications and holds the connections listening to websocket channels.
 	Notifier *notify.Service
@@ -4067,12 +4070,18 @@ func (h *Handlers) emitEnvA2AAudit(ctx context.Context, kitchen, agentName, envS
 // Set AGENTOVEN_BACKEND_TLS_VERIFY=true to opt back in to strict verification.
 var backendHTTPClient = func() *http.Client {
 	skipVerify := os.Getenv("AGENTOVEN_BACKEND_TLS_VERIFY") != "true"
+	// A call to a process that holds a tool for a person's approval takes as long as the person does, so the
+	// limit is one setting (default five minutes, as the overall limit always was) rather than 60 s on the headers.
+	limit := 5 * time.Minute
+	if d, err := time.ParseDuration(os.Getenv("AGENTOVEN_BACKEND_CALL_TIMEOUT")); err == nil && d > 0 {
+		limit = d
+	}
 	return &http.Client{
-		Timeout: 5 * time.Minute,
+		Timeout: limit,
 		Transport: &http.Transport{
 			TLSClientConfig:       &tls.Config{InsecureSkipVerify: skipVerify}, // #nosec G402 — internal cluster traffic; opt-in strict via env var
 			DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-			ResponseHeaderTimeout: 60 * time.Second,
+			ResponseHeaderTimeout: limit,
 		},
 	}
 }()
@@ -4763,6 +4772,9 @@ func (h *Handlers) proxyToProcess(
 	if id := hostedRunFrom(ctx); id != "" {
 		traceID = id // the run the process's model calls will be accounted to
 	}
+	// The process asks the control plane to run its tool calls with a token for this one call (ADR-0044).
+	ctx, closeTools := h.openToolScope(ctx, agent)
+	defer closeTools()
 	start := time.Now()
 
 	// Build the invoke request body
@@ -4904,6 +4916,8 @@ func (h *Handlers) proxyToProcessStream(
 	if id := hostedRunFrom(ctx); id != "" {
 		traceID = id
 	}
+	ctx, closeTools := h.openToolScope(ctx, agent)
+	defer closeTools()
 	streamURL := strings.TrimRight(agent.Process.Endpoint, "/") + "/invoke/stream"
 
 	body := map[string]interface{}{
@@ -5669,6 +5683,14 @@ func (h *Handlers) ResumeRun(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(models.WithTraceStamp(r.Context(), models.TraceStamp{TraceID: traceID}))
 	response, trace, err := h.Executor.ResumeFor(r.Context(), kitchen, agentName, traceID, decision)
 	h.decisionApplied(r, sig, decisionApplyError(err))
+	if errors.Is(err, executor.ErrHostedDecisionRecorded) {
+		// A tool call a hosted process is waiting on (ADR-0044): the decision is recorded, the waiting call acts on it.
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"agent": agentName, "trace_id": traceID, "status": "decision_recorded", "approved": decision != nil && decision.Approved,
+			"note": "the decision takes effect on the hosted agent's waiting tool call; nothing else runs",
+		})
+		return
+	}
 	if err != nil {
 		switch {
 		case h.respondRunEnded(w, r, agent, "", trace, err):

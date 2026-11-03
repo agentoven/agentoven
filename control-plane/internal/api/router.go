@@ -84,6 +84,10 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 
 	// API v1
 	r.Route("/api/v1", func(r chi.Router) {
+		// A hosted agent process asks for a tool call to be run for it (ADR-0044). Public to the auth layer: the
+		// only credential is the run token the control plane gave the process, which the handler checks.
+		r.Post("/internal/tool-calls", h.BrokeredToolCall)
+
 		// Background tasks — long-running agent work that outlives the request that started
 		// it. Every route needs an identity: starting one spends money, and the rest read or
 		// steer it.

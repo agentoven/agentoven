@@ -8,7 +8,7 @@ It runs as an independent HTTP server that:
   2. Listens for REST invoke requests         (POST /invoke)
   3. Streams SSE responses                    (POST /invoke/stream)
   4. Calls the configured LLM with native tool calling
-  5. Executes MCP tools via JSON-RPC 2.0 HTTP calls
+  5. Runs tools by asking the control plane (POST /api/v1/internal/tool-calls, ADR-0044); it never calls a tool itself
   6. Supports agent delegation via the control plane API
 
 Environment variables (set by the control plane):
@@ -62,11 +62,14 @@ API_ENDPOINT      = os.environ.get("AGENT_API_ENDPOINT", "")
 GATEWAY           = os.environ.get("AGENT_MODEL_GATEWAY", "") == "openai"
 GATEWAY_MODEL     = os.environ.get("AGENT_GATEWAY_MODEL", "")
 RUN_ID_HEADER     = "X-AgentOven-Run-Id"
+TOOL_TOKEN_HEADER = "X-AgentOven-Tool-Token"
 WIRE              = "openai" if GATEWAY else MODEL_PROVIDER   # the protocol the model calls speak
 SKILLS            = [s.strip() for s in os.environ.get("AGENT_SKILLS", "").split(",") if s.strip()]
 MAX_TURNS         = int(os.environ.get("AGENT_MAX_TURNS", "10"))
 
 CONTROL_PLANE_URL   = os.environ.get("AGENTOVEN_CONTROL_PLANE_URL", "")
+# A tool call that needs a person's approval waits for the answer, so this is longer than any model call.
+TOOL_CALL_TIMEOUT   = int(os.environ.get("AGENT_TOOL_CALL_TIMEOUT", "330"))
 CONTROL_PLANE_TOKEN = os.environ.get("CONTROL_PLANE_TOKEN", "")
 
 _REQUEST_CONTEXT = threading.local()
@@ -548,61 +551,42 @@ def execute_tool(name, args, trace_id=""):
             trace_id,
         )
 
-    resolved = _find_resolved_tool(name)
-    if resolved:
-        endpoint = resolved.get("endpoint", "")
-        if endpoint:
-            return _call_mcp_tool(endpoint, name, args)
+    if _find_resolved_tool(name):
+        return _call_tool_via_control_plane(name, args)
 
     return f"Error: tool '{name}' has no configured endpoint"
 
 
-def _call_mcp_tool(endpoint, name, args):
+def _call_tool_via_control_plane(name, args):
     """
-    Call an MCP server using JSON-RPC 2.0 (tools/call).
-    Falls back to a REST POST /call on any error.
+    Ask the control plane to run a tool call (ADR-0044). This process never calls a tool's endpoint itself: the
+    control plane applies the tool allowlist, the approval policy (a call that needs a person waits here until one
+    decides), the guardrails, the egress guard and the audit, and it is the only side that can reach a native
+    (pack://) tool. The token was given for the call this process is handling and works for nothing else.
     """
-    # Primary: standard MCP JSON-RPC 2.0
-    url = endpoint.rstrip("/")
-    body = json.dumps({
-        "jsonrpc": "2.0",
-        "id": str(uuid.uuid4()),
-        "method": "tools/call",
-        "params": {"name": name, "arguments": args},
-    }).encode("utf-8")
+    token = getattr(_REQ, "tool_token", "")
+    if not CONTROL_PLANE_URL or not token:
+        return "Tool error: tool calls go through the control plane and this call carries no tool token"
+    body = json.dumps({"call_id": str(uuid.uuid4()), "name": name, "arguments": args}).encode("utf-8")
     req = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+        CONTROL_PLANE_URL.rstrip("/") + "/api/v1/internal/tool-calls", data=body, method="POST",
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + token},
     )
     try:
-        with _urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-        if "error" in result:
-            return f"Tool error: {result['error'].get('message', str(result['error']))}"
-        rpc_result = result.get("result", result)
-        content = rpc_result.get("content", [])
-        if content:
-            parts = [p.get("text", "") for p in content if p.get("type") == "text"]
-            return "\n".join(parts) if parts else json.dumps(rpc_result)
-        return json.dumps(rpc_result)
-    except Exception:
-        pass  # fall through to REST fallback
-
-    # Fallback: REST POST to /call
-    try:
-        call_url = endpoint.rstrip("/") + "/call"
-        rest_body = json.dumps({"name": name, "arguments": args}).encode("utf-8")
-        rest_req = urllib.request.Request(
-            call_url, data=rest_body,
-            headers={"Content-Type": "application/json"}, method="POST",
-        )
-        with _urlopen(rest_req, timeout=30) as resp2:
-            r2 = json.loads(resp2.read().decode("utf-8"))
-        content = r2.get("content", [])
-        if content:
-            return "\n".join(p.get("text", "") for p in content if p.get("type") == "text")
-        return json.dumps(r2)
+        with _urlopen(req, timeout=TOOL_CALL_TIMEOUT) as resp:
+            out = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            out = json.loads(e.read().decode("utf-8"))
+        except Exception:
+            return f"Tool error: the control plane refused the call (HTTP {e.code})"
     except Exception as e:
-        return f"Tool error: {e}"
+        return f"Tool error: the control plane could not be reached: {type(e).__name__}"
+    err = out.get("error")
+    if err:
+        return f"Tool error: {err.get('message') or err.get('kind') or 'refused'}"
+    content = out.get("content", "")
+    return f"Tool error: {content}" if out.get("is_error") else content
 
 
 def _delegate_to_agent(agent_name, message, trace_id=""):
@@ -990,6 +974,8 @@ class AgentHandler(BaseHTTPRequestHandler):
         _REQ.run_id = self.headers.get(RUN_ID_HEADER, "") or (request.get("run_id", "") if isinstance(request, dict) else "")
         _REQ.thinking = False
         _REQ.thinking_budget = 0
+        # The token this call's tool requests carry; it lives in this request's thread and is never printed.
+        _REQ.tool_token = self.headers.get(TOOL_TOKEN_HEADER, "")
 
         path = self.path.split("?")[0]
 

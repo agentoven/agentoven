@@ -426,7 +426,7 @@ func (h *Handlers) signRunDecision(w http.ResponseWriter, r *http.Request, kitch
 // budget after being resumed was resumed, so the decision was applied.
 func decisionApplyError(err error) error {
 	var pe *executor.PausedError
-	if err == nil || errors.As(err, &pe) || errors.Is(err, executor.ErrBudgetExhausted) {
+	if err == nil || errors.As(err, &pe) || errors.Is(err, executor.ErrBudgetExhausted) || errors.Is(err, executor.ErrHostedDecisionRecorded) {
 		return nil
 	}
 	return err

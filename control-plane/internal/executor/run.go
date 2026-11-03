@@ -301,6 +301,10 @@ func (e *Executor) resume(ctx context.Context, kitchen, traceID string, decision
 	if js.Status == RunDone {
 		return js.FinalContent, nil, fmt.Errorf("executor: run %s already finished", traceID)
 	}
+	if js.Header.Hosted != nil {
+		// A held tool call has no loop to continue: the decision is handed to the call that waits for it.
+		return "", nil, e.decideHosted(ctx, js, decision)
+	}
 
 	agent := js.Header.Agent
 	if err := e.requireGuardrailPolicy(ctx, agent); err != nil {

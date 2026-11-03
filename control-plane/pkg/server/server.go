@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"net/http"
@@ -43,6 +44,7 @@ import (
 	"github.com/agentoven/agentoven/control-plane/internal/sessions"
 	"github.com/agentoven/agentoven/control-plane/internal/store"
 	"github.com/agentoven/agentoven/control-plane/internal/telemetry"
+	"github.com/agentoven/agentoven/control-plane/internal/toolbroker"
 	"github.com/agentoven/agentoven/control-plane/internal/vectorstore"
 	"github.com/agentoven/agentoven/control-plane/internal/workflow"
 	"github.com/agentoven/agentoven/control-plane/pkg/a2aauth"
@@ -325,6 +327,15 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 		h.A2ASecret = a2aSecret
 		pm.SetA2ASecret(a2aSecret)
 		a2aauth.UseSecret(a2aSecret)
+		h.SetToolBroker(toolbroker.New(a2aSecret, nil))
+		// Where a hosted process asks for its tool calls to be run (ADR-0044). A process on this machine reaches the
+		// server on loopback; one in a container or a pod needs AGENTOVEN_CONTROL_PLANE_URL to say where the server is.
+		cpURL := strings.TrimSpace(os.Getenv("AGENTOVEN_CONTROL_PLANE_URL"))
+		if cpURL == "" {
+			cpURL = fmt.Sprintf("http://127.0.0.1:%d", cfg.Port)
+			log.Info().Str("url", cpURL).Msg("AGENTOVEN_CONTROL_PLANE_URL is not set: hosted agent processes are pointed at loopback, which works for processes on this machine only (a container or pod needs it set to ask for its tool calls)")
+		}
+		pm.SetControlPlaneURL(cpURL)
 	}
 	h.SecretResolver = secretRes
 	// Secrets sealed into agents' ingredients and guardrail rules are read back from the vault, which Pro

@@ -594,7 +594,7 @@ func (m *Manager) buildEnvironment(agent *models.Agent, port int) map[string]str
 
 	// Tools — inject as JSON array so the SDK can build MCP tool wrappers
 	if agent.ResolvedConfig != nil && len(agent.ResolvedConfig.Tools) > 0 {
-		toolsJSON, err := json.Marshal(agent.ResolvedConfig.Tools)
+		toolsJSON, err := json.Marshal(toolsForProcess(agent))
 		if err == nil {
 			env["AGENT_TOOLS_JSON"] = string(toolsJSON)
 		}
@@ -664,4 +664,21 @@ func (m *Manager) buildEnvironment(agent *models.Agent, port int) map[string]str
 	}
 
 	return env
+}
+
+// toolsForProcess is the tool list a process is given. The embedded runner calls a tool by asking the control plane
+// (ADR-0044) and needs a tool's name and schema only, so it is not told where the tool lives: an endpoint it is not
+// meant to call is one it cannot call by mistake or after a compromise. An agent with its own entrypoint, or one that
+// runs a framework, reads the whole entry as before.
+func toolsForProcess(agent *models.Agent) []models.ResolvedTool {
+	tools := agent.ResolvedConfig.Tools
+	if agent.Entrypoint != "" || agent.IsFrameworkNative() {
+		return tools
+	}
+	out := make([]models.ResolvedTool, len(tools))
+	for i, t := range tools {
+		t.Endpoint = ""
+		out[i] = t
+	}
+	return out
 }

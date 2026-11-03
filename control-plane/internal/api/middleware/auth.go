@@ -256,5 +256,10 @@ func isAuthPublicPath(path string) bool {
 	if path == "/v1/chat/completions" {
 		return true
 	}
+	// A hosted process asks the control plane to run a tool call with a token minted for the call it is handling
+	// (ADR-0044). The token is not an identity; the handler accepts nothing else.
+	if path == "/api/v1/internal/tool-calls" {
+		return true
+	}
 	return false
 }
