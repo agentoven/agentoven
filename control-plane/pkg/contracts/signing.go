@@ -35,6 +35,10 @@ const (
 	GateLiveToolReplay = "live_tool_replay"
 	GateDatasetPublish = "dataset_publish"
 	GateDatasetPurge   = "dataset_purge"
+	// GateDatasetCaseErase erases the payload of one case of a regulated dataset (personal data, GDPR Art. 17).
+	// The legal team signs it, shown the dataset, the case and its content hash, never the content (owner
+	// decision S14, 2026-11-03). Erasing a case of any other dataset is not a gate.
+	GateDatasetCaseErase = "dataset_case_erase"
 	// GateLegalHoldRelease lifts a legal hold, on a dataset or on a kitchen's audit trail. Placing a
 	// hold is not a gate: it only protects. Lifting one is signed by the legal team (ADR-0043).
 	GateLegalHoldRelease = "legal_hold_release"
