@@ -23,6 +23,10 @@
   },
   {
    "method": "DELETE",
+   "path": "/api/v1/alert-rules/{id}"
+  },
+  {
+   "method": "DELETE",
    "path": "/api/v1/blobs/{ref}"
   },
   {
@@ -280,6 +284,26 @@
   {
    "method": "GET",
    "path": "/api/v1/agents/{agentName}/versions/{version}"
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/alert-rules"
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/alert-rules/alerts"
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/alert-rules/{id}"
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/alert-rules/{id}/alerts"
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/alert-rules/{id}/preview"
   },
   {
    "method": "GET",
@@ -652,6 +676,10 @@
   {
    "method": "GET",
    "path": "/api/v1/promotion-approvals"
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/promotion-holds"
   },
   {
    "method": "GET",
@@ -1139,6 +1167,10 @@
   },
   {
    "method": "POST",
+   "path": "/api/v1/alert-rules"
+  },
+  {
+   "method": "POST",
    "path": "/api/v1/approval-requests/open"
   },
   {
@@ -1424,6 +1456,10 @@
   {
    "method": "POST",
    "path": "/api/v1/promotion-approvals/{approvalID}/reject"
+  },
+  {
+   "method": "POST",
+   "path": "/api/v1/promotion-holds/{id}/release"
   },
   {
    "method": "POST",
@@ -1812,6 +1848,10 @@
   {
    "method": "PUT",
    "path": "/api/v1/agents/{agentName}/environments/{envSlug}"
+  },
+  {
+   "method": "PUT",
+   "path": "/api/v1/alert-rules/{id}"
   },
   {
    "method": "PUT",
