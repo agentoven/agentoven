@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **See what the next bake would change.** `GET /api/v1/agents/{name}/draft/diff` returns the field-level difference between a baked agent and its draft (lists by element, secrets masked, `has_draft`, `baked_version`, `changes_behaviour`); clients `agent_draft_diff` (Python, Rust) and `agentDraftDiff` (TypeScript). Owner decision A1.
+
 ---
 
 ## [0.9.6] — 2026-11-03

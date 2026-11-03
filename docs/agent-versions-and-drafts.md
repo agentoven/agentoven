@@ -13,6 +13,34 @@ PUT  /api/v1/agents/support {"guardrails": [], "max_turns": 20}   -> 200, "draft
 POST /api/v1/agents/support/recook {}                                -> 202; the draft is applied and the version becomes 0.2.0
 ```
 
+## What the next bake would change
+
+`GET /api/v1/agents/{name}/draft/diff` compares the agent as it was baked with the agent as the draft will leave it
+(`Agent.WithDraft`). It changes nothing and needs the same permission as reading the agent (`agent:read` in Pro); an agent
+of another kitchen is a 404.
+
+```
+GET /api/v1/agents/support/draft/diff
+{ "agent": "support", "has_draft": true, "baked": true, "baked_version": "0.1.0", "changes_behaviour": true,
+  "changes": [
+    { "field": "max_turns", "kind": "changed", "before": 10, "after": 20 },
+    { "field": "skills", "kind": "added", "before": null, "after": "web" },
+    { "field": "guardrails", "key": "g1", "kind": "changed", "details": [ { "field": "enabled", "kind": "changed", "before": true, "after": false } ], ... },
+    { "field": "ingredients", "key": "tool:search", "kind": "removed", "before": { ... }, "after": null } ] }
+```
+
+- `kind` is `added`, `changed` or `removed`. A field is named by its JSON path (`bot.max_actions`). Lists are diffed by element:
+  guardrails by `id`, ingredients by `kind:name` (the `key`), skills, approval tools, subagents and a bot's domains by name; a
+  changed guardrail or ingredient lists the fields inside it in `details`.
+- Secrets in an ingredient's or a rule's config come back masked (`****`) on both sides, the same masking `GET /agents/{name}`
+  uses. A changed secret is a `changed` whose two sides read the same; whether it changed is decided on the real values.
+- `changes_behaviour` says whether the draft moves the behaviour fingerprint, which is what makes the bake write a new version.
+  It judges configuration fields only: a bake also re-resolves prompts and models.
+- An agent with no draft (or one nothing was baked for) answers `has_draft: false` and `"changes": []`. A draft that sets what
+  is already baked has `has_draft: true` and no changes.
+- Clients: Python `client.agent_draft_diff(name)`, TypeScript `pro.agentDraftDiff(name)`, Rust `Client::agent_draft_diff(name)`;
+  the Pro dashboard shows it as "Unbaked changes" on the agent page.
+
 ## Two requests at once
 
 Every agent carries a `revision`, which goes up with each write to it. An edit, a bake and a re-cook that run at the same
