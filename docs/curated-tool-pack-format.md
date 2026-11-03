@@ -53,6 +53,7 @@ Each pack has a fixture, `internal/toolpacks/testdata/conformance/<pack>.json`: 
 
 ## Known limits
 
+- Text read from a vendor (an incident description, a case body, an article) is untrusted input to the model and can carry instructions. The packs do not filter it; every write waits for a person's approval, and the approver sees the arguments.
 - A recipe's agent steps run inside the agent's own process, which calls a tool's endpoint itself: it cannot reach a pack tool (transport `native`) and fails closed. Pack tools are used by agents invoked through the control plane (API, CLI, SDK, tasks, A2A through the executor), where approvals apply. See [examples/claim-triage](../examples/claim-triage/README.md).
 - A gated (write) tool cannot be called through `POST /mcp`; it answers `-32004`.
 - Connections are made per call (no pool), and no vendor has been exercised with a real account yet.
