@@ -79,6 +79,22 @@ func (b *bakeSerializer) run(agentKey string, gen uint64, fn func(superseded fun
 	fn(superseded)
 }
 
+// retiredMessage says why a lifecycle write on a retired agent is refused and what to do instead.
+func retiredMessage(agentName string) string {
+	return "agent '" + agentName + "' is retired: register it again with POST /api/v1/agents to bring it back"
+}
+
+// refuseRetired answers 409 for a write that would change a retired agent (an edit, a bake, a re-cook, a
+// cool, a rewarm) and reports whether it did. A retired agent comes back only by being registered again
+// (owner decision A8): a lifecycle write must not revive it as a side effect.
+func refuseRetired(w http.ResponseWriter, agent *models.Agent) bool {
+	if agent.Status != models.AgentStatusRetired {
+		return false
+	}
+	respondError(w, http.StatusConflict, retiredMessage(agent.Name))
+	return true
+}
+
 // lifecycle applies a change to an agent's status, tags, backend and process under the guard, and logs
 // when the agent has moved on and the change was dropped.
 func (h *Handlers) lifecycle(kitchen, name string, guard models.AgentLifecycleGuard, change models.AgentLifecycle) bool {
@@ -102,12 +118,26 @@ func (h *Handlers) burnt(kitchen, name string, guard models.AgentLifecycleGuard,
 	h.lifecycle(kitchen, name, guard, extra)
 }
 
+// bakeDeployment is what finishBake runs once a bake's agent is ready: the version becomes the deployment
+// of the environment the bake targeted. It is nil when there is no recorder or no environment, and a
+// recorder that fails does not undo the bake.
+func (h *Handlers) bakeDeployment(kitchen, agentName, version, envSlug, by string) func() {
+	if h.BakeDeployments == nil || envSlug == "" {
+		return nil
+	}
+	return func() {
+		if err := h.BakeDeployments.RecordBakeDeployment(context.Background(), kitchen, agentName, version, envSlug, by); err != nil {
+			log.Warn().Err(err).Str("agent", agentName).Str("environment", envSlug).Msg("bake: the deployment could not be recorded")
+		}
+	}
+}
+
 // finishBake is the background step of a bake (recook false) or a re-cook (recook true): it tests the
 // provider, starts the agent's process (a re-cook replaces it) and moves the agent from baking to
 // ready or burnt. It records the outcome through UpdateAgentLifecycle only, so what a person edited
 // while it ran is never written over, and it does nothing if the agent was cooled, retired, deleted
 // or baked again in the meantime.
-func (h *Handlers) finishBake(kitchen, agentName, version, k8sNamespace string, recook bool, superseded func() bool) {
+func (h *Handlers) finishBake(kitchen, agentName, version, k8sNamespace string, recook bool, superseded func() bool, onReady func()) {
 	time.Sleep(1 * time.Second) // let the response that started the bake go out first
 	if superseded() {
 		return
@@ -203,6 +233,9 @@ func (h *Handlers) finishBake(kitchen, agentName, version, k8sNamespace string, 
 		}
 		if h.lifecycle(kitchen, agentName, guard, ready) {
 			log.Info().Str("agent", agentName).Msg("Agent is ready")
+			if onReady != nil {
+				onReady()
+			}
 		}
 		return
 	}

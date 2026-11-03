@@ -144,6 +144,11 @@ type Handlers struct {
 	// OSS: nil (no-op). Pro injects a concrete implementation at startup.
 	WorkloadRestarter WorkloadRestarter
 
+	// BakeDeployments is an optional Pro hook told when a bake has made a version ready in the environment
+	// it targeted, so that the version shows as that environment's deployment (owner decision A7). OSS has
+	// no deployment records and leaves it nil.
+	BakeDeployments BakeDeploymentRecorder
+
 	// WorkloadScaler is an optional Pro-only hook called by CoolAgent (scale to 0)
 	// and RewarmAgent (scale back to desired replicas). The operator reconciles the
 	// replica change on the next tick, draining or recreating the pod.
@@ -179,6 +184,13 @@ type AgentEnvironmentStore interface {
 // Pro wraps it with role-based environment gating.
 type RecipeExecutorService interface {
 	ExecuteRecipe(ctx context.Context, recipe *models.Recipe, kitchen string, input map[string]interface{}, envSlug string) (string, error)
+}
+
+// BakeDeploymentRecorder records that a bake put a version of an agent into an environment. envSlug is the
+// environment the bake targeted ("" when the kitchen has none) and by the subject that asked for the bake.
+// A failure is logged by the caller and never fails the bake: the agent is ready either way.
+type BakeDeploymentRecorder interface {
+	RecordBakeDeployment(ctx context.Context, kitchen, agentName, version, envSlug, by string) error
 }
 
 // WorkloadRestarter is an optional Pro-only hook for triggering a Kubernetes
@@ -412,8 +424,7 @@ func (h *Handlers) updateAgent(w http.ResponseWriter, r *http.Request) {
 
 	// A retired agent is edited by registering it again (POST /agents brings it back under the same id),
 	// never by a PUT that would change it while it stays retired.
-	if agent.Status == models.AgentStatusRetired {
-		respondError(w, http.StatusConflict, "agent '"+agentName+"' is retired: register it again with POST /api/v1/agents to bring it back")
+	if refuseRetired(w, agent) {
 		return
 	}
 
@@ -540,6 +551,10 @@ func (h *Handlers) bakeAgent(w http.ResponseWriter, r *http.Request) {
 		} else {
 			respondError(w, http.StatusInternalServerError, err.Error())
 		}
+		return
+	}
+
+	if refuseRetired(w, agent) {
 		return
 	}
 
@@ -686,9 +701,13 @@ func (h *Handlers) bakeAgent(w http.ResponseWriter, r *http.Request) {
 	// The background step records its outcome through UpdateAgentLifecycle only (never the whole
 	// agent), one at a time per agent and only for the newest bake (agent_bake_tail.go).
 	agentKey, version := kitchen+"/"+agentName, agent.Version
+	by := ""
+	if id := pkgmw.GetIdentity(r.Context()); id != nil {
+		by = id.Subject
+	}
 	gen := h.bakes.begin(agentKey)
 	go h.bakes.run(agentKey, gen, func(superseded func() bool) {
-		h.finishBake(kitchen, agentName, version, kitchenK8sNS, false, superseded)
+		h.finishBake(kitchen, agentName, version, kitchenK8sNS, false, superseded, h.bakeDeployment(kitchen, agentName, version, targetEnvSlug, by))
 	})
 
 	respondJSON(w, http.StatusAccepted, map[string]string{
@@ -1060,6 +1079,9 @@ func (h *Handlers) recookAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if refuseRetired(w, agent) {
+		return
+	}
 	// Only allow re-cook on agents that have been baked at least once
 	if agent.Status == models.AgentStatusDraft {
 		respondError(w, http.StatusBadRequest,
@@ -1171,7 +1193,7 @@ func (h *Handlers) recookAgent(w http.ResponseWriter, r *http.Request) {
 	agentKey, version := kitchen+"/"+agentName, agent.Version
 	gen := h.bakes.begin(agentKey)
 	go h.bakes.run(agentKey, gen, func(superseded func() bool) {
-		h.finishBake(kitchen, agentName, version, "", true, superseded)
+		h.finishBake(kitchen, agentName, version, "", true, superseded, nil)
 	})
 
 	respondJSON(w, http.StatusAccepted, map[string]interface{}{
@@ -1187,13 +1209,17 @@ func (h *Handlers) CoolAgent(w http.ResponseWriter, r *http.Request) {
 	agentName := chi.URLParam(r, "agentName")
 	kitchen := middleware.GetKitchen(r.Context())
 
-	_, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
+	agent, err := h.Store.GetAgent(r.Context(), kitchen, agentName)
 	if err != nil {
 		if _, ok := err.(*store.ErrNotFound); ok {
 			respondError(w, http.StatusNotFound, err.Error())
 		} else {
 			respondError(w, http.StatusInternalServerError, err.Error())
 		}
+		return
+	}
+	// A retired agent stays retired: cooling it would have brought it back as a cooled agent.
+	if refuseRetired(w, agent) {
 		return
 	}
 
@@ -1206,9 +1232,13 @@ func (h *Handlers) CoolAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Only the status and the process change: the agent read above may be stale by now, and writing it
 	// whole would put back whatever a bake or an edit changed in between.
-	if _, err := h.Store.UpdateAgentLifecycle(r.Context(), kitchen, agentName, models.AgentLifecycleGuard{},
-		models.AgentLifecycle{Status: models.AgentStatusCooled, ClearProcess: true}); err != nil {
+	applied, err := h.Store.UpdateAgentLifecycle(r.Context(), kitchen, agentName, models.AgentLifecycleGuard{Not: models.AgentStatusRetired},
+		models.AgentLifecycle{Status: models.AgentStatusCooled, ClearProcess: true})
+	if err != nil {
 		log.Warn().Err(err).Str("agent", agentName).Msg("The cooled status could not be recorded")
+	} else if !applied {
+		respondError(w, http.StatusConflict, retiredMessage(agentName))
+		return
 	}
 
 	// Pro: scale the k8s deployment to 0 so the pod is drained.
@@ -1243,6 +1273,9 @@ func (h *Handlers) RewarmAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if refuseRetired(w, agent) {
+		return
+	}
 	if agent.Status != models.AgentStatusCooled {
 		respondError(w, http.StatusBadRequest, fmt.Sprintf("agent is '%s', only cooled agents can be rewarmed", agent.Status))
 		return

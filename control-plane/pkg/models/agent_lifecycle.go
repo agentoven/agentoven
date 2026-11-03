@@ -20,6 +20,9 @@ type AgentLifecycle struct {
 type AgentLifecycleGuard struct {
 	Status  AgentStatus
 	Version string
+	// Not refuses the change while the agent is in this status: a cool that reads the agent a moment before a
+	// delete must not bring the retired agent back as cooled (owner decision A8).
+	Not AgentStatus
 }
 
 // Apply writes the change onto a, which is the stored agent. It is shared by the stores so they
@@ -53,5 +56,6 @@ func (c AgentLifecycle) Apply(a *Agent) {
 
 // Matches reports whether the stored agent still satisfies the guard.
 func (g AgentLifecycleGuard) Matches(a *Agent) bool {
-	return (g.Status == "" || a.Status == g.Status) && (g.Version == "" || a.Version == g.Version)
+	return (g.Status == "" || a.Status == g.Status) && (g.Version == "" || a.Version == g.Version) &&
+		(g.Not == "" || a.Status != g.Not)
 }
