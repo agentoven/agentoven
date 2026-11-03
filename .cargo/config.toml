@@ -1,4 +1,0 @@
-# The Python extension (sdk/python) leaves the interpreter's symbols to be resolved when it is loaded.
-# maturin passes these flags itself; a plain `cargo build --workspace` on macOS needs them too.
-[target.'cfg(target_os = "macos")']
-rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]

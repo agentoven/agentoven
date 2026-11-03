@@ -85,6 +85,7 @@ dependencies = [
  "a2a-ao",
  "agentoven-core",
  "pyo3",
+ "pyo3-build-config",
  "reqwest",
  "serde_json",
  "tokio",
