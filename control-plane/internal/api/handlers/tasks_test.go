@@ -362,3 +362,36 @@ func TestAStalledTaskResumedThroughTheAgentRouteStallsAgainWith409(t *testing.T)
 		t.Fatalf("expected 409 run_stalled, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// A task names its files by blob reference only: inline bytes and URLs are refused (a queued, journaled
+// task carries a reference, and the control plane fetches nothing on a caller's say-so), and a blob the
+// kitchen does not own is a 404 before any task exists.
+func TestATaskTakesFilesByBlobReferenceOnly(t *testing.T) {
+	h := budgetHandlersWith(t, 1, models.RunBudget{}, nil, "ok", nil)
+	post := func(parts string) *httptest.ResponseRecorder {
+		return postTask(h, `{"agent":"worker","message":"read this","content_parts":`+parts+`}`)
+	}
+	ref := strings.Repeat("a", 64)
+	for name, parts := range map[string]string{
+		"text part":     `[{"type":"text","text":"hi"}]`,
+		"inline data":   `[{"type":"file","media":{"mime_type":"application/pdf","data":"AAAA"}}]`,
+		"url":           `[{"type":"image_url","media":{"mime_type":"image/png","url":"http://169.254.169.254/x"}}]`,
+		"no mime type":  `[{"type":"file","media":{"blob_ref":"` + ref + `"}}]`,
+		"no media":      `[{"type":"file"}]`,
+		"too many (17)": "[" + strings.TrimSuffix(strings.Repeat(`{"type":"file","media":{"mime_type":"application/pdf","blob_ref":"`+ref+`"}},`, 17), ",") + "]",
+	} {
+		if rec := post(parts); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: expected 400, got %d: %s", name, rec.Code, rec.Body.String())
+		}
+	}
+	// A well-formed part naming a blob that is not there (no blob store in this harness, or not this
+	// kitchen's) is refused as not found, and nothing is queued.
+	rec := post(`[{"type":"file","media":{"mime_type":"application/pdf","blob_ref":"` + ref + `"}}]`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("an unknown blob must be 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+	list := callAs(h.ListTasks, http.MethodGet, "/api/v1/tasks", "", nil, "default", nil, nil)
+	if decode(t, list.Body.String())["count"] != float64(0) {
+		t.Fatalf("a refused task must not exist: %s", list.Body.String())
+	}
+}

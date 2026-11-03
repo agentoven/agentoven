@@ -878,6 +878,95 @@ class AgentOvenClient(TaskMethods):
     def delete_schedule(self, schedule_id: str) -> dict[str, Any]:
         return self._delete(f"/api/v1/schedules/{schedule_id}")
 
+    # ── Inbound triggers (Pro, ADR-0047) ─────────────────────────────────
+    # A trigger starts a recipe or an agent from an event that arrives from outside, as a service account
+    # that belongs to a person. It cannot start what the account could not, and it cannot skip an approval.
+
+    def list_triggers(self) -> list[dict[str, Any]]:
+        """The kitchen's triggers."""
+        return self._get("/api/v1/triggers").get("triggers", [])
+
+    def get_trigger(self, trigger_id: str) -> dict[str, Any]:
+        return self._get(f"/api/v1/triggers/{_seg(trigger_id)}")
+
+    def create_trigger(
+        self,
+        name: str,
+        service_account_id: str,
+        target: str,
+        *,
+        kind: str = "webhook",
+        target_kind: str = "recipe",
+        environment: Optional[str] = None,
+        input_mapping: Optional[Mapping[str, Any]] = None,
+        required_paths: Optional[Sequence[str]] = None,
+        config: Optional[Mapping[str, Any]] = None,
+        secret_ref: Optional[str] = None,
+        rate_limit_per_min: Optional[int] = None,
+        description: str = "",
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        """Create a trigger. ``kind`` is ``webhook``, ``email`` or ``file``; ``target_kind`` is ``recipe`` or ``agent``.
+
+        ``input_mapping`` turns the payload into the run's input: a string ``"$.a.b"`` takes a value (keeping its
+        type), ``"text {{ $.a.b }}"`` puts one into text, nothing else is evaluated. An agent target maps
+        ``message`` (and optionally ``metadata``). ``config`` holds the settings of the kind, with secrets as
+        references (``vault://...``), never values.
+
+        A webhook trigger given no ``secret_ref`` gets a signing secret generated; it is in the response under
+        ``secret``, once. Sign a delivery with :func:`sign_webhook`.
+        """
+        if kind not in TRIGGER_KINDS:
+            raise ValueError(f"kind is one of {', '.join(TRIGGER_KINDS)}")
+        if target_kind not in ("recipe", "agent"):
+            raise ValueError("target_kind is recipe or agent")
+        body: dict[str, Any] = {
+            "name": name, "kind": kind, "target_kind": target_kind, "target": target,
+            "service_account_id": service_account_id, "description": description, "enabled": enabled,
+        }
+        _put_if(body, environment=environment, input_mapping=input_mapping, required_paths=list(required_paths) if required_paths is not None else None,
+                config=config, secret_ref=secret_ref, rate_limit_per_min=rate_limit_per_min)
+        return self._post("/api/v1/triggers", body)
+
+    def update_trigger(self, trigger_id: str, **fields: Any) -> dict[str, Any]:
+        """Change a trigger: any of description, target_kind, target, environment, service_account_id,
+        input_mapping, required_paths, config, rate_limit_per_min, enabled. Switching one off needs only the right
+        to manage triggers; anything else needs the authority of the account it runs as."""
+        return self._put(f"/api/v1/triggers/{_seg(trigger_id)}", fields)
+
+    def set_trigger_enabled(self, trigger_id: str, enabled: bool) -> dict[str, Any]:
+        return self.update_trigger(trigger_id, enabled=enabled)
+
+    def delete_trigger(self, trigger_id: str) -> dict[str, Any]:
+        return self._delete(f"/api/v1/triggers/{_seg(trigger_id)}")
+
+    def rotate_trigger_secret(self, trigger_id: str) -> dict[str, Any]:
+        """Replace the signing secret AgentOven generated for a webhook trigger. The new one is in ``secret``, once;
+        the old one stops working at once."""
+        return self._post(f"/api/v1/triggers/{_seg(trigger_id)}/rotate-secret", {})
+
+    def fire_trigger(self, trigger_id: str, payload: Any = None, *, dry_run: bool = True) -> dict[str, Any]:
+        """Try a trigger with a sample payload. A dry run (the default) shows the input the run would get and
+        starts nothing; ``dry_run=False`` starts a real run as the trigger's account, recorded as a test."""
+        return self._post(f"/api/v1/triggers/{_seg(trigger_id)}/fire", {"payload": {} if payload is None else payload, "dry_run": dry_run})
+
+    def poll_trigger(self, trigger_id: str) -> dict[str, Any]:
+        """Look at an e-mail or file trigger's source now, instead of at its next interval."""
+        return self._post(f"/api/v1/triggers/{_seg(trigger_id)}/poll", {})
+
+    def list_trigger_deliveries(
+        self,
+        trigger_id: Optional[str] = None,
+        status: Optional[str] = None,
+        run_id: Optional[str] = None,
+        limit: Optional[int] = None,
+        before: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """What happened to deliveries, newest first. ``status`` is accepted, rejected, duplicate or failed."""
+        if status is not None and status not in TRIGGER_DELIVERY_STATUSES:
+            raise ValueError(f"status is one of {', '.join(TRIGGER_DELIVERY_STATUSES)}")
+        return self._get("/api/v1/triggers/deliveries" + _query(trigger_id=trigger_id, status=status, run_id=run_id, limit=limit, before=before)).get("deliveries", [])
+
     # ── Test suites (Pro) ────────────────────────────────────────────────
     # The server routes every one of these by id, never by name.
 
@@ -2306,6 +2395,52 @@ def budget_record_id(provider: Optional[str] = None, agent: Optional[str] = None
         if name:
             return f"{scope}:{name}:{unit}"
     return f"kitchen::{unit}"
+
+
+TRIGGER_KINDS = ("webhook", "email", "file")
+TRIGGER_DELIVERY_STATUSES = ("accepted", "rejected", "duplicate", "failed")
+
+
+def sign_webhook(secret: str, body: bytes, timestamp: Optional[int] = None) -> dict[str, str]:
+    """The headers that sign a delivery to a webhook trigger: ``X-AgentOven-Signature`` (``sha256=`` and the HMAC
+    of ``"<timestamp>.<body>"``), ``X-AgentOven-Timestamp``, and an ``X-AgentOven-Delivery`` id that is the same
+    on every retry of one delivery (this helper makes a fresh one; pass your own header to keep it on a retry)."""
+    import hashlib
+    import hmac
+    import uuid
+
+    ts = int(time.time()) if timestamp is None else int(timestamp)
+    mac = hmac.new(secret.encode(), str(ts).encode() + b"." + body, hashlib.sha256).hexdigest()
+    return {"X-AgentOven-Signature": "sha256=" + mac, "X-AgentOven-Timestamp": str(ts), "X-AgentOven-Delivery": str(uuid.uuid4())}
+
+
+DEFAULT_TIMEOUT = 120.0
+"""Seconds one request may take when nothing else is set. Generous, because an invocation waits for a model.
+``AgentOven(timeout=...)`` or the ``AGENTOVEN_TIMEOUT`` environment variable changes it; a request with no limit
+hangs a script for ever on a server that accepted the connection and went quiet."""
+
+
+def _resolve_timeout(timeout: Optional[float]) -> float:
+    if timeout is None:
+        env = os.environ.get("AGENTOVEN_TIMEOUT", "").strip()
+        try:
+            timeout = float(env) if env else DEFAULT_TIMEOUT
+        except ValueError:
+            raise ValueError(f"AGENTOVEN_TIMEOUT must be a number of seconds, not {env!r}") from None
+    if timeout <= 0:
+        raise ValueError("timeout must be a positive number of seconds")
+    return timeout
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse a redirect: urllib would send the Authorization header to wherever it points. A control plane
+    that redirects is misconfigured, and the caller is better told (the error names the new location)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        raise AgentOvenAPIError(code, {"error": "redirect_refused", "message": f"the server redirected to {newurl}: use that URL as the server URL"})
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 def _seg(value: str) -> str:

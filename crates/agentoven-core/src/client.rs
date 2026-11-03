@@ -18,6 +18,8 @@ pub mod controls;
 pub mod guardrails;
 pub mod secrets;
 pub mod toolpacks;
+/// Inbound triggers: start a recipe or an agent from a webhook, a mailbox or a folder (Pro, ADR-0047).
+pub mod triggers;
 
 /// Client for interacting with the AgentOven control plane.
 #[derive(Debug, Clone)]

@@ -78,9 +78,36 @@ type createTaskRequest struct {
 	Agent     string `json:"agent"`
 	Message   string `json:"message"`
 	SessionID string `json:"session_id,omitempty"`
+	// ContentParts are files the task works on (images, documents, audio, video), each named by the
+	// blob_ref POST /api/v1/blobs returned. Only blob references are taken: a task is queued and
+	// journaled, so it carries a reference, not the bytes, and the control plane never fetches a URL
+	// on the caller's say-so.
+	ContentParts []models.ContentPart `json:"content_parts,omitempty"`
 	// Budget can only tighten the limits the task would otherwise get.
 	Budget   *models.RunBudget `json:"budget,omitempty"`
 	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+// maxTaskContentParts bounds the files one task can name.
+const maxTaskContentParts = 16
+
+// validTaskContentParts accepts only media parts that name a blob, and returns the reason when one
+// does not.
+func validTaskContentParts(parts []models.ContentPart) string {
+	if len(parts) > maxTaskContentParts {
+		return fmt.Sprintf("at most %d content_parts", maxTaskContentParts)
+	}
+	for _, p := range parts {
+		switch p.Type {
+		case "image_url", "audio", "video", "file":
+		default:
+			return "a task takes media in content_parts (image_url, audio, video or file); put text in 'message'"
+		}
+		if p.Media == nil || p.Media.BlobRef == "" || p.Media.MimeType == "" || p.Media.Data != "" || p.Media.URL != "" {
+			return "each content part of a task needs media.blob_ref and media.mime_type (upload with POST /api/v1/blobs), and no inline data or url"
+		}
+	}
+	return ""
 }
 
 // canAccessAgent applies a scoped key's agent allowlist. Callers that are not using a scoped
@@ -199,6 +226,14 @@ func (h *Handlers) CreateTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if reason := validTaskContentParts(req.ContentParts); reason != "" {
+		respondError(w, http.StatusBadRequest, reason)
+		return
+	}
+	if msg, ok := h.checkBlobRefs(r, kitchen, req.ContentParts); !ok {
+		respondError(w, http.StatusNotFound, msg)
+		return
+	}
 	if !h.canAccessAgent(r.Context(), kitchen, req.Agent) {
 		respondError(w, http.StatusForbidden, fmt.Sprintf("Scoped key does not have access to agent '%s'", req.Agent))
 		return
@@ -265,7 +300,7 @@ func (h *Handlers) CreateTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	snap, merged, err := h.startTask(r.Context(), agent, resolved, gr, models.ChatMessage{Role: "user", Content: req.Message}, req.SessionID, req.Budget, req.Metadata)
+	snap, merged, err := h.startTask(r.Context(), agent, resolved, gr, models.ChatMessage{Role: "user", Content: req.Message, ContentParts: req.ContentParts}, req.SessionID, req.Budget, req.Metadata)
 	switch {
 	case errors.Is(err, executor.ErrTaskQueueFull):
 		w.Header().Set("Retry-After", "30")

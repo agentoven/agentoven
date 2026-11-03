@@ -1001,6 +1001,75 @@ export class ProClient {
     await this.delete(`/api/v1/schedules/${scheduleId}`);
   }
 
+  // ── Inbound triggers (ADR-0047) ────────────────────────────────────────────
+  // A trigger starts a recipe or an agent from an event that arrives from outside, as a service account
+  // that belongs to a person. It cannot start what the account could not, and it cannot skip an approval.
+
+  async listTriggers(): Promise<Trigger[]> {
+    return (await this.get<{ triggers?: Trigger[] }>('/api/v1/triggers')).triggers ?? [];
+  }
+
+  async getTrigger(triggerId: string): Promise<Trigger> {
+    return this.get(`/api/v1/triggers/${seg(triggerId)}`);
+  }
+
+  /**
+   * Create a trigger. `kind` is `webhook` (the default), `email` or `file`; `target_kind` is `recipe` (the
+   * default) or `agent`. `input_mapping` turns the payload into the run's input: `"$.a.b"` takes a value and
+   * keeps its type, `"text {{ $.a.b }}"` puts one into text, nothing else is evaluated. Secrets in `config`
+   * are references (`vault://...`), never values. A webhook trigger given no `secret_ref` gets a signing
+   * secret generated, returned once as `secret`; sign deliveries with `signWebhook`.
+   */
+  async createTrigger(req: CreateTriggerRequest): Promise<{ trigger: Trigger; secret?: string }> {
+    const kind = req.kind ?? 'webhook';
+    const targetKind = req.target_kind ?? 'recipe';
+    if (!TRIGGER_KINDS.includes(kind)) throw new Error(`kind is one of ${TRIGGER_KINDS.join(', ')}, not ${JSON.stringify(kind)}`);
+    if (targetKind !== 'recipe' && targetKind !== 'agent') throw new Error('target_kind is recipe or agent');
+    return this.post('/api/v1/triggers', { enabled: true, ...req, kind, target_kind: targetKind });
+  }
+
+  /** Change a trigger. Switching one off needs only the right to manage triggers; anything else needs the authority of the account it runs as. */
+  async updateTrigger(triggerId: string, fields: Partial<Omit<CreateTriggerRequest, 'name' | 'kind' | 'secret_ref'>>): Promise<Trigger> {
+    return this.put(`/api/v1/triggers/${seg(triggerId)}`, fields);
+  }
+
+  async setTriggerEnabled(triggerId: string, enabled: boolean): Promise<Trigger> {
+    return this.updateTrigger(triggerId, { enabled });
+  }
+
+  async deleteTrigger(triggerId: string): Promise<void> {
+    await this.delete(`/api/v1/triggers/${seg(triggerId)}`);
+  }
+
+  /** Replace the signing secret AgentOven generated. The new one is returned once; the old one stops working at once. */
+  async rotateTriggerSecret(triggerId: string): Promise<{ secret: string }> {
+    return this.post(`/api/v1/triggers/${seg(triggerId)}/rotate-secret`, {});
+  }
+
+  /**
+   * Try a trigger with a sample payload. A dry run (the default) shows the input the run would get and
+   * starts nothing; `dryRun: false` starts a real run as the trigger's account, recorded as a test.
+   */
+  async fireTrigger(triggerId: string, payload: unknown = {}, opts: { dryRun?: boolean } = {}): Promise<TriggerFireResult> {
+    return this.post(`/api/v1/triggers/${seg(triggerId)}/fire`, { payload, dry_run: opts.dryRun ?? true });
+  }
+
+  /** Look at an e-mail or file trigger's source now, instead of at its next interval. */
+  async pollTrigger(triggerId: string): Promise<{ handled: number }> {
+    return this.post(`/api/v1/triggers/${seg(triggerId)}/poll`, {});
+  }
+
+  /** What happened to deliveries, newest first. */
+  async listTriggerDeliveries(filter: { trigger_id?: string; status?: TriggerDeliveryStatus; run_id?: string; limit?: number; before?: string } = {}): Promise<TriggerDelivery[]> {
+    if (filter.status !== undefined && !TRIGGER_DELIVERY_STATUSES.includes(filter.status)) {
+      throw new Error(`status is one of ${TRIGGER_DELIVERY_STATUSES.join(', ')}, not ${JSON.stringify(filter.status)}`);
+    }
+    const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(filter)) if (v !== undefined && v !== '') q.set(k, String(v));
+    const qs = q.toString();
+    return (await this.get<{ deliveries?: TriggerDelivery[] }>(`/api/v1/triggers/deliveries${qs ? `?${qs}` : ''}`)).deliveries ?? [];
+  }
+
   // ── Test suites ────────────────────────────────────────────────────────────
   // The server routes every one of these by id, never by name — despite the
   // early `name`-labelled params below (kept only so `getTestSuite(x)` /
@@ -2563,4 +2632,50 @@ export interface ImportOpenApiRequest {
   name: string; url?: string; spec?: string; base_url?: string;
   auth?: { type?: 'none' | 'bearer' | 'header' | 'query' | 'basic' | 'oauth2_client_credentials'; name?: string; token_url?: string; scopes?: string };
   operations?: string[]; secrets?: Record<string, string>; tools?: Record<string, ToolPackSwitch>; replace?: boolean;
+}
+
+export const TRIGGER_KINDS: readonly TriggerKind[] = ['webhook', 'email', 'file'];
+export const TRIGGER_DELIVERY_STATUSES: readonly TriggerDeliveryStatus[] = ['accepted', 'rejected', 'duplicate', 'failed'];
+
+export type TriggerKind = 'webhook' | 'email' | 'file';
+export type TriggerDeliveryStatus = 'accepted' | 'rejected' | 'duplicate' | 'failed';
+
+export interface Trigger {
+  id: string; kitchen: string; name: string; kind: TriggerKind; description?: string;
+  target_kind: 'recipe' | 'agent'; target: string; environment?: string; service_account_id: string;
+  input_mapping: unknown; required_paths: string[]; config: Record<string, unknown>;
+  secret_ref?: string; secret_managed: boolean; rate_limit_per_min: number; enabled: boolean;
+  created_by?: string; created_at: string; updated_at: string;
+  last_delivery_at?: string; last_polled_at?: string; last_error?: string;
+  /** Where a webhook trigger receives, relative to the server. */
+  url_path?: string;
+}
+
+export interface CreateTriggerRequest {
+  name: string;
+  /** The service account the work runs as: it belongs to a person, and its role is the most the trigger can do. */
+  service_account_id: string;
+  target: string;
+  kind?: TriggerKind;
+  target_kind?: 'recipe' | 'agent';
+  environment?: string;
+  description?: string;
+  input_mapping?: Record<string, unknown>;
+  required_paths?: string[];
+  config?: Record<string, unknown>;
+  secret_ref?: string;
+  rate_limit_per_min?: number;
+  enabled?: boolean;
+}
+
+export interface TriggerDelivery {
+  id: string; trigger_id: string; trigger_name: string; source: 'webhook' | 'email' | 'file' | 'test';
+  delivery_key?: string; status: TriggerDeliveryStatus; code?: string; reason?: string;
+  run_kind?: 'recipe' | 'task'; run_id?: string; test?: boolean;
+  payload_bytes: number; payload_sha256?: string; remote_addr?: string; suppressed?: number; received_at: string;
+}
+
+export interface TriggerFireResult {
+  status: string; dry_run: boolean; code?: string; reason?: string;
+  run_id?: string; run_kind?: string; delivery_id?: string; preview?: unknown;
 }

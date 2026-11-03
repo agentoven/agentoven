@@ -74,6 +74,7 @@ What other options were evaluated and why were they rejected?
 | [0027](0027-pooled-agent-runtime.md) | Pooled agent runtime — request-time config injection into a per-kitchen warm process pool | Proposed | 2026-08-18 |
 | [0028](0028-knowledge-ingredient-seam.md) | The `knowledge` ingredient seam — OSS hooks for the Pro knowledge engine | Proposed | 2026-10-10 |
 | [0029](0029-agentic-bot-runtime-seam.md) | The `agenticbot` runtime seam — OSS hooks for Pro-managed computer-use agents | Accepted | 2026-10-12 |
+| [0030](0030-task-content-parts.md) | Background tasks take files by blob reference (and a refused approval is a 403, not a 500) | Accepted | 2026-11-03 |
 | [0031](0031-native-tool-transport-and-tool-approval-seams.md) | The native tool transport and tool-level approval seams — OSS hooks for Pro tool packs | Accepted | 2026-11-03 |
 | [0032](0032-guardrail-actions-and-hops.md) | Guardrail actions (block, redact, mask, warn, require_approval), validated detectors, retrieval hop and custom evaluator seam | Accepted | 2026-11-03 |
 | [0033](0033-route-guard-seam-and-kitchen-scoped-ids.md) | The route guard seam, provider credential pinning and ids that belong to a kitchen | Accepted | 2026-11-03 |

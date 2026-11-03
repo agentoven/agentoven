@@ -28,6 +28,7 @@ pub mod cache;
 pub mod approvals;
 pub mod legal_hold;
 pub mod limits;
+pub mod trigger;
 pub mod secret;
 pub mod signing;
 pub mod eval;
@@ -209,6 +210,10 @@ pub enum Commands {
     #[command(subcommand)]
     Limits(limits::LimitsCommands),
 
+    /// 📥 Start work from events: a signed webhook, a mailbox, a folder (Pro).
+    #[command(subcommand)]
+    Trigger(trigger::TriggerCommands),
+
     /// 🧊 The response cache: policy per kitchen or agent, and purge (Pro).
     #[command(subcommand)]
     Cache(cache::CacheCommands),
@@ -294,6 +299,9 @@ pub async fn execute(cli: Cli) -> anyhow::Result<()> {
         Commands::Budgets(cmd) => {
             budgets::execute(cmd, signing::client_with(url, api_key, kitchen)?, matches!(output, OutputFormat::Json)).await
         }
+        Commands::Trigger(cmd) => {
+            trigger::execute(cmd, signing::client_with(url, api_key, kitchen)?, matches!(output, OutputFormat::Json)).await
+        }
         Commands::Limits(cmd) => {
             limits::execute(cmd, signing::client_with(url, api_key, kitchen)?, matches!(output, OutputFormat::Json)).await
         }
@@ -362,7 +370,7 @@ mod tests {
     #[test]
     fn the_new_commands_are_well_formed() {
         let root = Cli::command();
-        for name in ["dataset", "signature", "legal-hold", "key", "secret", "trace", "kitchen", "service-account", "recipe", "budgets", "limits", "cache"] {
+        for name in ["dataset", "signature", "legal-hold", "key", "secret", "trace", "kitchen", "service-account", "recipe", "budgets", "limits", "cache", "trigger"] {
             let sub = root.find_subcommand(name).unwrap_or_else(|| panic!("no {name}")).clone();
             sub.debug_assert();
         }

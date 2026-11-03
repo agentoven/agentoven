@@ -97,6 +97,7 @@ export type { AttachmentOptions, AudioClip, AudioInput, ContentPart, ContentPart
 export {
   ProClient, AgentOvenAPIError, AudioModalityError, OidcSigningRequired, RateLimitedError, BudgetExceededError, SIGNING_TOKEN_HEADER, SIGNING_GATES,
   KITCHEN_ROLES, PERSON_ROLES, BUDGET_UNITS, BUDGET_PERIODS, LIMIT_SCOPES, CACHE_MODES, budgetRecordId,
+  TRIGGER_KINDS, TRIGGER_DELIVERY_STATUSES,
 } from './pro-client.js';
 export type {
   TraceListFilters, TraceView, TraceTimeline, TimelineSpan, TraceAudit,
@@ -108,6 +109,7 @@ export type {
   Budget, BudgetScope, BudgetUnit, BudgetPeriod, SetBudgetOptions, BudgetLedgerEntry, BudgetAlert, UsageGroup, UsageRow,
   RateLimit, LimitScope, CacheMode, CachePolicy, CacheState,
   ToolPackSwitch, ToolPackManifest, ToolPackTool, ToolPackInstall, InstallToolPackRequest, OpenApiPreview, ImportOpenApiRequest,
+  Trigger, TriggerKind, TriggerDelivery, TriggerDeliveryStatus, TriggerFireResult, CreateTriggerRequest,
 } from './pro-client.js';
 
 // Re-export all types
@@ -178,6 +180,7 @@ export type {
 
 
 export { Blobs, blobPart } from './blobs.js';
+export { signWebhook } from './triggers.js';
 export type { Blob, BlobPart, BlobsOptions, UploadOptions } from './blobs.js';
 export { Tasks, TASK_PAUSE_GATES } from './tasks.js';
 export type { Task, TaskStatus, PauseKind, StartedTask, StartTaskOptions, ResumeTaskOptions, BudgetExtension, TaskEvent, WaitOptions, TasksOptions } from './tasks.js';

@@ -77,6 +77,8 @@ curl -X POST …/api/v1/tasks -d '{"agent":"worker","message":"audit last quarte
 | `POST /api/v1/tasks/{id}/cancel` | stop it |
 | `POST /api/v1/tasks/{id}/resume` | continue a paused (budget, tool approval, repeated call) or interrupted task |
 
+A task can work on files: add `"content_parts": [{"type": "file", "media": {"blob_ref": "<from POST /api/v1/blobs>", "mime_type": "application/pdf"}}]` (at most 16; `image_url`, `audio`, `video` or `file`). Files go by reference only: inline bytes and URLs are refused, and a blob the kitchen does not own is a 404. The control plane's [inbound triggers](inbound-triggers.md) use this to hand an e-mail's attachments to an agent.
+
 Statuses: `queued`, `running`, `paused`, `completed`, `max_turns`, `failed`, `cancelled`,
 `budget_exhausted`, `stalled`, `interrupted`, `abandoned`.
 

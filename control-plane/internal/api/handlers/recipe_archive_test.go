@@ -3,6 +3,7 @@ package handlers_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -167,5 +168,32 @@ func TestARunCanBeRunAgainWithItsInputAndRecordsWhatItRepeats(t *testing.T) {
 	callAgentAPI(x.h.DeleteRecipe, http.MethodDelete, "/x", map[string]string{"recipeName": "refunds"}, "")
 	if rec = call(x.h.RerunRecipeRun, "/x", ``, map[string]string{"recipeName": "refunds", "runId": first}); rec.Code != http.StatusConflict {
 		t.Errorf("repeating a run of an archived recipe: %d", rec.Code)
+	}
+}
+
+type refusingExecutor struct{ err error }
+
+func (r refusingExecutor) ExecuteRecipe(context.Context, *models.Recipe, string, map[string]interface{}, string) (string, error) {
+	return "", r.err
+}
+
+// An edition's recipe executor refuses with "permission_denied: <why>". That is a 403 for the caller, not
+// a 500 (the check compared the first 16 characters of the message with a 17-character word, so only the
+// bare word ever matched), and a caller that retries on a 5xx would otherwise retry a refusal for good.
+func TestAnExecutorsPermissionRefusalIsA403NotA500(t *testing.T) {
+	x, _ := recipeHandlers(t)
+	makeRecipe(t, x, "gated")
+	for err, want := range map[string]int{
+		"permission_denied": http.StatusForbidden,
+		"permission_denied: environment requires approval":      http.StatusForbidden,
+		"permission_denied_but_longer than the word":            http.StatusForbidden,
+		"something else went wrong":                             http.StatusInternalServerError,
+		"not a permission_denied, only mentioning it somewhere": http.StatusInternalServerError,
+	} {
+		x.h.RecipeExecutor = refusingExecutor{errors.New(err)}
+		rec := callAgentAPI(x.h.BakeRecipe, http.MethodPost, "/api/v1/recipes/gated/bake", map[string]string{"recipeName": "gated"}, `{"environment":"prod"}`)
+		if rec.Code != want {
+			t.Errorf("%q: %d, want %d", err, rec.Code, want)
+		}
 	}
 }
