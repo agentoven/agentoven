@@ -77,5 +77,6 @@ What other options were evaluated and why were they rejected?
 | [0031](0031-native-tool-transport-and-tool-approval-seams.md) | The native tool transport and tool-level approval seams — OSS hooks for Pro tool packs | Accepted | 2026-11-03 |
 | [0032](0032-guardrail-actions-and-hops.md) | Guardrail actions (block, redact, mask, warn, require_approval), validated detectors, retrieval hop and custom evaluator seam | Accepted | 2026-11-03 |
 | [0033](0033-route-guard-seam-and-kitchen-scoped-ids.md) | The route guard seam, provider credential pinning and ids that belong to a kitchen | Accepted | 2026-11-03 |
+| [0034](0034-approval-observer-and-expirer-seams.md) | The approval observer and expirer seams — OSS hooks for Pro approvals where people work | Accepted | 2026-11-03 |
 | [0035](0035-traffic-and-cache-seams.md) | Traffic and cache seams — OSS hooks for Pro rate limits, budgets per scope and the response cache | Accepted | 2026-11-03 |
 | [0036](0036-agent-draft-edits-fencing-and-public-trace-views.md) | Draft edits, fingerprint rules, lease fencing and public views of trace content — fixes from the 2026-11-03 adversarial review | Accepted | 2026-11-03 |

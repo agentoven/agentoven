@@ -101,6 +101,7 @@ export {
 export type {
   TraceListFilters, TraceView, TraceTimeline, TimelineSpan, TraceAudit,
   Signing, SigningChallenge, SigningTokenReply, SignatureRecord, ApproverPolicy,
+  ApprovalRequestSummary, ApprovalRequestDetail, ApprovalEscalationRule,
   ReplayEdits, ReplayVariant, ReplayToolMode, ReplayCallResult, ReplayRunResult, PreparedLiveReplay, SpanCapture,
   Dataset, DatasetSettings, DatasetCase, DatasetExport, KitchenBinding,
   SecretProvider, Secret, CreateSecretRequest, UpdateSecretRequest, SecretProbe, RotateSecretResult, SecretBinding, SecretMigrationPlan,

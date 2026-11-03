@@ -814,6 +814,65 @@ export class ProClient {
     return this.put('/api/v1/approver-policy', { policy: rules });
   }
 
+  // ── Approvals where people work (Pro, ADR-0050). None of these decides anything: a decision is signed. ──
+
+  /**
+   * Decisions that were announced to people through the kitchen's channels, newest first. `status` is `open`
+   * (default), `closed` or `all`; `gate` and `recordId` narrow them. Each says how many messages went out, the
+   * reminders sent, the escalation stage and who claimed it.
+   */
+  async listApprovalRequests(opts: { status?: 'open' | 'closed' | 'all'; gate?: string; recordId?: string } = {}): Promise<ApprovalRequestSummary[]> {
+    const q = new URLSearchParams({ status: opts.status ?? 'open' });
+    if (opts.gate) q.set('gate', opts.gate);
+    if (opts.recordId) q.set('record_id', opts.recordId);
+    return (await this.get<{ requests: ApprovalRequestSummary[] }>(`/api/v1/approval-requests?${q}`)).requests;
+  }
+
+  /** One request: its timeline (who was messaged where, reminders, escalations, claims) and, while open, the chain of people to be asked. */
+  getApprovalRequest(id: string): Promise<ApprovalRequestDetail> {
+    return this.get(`/api/v1/approval-requests/${seg(id)}`);
+  }
+
+  /** The latest request for a decision (its gate and record id) with its timeline, or `null` if it was never announced. */
+  async approvalNotifyStatus(gate: string, recordId: string): Promise<ApprovalRequestDetail | null> {
+    const [latest] = await this.listApprovalRequests({ status: 'all', gate, recordId });
+    return latest ? this.getApprovalRequest(latest.id) : null;
+  }
+
+  /** Say you are looking at it: reminders are quiet for a while. It does not decide anything. */
+  async claimApprovalRequest(id: string): Promise<ApprovalRequestSummary> {
+    return (await this.post<{ request: ApprovalRequestSummary }>(`/api/v1/approval-requests/${seg(id)}/claim`, {})).request;
+  }
+
+  /** Let go of a claim. */
+  async unclaimApprovalRequest(id: string): Promise<ApprovalRequestSummary> {
+    return (await this.post<{ request: ApprovalRequestSummary }>(`/api/v1/approval-requests/${seg(id)}/unclaim`, {})).request;
+  }
+
+  /** Say it is not yours: it goes to the next person up at once. */
+  async declineApprovalRequest(id: string): Promise<ApprovalRequestSummary> {
+    return (await this.post<{ request: ApprovalRequestSummary }>(`/api/v1/approval-requests/${seg(id)}/decline`, {})).request;
+  }
+
+  /** Quiet reminders and escalation for `minutes` (1 to 1440). The deadline does not move. */
+  async snoozeApprovalRequest(id: string, minutes = 60): Promise<ApprovalRequestSummary> {
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) throw new RangeError('a snooze is between 1 and 1440 minutes');
+    return (await this.post<{ request: ApprovalRequestSummary }>(`/api/v1/approval-requests/${seg(id)}/snooze`, { minutes })).request;
+  }
+
+  /** How the kitchen chases what waits for a person: the rules by gate, the built-in default, the gates a rule can name. */
+  getApprovalEscalation(): Promise<{ policy: Record<string, ApprovalEscalationRule>; default: ApprovalEscalationRule; gates: string[]; min_interval_seconds: number }> {
+    return this.get('/api/v1/approval-escalation');
+  }
+
+  /**
+   * Replace the kitchen's rules (a Head Chef's; send every rule). Expiring refuses a request after the last wait; it
+   * never approves it.
+   */
+  setApprovalEscalation(policy: Record<string, ApprovalEscalationRule>): Promise<{ policy: Record<string, ApprovalEscalationRule> }> {
+    return this.put('/api/v1/approval-escalation', { policy });
+  }
+
   /** The header for one decision: the token passed, or one signed now with `password`, or none. */
   private async signingHeaders(
     opts: Signing | undefined,
@@ -2169,6 +2228,33 @@ export interface SignatureRecord {
   signed_at: string;
   outcome?: string;
   outcome_detail?: string;
+}
+
+/** A decision that was announced to people, and where its chasing stands (Pro ADR-0050). */
+export interface ApprovalRequestSummary {
+  id: string; kitchen: string; gate: string; record_id: string; title: string;
+  status: 'open' | 'resolved' | 'expired' | 'gone';
+  close_reason?: string; requested_at: string; expires_at?: string;
+  stage: number; stage_count: number; notified_at?: string; reminders_sent: number; last_reminder_at?: string; held_until?: string;
+  claimed_by?: string; claimed_via?: string; last_error?: string; closed_at?: string;
+  /** Messages sent, and sends that failed (in a list). */
+  delivered?: number; failed?: number;
+}
+
+/** One request with its timeline and, while open, the chain of people who will be asked, in order. */
+export interface ApprovalRequestDetail {
+  request: ApprovalRequestSummary;
+  events: { id: number; at: string; kind: string; stage: number; channel?: string; recipient?: string; actor?: string; detail?: string }[];
+  chain?: { stage: number; state: 'done' | 'current' | 'next'; people: { email: string; name: string; role: string }[]; channels: string[] }[];
+}
+
+/** How a kind of decision is chased. Every time is in seconds, and 0 means never. */
+export interface ApprovalEscalationRule {
+  channels?: string[];
+  remind_after_seconds: number; remind_every_seconds: number; max_reminders: number;
+  escalate_after_seconds: number;
+  escalation?: { roles?: string[]; users?: string[]; channels?: string[] }[];
+  expire_after_seconds: number; claim_hold_seconds?: number;
 }
 
 /** Which budget: the kitchen's (none of the three), or one provider's, agent's or credential's, in dollars or tokens. */

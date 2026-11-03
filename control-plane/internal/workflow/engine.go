@@ -27,6 +27,7 @@ import (
 	"github.com/agentoven/agentoven/control-plane/internal/executor"
 	"github.com/agentoven/agentoven/control-plane/internal/notify"
 	"github.com/agentoven/agentoven/control-plane/internal/store"
+	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/expr-lang/expr"
 	"github.com/google/uuid"
@@ -39,6 +40,9 @@ type Engine struct {
 	client   *http.Client
 	notifier *notify.Service
 	pricer   func(ctx context.Context, kitchen, provider, model string, u *models.TokenUsage)
+
+	// approvals, when set, is told when a human gate starts waiting (see SetApprovalObserver).
+	approvals contracts.ApprovalObserver
 
 	// baseURL is the control plane's own HTTP origin (e.g. "http://localhost:8080").
 	// The engine routes all A2A and RAG calls through the control plane gateway
@@ -281,6 +285,9 @@ func (e *Engine) ApproveGateAs(runID, stepName string, approved bool, who Approv
 	gateKey := runID + ":" + stepName
 	ctx := context.Background()
 
+	// A decision and an expiry (ExpireGate) must not both win: the check and the write are one step.
+	decideMu.Lock()
+	defer decideMu.Unlock()
 	record, err := e.store.GetApproval(ctx, gateKey)
 	if err != nil || record.Status != "pending" {
 		return false, nil
@@ -1685,6 +1692,8 @@ func (e *Engine) executeHumanGate(ctx context.Context, run *models.RecipeRun, st
 	}
 	if err := e.store.CreateApproval(ctx, approval); err != nil {
 		log.Warn().Err(err).Str("gate_key", gateKey).Msg("Failed to persist approval record, falling back to in-memory only")
+	} else {
+		e.observeGate(ctx, run.Kitchen, gateKey, time.Duration(float64(time.Minute)*maxWaitMinutes))
 	}
 
 	// Register in-memory channel for fast signaling
@@ -1717,7 +1726,13 @@ func (e *Engine) executeHumanGate(ctx context.Context, run *models.RecipeRun, st
 			Kitchen:    run.Kitchen,
 			Timestamp:  time.Now().UTC(),
 		}
-		result.NotifyResults = e.notifier.DispatchAll(ctx, run.Kitchen, step.NotifyTools, evt)
+		if e.approvals != nil {
+			// The observer reaches people through the kitchen's channels, with the link to sign; the
+			// event goes on to the tools the step names.
+			result.NotifyResults = e.notifier.SendTo(ctx, run.Kitchen, nil, step.NotifyTools, evt)
+		} else {
+			result.NotifyResults = e.notifier.DispatchAll(ctx, run.Kitchen, step.NotifyTools, evt)
+		}
 	}
 
 	// Update run status to paused
@@ -1749,6 +1764,9 @@ func (e *Engine) executeHumanGate(ctx context.Context, run *models.RecipeRun, st
 			// Check store for external approval
 			record, err := e.store.GetApproval(gateCtx, gateKey)
 			if err == nil && record.Status != "pending" {
+				if record.Status == "timed_out" {
+					return e.gateTimedOut(ctx, run, step, result, "timed out: "+record.Comments)
+				}
 				return e.resolveGate(ctx, run, step, result, gateKey, record.Status == "approved")
 			}
 
@@ -1763,15 +1781,8 @@ func (e *Engine) executeHumanGate(ctx context.Context, run *models.RecipeRun, st
 					record.Comments = fmt.Sprintf("SLA breach: gate not resolved within %.2f minutes", maxWaitMinutes)
 					e.store.UpdateApproval(ctx, record)
 				}
-				result.GateStatus = "timed_out"
-				if ctx.Err() == nil && gateFollowsPath(step, "on_timeout") {
-					// The recipe says what happens when nobody answers: carry on along the rejected path.
-					result.Output = map[string]interface{}{"approved": false, "decision": "timed_out"}
-					run.Status = models.RecipeRunRunning
-					e.store.UpdateRecipeRun(ctx, run)
-					return nil
-				}
-				return fmt.Errorf("human gate '%s' exceeded SLA of %.2f minutes", step.Name, maxWaitMinutes)
+				// The recipe says what happens when nobody answers: carry on along its on_timeout path, or fail.
+				return e.gateTimedOut(ctx, run, step, result, fmt.Sprintf("exceeded SLA of %.2f minutes", maxWaitMinutes))
 			}
 			return fmt.Errorf("human gate '%s' was canceled", step.Name)
 		}

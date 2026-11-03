@@ -511,6 +511,60 @@ class AgentOvenClient(TaskMethods):
             rules[key] = {"roles": roles, "users": list(rule.get("users") or [])}
         return self._put("/api/v1/approver-policy", {"policy": rules})
 
+    # ── Approvals where people work (Pro, ADR-0050) ───────────────────────
+    # None of these decides anything: a decision is signed (``sign`` / ``approve_gate(password=...)``).
+
+    def list_approval_requests(self, status: str = "open", gate: str = "", record_id: str = "") -> list[dict[str, Any]]:
+        """Decisions that were announced to people through the kitchen's channels, newest first. ``status`` is
+        ``"open"``, ``"closed"`` or ``"all"``; ``gate`` (``"tool_approval"``, ``"budget_extension"``, ``"recipe_gate"``...)
+        and ``record_id`` narrow them. Each says how many messages went out (``delivered``, ``failed``), the reminders
+        sent, the escalation ``stage`` and who claimed it."""
+        if status not in ("open", "closed", "all"):
+            raise ValueError("status is 'open', 'closed' or 'all'")
+        query = f"status={status}" + (f"&gate={_seg(gate)}" if gate else "") + (f"&record_id={_seg(record_id)}" if record_id else "")
+        return self._get(f"/api/v1/approval-requests?{query}")["requests"]
+
+    def get_approval_request(self, request_id: str) -> dict[str, Any]:
+        """One request: ``request``, its ``events`` (who was messaged where, reminders, escalations, claims) and, while
+        it is open, the ``chain`` of people who will be asked, in order."""
+        return self._get(f"/api/v1/approval-requests/{_seg(request_id)}")
+
+    def approval_notify_status(self, gate: str, record_id: str) -> Optional[dict[str, Any]]:
+        """The latest request for a decision (its gate and record id, e.g. ``"recipe_gate"`` and ``"<run>:<step>"``)
+        with its timeline: who was told, through which channel, when it was reminded and escalated. ``None`` if it was
+        never announced."""
+        found = self.list_approval_requests("all", gate, record_id)
+        return self.get_approval_request(found[0]["id"]) if found else None
+
+    def claim_approval_request(self, request_id: str) -> dict[str, Any]:
+        """Say you are looking at it: reminders are quiet for a while. It does not decide anything."""
+        return self._post(f"/api/v1/approval-requests/{_seg(request_id)}/claim", {})["request"]
+
+    def unclaim_approval_request(self, request_id: str) -> dict[str, Any]:
+        """Let go of a claim."""
+        return self._post(f"/api/v1/approval-requests/{_seg(request_id)}/unclaim", {})["request"]
+
+    def decline_approval_request(self, request_id: str) -> dict[str, Any]:
+        """Say it is not yours: it goes to the next person up at once."""
+        return self._post(f"/api/v1/approval-requests/{_seg(request_id)}/decline", {})["request"]
+
+    def snooze_approval_request(self, request_id: str, minutes: int = 60) -> dict[str, Any]:
+        """Quiet reminders and escalation for ``minutes`` (1 to 1440). The deadline does not move."""
+        if not 1 <= int(minutes) <= 1440:
+            raise ValueError("a snooze is between 1 and 1440 minutes")
+        return self._post(f"/api/v1/approval-requests/{_seg(request_id)}/snooze", {"minutes": int(minutes)})["request"]
+
+    def get_approval_escalation(self) -> dict[str, Any]:
+        """How the kitchen chases what waits for a person: ``policy`` (rules by gate, ``"<gate>:<scope>"`` or ``"*"``),
+        the built-in ``default``, the ``gates`` a rule can name and the shortest interval allowed."""
+        return self._get("/api/v1/approval-escalation")
+
+    def set_approval_escalation(self, policy: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+        """Replace the kitchen's rules (a Head Chef's; send every rule). A rule has ``channels``, ``remind_after_seconds``,
+        ``remind_every_seconds``, ``max_reminders``, ``escalate_after_seconds``, ``escalation`` (stages of
+        ``roles``/``users``/``channels``) and ``expire_after_seconds`` (0 never). Expiring refuses a request; it never approves it."""
+        return self._put("/api/v1/approval-escalation", {"policy": {k: dict(v) for k, v in policy.items()}})
+
     def _signing_headers(
         self,
         password: Optional[str],

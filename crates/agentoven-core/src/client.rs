@@ -10,6 +10,9 @@ use crate::recipe::Recipe;
 
 /// Pro surfaces: replay, governed datasets, signed decisions, bindings and owners.
 pub mod pro;
+use pro::seg;
+/// Approvals where people work: requests, who was told, reminders and escalation (Pro ADR-0050).
+pub mod approvals;
 /// Budgets, rate limits and the response cache (Pro, ADR-0051).
 pub mod controls;
 pub mod guardrails;

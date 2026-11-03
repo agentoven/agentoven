@@ -828,6 +828,9 @@ func (e *Executor) runLoop(ctx context.Context, st *runState, thinkingEnabled bo
 				}
 			}
 			opts.onEvent.emit(Event{Type: EventPaused, Turn: turn, Pending: &pending, Trace: trace})
+			if opts.journal != nil {
+				e.pausedFor(ctx, st, PauseApproval) // a pause with no journal cannot be resumed, so nobody is asked
+			}
 			log.Info().Str("agent", agent.Name).Int("turn", turn).Strs("gated_tools", gated).Msg("Agentic loop paused for approval")
 			return "", trace, ErrPausedForApproval
 		}

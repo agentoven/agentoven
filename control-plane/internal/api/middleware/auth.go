@@ -226,6 +226,12 @@ func isAuthPublicPath(path string) bool {
 	if path == "/auth/login" || strings.HasPrefix(path, "/auth/saml") || strings.HasPrefix(path, "/auth/oidc") {
 		return true
 	}
+	// Chat platforms call back (an approver pressing "claim" in Slack) with a signature they made with a
+	// secret only the platform and the kitchen's channel know. Each endpoint under here verifies that
+	// signature before it reads anything else, and does nothing a person's login is needed for.
+	if strings.HasPrefix(path, "/hooks/chat/") {
+		return true
+	}
 	// MCP protocol endpoint (auth handled by MCP layer)
 	if strings.HasPrefix(path, "/mcp") {
 		return true

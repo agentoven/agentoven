@@ -25,6 +25,7 @@ pub mod guardrails;
 pub mod key;
 pub mod budgets;
 pub mod cache;
+pub mod approvals;
 pub mod legal_hold;
 pub mod limits;
 pub mod secret;
@@ -188,6 +189,10 @@ pub enum Commands {
     #[command(subcommand)]
     Signature(signing::SignatureCommands),
 
+    /// 📬 What is waiting for a person and how it is being chased: who was told, reminders, escalation (Pro).
+    #[command(subcommand)]
+    Approvals(approvals::ApprovalsCommands),
+
     /// ⚖️  Place or lift a legal hold on a dataset or the audit trail (Pro).
     #[command(subcommand)]
     LegalHold(legal_hold::LegalHoldCommands),
@@ -281,6 +286,9 @@ pub async fn execute(cli: Cli) -> anyhow::Result<()> {
         Commands::ServiceAccount(cmd) => service_account::execute(cmd).await,
         Commands::Dataset(cmd) => dataset::execute(cmd, signing::client_with(url, api_key, kitchen)?).await,
         Commands::Signature(cmd) => signing::execute(cmd, signing::client_with(url, api_key, kitchen)?).await,
+        Commands::Approvals(cmd) => {
+            approvals::execute(cmd, signing::client_with(url, api_key, kitchen)?, matches!(output, OutputFormat::Json)).await
+        }
         Commands::LegalHold(cmd) => legal_hold::execute(cmd, signing::client_with(url, api_key, kitchen)?).await,
         Commands::Key(cmd) => key::execute(cmd, signing::client_with(url, api_key, kitchen)?).await,
         Commands::Budgets(cmd) => {

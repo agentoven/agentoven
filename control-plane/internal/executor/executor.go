@@ -172,6 +172,8 @@ type Executor struct {
 	// spend would want on record: it paused at its budget, a person raised the budget, it
 	// stopped for repeating itself. See SetAudit.
 	audit func(ctx context.Context, kitchen, action string, details map[string]interface{})
+	// approvals, when set, is told when a run pauses for a person (see SetApprovalObserver).
+	approvals contracts.ApprovalObserver
 }
 
 // SetAudit sets where run events worth auditing are reported: "run.budget_paused",

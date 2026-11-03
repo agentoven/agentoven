@@ -36,3 +36,20 @@ func TestOnlyAChannelListenWithATicketSkipsAuthentication(t *testing.T) {
 		}
 	}
 }
+
+// Chat platforms call back with their own signature; only paths under /hooks/chat/ skip the general
+// authentication, and a look-alike prefix or an API path does not.
+func TestOnlyChatCallbacksSkipAuthenticationBySignature(t *testing.T) {
+	for path, want := range map[string]bool{
+		"/hooks/chat/approvals/slack/default/ops": true,
+		"/hooks/chat/":                            true,
+		"/hooks/chatter/x":                        false,
+		"/hooks/other/x":                          false,
+		"/api/v1/hooks/chat/x":                    false,
+		"/api/v1/approval-requests":               false,
+	} {
+		if got := isAuthPublic(httptest.NewRequest("POST", path, nil)); got != want {
+			t.Errorf("%s: public=%v, want %v", path, got, want)
+		}
+	}
+}

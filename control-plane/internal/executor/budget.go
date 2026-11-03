@@ -624,6 +624,7 @@ func (e *Executor) pauseForBudget(ctx context.Context, st *runState, opts loopOp
 			status = st.budget.status(len(trace.Turns))
 		}
 		opts.onEvent.emit(Event{Type: EventBudgetPaused, Turn: pause.Turn, BudgetPause: &pause, Budget: status})
+		e.pausedFor(ctx, st, PauseBudget)
 		log.Info().Str("agent", st.agent.Name).Str("trace_id", st.traceID).Str("dimension", pause.Dimension).
 			Float64("spent", pause.Spent).Float64("cap", pause.Cap).Msg("Run paused at its budget")
 		return "", trace, &PausedError{Kind: PauseBudget, Budget: &pause}

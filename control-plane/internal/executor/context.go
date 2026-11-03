@@ -648,6 +648,7 @@ func (e *Executor) pauseForStall(ctx context.Context, st *runState, opts loopOpt
 				"agent": st.agent.Name, "trace_id": st.traceID, "tool": info.Tool, "count": info.Count,
 			})
 			opts.onEvent.emit(Event{Type: EventStallPaused, Turn: info.Turn, Stall: &info})
+			e.pausedFor(ctx, st, PauseStall)
 			log.Warn().Str("agent", st.agent.Name).Str("trace_id", st.traceID).Str("tool", info.Tool).Int("count", info.Count).Msg("Run paused: it kept repeating the same tool call")
 			return "", trace, &PausedError{Kind: PauseStall, Stall: &info}
 		} else {
