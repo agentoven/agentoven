@@ -70,7 +70,7 @@ does not make the next rule refuse it.
 ## `llamaguard`
 
 `config.endpoint` (http or https URL, no credentials), `model`, `api_key` (sent to that endpoint only), `timeout_secs` (1 to 30), `categories`, `fail_open`.
-The endpoint is reached through the egress guard (`AGENTOVEN_TOOL_EGRESS_ALLOW`, the kitchen's allowlist): loopback, private and metadata addresses
+The endpoint is reached through the egress guard (`AGENTOVEN_TOOL_EGRESS_ALLOW`, the tools' kitchen allowlist): loopback, private and metadata addresses
 are refused at the connection, redirects are not followed, the reply is capped at 64 KiB and every failure reads the same. An agent's own rules are
 checked when the agent is saved (`POST`/`PUT /agents`): an unknown kind, an invalid pattern, a list over 1000 entries or an endpoint written as a
 refused address is a 400, not a rule that does nothing.
@@ -112,3 +112,11 @@ would redact there blocks instead of passing the sensitive text on.
 
 `kind: custom` calls an evaluator the edition installs. The community edition has none, so a custom rule passes. Pro posts the text to the kitchen's
 HTTPS endpoint (signed, SSRF-protected, fail-closed unless the rule says otherwise); see the Pro documentation.
+
+## Custom endpoints named by an agent
+
+An edition that evaluates `custom` rules may let an agent name an endpoint in its own guardrails. Before every run and every
+bake the engine asks the edition's policy (`Handlers.SetOwnEndpointPolicy`); a refusal stops the agent the way a workspace rule
+that cannot be applied does, and a bake or re-cook answers `409 guardrail_endpoint_not_approved`. The community edition installs
+no policy and evaluates no custom rule. Every rule an agent runs is stamped with the kitchen and the agent it runs for
+(`Guardrail.AgentName`). See OSS ADR-0042.

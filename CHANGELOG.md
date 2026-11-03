@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Owner decisions of 2026-11-03 (ADR-0042).** A reader without the right to read trace content no longer sees an approval's inputs or comment, only that it exists, its step and who decided it (A3). A `PUT /agents/{name}` with JSON `null` for an optional field clears it; `null` for the model or mode is a `400` (A4). A retired agent refuses an edit, bake, re-cook, cool and rewarm with `409` (A8). Notification channels have their own egress allowlist, `AGENTOVEN_CHANNEL_EGRESS_ALLOW` and a kitchen list; `AGENTOVEN_TOOL_EGRESS_ALLOW` no longer admits a channel (S10). Hooks for an edition: `BakeDeployments` (A7), `SetOwnEndpointPolicy` (S7). The SDK edit mirrors follow `null`, and clear `skills` with `[]` as the server does.
 - **See what the next bake would change.** `GET /api/v1/agents/{name}/draft/diff` returns the field-level difference between a baked agent and its draft (lists by element, secrets masked, `has_draft`, `baked_version`, `changes_behaviour`); clients `agent_draft_diff` (Python, Rust) and `agentDraftDiff` (TypeScript). Owner decision A1.
 
 ---

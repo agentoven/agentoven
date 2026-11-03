@@ -74,3 +74,15 @@ Timings, status, usage, cost, model and provider names stay. Prompts, answers, t
 text, a score's comment, a session's messages, a task's result, error and pending tool arguments are not in the response, and
 `content_withheld` is `true`. This holds on every route that returns them (traces, spans, timeline, scores, sessions, tasks,
 and in Pro the judgment ledger and dataset cases); `GET /tasks/{id}/events` and `POST /langfuse/export` answer 403.
+
+## Clearing a field, and retired agents
+
+A `PUT` stays partial: a field you leave out stays as it is. To clear an optional field, send JSON `null` for it:
+`{"backup_provider": null, "backup_model": null}`. The optional fields are `description`, `framework`, `backup_provider`,
+`backup_model`, `execution_mode`, `max_turns`, `bot`, `ingredients`, `context_budget`, `reasoning_strategy`,
+`summary_provider` and `summary_model`. `null` for `model_provider`, `model_name`, `mode`, `behavior` or `runtime` is a
+`400`: an agent cannot run without them. For the lists (`skills`, `guardrails`, `approval_tools`, `subagents`) `null` still
+means "no opinion", and `[]` clears. On a baked agent the clear waits in the draft like any edit.
+
+A retired agent (deleted with `DELETE /api/v1/agents/{name}`) refuses an edit, a bake, a re-cook, a cool and a rewarm with
+`409`; register it again with `POST /api/v1/agents` to bring it back.
