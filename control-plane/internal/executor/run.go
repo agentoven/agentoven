@@ -675,7 +675,7 @@ func (e *Executor) runLoop(ctx context.Context, st *runState, thinkingEnabled bo
 			if bud != nil && errors.Is(err, context.DeadlineExceeded) {
 				break // that is the active-time cap, handled below
 			}
-			wait := e.retry.base << uint(attempt)
+			wait := e.retry.waitFor(attempt, err)
 			log.Warn().Err(err).Str("trace_id", st.traceID).Int("turn", turn).Int("attempt", attempt+1).Dur("wait", wait).Msg("Model call failed; retrying")
 			select {
 			case <-time.After(wait):
@@ -701,7 +701,7 @@ func (e *Executor) runLoop(ctx context.Context, st *runState, thinkingEnabled bo
 				// run waits, as it does at its own budget, and carries on when a person resumes
 				// it once that budget has been raised or has reset.
 				return e.pauseForBudget(ctx, st, opts, models.BudgetPause{
-					Turn: turn, Dimension: models.BudgetDimCost, Spent: refused.Spent, Cap: refused.Cap, Scope: refused.Scope})
+					Turn: turn, Dimension: refused.Dimension(), Spent: refused.Spent, Cap: refused.Cap, Scope: refused.Scope})
 			}
 			runErr := fmt.Errorf("model router call failed (turn %d): %w", turn, err)
 			// Deliberately not journal.MarkDone: a model/router failure is
@@ -736,6 +736,7 @@ func (e *Executor) runLoop(ctx context.Context, st *runState, thinkingEnabled bo
 		st.totalUsage.ThinkingTokens += routeResp.Usage.ThinkingTokens
 		st.totalUsage.EstimatedCost += routeResp.Usage.EstimatedCost
 		if bud != nil {
+			attribute.Bool("llm.cache_hit", routeResp.Cached),
 			for _, w := range bud.charge(routeResp.Usage) {
 				w := w
 				opts.onEvent.emit(Event{Type: EventBudgetWarning, Turn: turn, BudgetWarning: &w})
@@ -753,7 +754,7 @@ func (e *Executor) runLoop(ctx context.Context, st *runState, thinkingEnabled bo
 		// calls are captured, journaled, shown to an approver or run.
 		routeResp, guardHeld, guardHolds := e.guardToolCalls(ctx, agent, routeResp, toolCalls)
 		turnRecord := Turn{Number: turn, Request: st.messages, ThinkingBlocks: routeResp.ThinkingBlocks, Usage: routeResp.Usage,
-			Provider: routeResp.Provider, Model: routeResp.Model, Attempts: routeResp.Attempts,
+			Provider: routeResp.Provider, Model: routeResp.Model, Attempts: routeResp.Attempts, CacheHit: routeResp.Cached,
 			SpanID: e.captureCall(ctx, st.traceID, agent, turn, turnStart, routeReq, routeResp)}
 
 		// The model's reply is journaled before anything acts on it. It was paid for, and

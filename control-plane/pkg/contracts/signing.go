@@ -21,15 +21,19 @@ import (
 const (
 	GateToolApproval    = "tool_approval"
 	GateBudgetExtension = "budget_extension"
-	GateResumeGuidance  = "resume_guidance"
-	GateRecipeGate      = "recipe_gate"
-	GateWaitRelease     = "wait_release"
-	GatePromotion       = "environment_promotion"
-	GateSkillApproval   = "skill_approval"
-	GateBotAction       = "bot_action"
-	GateLiveToolReplay  = "live_tool_replay"
-	GateDatasetPublish  = "dataset_publish"
-	GateDatasetPurge    = "dataset_purge"
+	// GateBudgetRaise raises or removes a period budget (a kitchen's, an agent's, a provider's or an API
+	// key's monthly allowance, ADR-0051). It is the decision GateBudgetExtension is for one run, taken
+	// for everyone who shares the budget; lowering a budget only protects and is not a gate.
+	GateBudgetRaise    = "budget_raise"
+	GateResumeGuidance = "resume_guidance"
+	GateRecipeGate     = "recipe_gate"
+	GateWaitRelease    = "wait_release"
+	GatePromotion      = "environment_promotion"
+	GateSkillApproval  = "skill_approval"
+	GateBotAction      = "bot_action"
+	GateLiveToolReplay = "live_tool_replay"
+	GateDatasetPublish = "dataset_publish"
+	GateDatasetPurge   = "dataset_purge"
 	// GateLegalHoldRelease lifts a legal hold, on a dataset or on a kitchen's audit trail. Placing a
 	// hold is not a gate: it only protects. Lifting one is signed by the legal team (ADR-0043).
 	GateLegalHoldRelease = "legal_hold_release"

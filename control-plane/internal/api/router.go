@@ -89,7 +89,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 		// steer it.
 		r.Route("/tasks", func(r chi.Router) {
 			r.Use(middleware.RequireIdentity)
-			r.Post("/", h.CreateTask)
+			r.With(h.LimitTraffic).Post("/", h.CreateTask)
 			r.Get("/", h.ListTasks)
 			r.Route("/{taskID}", func(r chi.Router) {
 				r.Get("/", h.GetTask)
@@ -123,8 +123,9 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 
 				// Invoke routes always require a resolved identity — regardless of the
 				// global AGENTOVEN_REQUIRE_AUTH flag. Anonymous callers are rejected with 401.
-				r.With(middleware.RequireIdentity).Post("/invoke", h.InvokeAgent)
-				r.With(middleware.RequireIdentity).Post("/invoke/stream", h.StreamInvokeAgent)
+				// LimitTraffic is the edition's request limit; the community edition has none.
+				r.With(middleware.RequireIdentity, h.LimitTraffic).Post("/invoke", h.InvokeAgent)
+				r.With(middleware.RequireIdentity, h.LimitTraffic).Post("/invoke/stream", h.StreamInvokeAgent)
 
 				// Durable execution — resume a run paused on an approval-gated
 				// tool call, or retry one interrupted mid-loop without pausing.
@@ -146,7 +147,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 					r.Route("/{sessionID}", func(r chi.Router) {
 						r.Get("/", h.GetSession)
 						r.Delete("/", h.DeleteSession)
-						r.Post("/messages", h.SendSessionMessage)
+						r.With(h.LimitTraffic).Post("/messages", h.SendSessionMessage)
 					})
 				})
 

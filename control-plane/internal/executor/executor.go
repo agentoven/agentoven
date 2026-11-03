@@ -114,6 +114,9 @@ type Turn struct {
 	Provider string                `json:"provider,omitempty"`
 	Model    string                `json:"model,omitempty"`
 	Attempts []models.RouteAttempt `json:"attempts,omitempty"`
+	// CacheHit is true when the response cache answered this turn: no provider was called and the
+	// turn's usage is zero.
+	CacheHit bool `json:"cache_hit,omitempty"`
 	// SpanID is the span this turn's model call is recorded under. It is chosen when the call is
 	// made, so a capture hook can file the whole call under it even though the run's spans are
 	// written when the run ends. Empty on a turn replayed from a journal written before this field.

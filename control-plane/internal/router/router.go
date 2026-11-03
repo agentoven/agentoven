@@ -130,6 +130,8 @@ type ModelRouter struct {
 
 	// spendGate, when set, is consulted before every model call (see spendgate.go).
 	spendGate atomic.Pointer[gateBox]
+	// responseCache, when set, answers a repeated request without calling the provider (see responsecache.go).
+	responseCache atomic.Pointer[cacheBox]
 }
 
 // CatalogLookup is the interface the router needs from the model catalog.
@@ -623,6 +625,9 @@ func (mr *ModelRouter) routeCore(ctx context.Context, req *models.RouteRequest) 
 				Msg("Provider call failed (after retries), trying next")
 			lastErr = err
 			attempts = append(attempts, mr.attemptOf(&provider, req, err, time.Since(t0)))
+			if refusalCoversAllProviders(err) {
+				break
+			}
 			continue
 		}
 
@@ -773,6 +778,9 @@ func (mr *ModelRouter) RouteStream(ctx context.Context, req *models.RouteRequest
 			endSpend, serr := mr.spendBegin(ctx, &provider, req)
 			if serr != nil {
 				lastErr = serr
+				if refusalCoversAllProviders(serr) {
+					break
+				}
 				continue
 			}
 			var streamed *models.TokenUsage
@@ -807,6 +815,9 @@ func (mr *ModelRouter) RouteStream(ctx context.Context, req *models.RouteRequest
 			attempts = append(attempts, mr.attemptOf(&provider, req, err, time.Since(t0)))
 			continue
 		}
+			if refusalCoversAllProviders(err) {
+				break
+			}
 		mr.trackCost(req.Kitchen, req.AgentRef, resp)
 		mr.finishRoute(ctx, req, resp, attempts, started, nil)
 
@@ -933,6 +944,13 @@ func (mr *ModelRouter) callProvider(ctx context.Context, provider *models.ModelP
 
 	endSpend, err := mr.spendBegin(ctx, provider, &driverReq)
 	if err != nil {
+	// A repeated request is answered before anything is reserved or sent: it costs nothing and
+	// uses none of the provider's rate limit.
+	if cached, ok := mr.cacheLookup(ctx, provider, &driverReq); ok {
+		cached.LatencyMs = time.Since(start).Milliseconds()
+		return cached, nil
+	}
+
 		return nil, err
 	}
 	resp, err := driver.Call(ctx, provider, &driverReq)
@@ -955,6 +973,7 @@ func (mr *ModelRouter) callProvider(ctx context.Context, provider *models.ModelP
 	resp.LatencyMs = latencyMs
 	resp.Strategy = req.Strategy
 	if resp.Strategy == "" {
+	mr.cacheStore(ctx, provider, &driverReq, resp)
 		resp.Strategy = models.RoutingFallback
 	}
 
@@ -2179,6 +2198,7 @@ func (mr *ModelRouter) finishRoute(ctx context.Context, req *models.RouteRequest
 
 	if resp != nil {
 		trace.OutputText = resp.Content
+		trace.Metadata["cache_hit"] = resp.Cached
 		trace.TotalTokens = resp.Usage.TotalTokens
 		trace.CostUSD = resp.Usage.EstimatedCost
 		trace.ThinkingBlocks = resp.ThinkingBlocks
@@ -2203,6 +2223,7 @@ func (mr *ModelRouter) finishRoute(ctx context.Context, req *models.RouteRequest
 		answerID := uuid.New().String()
 		calls = append(calls, models.LLMCall{SpanID: answerID, StartedAt: cursor, Response: resp})
 		spans = append(spans, models.Span{
+				"cache_hit":       resp.Cached,
 			ID: answerID, TraceID: traceID, ParentSpanID: rootID,
 			Name: "llm." + resp.Provider, Kind: models.SpanKindLLM, Status: "completed",
 			StartTime: cursor, EndTime: end, DurationMs: resp.LatencyMs,

@@ -2,10 +2,12 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
@@ -231,5 +233,36 @@ func TestWhichModelErrorsAreWorthRetrying(t *testing.T) {
 	}
 	if retriable(context.Canceled) || retriable(nil) {
 		t.Fatal("a cancelled call is not retried")
+	}
+}
+
+// A rate limit is the one refusal that clears by itself, and its error says when: a budgeted run waits
+// at least that long before it tries again, but never more than a minute.
+func TestARateLimitIsRetriedAfterAtLeastTheTimeItAsksFor(t *testing.T) {
+	limited := func(after time.Duration) error {
+		return fmt.Errorf("model router call failed: %w", &models.RateLimitedError{Scope: "kitchen", Limit: "requests_per_minute", RetryAfter: after, Reason: "kitchen k is over its requests-per-minute limit"})
+	}
+	// The message names "400ms"-style numbers that the retriable heuristic would take for an HTTP 400.
+	if !retriable(limited(400 * time.Millisecond)) {
+		t.Fatal("a rate limit is worth retrying")
+	}
+	if retriable(&models.SpendRefusedError{Scope: "kitchen"}) {
+		t.Fatal("a budget that is used up is not: a person decides")
+	}
+	r := modelRetry{max: 3, base: 2 * time.Second}
+	for name, c := range map[string]struct {
+		attempt int
+		err     error
+		want    time.Duration
+	}{
+		"ordinary error doubles":            {2, errors.New("boom"), 8 * time.Second},
+		"limit longer than the backoff":     {0, limited(20 * time.Second), 20 * time.Second},
+		"limit shorter than the backoff":    {2, limited(time.Second), 8 * time.Second},
+		"limit longer than a minute":        {0, limited(time.Hour), time.Minute},
+		"ordinary error is not capped here": {5, errors.New("boom"), 64 * time.Second},
+	} {
+		if got := r.waitFor(c.attempt, c.err); got != c.want {
+			t.Errorf("%s: %s, want %s", name, got, c.want)
+		}
 	}
 }

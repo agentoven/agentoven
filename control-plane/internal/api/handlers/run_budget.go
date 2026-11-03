@@ -32,6 +32,11 @@ func (h *Handlers) respondRunStopped(w http.ResponseWriter, agentName string, tr
 		traceID = trace.TraceID
 	}
 
+	// A model call that a rate limit refused is a 429 that says when to come back, never a 500.
+	if respondRateLimited(w, err) {
+		return true
+	}
+
 	var paused *executor.PausedError
 	switch {
 	case errors.As(err, &paused) && paused.Stall != nil:

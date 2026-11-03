@@ -550,6 +550,9 @@ func retriable(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, models.ErrSpendRefused) {
 		return false
 	}
+	if errors.Is(err, models.ErrRateLimited) {
+		return true // our own limit, and the one error whose message says when to come back
+	}
 	msg := strings.ToLower(err.Error())
 	for _, never := range []string{"401", "403", "unauthorized", "invalid api key", "invalid_api_key", "authentication", "permission", "400", "invalid_request", "context length", "context_length"} {
 		if strings.Contains(msg, never) {
@@ -563,6 +566,26 @@ func retriable(err error) bool {
 type modelRetry struct {
 	max  int
 	base time.Duration
+}
+
+// maxRateLimitWait bounds how long a run waits for a rate limit to clear before the retry: a limit
+// that wants more than this is left to a person (or the caller) to come back to.
+const maxRateLimitWait = time.Minute
+
+// waitFor is how long to wait before the retry after attempt (0-based) failed with err: the usual
+// growing delay, or, for a rate limit, at least as long as the limit says it needs.
+func (r modelRetry) waitFor(attempt int, err error) time.Duration {
+	wait := r.base << uint(attempt)
+	var rl *models.RateLimitedError
+	if errors.As(err, &rl) {
+		if rl.RetryAfter > wait {
+			wait = rl.RetryAfter
+		}
+		if wait > maxRateLimitWait {
+			wait = maxRateLimitWait
+		}
+	}
+	return wait
 }
 
 func defaultModelRetry() modelRetry {
