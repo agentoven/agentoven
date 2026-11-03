@@ -3,7 +3,7 @@
 A tool pack is a named, versioned set of tools for one kind of system. You install it into a kitchen by choosing **secrets**, not by writing a tool server. The control plane makes the calls itself, so the rules that matter are enforced in one place:
 
 - anything that **changes** an outside system waits for a person's approval, until a Head Chef switches that off for that tool;
-- credentials are `vault://` **references** to secrets you already keep; a pack never holds a value, and values are removed from what a tool returns;
+- credentials are `vault://` **references** to secrets you already keep, **pinned to the hosts the pack sends them to** (`allowed_hosts` on the secret: an install is refused, `secret_not_pinned`, until it is, and a pin that moves later stops the calls); a pack never holds a value, and values are removed from what a tool returns;
 - a pack reaches **public addresses only**; your own network has to be allowed, by name, per kitchen;
 - with skill approval required (`AGENTOVEN_SKILL_APPROVAL=required`), an install **waits for people** who did not install it, and a change to it goes back for review;
 - every install, change and write call is in the audit trail.
@@ -15,7 +15,7 @@ A tool pack is a named, versioned set of tools for one kind of system. You insta
 | `postgres-readonly` | `query`, `list_tables`, `describe_table` (all read) | `dsn`: `postgres://user:password@host:5432/db?sslmode=require` of a role that can only `SELECT` |
 | `notifications` | `send_email`, `post_slack_message` (both write) | `smtp`: `smtp://user:pass@host:587?from=alerts@example.com&starttls=required`; `slack_webhook`: the incoming-webhook URL. Bind one or both; only the tools whose secret is bound are installed |
 
-`postgres-readonly` parses each statement and runs only one `SELECT`, `VALUES`, `WITH ... SELECT` or `EXPLAIN`, in a read-only transaction, with values bound as parameters (`$1`, `$2`, never inside the SQL), a statement timeout and a row cap. It is a second line of defence: the role behind the connection string should have no write privilege at all.
+`postgres-readonly` reads each statement with PostgreSQL's own parser and runs only one `SELECT`, `VALUES`, `WITH ... SELECT` or `EXPLAIN` (without `ANALYZE`), with no `INTO` and no row locks, calling only built-in functions on an allowlist (aggregates, arithmetic, text, dates, JSON, arrays, a few catalog readers; nothing that reads files, reaches other servers, takes locks or sleeps), in a read-only transaction, with values bound as parameters (`$1`, `$2`, never inside the SQL), a statement timeout and a row cap. A refusal says what to change. **The connection string must name a role that is not a superuser and not a member of `pg_read_server_files`, `pg_write_server_files` or `pg_execute_server_program`:** the pack refuses to connect as one. Beyond that, the role should have `SELECT` on what the agent may see and nothing else.
 
 Any REST API with an OpenAPI 3 document can be imported as a pack of its own.
 
@@ -87,6 +87,7 @@ await pro.importOpenApi({ name: 'pets', spec, operations: ['getPet'], secrets: {
 
 ## Limits worth knowing
 
-- Pin your secrets to the hosts they belong to (`agentoven secret update --allow-host`): a secret with no pin can be sent by anyone who may install a pack to any public host.
+- Pin your secrets to the hosts they belong to (`agentoven secret update --allow-host`): a pack uses only pinned credentials. Whoever may change a secret's pin can send it to the hosts they choose, so the right to do that is as sensitive as the secret.
+- A pack's tools cannot be edited or removed through the generic tools API (`PUT`/`DELETE /tools/{name}` answer `403 tool_managed`); use the pack's own commands.
 - PostgreSQL only for SQL; email is plain text; Slack is text only; no multipart or form bodies in imported APIs.
 - Design and the full list of what is not built: Pro ADR-0048 and OSS ADR-0031.

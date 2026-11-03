@@ -37,6 +37,13 @@ The sender signs every call. The scheme is the one AgentOven's own outbound webh
 
 Rotating the secret (`agentoven trigger rotate-secret`) takes effect at once; there is no overlap period.
 
+Two rules about secrets and replays:
+
+- **Every secret a trigger names is `vault://<credential>` of its own kitchen.** A webhook's `secret_ref`, a mailbox's `password_ref` and an object store's `access_key_ref` and `secret_key_ref` cannot be `env://` or `k8s://` (those would read the server's own environment and hand it to the host the trigger names); create the credential first (`agentoven secret create`). One credential signs one trigger: a second trigger naming it is refused (`409 secret_in_use`), and the generated secret has an unguessable name.
+- **A signed request is one delivery, whatever id it carries.** The delivery id header is not covered by the signature, so a captured request cannot be made new by changing it: a repeat of the same signed request is a `duplicate`. A sender that retries must resend the same signed request, or sign again and send the same `X-AgentOven-Delivery` (AgentOven's own sender does that). With `hmac-body`, an identical body inside 24 hours is a duplicate too.
+
+Anyone can open a connection to the webhook address, so a few places are rationed before a signature is checked: one address holds at most 8 requests at once and one kitchen's path 24, a body must arrive within 15 seconds, and a refused request is answered `503` with `Retry-After`.
+
 ## Mapping the payload to the input
 
 `input_mapping` is JSON. A string that is `$.a.b[0]` is replaced by that value and keeps its type; `"text {{ $.a.b }}"` puts values into text; `$meta.delivery_id`, `$meta.source`, `$meta.trigger`, `$meta.kitchen`, `$meta.received_at` name the delivery; `$$` starts a literal `$`. Nothing else is evaluated: no functions, no scripts, no environment. A bad path is refused when the trigger is saved. With no mapping a recipe gets `{"payload": <the payload>}` and an agent a message that shows it, marked as untrusted data from an outside sender (it is still text an outsider wrote: guardrails apply to what a trigger sends an agent, as to any input).
