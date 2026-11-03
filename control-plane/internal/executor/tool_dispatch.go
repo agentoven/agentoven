@@ -69,6 +69,14 @@ func (e *Executor) dispatchToolCall(ctx context.Context, agent *models.Agent, tc
 	)
 	defer toolSpan.End()
 
+	// A call a guardrail rule blocked carries a placeholder for its arguments; it is never run, whatever
+	// rules apply by the time it gets here (a run that paused and was resumed meets it again).
+	if tc.Refused {
+		toolSpan.SetStatus(codes.Error, "tool call arguments blocked by guardrails")
+		toolSpan.SetAttributes(attribute.Bool("tool.is_error", true), attribute.Bool("tool.guardrail_blocked", true))
+		return ToolResult{ToolCallID: tc.ID, Name: tc.Name, IsError: true, Content: "Error: tool call arguments blocked by guardrails"}
+	}
+
 	// schema is nil for the virtual agentoven_delegate tool (it isn't one of
 	// resolved.Tools), and validateArgs treats a nil schema as unconstrained —
 	// so this naturally only ever rejects a real MCP tool's malformed call.

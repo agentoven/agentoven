@@ -128,7 +128,11 @@ func (h *Handlers) finishBake(kitchen, agentName, version, k8sNamespace string, 
 	// Test the provider with a real credential-validating call
 	if fresh.ModelProvider != "" {
 		if provider, err := h.Store.GetProvider(ctx, kitchen, fresh.ModelProvider); err == nil {
-			if result := h.Router.TestProvider(ctx, provider); !result.Healthy {
+			// A test the budget or a rate limit stopped from being made says nothing about the provider: the
+			// bake does not fail because the kitchen is out of budget (the agent is refused when it is called).
+			if result := h.Router.TestProvider(ctx, provider); result.Refused != nil {
+				log.Warn().Err(result.Refused).Str("agent", agentName).Msg("bake: the provider test was refused by a budget or rate limit; the credential was not validated")
+			} else if !result.Healthy {
 				h.burnt(kitchen, agentName, guard, fmt.Sprintf("Provider '%s' test failed: %s", fresh.ModelProvider, result.Error), models.AgentLifecycle{})
 				log.Warn().Str("agent", agentName).Msg("Agent burnt: provider test failed")
 				return

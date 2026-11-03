@@ -32,8 +32,9 @@ func (h *Handlers) respondRunStopped(w http.ResponseWriter, agentName string, tr
 		traceID = trace.TraceID
 	}
 
-	// A model call that a rate limit refused is a 429 that says when to come back, never a 500.
-	if respondRateLimited(w, err) {
+	// A model call that a rate limit refused is a 429 that says when to come back, never a 500; a budget
+	// that is used up is a 402, a guardrail a 403 (respondRefusal).
+	if respondRefusal(w, err) {
 		return true
 	}
 
@@ -158,4 +159,14 @@ func (h *Handlers) auditRun(ctx context.Context, kitchen, action string, details
 		Details: details, ResponseStatus: http.StatusOK,
 		RegulationTags: []string{"cost-control"}, DataClassification: "internal",
 	})
+}
+
+// respondRunEnded is respondRunStopped for a handler that knows the agent and what was asked: a run whose
+// reply a guardrail refused is also recorded as a (blocked) trace, so the refusal in the audit log can be read
+// together with the run that caused it.
+func (h *Handlers) respondRunEnded(w http.ResponseWriter, r *http.Request, agent *models.Agent, input string, trace *executor.ExecutionTrace, err error) bool {
+	if errors.Is(err, models.ErrGuardrailBlocked) && trace != nil {
+		h.recordBlockedRun(r.Context(), agent, input, trace)
+	}
+	return h.respondRunStopped(w, agent.Name, trace, err)
 }

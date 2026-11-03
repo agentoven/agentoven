@@ -308,6 +308,9 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 
 	// Build handlers + API router
 	h := handlers.New(dataStore, mr, gw, wf, cat, sessStore, pm)
+	// Every model call is judged by the kitchen's workspace guardrails inside the router, whichever route,
+	// process or reader made it (router/guard.go); callers that judged it with the agent's rules too say so.
+	mr.SetContentGuard(h.ModelGuard())
 	h.Notifier = ns
 
 	// The key agent pods' A2A tokens are derived from: each pod is started holding a token for

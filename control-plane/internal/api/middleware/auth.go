@@ -242,10 +242,8 @@ func isAuthPublicPath(path string) bool {
 	if strings.HasPrefix(path, "/hooks/chat/") {
 		return true
 	}
-	// MCP protocol endpoint (auth handled by MCP layer)
-	if strings.HasPrefix(path, "/mcp") {
-		return true
-	}
+	// The MCP gateway is not here: it runs a kitchen's tools with the credentials stored for them,
+	// and nothing in the MCP layer authenticates anyone. It is authenticated like every other route.
 	// The OpenAI-compatible model endpoint authenticates itself: a hosted agent process calls
 	// it with a credential minted for that one process, which is not an identity anywhere else,
 	// so the endpoint checks it (or an ordinary API key) itself rather than giving that

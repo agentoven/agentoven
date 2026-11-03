@@ -141,6 +141,9 @@ func (h *Handlers) addSpeech(w http.ResponseWriter, ctx context.Context, agent *
 	}
 	speech, mime, err := engine.Speak(ctx, response, voice)
 	if err != nil {
+		if respondRefusal(w, err) {
+			return false
+		}
 		respondError(w, http.StatusBadGateway, "could not synthesize speech: "+err.Error())
 		return false
 	}

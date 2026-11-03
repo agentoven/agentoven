@@ -18,6 +18,10 @@ The router has one hook for money (`SetSpendGate`, [ROADMAP #107](../ROADMAP.md)
 6. **Executor**: a rate limit is retried by a budgeted run after at least the time it names (at most a minute); a budget refusal is still not retried.
 7. **`contracts.GateBudgetRaise`** (`budget_raise`): a name for the signed decision ([Pro ADR-0041](../../agentoven-pro/ADR/0041-electronic-signatures-on-human-decisions.md)) of raising or removing a period budget. The community edition has no period budgets and no use for it.
 
+8. **One chain for every model call** (amendment 2026-11-03, review 5). The router is the only door: guardrails on the prompt (`router.ContentGuard`, `SetContentGuard`; the server installs `Handlers.ModelGuard`, the kitchen's workspace rules), then the response cache, the spend gate with the rate limits, the provider, then guardrails on the reply, then the trace and capture, which therefore hold what was handed on. A caller that already judged the exchange with an agent's own rules says so with `router.ContextGuardrailsApplied`; a caller that judges the reply itself (the native session handler) passes `router.ContextReplyJudge` so the refusal or redaction happens before the router records the call. A stream under a rule that applies to replies is held back and judged whole. Calls that are not completions go through the same gate with `ModelRouter.Admit`: speech to text and text to speech (`SpeechFor`), a live session (`RealtimeFor`, settled when it ends, sized from its duration), embeddings, and a provider test (`TestProvider`); an ad-hoc provider (the prompt validator's judge) goes through `RouteVia`. `TestEveryProviderCallPassesTheSpendGate`, `TestEveryModelCallIsJudgedByTheGuard`, `TestEveryExportedRouterMethodIsClassified` (a new exported router method must be classified) and `TestNoOneReachesADriverAroundTheRouter` keep it that way.
+9. **Refusals have their own statuses**: `handlers.respondRefusal` answers a used-up budget 402, a rate limit or a refusal caused by calls in flight 429 with `Retry-After`, a guardrail 403 and rules that cannot be read 503, on the raw routes, their streams, session messages, invoke, test and voice. A stream is committed to its 200 only when a frame that says a model answered is written, so a refusal before that is still a status.
+10. **Every route that starts agent work asks the invocation limiter**: besides invoke, streams, session messages and tasks, now `/test`, `/runs/{id}/resume`, all A2A endpoints (recipe steps use them) and `/langchain/invoke` (`TestEveryRouteThatRunsAnAgentAsksTheTrafficLimiter`).
+
 ## Consequences
 
 - With nothing installed, behaviour is the community edition's as before, except that a budget refusal no longer opens a provider's circuit (a fix).
@@ -26,4 +30,5 @@ The router has one hook for money (`SetSpendGate`, [ROADMAP #107](../ROADMAP.md)
 ## Not done
 
 - No community-edition rate limit or cache.
-- The invocation limit is not applied to A2A message routes (the model-call limits cover them).
+- ~~The invocation limit is not applied to A2A message routes~~ done 2026-11-03 (decision 10). The platform workflow engine's own A2A calls are counted too.
+- The voice and realtime meters size a call from bytes, characters and duration (providers bill them in minutes and characters), so their cost is an estimate unless the model is priced; the agent a speech call is for is not attributed (budgets of an agent are not charged for speech).

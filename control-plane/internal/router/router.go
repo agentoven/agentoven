@@ -132,6 +132,8 @@ type ModelRouter struct {
 	spendGate atomic.Pointer[gateBox]
 	// responseCache, when set, answers a repeated request without calling the provider (see responsecache.go).
 	responseCache atomic.Pointer[cacheBox]
+	// contentGuard, when set, judges every call's prompt and reply (see guard.go).
+	contentGuard atomic.Pointer[guardBox]
 }
 
 // CatalogLookup is the interface the router needs from the model catalog.
@@ -342,7 +344,7 @@ func (mr *ModelRouter) ListEmbeddingCapableDrivers() map[string]EmbeddingCapable
 	result := make(map[string]EmbeddingCapableDriver)
 	for kind, driver := range mr.drivers {
 		if ecd, ok := driver.(EmbeddingCapableDriver); ok {
-			result[kind] = ecd
+			result[kind] = meteredEmbedder{EmbeddingCapableDriver: ecd, mr: mr}
 		}
 	}
 	return result
@@ -359,7 +361,7 @@ func (mr *ModelRouter) DiscoverEmbeddingsForProvider(provider *models.ModelProvi
 	if !ok {
 		return nil, nil
 	}
-	return ecd, ecd.EmbeddingModels()
+	return meteredEmbedder{EmbeddingCapableDriver: ecd, mr: mr}, ecd.EmbeddingModels()
 }
 
 // DiscoverModelsForProvider checks if a provider's driver supports model discovery
@@ -560,10 +562,20 @@ func (mr *ModelRouter) SelectAPIKey(provider *models.ModelProvider) string {
 
 // Route sends a request through the router using the specified strategy.
 func (mr *ModelRouter) Route(ctx context.Context, req *models.RouteRequest) (*models.RouteResponse, error) {
+	req, err := mr.guardInput(ctx, req)
+	if err != nil {
+		return nil, err
+	}
 	started := time.Now()
 	resp, attempts, err := mr.routeCore(ctx, req)
+	if err == nil {
+		resp, err = mr.guardOutput(ctx, req, resp)
+	}
 	mr.finishRoute(ctx, req, resp, attempts, started, err)
-	return resp, err
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 // routeCore tries the providers in order and returns the first answer, with the providers that failed
@@ -676,12 +688,15 @@ func (mr *ModelRouter) routePinned(ctx context.Context, req *models.RouteRequest
 // primary providers fail, automatically falls back to the backup provider.
 // This is used by InvokeAgent/SendSessionMessage when an agent has a BackupProvider configured.
 func (mr *ModelRouter) RouteWithBackup(ctx context.Context, req *models.RouteRequest, backupProvider, backupModel string) (*models.RouteResponse, error) {
+	req, gerr := mr.guardInput(ctx, req)
+	if gerr != nil {
+		return nil, gerr
+	}
 	started := time.Now()
 	// Try primary route first
 	resp, attempts, err := mr.routeCore(ctx, req)
 	if err == nil {
-		mr.finishRoute(ctx, req, resp, attempts, started, nil)
-		return resp, nil
+		return mr.finishGuarded(ctx, req, resp, attempts, started)
 	}
 
 	// Primary failed — try backup provider if configured
@@ -733,15 +748,24 @@ func (mr *ModelRouter) RouteWithBackup(ctx context.Context, req *models.RouteReq
 	// Tag the response as coming from backup
 	resp.Provider = backup.Name + " (backup)"
 	mr.trackCost(req.Kitchen, req.AgentRef, resp)
-	mr.finishRoute(ctx, req, resp, attempts, started, nil)
+	return mr.finishGuarded(ctx, req, resp, attempts, started)
+}
 
+// finishGuarded judges an answer, records the call as what was handed on (or refused) and returns it.
+func (mr *ModelRouter) finishGuarded(ctx context.Context, req *models.RouteRequest, resp *models.RouteResponse, attempts []models.RouteAttempt, started time.Time) (*models.RouteResponse, error) {
+	resp, err := mr.guardOutput(ctx, req, resp)
+	mr.finishRoute(ctx, req, resp, attempts, started, err)
+	if err != nil {
+		return nil, err
+	}
 	return resp, nil
 }
 
-// RouteStream routes a request to a provider that supports streaming.
+// routeStream routes a request to a provider that supports streaming (RouteStream, in guard.go, is
+// what callers use: it judges the call first).
 // Falls back to non-streaming Route() if the selected driver doesn't implement
 // StreamingProviderDriver, buffering the full response and sending it as one chunk.
-func (mr *ModelRouter) RouteStream(ctx context.Context, req *models.RouteRequest, callback func(chunk *models.StreamChunk) error) error {
+func (mr *ModelRouter) routeStream(ctx context.Context, req *models.RouteRequest, callback func(chunk *models.StreamChunk) error) error {
 	providers, err := mr.store.ListProviders(ctx, req.Kitchen)
 	if err != nil {
 		return fmt.Errorf("list providers: %w", err)
@@ -1745,6 +1769,28 @@ func (mr *ModelRouter) GetCostSummary(kitchen string) *models.CostSummary {
 // For ollama it calls /api/tags to list available models.
 // Returns a structured result with latency and error info.
 func (mr *ModelRouter) TestProvider(ctx context.Context, provider *models.ModelProvider) *models.ProviderTestResult {
+	if provider.Kind == "ollama" {
+		return mr.testProvider(ctx, provider) // lists the server's models; no model is called
+	}
+	// The test is one tiny completion at the provider's expense: it goes through the gate like any other.
+	model := ""
+	if len(provider.Models) > 0 {
+		model = provider.Models[0]
+	}
+	end, err := mr.Admit(ctx, Admission{Provider: provider, Model: model, InputTokens: 8, OutputTokens: 8})
+	if err != nil {
+		return &models.ProviderTestResult{Provider: provider.Name, Kind: provider.Kind, Error: err.Error(), Refused: err}
+	}
+	result := mr.testProvider(ctx, provider)
+	if result.Healthy {
+		end(&models.TokenUsage{InputTokens: 8, OutputTokens: 1})
+	} else {
+		end(nil)
+	}
+	return result
+}
+
+func (mr *ModelRouter) testProvider(ctx context.Context, provider *models.ModelProvider) *models.ProviderTestResult {
 	tested := *provider // a copy: the key applied for the test is not left on the caller's provider
 	mr.applyKey(&tested)
 	provider = &tested

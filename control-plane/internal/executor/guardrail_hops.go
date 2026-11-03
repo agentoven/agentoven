@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/agentoven/agentoven/control-plane/pkg/contracts"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
@@ -86,41 +87,32 @@ type GuardrailHold struct {
 	Reason string   `json:"reason,omitempty"`
 }
 
-// needsPrepass reports whether any rule that applies to a tool call's arguments does more than
-// block: redacts, asks for approval, or is a custom endpoint. With only blocking rules (every rule
-// written before actions existed) there is nothing to do before dispatch, and nothing is evaluated
-// twice.
-func needsPrepass(rules []models.Guardrail) bool {
-	for _, g := range rules {
-		if !g.Enabled || g.Kind == "" {
-			continue
-		}
-		switch g.EffectiveAction() {
-		case models.GuardrailActionRedact, models.GuardrailActionMask, models.GuardrailActionRequireApproval:
-			return true
-		}
-		if g.Kind == models.GuardrailCustom {
-			return true
-		}
-	}
-	return false
+// withheldArguments is what the arguments of a call a rule blocked are replaced with everywhere they
+// are kept. It is valid JSON, so the assistant message that carries it can be sent back to the model.
+const withheldArguments = `{"withheld":"the arguments were blocked by a guardrail"}`
+
+// withheldCall is what the arguments of a blocked call become in the call itself.
+func withheldCall() map[string]interface{} {
+	return map[string]interface{}{"withheld": "the arguments were blocked by a guardrail"}
 }
 
 // guardToolCalls runs on the model's tool calls before anything else touches them: before they
 // are journaled, shown to an approver or dispatched. It redacts their arguments (in the calls, and
 // in the assistant message the model sees on its next turn) and reports the calls that a
 // require_approval rule holds, so the loop can pause for a person with the redacted arguments on
-// the screen. A call that a rule blocks outright is left as it is: dispatch refuses it, on the
-// original text, which is what the rule judged.
+// the screen. A call that a rule blocks outright is refused here and its arguments are replaced by a
+// placeholder in every copy that is kept (the response, the journal, the capture, the session, the
+// trace): a block means the text is not stored, and it used to be the one thing a redaction could not
+// reach. The call is marked Refused, so dispatch never runs it with the placeholder.
 //
-// It does nothing unless some rule redacts or asks for approval (needsPrepass). It returns the response
-// with the redacted arguments in it.
+// Every call is judged here, once; dispatch does not judge it again. It returns the response with the
+// redacted or withheld arguments in it.
 func (e *Executor) guardToolCalls(ctx context.Context, agent *models.Agent, resp *models.RouteResponse, calls []ToolCall) (_ *models.RouteResponse, names []string, holds []GuardrailHold) {
 	if e.guardrails == nil || len(calls) == 0 {
 		return resp, nil, nil
 	}
 	guards, err := e.guardrailsFor(ctx, agent)
-	if err != nil || !needsPrepass(guards) {
+	if err != nil || len(guards) == 0 {
 		return resp, nil, nil // dispatch refuses a call whose policy could not be established
 	}
 	// The response may be shared (the router's response cache hands out what it stored), so what is
@@ -135,6 +127,11 @@ func (e *Executor) guardToolCalls(ctx context.Context, agent *models.Agent, resp
 			continue
 		}
 		if !eval.Passed && !eval.ApprovalRequired {
+			calls[i].Arguments, calls[i].Refused, calls[i].guarded = withheldCall(), true, true
+			if len(resp.ToolCalls) == len(calls) {
+				resp.ToolCalls[i].Function.Arguments = withheldArguments
+			}
+			e.auditGuardrail(ctx, agent, "tool_args", calls[i].Name, eval)
 			continue
 		}
 		if eval.Redacted > 0 {
@@ -158,6 +155,73 @@ func (e *Executor) guardToolCalls(ctx context.Context, agent *models.Agent, resp
 	return resp, names, holds
 }
 
+// judgeReply judges the text of one assistant turn, whether the turn ends the run or goes on to call tools
+// (text beside a tool call used to go unjudged), before anything keeps it: the capture, the journal, the
+// trace, the session and the event stream all get what it returns. It returns the reply with redactions
+// applied. A reply a rule blocks, or that could not be judged (closed, as every output check is), comes back
+// as a *models.GuardrailBlockedError together with a copy of the reply emptied of its text, which is what a
+// capture of the refused call may hold. judged says whether any rule was applied.
+func (e *Executor) judgeReply(ctx context.Context, agent *models.Agent, resp *models.RouteResponse) (out *models.RouteResponse, judged bool, err error) {
+	if e.guardrails == nil || resp == nil || strings.TrimSpace(resp.Content) == "" {
+		return resp, false, nil
+	}
+	guards, gerr := e.guardrailsFor(ctx, agent)
+	if gerr != nil {
+		return withheldReply(resp), false, &models.GuardrailBlockedError{Stage: "policy"}
+	}
+	if len(guards) == 0 {
+		return resp, false, nil
+	}
+	eval, eerr := e.guardrails.EvaluateOutput(ctx, guards, resp.Content)
+	if eerr != nil || eval == nil {
+		log.Error().Err(eerr).Str("agent", agent.Name).Msg("the model's reply could not be judged by the guardrails; it is withheld")
+		return withheldReply(resp), true, &models.GuardrailBlockedError{Stage: "output"}
+	}
+	e.auditGuardrail(ctx, agent, "output", "", eval)
+	if !eval.Passed {
+		return withheldReply(resp), true, &models.GuardrailBlockedError{Stage: "output", Results: eval.Results}
+	}
+	guardCountsFrom(ctx).add(eval)
+	if eval.Redacted == 0 {
+		return resp, true, nil
+	}
+	// The response may be shared (the router's response cache hands out what it stored): change a copy.
+	own := *resp
+	own.Content = eval.Text
+	return &own, true, nil
+}
+
+// refuseReply ends a run whose reply a guardrail refused. What was said is kept nowhere: the capture of the
+// call holds the emptied reply, the journal gets no assistant message and no final text, and the session
+// is left as it was before the turn, so the refused text cannot be replayed to the model on the next one.
+// The turn itself (its usage, the provider that answered) is recorded, since it was paid for.
+func (e *Executor) refuseReply(ctx context.Context, st *runState, opts loopOpts, trace *ExecutionTrace, agent *models.Agent, req *models.RouteRequest, withheld *models.RouteResponse, turn int, turnStart time.Time, cause error) (string, *ExecutionTrace, error) {
+	rec := Turn{Number: turn, Request: st.messages, Usage: withheld.Usage, Provider: withheld.Provider, Model: withheld.Model, Attempts: withheld.Attempts,
+		CacheHit: withheld.Cached, LatencyMs: time.Since(turnStart).Milliseconds(),
+		SpanID: e.captureCall(ctx, st.traceID, agent, turn, turnStart, req, withheld)}
+	trace.Turns = appendTurn(trace.Turns, rec)
+	trace.TotalMs = time.Since(st.start).Milliseconds()
+	trace.Usage = st.totalUsage
+	if opts.journal != nil {
+		if err := opts.journal.CommitTurn(ctx, st.traceID, rec, st.messages); err != nil {
+			log.Warn().Err(err).Str("trace_id", st.traceID).Msg("Failed to journal the turn of a refused reply")
+		}
+		if err := opts.journal.MarkOutcome(ctx, st.traceID, OutcomeFailed, "", cause); err != nil {
+			log.Warn().Err(err).Str("trace_id", st.traceID).Msg("Failed to mark the run with a refused reply done in the journal")
+		}
+	}
+	opts.onEvent.emit(Event{Type: EventError, Turn: turn, Err: cause.Error()})
+	return "", trace, cause
+}
+
+// withheldReply is a copy of a reply with nothing a rule judged left in it; its usage stays, since the
+// provider was paid for the call.
+func withheldReply(resp *models.RouteResponse) *models.RouteResponse {
+	w := *resp
+	w.Content, w.ToolCalls, w.ContentParts = "", nil, nil
+	return &w
+}
+
 // mergeNames appends the names in extra that are not already in names, keeping call order.
 func mergeNames(names, extra []string) []string {
 	for _, n := range extra {
@@ -179,6 +243,9 @@ func mergeNames(names, extra []string) []string {
 // run with (redacted), and a reason when the call must not run. A call the pre-pass already
 // judged is not judged again.
 func (e *Executor) checkToolArgs(ctx context.Context, agent *models.Agent, guards []models.Guardrail, tc ToolCall) (map[string]interface{}, string) {
+	if tc.Refused {
+		return nil, "Error: tool call arguments blocked by guardrails"
+	}
 	if tc.guarded {
 		return tc.Arguments, ""
 	}

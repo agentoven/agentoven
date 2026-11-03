@@ -54,6 +54,12 @@ type ToolCall struct {
 	Name      string                 `json:"name"`
 	Arguments map[string]interface{} `json:"arguments"`
 
+	// Refused is set when a guardrail rule blocked the call's arguments. The arguments the call carries
+	// from then on are a placeholder (the blocked text is kept nowhere: not in the journal, the capture,
+	// the trace or the session), so dispatch must never run it, including after a pause for approval, which
+	// is why the flag is serialised with the call.
+	Refused bool `json:"refused,omitempty"`
+
 	// guarded is set when guardToolCalls already judged and redacted this call's arguments, so
 	// dispatch does not judge them again (a custom endpoint would be asked twice). It is not
 	// serialised: a call read back from a journal is judged at dispatch.
@@ -97,6 +103,10 @@ type ExecutionTrace struct {
 	// Guardrails counts the spans guardrail rules redacted and the warnings they raised during
 	// the run (tool arguments, tool results, retrieved chunks). Absent when none did.
 	Guardrails *GuardrailCounts `json:"guardrails,omitempty"`
+	// OutputJudged is true when the run judged the text of every assistant turn, the last one included,
+	// with the agent's rules and the kitchen's, and kept only what they let through. A handler that finds
+	// it set does not judge the reply a second time (a custom endpoint would be asked twice).
+	OutputJudged bool `json:"-"`
 }
 
 // Turn is one iteration of the agentic loop.
@@ -560,7 +570,7 @@ func (e *Executor) summarizeMessages(ctx context.Context, agent *models.Agent, m
 	}
 
 	// Suppress router trace — summary calls are internal, not user-facing.
-	resp, err := e.router.Route(router.ContextSkipTrace(ctx), routeReq)
+	resp, err := e.router.Route(router.ContextGuardrailsApplied(router.ContextSkipTrace(ctx)), routeReq)
 	if err != nil {
 		log.Warn().Err(err).Str("agent", agent.Name).Msg("Summary generation failed, using truncation fallback")
 		text := sb.String()

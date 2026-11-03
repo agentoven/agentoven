@@ -663,7 +663,7 @@ func (e *Executor) runLoop(ctx context.Context, st *runState, thinkingEnabled bo
 			),
 		)
 		callModel := func() (*models.RouteResponse, error) {
-			routeCtx := router.ContextSkipTrace(llmCtx)
+			routeCtx := router.ContextGuardrailsApplied(router.ContextSkipTrace(llmCtx)) // the run judges its own exchange: its rules, the kitchen's
 			cancelCall := func() {}
 			if bud != nil {
 				if d := bud.deadline(); d > 0 {
@@ -753,6 +753,13 @@ func (e *Executor) runLoop(ctx context.Context, st *runState, thinkingEnabled bo
 			}
 			bud.addTurn()
 		}
+
+		// Everything the model said this turn is judged before anything keeps or shows it.
+		routeResp, judged, judgeErr := e.judgeReply(ctx, agent, routeResp)
+		if judgeErr != nil {
+			return e.refuseReply(ctx, st, opts, trace, agent, routeReq, routeResp, turn, turnStart, judgeErr)
+		}
+		trace.OutputJudged = judged
 
 		if routeResp.Content != "" {
 			opts.onEvent.emit(Event{Type: EventToken, Turn: turn, Content: routeResp.Content})

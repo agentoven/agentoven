@@ -22,7 +22,10 @@ func (mr *ModelRouter) RealtimeFor(p *models.ModelProvider) realtime.Driver {
 		return nil
 	}
 	d, _ := mr.GetDriver(p.Kind).(realtime.Driver)
-	return d
+	if d == nil {
+		return nil
+	}
+	return meteredRealtime{mr: mr, inner: d}
 }
 
 // SpeechFor returns the speech driver (speech-to-text and text-to-speech) for a
@@ -32,7 +35,10 @@ func (mr *ModelRouter) SpeechFor(p *models.ModelProvider) audio.EngineProvider {
 		return nil
 	}
 	d, _ := mr.GetDriver(p.Kind).(audio.EngineProvider)
-	return d
+	if d == nil {
+		return nil
+	}
+	return meteredSpeech{mr: mr, inner: d}
 }
 
 // webSearcher is implemented by a driver whose API has built-in web search the harness can

@@ -319,7 +319,7 @@ func TestSpeechEnginesCarryEachProvidersDefaultsAndOverrides(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", p.Kind, err)
 		}
-		oe := e.(*audioEngine)
+		oe := UnderlyingEngine(e).(*audioEngine) // the engine the driver built, under the gate's wrapper
 		return oe.Endpoint, oe.STTModel, oe.TTSModel
 	}
 

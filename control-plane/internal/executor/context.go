@@ -295,7 +295,7 @@ func (e *Executor) summarize(ctx context.Context, st *runState, oldSummary strin
 		}
 	}
 	maxOut := 1500
-	resp, err := e.router.Route(router.ContextSkipTrace(ctx), &models.RouteRequest{
+	resp, err := e.router.Route(router.ContextGuardrailsApplied(router.ContextSkipTrace(ctx)), &models.RouteRequest{
 		Messages:  []models.ChatMessage{{Role: "user", Content: prompt}},
 		Model:     model,
 		Kitchen:   st.agent.Kitchen,

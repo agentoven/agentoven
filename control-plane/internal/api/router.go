@@ -117,7 +117,8 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 				r.Post("/recook", h.RecookAgent)
 				r.Post("/cool", h.CoolAgent)
 				r.Post("/rewarm", h.RewarmAgent)
-				r.Post("/test", h.TestAgent)
+				// Every route that runs an agent counts against the edition's invocation limit, not only /invoke.
+				r.With(h.LimitTraffic).Post("/test", h.TestAgent)
 				r.Get("/config", h.GetAgentConfig)
 				r.Get("/process", h.GetAgentProcess)
 
@@ -129,7 +130,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 
 				// Durable execution — resume a run paused on an approval-gated
 				// tool call, or retry one interrupted mid-loop without pausing.
-				r.With(middleware.RequireIdentity).Post("/runs/{traceID}/resume", h.ResumeRun)
+				r.With(middleware.RequireIdentity, h.LimitTraffic).Post("/runs/{traceID}/resume", h.ResumeRun)
 
 				// Agent card (A2A-compatible metadata)
 				r.Get("/card", h.GetAgentCard)
@@ -157,7 +158,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 
 				// Per-agent A2A (also reachable at root /agents/{agentName}/a2a)
 				r.Route("/a2a", func(r chi.Router) {
-					r.With(middleware.RequireIdentity).Post("/", h.A2AAgentEndpoint)
+					r.With(middleware.RequireIdentity, h.LimitTraffic).Post("/", h.A2AAgentEndpoint)
 					r.Get("/.well-known/agent-card.json", h.ServeAgentSpecificCard)
 				})
 			})
@@ -194,9 +195,10 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 		})
 
 		// Blobs — upload a file once, name it in messages by blob_ref. Kitchen-scoped: another
-		// kitchen's ref answers 404. Storing bytes costs disk, so every route needs an identity.
+		// kitchen's ref answers 404. Storing bytes costs disk: the community edition follows the global
+		// auth flag like the rest of /api/v1, and the enterprise edition demands an identity here through
+		// its route table (routeguard Rule.Identified).
 		r.Route("/blobs", func(r chi.Router) {
-			r.Use(middleware.RequireIdentity)
 			r.Post("/", h.UploadBlob)
 			r.Get("/{ref}", h.GetBlob)
 			r.Delete("/{ref}", h.DeleteBlob)
@@ -204,9 +206,9 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 
 		// Documents — read a file into text with its structure (extract: no model), transcribe a
 		// scan (ocr) or read schema fields with their source quotes (fields) through the kitchen's
-		// own provider. Kitchen-scoped like blobs; ocr and fields spend the kitchen's money.
+		// own provider. Kitchen-scoped like blobs, and authenticated the same way; ocr and fields spend the
+		// kitchen's money.
 		r.Route("/documents", func(r chi.Router) {
-			r.Use(middleware.RequireIdentity)
 			r.Post("/extract", h.ExtractDocument)
 			r.Post("/ocr", h.OCRDocument)
 			r.Post("/fields", h.ExtractDocumentFields)
@@ -427,7 +429,10 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 		})
 	})
 
-	// MCP Gateway — JSON-RPC endpoint
+	// MCP Gateway — JSON-RPC endpoint. It runs the kitchen's tools with their stored credentials. It is
+	// not a public path: like every route it follows AGENTOVEN_REQUIRE_AUTH, and the kitchen is the one an
+	// identity holds when there is one. The enterprise edition demands an identity and a permission here
+	// whatever the flag says (routeguard Rule.Identified).
 	r.Route("/mcp", func(r chi.Router) {
 		r.Post("/", h.MCPEndpoint)
 		r.Get("/sse", h.MCPSSEEndpoint)
@@ -436,13 +441,13 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 	// A2A Gateway — agent-to-agent protocol endpoint. Running a task needs an identity, like
 	// /invoke does; only the agent card (discovery) is public. See middleware.isAuthPublic.
 	r.Route("/a2a", func(r chi.Router) {
-		r.With(middleware.RequireIdentity).Post("/", h.A2AEndpoint)
+		r.With(middleware.RequireIdentity, h.LimitTraffic).Post("/", h.A2AEndpoint)
 		r.Get("/.well-known/agent-card.json", h.ServeAgentCard)
 	})
 
 	// Per-agent A2A endpoints
 	r.Route("/agents/{agentName}/a2a", func(r chi.Router) {
-		r.With(middleware.RequireIdentity).Post("/", h.A2AAgentEndpoint)
+		r.With(middleware.RequireIdentity, h.LimitTraffic).Post("/", h.A2AAgentEndpoint)
 		r.Get("/.well-known/agent-card.json", h.ServeAgentSpecificCard)
 	})
 
@@ -450,7 +455,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 	// When environments are configured, bake sets the A2A endpoint here.
 	// Clients calling this route get the backend for that specific environment.
 	r.Route("/env/{envSlug}/agents/{agentName}/a2a", func(r chi.Router) {
-		r.With(middleware.RequireIdentity).Post("/", h.A2AAgentEnvEndpoint)
+		r.With(middleware.RequireIdentity, h.LimitTraffic).Post("/", h.A2AAgentEnvEndpoint)
 		r.Get("/.well-known/agent-card.json", h.ServeAgentSpecificCard)
 	})
 
@@ -460,7 +465,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, rh *handlers.RAGHandler
 	lcAdapter := langchain.NewAdapter(h.Store)
 	r.Route("/langchain", func(r chi.Router) {
 		r.Get("/tools", lcAdapter.HandleListTools)
-		r.Post("/invoke", lcAdapter.HandleInvoke)
+		r.With(h.LimitTraffic).Post("/invoke", lcAdapter.HandleInvoke)
 	})
 
 	// LangFuse bridge — bidirectional trace exchange with LangFuse

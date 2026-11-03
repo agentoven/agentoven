@@ -88,3 +88,11 @@ knows whose rule it is.
 - Per-turn redaction of intermediate assistant text of an in-process run.
 - Additional national identifier checksums (only those listed); an LLM-judge custom evaluator.
 - Delegation to an external A2A agent is still refused (unchanged).
+
+## Amendment 2026-11-03 (review 5, findings 3, 4 and 5)
+
+- **Every assistant turn is judged before anything keeps it** (`Executor.judgeReply`): text beside a tool call (it was never judged), the last reply, with the agent's rules and the kitchen's. A redacted reply is what the capture, the journal, the trace, the session, the event stream and the next model call hold. A reply a rule blocks, or that cannot be judged, ends the run with `*models.GuardrailBlockedError`: the capture holds the emptied reply, the journal gets no assistant message and no final text, and the session is left as it was, so the refused text is not replayed to the model. The trace says `OutputJudged`, so handlers do not judge the reply a second time.
+- **A tool call a blocking rule refuses keeps no arguments**: its arguments become a placeholder in every copy, the call is marked `Refused` (serialised, so a paused and resumed run still refuses it) and dispatch never runs it. Every call is judged once, before dispatch.
+- Handlers fail closed when the evaluation of an output errors (it used to log and release the reply).
+- Tests: `internal/executor/guardrail_sinks_test.go` (a planted key is searched for in the trace, every capture, the journal files and the session), `internal/api/handlers/raw_route_test.go`; end to end `agentoven-pro/scripts/e2e/e2e_gateway_governance.py` greps a `pg_dump` and the data directory.
+- Not done: thinking blocks are stored as the model wrote them (Anthropic requires their signatures to be sent back unchanged); a held stream still judges the joined text twice (the run and the hold-back) when both apply.

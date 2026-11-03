@@ -47,21 +47,6 @@ func (mr *ModelRouter) SetSpendGate(g SpendGate) {
 	mr.spendGate.Store(&gateBox{g: g})
 }
 
-// spendAllow asks the gate, if there is one, whether the call may go out.
-func (mr *ModelRouter) spendAllow(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) error {
-	box := mr.spendGate.Load()
-	if box == nil {
-		return nil
-	}
-	q := spendQueryOf(provider, req)
-	if err := box.g.Allow(ctx, q); err != nil {
-		// A gate that errors for its own reasons still stops the call; wrapping keeps a
-		// budget refusal recognisable to the caller.
-		return fmt.Errorf("spend gate: %w", err)
-	}
-	return nil
-}
-
 // spendRecord tells the gate about a completed call.
 func (mr *ModelRouter) spendRecord(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest, resp *models.RouteResponse) {
 	if box := mr.spendGate.Load(); box != nil && resp != nil {
@@ -102,14 +87,19 @@ func estimateInputTokens(req *models.RouteRequest) int {
 
 // spendBegin is what a call goes through: it asks the gate (reserving, when the gate can) and
 // returns the function that ends the gate's part in the call. Pass the response of a call that
-// completed, nil for one that failed. A refusal is returned as spendAllow returns it.
+// completed, nil for one that failed. A refusal wraps the gate's error, so a budget refusal stays recognisable to the caller.
 func (mr *ModelRouter) spendBegin(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) (func(*models.RouteResponse), error) {
+	return mr.spendBeginQuery(ctx, spendQueryOf(provider, req), provider, req)
+}
+
+// spendBeginQuery is spendBegin for a call whose size the caller states (Admit: speech, a live session).
+func (mr *ModelRouter) spendBeginQuery(ctx context.Context, q models.SpendQuery, provider *models.ModelProvider, req *models.RouteRequest) (func(*models.RouteResponse), error) {
 	box := mr.spendGate.Load()
 	if box == nil {
 		return func(*models.RouteResponse) {}, nil
 	}
 	if rg, ok := box.g.(SpendReserver); ok {
-		res, err := rg.Reserve(ctx, spendQueryOf(provider, req))
+		res, err := rg.Reserve(ctx, q)
 		if err != nil {
 			return nil, fmt.Errorf("spend gate: %w", err)
 		}
@@ -124,8 +114,8 @@ func (mr *ModelRouter) spendBegin(ctx context.Context, provider *models.ModelPro
 			res.Settle(ectx, models.SpendRecord{Kitchen: req.Kitchen, Agent: req.AgentRef, Provider: provider.Name, Model: req.Model, Usage: resp.Usage})
 		}, nil
 	}
-	if err := mr.spendAllow(ctx, provider, req); err != nil {
-		return nil, err
+	if err := box.g.Allow(ctx, q); err != nil {
+		return nil, fmt.Errorf("spend gate: %w", err)
 	}
 	return func(resp *models.RouteResponse) { mr.spendRecord(ctx, provider, req, resp) }, nil
 }

@@ -754,7 +754,7 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 		runCtx, _ := withRunTrace(r.Context())
 		r = r.WithContext(runCtx)
 		response, trace, err := h.Executor.Execute(r.Context(), agent, req.Message, resolved, nil, req.ThinkingEnabled)
-		if h.respondRunStopped(w, agentName, trace, err) {
+		if h.respondRunEnded(w, r, agent, req.Message, trace, err) {
 			return
 		}
 		if err != nil {
@@ -763,10 +763,14 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// ── Output Guardrails ─────────────────────────────────
-		if h.Guardrails != nil && len(gr) > 0 {
+		// (A run that judged every reply itself has nothing left to judge: trace.OutputJudged.)
+		if h.Guardrails != nil && len(gr) > 0 && !trace.OutputJudged {
 			eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), gr, response)
 			if gErr != nil {
-				log.Warn().Err(gErr).Str("agent", agentName).Msg("Output guardrail evaluation error (test+tools)")
+				log.Warn().Err(gErr).Str("agent", agentName).Msg("Output guardrail evaluation error (test+tools); the reply is withheld")
+				h.emitGuardrailAudit(r.Context(), kitchen, agentName, "output", nil, gErr)
+				respondError(w, http.StatusServiceUnavailable, "the reply could not be checked by the guardrails, so it was withheld")
+				return
 			} else if !eval.Passed {
 				respondJSON(w, http.StatusForbidden, map[string]interface{}{
 					"error":      "Output blocked by guardrails",
@@ -894,9 +898,12 @@ func (h *Handlers) TestAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Use ContextSkipTrace so the router does not create its own flat trace;
 	// this handler records a richer trace below with input/output text.
-	resp, err := h.Router.Route(router.ContextSkipTrace(r.Context()), routeReq)
+	resp, err := h.Router.Route(router.ContextGuardrailsApplied(router.ContextSkipTrace(r.Context())), routeReq)
 	duration := time.Since(start)
 	if err != nil {
+		if respondRefusal(w, err) {
+			return
+		}
 		respondError(w, http.StatusBadGateway, "Model provider error: "+err.Error())
 		return
 	}
@@ -2203,18 +2210,16 @@ func (h *Handlers) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) RouteModel(w http.ResponseWriter, r *http.Request) {
-	var req models.RouteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid request body")
+	req, ok := h.rawRouteRequest(w, r)
+	if !ok {
 		return
 	}
 
-	if req.Kitchen == "" {
-		req.Kitchen = middleware.GetKitchen(r.Context())
-	}
-
-	resp, err := h.Router.Route(r.Context(), &req)
+	resp, err := h.Router.Route(r.Context(), req)
 	if err != nil {
+		if respondRefusal(w, err) {
+			return
+		}
 		respondError(w, http.StatusBadGateway, err.Error())
 		return
 	}
@@ -2225,30 +2230,34 @@ func (h *Handlers) RouteModel(w http.ResponseWriter, r *http.Request) {
 // RouteModelStream routes a model request with Server-Sent Events streaming.
 // POST /api/v1/models/route/stream
 func (h *Handlers) RouteModelStream(w http.ResponseWriter, r *http.Request) {
-	var req models.RouteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid request body")
+	req, ok := h.rawRouteRequest(w, r)
+	if !ok {
 		return
 	}
-
-	if req.Kitchen == "" {
-		req.Kitchen = middleware.GetKitchen(r.Context())
-	}
-
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		respondError(w, http.StatusInternalServerError, "Streaming not supported")
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
+	// The stream is committed (status 200, headers) when its first frame is written, so a call the gate,
+	// a rate limit or a guardrail refuses before any model answers can still be a 402, 429 or 403.
+	started := false
+	start := func() {
+		if started {
+			return
+		}
+		started = true
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+	}
 
-	err := h.Router.RouteStream(r.Context(), &req, func(chunk *models.StreamChunk) error {
+	err := h.Router.RouteStream(r.Context(), req, func(chunk *models.StreamChunk) error {
+		start()
 		data, _ := json.Marshal(chunk)
 		_, writeErr := fmt.Fprintf(w, "data: %s\n\n", data)
 		if writeErr != nil {
@@ -2259,10 +2268,16 @@ func (h *Handlers) RouteModelStream(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if err != nil {
+		if !started && respondRefusal(w, err) {
+			return
+		}
+		start()
 		errChunk, _ := json.Marshal(models.StreamChunk{Error: err.Error(), Done: true})
 		fmt.Fprintf(w, "data: %s\n\n", errChunk)
 		flusher.Flush()
+		return
 	}
+	start()
 }
 
 func (h *Handlers) GetCostSummary(w http.ResponseWriter, r *http.Request) {
@@ -2293,6 +2308,9 @@ func (h *Handlers) TestProvider(w http.ResponseWriter, r *http.Request) {
 	log.Info().Str("provider", providerName).Str("kind", provider.Kind).Msg("Testing provider")
 
 	result := h.Router.TestProvider(r.Context(), provider)
+	if result.Refused != nil && respondRefusal(w, result.Refused) {
+		return // the test was not made: a budget or a rate limit said no (402, 429), the provider was not asked
+	}
 
 	// Cache the test result on the provider
 	now := time.Now().UTC()
@@ -2332,7 +2350,24 @@ func (h *Handlers) MCPEndpoint(w http.ResponseWriter, r *http.Request) {
 
 	log.Info().Str("method", req.Method).Str("kitchen", kitchen).Msg("MCP request received")
 
-	resp := h.MCPGateway.HandleJSONRPC(r.Context(), kitchen, &req)
+	// A tool call made here has no agent run around it: the workspace guardrails judge its arguments
+	// and the call is audited under the caller (mcp_gateway.go).
+	var tool string
+	callReq := &req
+	var resp *models.MCPResponse
+	if req.Method == "tools/call" {
+		var params models.MCPToolCallParams
+		if json.Unmarshal(req.Params, &params) == nil {
+			tool = params.Name
+			callReq, resp = h.guardMCPCall(r.Context(), kitchen, &req, &params)
+		}
+	}
+	if resp == nil {
+		resp = h.MCPGateway.HandleJSONRPC(r.Context(), kitchen, callReq)
+	}
+	if tool != "" {
+		h.auditMCPCall(r.Context(), kitchen, tool, mcpOutcome(resp))
+	}
 	if resp == nil {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -3237,10 +3272,12 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 		}
 
 		var outputBlocked *models.GuardrailEvaluation
-		if status == "completed" && response != "" && h.Guardrails != nil && len(gr) > 0 {
+		if status == "completed" && response != "" && h.Guardrails != nil && len(gr) > 0 && (execTrace == nil || !execTrace.OutputJudged) {
 			if eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), gr, response); gErr != nil {
-				log.Warn().Err(gErr).Str("agent", agentName).Msg("Output guardrail evaluation error (A2A task)")
+				log.Warn().Err(gErr).Str("agent", agentName).Msg("Output guardrail evaluation error (A2A task); the reply is withheld")
 				h.emitGuardrailAudit(r.Context(), agent.Kitchen, agentName, "output", nil, gErr)
+				status = "blocked"
+				response = "" // a reply that could not be judged is never stored or returned
 			} else if !eval.Passed {
 				h.emitGuardrailAudit(r.Context(), agent.Kitchen, agentName, "output", eval, nil)
 				outputBlocked = eval
@@ -4921,6 +4958,9 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		transcript, err = transcribeAudioInput(r.Context(), engine, req.Audio)
 		if err != nil {
+			if respondRefusal(w, err) {
+				return
+			}
 			respondError(w, http.StatusBadRequest, "could not transcribe audio: "+err.Error())
 			return
 		}
@@ -4937,6 +4977,9 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	if len(req.ContentParts) > 0 {
 		spoken, rest, err := h.transcribeAudioParts(r.Context(), agent, req.ContentParts)
 		if err != nil {
+			if respondRefusal(w, err) {
+				return
+			}
 			respondError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -5102,7 +5145,7 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(runCtx)
 	response, trace, err := h.Executor.ExecuteMessage(r.Context(), agent,
 		models.ChatMessage{Role: "user", Content: req.Message, ContentParts: mediaParts}, resolved, sanitizedVars, req.ThinkingEnabled, req.SessionID)
-	if h.respondRunStopped(w, agentName, trace, err) {
+	if h.respondRunEnded(w, r, agent, req.Message, trace, err) {
 		return
 	}
 	if err != nil {
@@ -5115,11 +5158,14 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ── Output Guardrails ───────────────────────────────────
-	if h.Guardrails != nil && len(gr) > 0 {
+	// (A run that judged every reply itself, the last one included, has nothing left to judge here.)
+	if h.Guardrails != nil && len(gr) > 0 && !trace.OutputJudged {
 		eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), gr, response)
 		if gErr != nil {
-			log.Warn().Err(gErr).Str("agent", agentName).Msg("Output guardrail evaluation error")
+			log.Warn().Err(gErr).Str("agent", agentName).Msg("Output guardrail evaluation error; the reply is withheld")
 			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "output", nil, gErr)
+			respondError(w, http.StatusServiceUnavailable, "the reply could not be checked by the guardrails, so it was withheld")
+			return
 		} else if !eval.Passed {
 			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "output", eval, nil)
 			h.recordBlockedRun(r.Context(), agent, req.Message, trace)
@@ -5249,6 +5295,9 @@ func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 	if len(req.ContentParts) > 0 {
 		spoken, rest, err := h.transcribeAudioParts(r.Context(), agent, req.ContentParts)
 		if err != nil {
+			if respondRefusal(w, err) {
+				return
+			}
 			respondError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -5352,19 +5401,14 @@ func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 	canFlush := false
 	if h.holdBackNeeded(gr) {
 		held = &heldEvents{}
-	} else {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("X-Accel-Buffering", "no")
-		w.WriteHeader(http.StatusOK)
-		flusher, canFlush = w.(http.Flusher)
 	}
-
-	writeEvent := func(ev executor.Event) error {
-		if held != nil {
-			return held.add(ev)
-		}
+	// The stream is committed (status 200 and headers) with its first frame that says a model answered, not
+	// before: a call the budget, a rate limit or a guardrail refuses before any model answers is still a
+	// 402, 429 or 403, which is what an SDK reads (an error frame inside a 200 is retried like any outage).
+	// The frames that come first (the start of the turn, an error, a pause at a budget) wait in `early` until then.
+	committed := false
+	var early []executor.Event
+	emit := func(ev executor.Event) error {
 		payload, merr := json.Marshal(ev)
 		if merr != nil {
 			return merr
@@ -5377,11 +5421,53 @@ func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	}
+	commit := func() error {
+		if committed {
+			return nil
+		}
+		committed = true
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		flusher, canFlush = w.(http.Flusher)
+		for _, ev := range early {
+			if err := emit(ev); err != nil {
+				return err
+			}
+		}
+		early = nil
+		return nil
+	}
+
+	writeEvent := func(ev executor.Event) error {
+		if held != nil {
+			return held.add(ev)
+		}
+		if !committed && (ev.Type == executor.EventTurnStart || ev.Type == executor.EventError || ev.Type == executor.EventBudgetPaused) {
+			early = append(early, ev)
+			return nil
+		}
+		if err := commit(); err != nil {
+			return err
+		}
+		return emit(ev)
+	}
 
 	runCtx, _ := withRunTrace(r.Context())
 	r = r.WithContext(runCtx)
 	response, trace, err := h.Executor.ExecuteStreamMessage(r.Context(), agent,
 		models.ChatMessage{Role: "user", Content: req.Message, ContentParts: mediaParts}, resolved, sanitizedVars, req.ThinkingEnabled, writeEvent, req.SessionID)
+	if err != nil && (held != nil || !committed) && h.respondRunEnded(w, r, agent, req.Message, trace, err) {
+		return // refused before anything was sent: the caller got the status that says why (402, 429, 403, 503)
+	}
+	if !committed && held == nil {
+		// Nothing but the start of a turn and an error came out: send them as the stream they were.
+		if cerr := commit(); cerr != nil {
+			return
+		}
+	}
 	if held != nil && !h.releaseHeld(w, r, agent, gr, held, response) {
 		h.recordBlockedRun(r.Context(), agent, req.Message, trace)
 		return // blocked: the caller got a 403 and none of the reply
@@ -5501,7 +5587,7 @@ func (h *Handlers) ResumeRun(w http.ResponseWriter, r *http.Request) {
 	h.decisionApplied(r, sig, decisionApplyError(err))
 	if err != nil {
 		switch {
-		case h.respondRunStopped(w, agentName, trace, err):
+		case h.respondRunEnded(w, r, agent, "", trace, err):
 			// paused again (approval or budget), ended at its budget, or unpriced
 		case strings.Contains(err.Error(), "no journal configured"):
 			respondError(w, http.StatusServiceUnavailable, err.Error())
@@ -6632,6 +6718,9 @@ func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
 	// Append user message to session history
 	transcript, parts, err := h.transcribeAudioParts(r.Context(), agent, req.ContentParts)
 	if err != nil {
+		if respondRefusal(w, err) {
+			return
+		}
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -6768,12 +6857,17 @@ func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
 		routeReq.Model = agent.ModelName
 	}
 
+	// The input is judged above, with the agent's rules and the kitchen's, and the router does not judge it
+	// again. The reply is judged by this handler's rules too, but inside the router, before it records the call
+	// (replyJudge), so the trace and the capture it writes hold only what the caller may see.
+	routeCtx := router.ContextReplyJudge(router.ContextGuardrailsApplied(r.Context()), h.replyJudge(kitchen, agentName, gr))
+
 	// Use RouteWithBackup if agent has a backup provider configured
 	var routeResp *models.RouteResponse
 	if agent.BackupProvider != "" {
-		routeResp, err = h.Router.RouteWithBackup(r.Context(), routeReq, agent.BackupProvider, agent.BackupModel)
+		routeResp, err = h.Router.RouteWithBackup(routeCtx, routeReq, agent.BackupProvider, agent.BackupModel)
 	} else {
-		routeResp, err = h.Router.Route(r.Context(), routeReq)
+		routeResp, err = h.Router.Route(routeCtx, routeReq)
 	}
 	if err != nil {
 		// The turn did not happen, so it must not stay in the history: a message the model
@@ -6783,31 +6877,13 @@ func (h *Handlers) SendSessionMessage(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusUnprocessableEntity, "model routing failed: "+err.Error())
 			return
 		}
+		if respondRefusal(w, err) {
+			return
+		}
 		respondError(w, http.StatusInternalServerError, "model routing failed: "+err.Error())
 		return
 	}
 	latencyMs := time.Since(startTime).Milliseconds()
-
-	// ── Output Guardrails (Session) ─────────────────────────
-	if h.Guardrails != nil && len(gr) > 0 {
-		eval, gErr := h.Guardrails.EvaluateOutput(r.Context(), gr, routeResp.Content)
-		if gErr != nil {
-			log.Warn().Err(gErr).Str("agent", agentName).Msg("Session output guardrail error")
-			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "output", nil, gErr)
-		} else if !eval.Passed {
-			// Remove the user message we appended (response never reaches the user)
-			session.Messages = session.Messages[:len(session.Messages)-1]
-			h.emitGuardrailAudit(r.Context(), kitchen, agentName, "output", eval, nil)
-			respondJSON(w, http.StatusForbidden, map[string]interface{}{
-				"error":      "Output blocked by guardrails",
-				"guardrails": eval.Results,
-			})
-			return
-		} else {
-			routeResp.Content = eval.Apply(routeResp.Content)
-			h.noteGuardrails(r.Context(), kitchen, agentName, "output", eval)
-		}
-	}
 
 	// Append assistant response to session
 	assistantMsg := models.ChatMessage{

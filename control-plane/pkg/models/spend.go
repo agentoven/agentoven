@@ -110,3 +110,23 @@ func (e *RateLimitedError) RetryAfterSeconds() int {
 	}
 	return s
 }
+
+// ErrGuardrailBlocked is what a GuardrailBlockedError matches with errors.Is.
+var ErrGuardrailBlocked = errors.New("blocked by guardrails")
+
+// GuardrailBlockedError is the model router refusing a call, or a reply, because a guardrail rule blocked it.
+// Like the spend and rate-limit refusals it is a decision about the caller, not a fault of the provider: it
+// does not count toward a circuit and a retry would be refused again. It names the stage and the rules that
+// fired, never the text that matched.
+type GuardrailBlockedError struct {
+	// Stage is "input" or "output": whether the prompt or the reply was refused.
+	Stage string
+	// Results are the rules that fired (kind, rule id, message); they carry no text from the request.
+	Results []GuardrailResult
+}
+
+func (e *GuardrailBlockedError) Error() string {
+	return fmt.Sprintf("%s: the %s was refused by a guardrail", ErrGuardrailBlocked, e.Stage)
+}
+
+func (e *GuardrailBlockedError) Is(target error) bool { return target == ErrGuardrailBlocked }

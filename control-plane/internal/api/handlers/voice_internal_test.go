@@ -85,7 +85,7 @@ func speechEngine(t *testing.T, agentProvider string, providers ...models.ModelP
 	if err != nil {
 		return nil, err
 	}
-	return eng.(*audio.OpenAIEngine), nil
+	return router.UnderlyingEngine(eng).(*audio.OpenAIEngine), nil
 }
 
 func withKey(p models.ModelProvider) models.ModelProvider {

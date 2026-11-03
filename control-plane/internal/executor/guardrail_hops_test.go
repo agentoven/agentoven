@@ -271,7 +271,8 @@ func (o oneRAG) Default() (contracts.RAGService, error)   { return o.svc, nil }
 
 func retrievalRun(t *testing.T, rules []models.Guardrail, chunks ...string) (string, *executor.ExecutionTrace, []string) {
 	t.Helper()
-	d := &scriptedDriver{replies: []turnReply{{content: "answer"}}}
+	// The reply mentions billing so that a rule on the reply's topic (the test below) judges it fit.
+	d := &scriptedDriver{replies: []turnReply{{content: "answer about billing"}}}
 	e, _ := guardedExecutor(t, d, "ok")
 	e.SetRAGRegistry(oneRAG{&chunkRAG{chunks: chunks}})
 	var audited []string

@@ -924,6 +924,9 @@ type ProviderTestResult struct {
 	LatencyMs int64  `json:"latency_ms"`
 	Model     string `json:"model,omitempty"`
 	Error     string `json:"error,omitempty"`
+	// Refused is set when the spend gate or a rate limit stopped the test from being made, so a handler can
+	// answer 402 or 429 instead of reporting a provider that was never asked as unhealthy.
+	Refused error `json:"-"`
 }
 
 // ProviderTemplate is a pre-built template for a known provider kind.

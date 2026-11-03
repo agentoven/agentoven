@@ -92,6 +92,17 @@ rule that finds spans (a longer text is refused), and at most 128 enabled rules 
 Redacted input is what a trace and a stored session keep; redacted output is what the trace, the run's last turn and the session keep. Audit
 events and results carry rule ids, detector types and counts, never the matched text. Traces show `metadata.guardrails.redacted` and `warned`.
 
+This holds for every assistant turn of a run, not only the last: text a model says beside a tool call is judged before the call capture, the run
+journal, the trace and the session keep it, and the next model call carries the redacted text. A reply a rule blocks is kept nowhere (the run ends
+with a 403, the session is left as it was before the turn), and the arguments of a tool call a rule blocks are replaced by a placeholder in every
+stored copy while the call is refused.
+
+## Every model call is judged
+
+The kitchen's workspace rules also apply to calls made without an agent: `/models/route` and its stream, the OpenAI-compatible endpoint a hosted
+agent process uses, documents read through a model, and the arguments of a tool called through `POST /mcp`. They go through the model router,
+which judges the prompt before any provider is reached and the reply before anything records or returns it.
+
 ## Surfaces that cannot be rewritten
 
 A held-back SSE stream, a streamed A2A reply, a bot action, spoken input and a captured replay request cannot be changed in place, so a rule that
