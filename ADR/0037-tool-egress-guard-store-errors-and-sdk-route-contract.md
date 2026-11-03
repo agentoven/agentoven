@@ -17,7 +17,7 @@
 ## Not done
 
 - The route contract reads call sites: a path held in a variable is not seen, and the Rust scanner finds a verb by the next calls in the source (66 calls today). The CLI crate's own HTTP calls and the dashboard's `api.ts` are not covered.
-- `internal/api/handlers` webhook-style channels and the guardrail webhook keep their own address checks; they are not folded into `pkg/netguard`.
+- `internal/api/handlers` webhook-style channels and the guardrail webhook keep their own address checks; they are not folded into `pkg/netguard`. (Channels are now: see the 2026-11-03 amendment on notification channels.)
 - The Python SDK's native `register` is the Rust core: it picks up the retired-agent rule when the extension is rebuilt (`maturin`), which was not done here; the Rust test covers it.
 - `delete_world_schema` is removed rather than the server gaining a delete route: a delete needs a store method, a permission and an ADR of its own.
 
@@ -27,4 +27,26 @@
 - **A reference a kitchen types is `vault://<name>` of that kitchen, and nothing else** (`internal/secretref.KitchenVaultName`, exported to editions as `contracts.KitchenSecretName`). `Resolver.ResolveFor`, which every edition uses for such references, refuses any other scheme; `Resolve`, which takes every scheme, is for operator-set references. A provider's `secret_ref` or pool-key reference that is `env://` or `k8s://` can be set only by a platform administrator when the edition has a vault (`provider_vault.go`, `403`); one the provider already holds is kept.
 - **A tool whose transport is `native` is managed by the edition that runs it** (tool packs): `PUT` and `DELETE /tools/{name}` answer `403 tool_managed`, and a native tool cannot be registered through `POST /tools`, `/tools/bulk` or by changing a tool's transport.
 
-Not done: the guardrail webhook's own address check and the notification channels' URLs are still outside the guard (unchanged); the provider driver's `secret_ref` still resolves with `Resolve` because it is set by an operator (or by a platform administrator through the API).
+Not done: the guardrail webhook's own address check is still outside the guard (unchanged; the notification channels' URLs are inside it now, see the amendment below); the provider driver's `secret_ref` still resolves with `Resolve` because it is set by an operator (or by a platform administrator through the API).
+
+## Amendment 2026-11-03: notification channels follow the egress guard
+
+The end-to-end scripts that start a loopback receiver for a channel (`e2e_channel_secret.py`, `e2e_approval_notify.py` in Pro) forced
+the question whether a channel may point at a private address. It could: a channel's `url` was posted to by a plain `http.Client`,
+so a person who may create channels could aim one at `http://169.254.169.254/` or any internal service, and a Pro e-mail channel
+dialled whatever `smtp_host` it was given. That was the open item "found, not fixed" in Pro ADR-0050. The rule is the one for tools:
+
+- **At delivery.** `WebhookChannelDriver.Send` (OSS) and Pro's Slack, Teams, Discord, Zapier and e-mail drivers send through
+  `netguard.Default()` (`ClientWith` / `Dial`): the destination is resolved once, vetted, and dialled by address; loopback, private, link-local and
+  the cloud metadata ranges are refused unless `AGENTOVEN_TOOL_EGRESS_ALLOW` or the kitchen's allowlist names the host (the metadata range is
+  refused even then). No redirect is followed and no connection is kept between deliveries. A refusal (`netguard.ErrRefused`) is a policy decision: it is
+  returned at once, not retried three times with a pause, and Pro's `postJSON` leaves the URL out of it (an incoming-webhook URL is itself the secret).
+- **At save.** `POST /channels` and `PUT /channels/{name}` run `netguard.CheckURL` on the `url` of every kind that has one (webhook, Slack, Teams, Discord, Zapier;
+  not e-mail, which names an SMTP server in its config, and not WebSocket, which is listened to) and answer `400` with `url: ...`. A name that does not resolve yet is
+  accepted, as for tools; the dial still checks it. `handlers/channel_egress.go`.
+- Tests: `internal/notify/channel_egress_test.go`, `internal/api/handlers/channel_egress_test.go`; Pro `internal/channels/egress_test.go` and the end-to-end
+  `e2e_channel_secret.py`. Test servers on loopback allowlist `127.0.0.1` (the handlers and Pro channels packages do it in `TestMain`).
+
+Not done: an existing channel at a private address is not removed or flagged by a migration; it keeps its row and its deliveries fail with the refusal on the
+approval's timeline until the operator allowlists the host or edits the channel. The e-mail channel's SMTP host is checked at delivery only (it is not in a URL).
+

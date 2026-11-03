@@ -17,6 +17,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/agentoven/agentoven/control-plane/pkg/netguard"
 	"github.com/agentoven/agentoven/control-plane/pkg/toolauth"
@@ -85,9 +86,7 @@ func NewService(s store.Store) *Service {
 	// The WebSocket driver and the hub the connections listen on
 	svc.RegisterDriver(&WebSocketChannelDriver{hub: svc.hub})
 	// Register the built-in OSS webhook driver
-	svc.RegisterDriver(&WebhookChannelDriver{
-		client: svc.client,
-	})
+	svc.RegisterDriver(&WebhookChannelDriver{})
 	return svc
 }
 
@@ -474,7 +473,25 @@ func channelSubscribes(ch *models.NotificationChannel, eventType string) bool {
 // WebhookChannelDriver sends notifications via HTTP POST to a webhook URL
 // with optional HMAC-SHA256 signing. This is the default OSS driver.
 type WebhookChannelDriver struct {
+	// client is for tests that stand in for the network. In production it is nil and every send goes
+	// through the egress guard (pkg/netguard): a channel's URL is chosen by whoever may create channels
+	// and called from inside the deployment, so it may not reach loopback, private, link-local or cloud
+	// metadata addresses unless the operator or the kitchen allowlisted the host.
 	client *http.Client
+}
+
+// guardedClient is the client a channel driver sends one delivery of kitchen through. It follows no
+// redirect (a receiver must not be able to bounce the control plane to an internal address) and keeps
+// no connection between deliveries.
+func guardedClient(kitchen string) *http.Client {
+	return netguard.Default().ClientWith(kitchen, netguard.HTTPOptions{Timeout: 15 * time.Second, NoKeepAlive: true})
+}
+
+func (d *WebhookChannelDriver) httpClient(kitchen string) *http.Client {
+	if d.client != nil {
+		return d.client
+	}
+	return guardedClient(kitchen)
 }
 
 // Kind returns ChannelWebhook.
@@ -512,6 +529,7 @@ func (d *WebhookChannelDriver) Send(ctx context.Context, channel *models.Notific
 	}
 
 	// Send with retries
+	client := d.httpClient(channel.Kitchen)
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
@@ -521,8 +539,11 @@ func (d *WebhookChannelDriver) Send(ctx context.Context, channel *models.Notific
 				return err
 			}
 		}
-		resp, err := d.client.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
+			if errors.Is(err, netguard.ErrRefused) {
+				return fmt.Errorf("webhook %s: %w", channel.Name, err) // a policy decision, not a network failure: retrying cannot change it
+			}
 			lastErr = err
 			continue
 		}

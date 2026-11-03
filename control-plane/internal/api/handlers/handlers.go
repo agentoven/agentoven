@@ -6316,6 +6316,10 @@ func (h *Handlers) CreateChannel(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Channel kind is required")
 		return
 	}
+	if err := checkChannelURL(r.Context(), ch.Kitchen, ch.Kind, ch.URL); err != nil {
+		respondError(w, http.StatusBadRequest, "url: "+err.Error())
+		return
+	}
 
 	ch.ID = uuid.New().String()
 	now := time.Now().UTC()
@@ -6347,6 +6351,10 @@ func (h *Handlers) UpdateChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := checkChannelURL(r.Context(), kitchen, update.Kind, update.URL); err != nil {
+		respondError(w, http.StatusBadRequest, "url: "+err.Error())
+		return
+	}
 	existing.Kind = update.Kind
 	existing.URL = update.URL
 	switch secret {

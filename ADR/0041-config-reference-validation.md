@@ -85,6 +85,20 @@ the server.
 - One more kitchen read (about nine list calls) per write and per bake. The bake path reads it before it reads the
   agent, so it does not widen the window in which a concurrent write makes the bake stale.
 
+## Amendment 2026-11-03: what the end-to-end scripts had encoded, and now must not
+
+Several Pro end-to-end scripts ran recipes and agents that only worked because the old decoder ignored what it did not know. The validation
+is right and the scripts were wrong; each now says what the server means:
+
+- A recipe step has no `notify` field (a human gate's channels come from the approval policy, ADR-0050; `notify_tools` names MCP tools) and no `input` field
+  (an agent step receives the run's input and its dependencies' output). Both were silently dropped before; both are `422 unknown_field` now, with
+  `notify_tools` / `input_mapping` offered. A script that creates a recipe without checking the status will fail much later with a missing recipe, so the
+  scripts now assert the create.
+- An agent names a provider the kitchen has, and a model that provider lists: `model_provider: "p"` with no provider, or a PUT to `gpt-4o-mini` on a provider that
+  lists `gpt-4o`, is `422` (`not_found` with the nearest valid value). An edit that was refused leaves the draft as it was, so a bake after it changes nothing.
+- A run, schedule or trigger on an environment the kitchen does not have is `422 invalid_configuration` **before** the approval gate is reached. In a GxP
+  or approval-requiring kitchen the gate (every environment needs approval) is only tested when the environment exists.
+
 ## Not done
 
 - `PUT` cannot clear `backup_provider`/`backup_model` (the edit still treats `""` as unchanged), and still ignores
