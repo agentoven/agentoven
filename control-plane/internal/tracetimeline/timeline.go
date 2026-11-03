@@ -122,6 +122,9 @@ type LaneEvent struct {
 type Options struct {
 	Limit  int
 	Cursor string // the previous page's Cursor
+	// WithholdErrors replaces a failed span's error text with models.WithheldError: for a reader who
+	// may not see content, since the text is often the provider's reply and echoes the prompt.
+	WithholdErrors bool
 }
 
 type node struct {
@@ -246,6 +249,9 @@ func Build(trace *models.Trace, spans []models.Span, lanes []Lane, opt Options) 
 			Status: n.span.Status, OffsetMs: ms(n.start.Sub(rootStart)), DurationMs: ms(n.end.Sub(n.start)),
 			Critical: n.critical, Skew: n.skew, Orphan: n.orphan, Attempt: n.attempt, RetryOf: n.retryOf,
 			Model: n.span.Model, Provider: n.span.Provider, Error: n.span.Error, Usage: n.span.Usage,
+		}
+		if opt.WithholdErrors && sp.Error != "" {
+			sp.Error = models.WithheldError
 		}
 		if n.orphan {
 			sp.ParentID = ""

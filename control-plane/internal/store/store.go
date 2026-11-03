@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
@@ -67,6 +68,10 @@ type AgentStore interface {
 	GetAgent(ctx context.Context, kitchen, name string) (*models.Agent, error)
 	CreateAgent(ctx context.Context, agent *models.Agent) error
 	UpdateAgent(ctx context.Context, agent *models.Agent) error
+	// UpdateAgentLifecycle changes only what a bake's background step owns (status, error tag,
+	// backend endpoint, process) and only while the agent still matches guard; applied reports whether
+	// it did. It never writes the rest of the agent, so it cannot undo an edit made since the bake began.
+	UpdateAgentLifecycle(ctx context.Context, kitchen, name string, guard models.AgentLifecycleGuard, change models.AgentLifecycle) (applied bool, err error)
 	DeleteAgent(ctx context.Context, kitchen, name string) error
 
 	// Agent versioning — tracks historical versions of agents
@@ -495,17 +500,17 @@ func (e *ErrNotFound) Error() string {
 	return e.Entity + " not found: " + e.Key
 }
 
-// ErrConflict is returned when a create would duplicate something that must be unique.
-type ErrConflict struct {
-	Entity string
-	Key    string
-}
 // ErrKitchenRequired is returned by a store call that filters by kitchen when it is given none. An empty
 // kitchen used to mean "every kitchen", so a caller that lost the kitchen on the way (a header read in
 // place of the authenticated one) listed another tenant's records. A caller that really means every kitchen
 // does not exist in the API; an internal sweep names its scope some other way.
 var ErrKitchenRequired = errors.New("a kitchen is required: an empty kitchen is not a wildcard")
 
+// ErrConflict is returned when a create would duplicate something that must be unique.
+type ErrConflict struct {
+	Entity string
+	Key    string
+}
 
 func (e *ErrConflict) Error() string {
 	return e.Entity + " already exists: " + e.Key

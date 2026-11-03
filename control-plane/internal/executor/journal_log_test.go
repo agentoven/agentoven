@@ -17,8 +17,9 @@ import (
 // memLog is a RecordLog in memory: what a database table is to several replicas, one value of it is
 // to several journals in one test.
 type memLog struct {
-	mu   sync.Mutex
-	runs map[string]*memRun
+	mu         sync.Mutex
+	runs       map[string]*memRun
+	sweepReads int // index entries ListSweepable returned: what a janitor pass read
 }
 
 type memRun struct {
@@ -120,7 +121,27 @@ func (l *memLog) ListUnfinished(_ context.Context, kitchen string) ([]executor.R
 	}
 	return out, nil
 }
-func (l *memLog) ListAll(context.Context) ([]executor.RunMeta, error) { return l.all(), nil }
+func (l *memLog) ListSweepable(_ context.Context, doneBefore, staleBefore time.Time, after string, limit int) ([]executor.RunMeta, error) {
+	var out []executor.RunMeta
+	for _, m := range l.all() {
+		at := m.DoneAt
+		if at.IsZero() {
+			at = m.LastUpdate
+		}
+		due := (m.Done && !doneBefore.IsZero() && at.Before(doneBefore)) || (!m.Done && !staleBefore.IsZero() && m.LastUpdate.Before(staleBefore))
+		if due && m.TraceID > after {
+			out = append(out, m)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].TraceID < out[j].TraceID })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	l.mu.Lock()
+	l.sweepReads += len(out)
+	l.mu.Unlock()
+	return out, nil
+}
 func (l *memLog) Delete(_ context.Context, id string) error {
 	l.mu.Lock()
 	delete(l.runs, id)

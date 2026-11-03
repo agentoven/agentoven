@@ -102,6 +102,18 @@ func (e *Executor) dispatchToolCall(ctx context.Context, agent *models.Agent, tc
 		tc.Arguments = args // with any redaction applied
 	}
 
+	// A task that holds a lease proves it still does, at the moment of acting. Without this a process
+	// that was frozen past its ttl would run the next tool of a task another replica has adopted, and
+	// the new owner has already recorded that call's outcome as unknown.
+	if f, ok := FenceFrom(ctx); ok {
+		if err := f.Verify(ctx); err != nil {
+			log.Warn().Err(err).Str("task_id", f.TaskID).Str("tool", tc.Name).Msg("tool call not run: the task's lease is not held")
+			toolSpan.SetStatus(codes.Error, "task lease not held")
+			toolSpan.SetAttributes(attribute.Bool("tool.is_error", true), attribute.Bool("tool.fenced", true))
+			return ToolResult{ToolCallID: tc.ID, Name: tc.Name, IsError: true, Content: "Error: tool call not run, this replica no longer owns the task"}
+		}
+	}
+
 	timeout := e.toolTimeout
 	if timeout <= 0 {
 		timeout = DefaultToolTimeout

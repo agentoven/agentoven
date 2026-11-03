@@ -38,6 +38,42 @@ type taskView struct {
 	ResultBlocked bool `json:"result_blocked,omitempty"`
 }
 
+// publicTaskView is a task as a reader without content access sees it (trace:read:content in Pro,
+// ADR-0043): where it stands, what it spent and when, and nothing the model or a tool said. The result,
+// the error text (it may be the provider's reply), the pending tool calls with their arguments, the
+// stall's repeated call and the caller's metadata are not in it, because the type does not have them.
+type publicTaskView struct {
+	ID              string               `json:"id"`
+	Agent           string               `json:"agent"`
+	Kitchen         string               `json:"kitchen"`
+	Status          executor.TaskStatus  `json:"status"`
+	PauseKind       string               `json:"pause_kind,omitempty"`
+	BudgetPause     *models.BudgetPause  `json:"budget_pause,omitempty"`
+	Budget          *models.BudgetStatus `json:"budget,omitempty"`
+	Turns           int                  `json:"turns"`
+	Usage           models.TokenUsage    `json:"usage"`
+	Failed          bool                 `json:"failed,omitempty"`
+	Attempts        int                  `json:"attempts"`
+	Owner           string               `json:"owner,omitempty"`
+	CreatedAt       time.Time            `json:"created_at"`
+	UpdatedAt       time.Time            `json:"updated_at"`
+	ContentWithheld bool                 `json:"content_withheld"`
+}
+
+// taskOut is a task as the caller may see it.
+func (h *Handlers) taskOut(r *http.Request, snap executor.TaskSnapshot) interface{} {
+	if !h.canReadTraceContent(r) {
+		return publicTaskOf(snap)
+	}
+	return h.viewOf(r.Context(), snap)
+}
+
+func publicTaskOf(snap executor.TaskSnapshot) publicTaskView {
+	return publicTaskView{ID: snap.ID, Agent: snap.Agent, Kitchen: snap.Kitchen, Status: snap.Status, PauseKind: snap.PauseKind,
+		BudgetPause: snap.BudgetPause, Budget: snap.Budget, Turns: snap.Turns, Usage: snap.Usage, Failed: snap.Error != "",
+		Attempts: snap.Attempts, Owner: snap.Owner, CreatedAt: snap.CreatedAt, UpdatedAt: snap.UpdatedAt, ContentWithheld: true}
+}
+
 type createTaskRequest struct {
 	Agent     string `json:"agent"`
 	Message   string `json:"message"`
@@ -266,7 +302,7 @@ func (h *Handlers) ListTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	kitchen := middleware.GetKitchen(r.Context())
 	statusFilter := r.URL.Query().Get("status")
-	out := []taskView{}
+	out := []interface{}{}
 	for _, s := range h.Tasks.List(r.Context(), kitchen) {
 		if !h.canAccessAgent(r.Context(), kitchen, s.Agent) {
 			continue
@@ -274,7 +310,7 @@ func (h *Handlers) ListTasks(w http.ResponseWriter, r *http.Request) {
 		if statusFilter != "" && string(s.Status) != statusFilter {
 			continue
 		}
-		out = append(out, h.viewOf(r.Context(), s))
+		out = append(out, h.taskOut(r, s))
 	}
 	respondJSON(w, http.StatusOK, map[string]interface{}{"tasks": out, "count": len(out)})
 }
@@ -289,7 +325,7 @@ func (h *Handlers) GetTask(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	respondJSON(w, http.StatusOK, h.viewOf(r.Context(), snap))
+	respondJSON(w, http.StatusOK, h.taskOut(r, snap))
 }
 
 // CancelTask stops a task.
@@ -304,7 +340,7 @@ func (h *Handlers) CancelTask(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusNotFound, "task not found")
 			return
 		}
-		respondJSON(w, http.StatusOK, h.viewOf(r.Context(), snap))
+		respondJSON(w, http.StatusOK, h.taskOut(r, snap))
 	}
 }
 
@@ -388,7 +424,7 @@ func (h *Handlers) ResumeTask(w http.ResponseWriter, r *http.Request) {
 		}
 		respondError(w, http.StatusBadRequest, err.Error())
 	default:
-		respondJSON(w, http.StatusAccepted, h.viewOf(r.Context(), out))
+		respondJSON(w, http.StatusAccepted, h.taskOut(r, out))
 	}
 }
 
@@ -440,6 +476,12 @@ func (h *Handlers) TaskEvents(w http.ResponseWriter, r *http.Request) {
 		return true
 	}
 
+	// The stream is the run itself: tokens, thinking, tool calls and their results. There is no
+	// public form of it, so a reader without content access is refused.
+	if !h.canReadTraceContent(r) {
+		respondError(w, http.StatusForbidden, "a task's event stream carries its content, which this role may not read")
+		return
+	}
 	ping := time.NewTicker(15 * time.Second)
 	defer ping.Stop()
 	for {

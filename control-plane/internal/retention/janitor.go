@@ -61,6 +61,18 @@ type Janitor struct {
 
 	// defaultBackend is used when a kitchen's policy doesn't specify one.
 	defaultBackend string
+
+	// onTraceDeleted is told of every trace the janitor removed from the hot store, so what is
+	// kept under the trace's ID elsewhere (the execution journal of the run) goes with it.
+	onTraceDeleted func(ctx context.Context, kitchen, traceID string)
+}
+
+// SetOnTraceDeleted installs f, called after the janitor deletes an expired trace. A run's execution
+// journal holds the same prompts and tool results as its trace and is keyed by the trace's ID, so a
+// deployment that keeps journals removes them here and they never outlive the trace's retention.
+// Call it before Start.
+func (j *Janitor) SetOnTraceDeleted(f func(ctx context.Context, kitchen, traceID string)) {
+	j.onTraceDeleted = f
 }
 
 // NewJanitor creates a new retention janitor that runs on the given interval.
@@ -431,6 +443,9 @@ func (j *Janitor) purgeTraces(ctx context.Context, traces []models.Trace, stats 
 			continue
 		}
 		stats.TracesPurged++
+		if j.onTraceDeleted != nil {
+			j.onTraceDeleted(ctx, t.Kitchen, t.ID)
+		}
 	}
 }
 

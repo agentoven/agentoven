@@ -452,11 +452,11 @@ func (mr *ModelRouter) callGemini(ctx context.Context, provider *models.ModelPro
 		}
 		if json.Unmarshal(respBody, &gErr) == nil && gErr.Error.Message != "" {
 			if gErr.Error.Status == "NOT_FOUND" {
-				return nil, fmt.Errorf("gemini: model %q not found — check the model name in your provider config (e.g. gemini-2.0-flash)", model)
+				return nil, RequestRejected(404, fmt.Errorf("gemini: model %q not found — check the model name in your provider config (e.g. gemini-2.0-flash)", model))
 			}
-			return nil, fmt.Errorf("gemini: status %d: %s (%s)", httpResp.StatusCode, gErr.Error.Message, gErr.Error.Status)
+			return nil, classifyStatus(httpResp.StatusCode, fmt.Errorf("gemini: status %d: %s (%s)", httpResp.StatusCode, gErr.Error.Message, gErr.Error.Status))
 		}
-		return nil, fmt.Errorf("gemini: status %d: %s", httpResp.StatusCode, string(respBody))
+		return nil, classifyStatus(httpResp.StatusCode, fmt.Errorf("gemini: status %d: %s", httpResp.StatusCode, string(respBody)))
 	}
 
 	var gemResp geminiResponse

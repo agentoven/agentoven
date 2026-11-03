@@ -41,9 +41,10 @@ func TestAgentVersionMovesOnlyOnAChangedBake(t *testing.T) {
 		t.Fatalf("the first bake keeps the registered version, got %s", got.Version)
 	}
 
-	// An edit is a draft: no new version, and the stored version is not rewritten.
+	// An edit is a draft: no new version, and the stored version is not rewritten. (Tags are labels;
+	// a change to anything that shapes behaviour waits for a bake, see TestBakedFingerprintCoversEveryBehaviourField.)
 	a, _ := s.GetAgent(ctx, "k", "bot")
-	a.Description = "edited"
+	a.Tags = map[string]string{"owner": "me"}
 	if err := s.UpdateAgent(ctx, a); err != nil {
 		t.Fatal(err)
 	}

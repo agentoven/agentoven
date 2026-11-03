@@ -119,6 +119,15 @@ func (a Agent) Redacted() Agent {
 		}
 		a.Ingredients = ing
 	}
+	if a.Draft != nil && a.Draft.Ingredients != nil {
+		d := *a.Draft // the draft carries ingredients too, with the same secrets in their config
+		d.Ingredients = make([]Ingredient, len(a.Draft.Ingredients))
+		for i, in := range a.Draft.Ingredients {
+			in.Config = RedactConfig(in.Config)
+			d.Ingredients[i] = in
+		}
+		a.Draft = &d
+	}
 	return a
 }
 

@@ -532,75 +532,112 @@ func (m *MemoryStore) CreateAgent(_ context.Context, agent *models.Agent) error 
 
 func (m *MemoryStore) UpdateAgent(_ context.Context, agent *models.Agent) error {
 	m.mu.Lock()
+	defer func() {
+		m.mu.Unlock()
+		m.requestSave()
+	}()
 	copy := *agent
 
-	// Migrate legacy integer versions to semver
-	if copy.Version != "" && !models.IsSemver(copy.Version) {
+	// Migrate legacy integer versions to semver (a name the caller chose is judged as it is, not migrated)
+	if copy.VersionBump != models.VersionBumpNamed && copy.Version != "" && !models.IsSemver(copy.Version) {
 		copy.Version = models.MigrateLegacyVersion(copy.Version)
 	}
 
 	// A version is written only when something that shapes behaviour was baked differently, or
-	// when the caller asks for a bump or names a version. Edits and status changes (the bake's
-	// background goroutine setting ready/burnt) never change a stored version: versions are immutable.
+	// when the caller asks for a bump or names a valid one. Edits and status changes (the bake's
+	// background step setting ready/burnt) never change a stored version: versions are immutable.
+	// Every decision compares with what is stored now, never with the caller's copy, which may have
+	// been read before another request changed the agent (two identical concurrent bakes append one
+	// version, not two).
 	vk := key(agent.Kitchen, agent.Name)
+	storedVersion := copy.Version
+	if cur, ok := m.agents[vk]; ok {
+		storedVersion = cur.Version
+	}
+	var latest *models.Agent
+	var stored []string
+	for _, v := range m.agentVersions[vk] {
+		stored = append(stored, v.Version)
+		if v.Version == storedVersion {
+			latest = v
+		}
+	}
+	if latest == nil {
+		if vs := m.agentVersions[vk]; len(vs) > 0 {
+			latest = vs[len(vs)-1]
+		}
+	}
 	recordHistory := false
 	refreshLatest := false
 	switch copy.VersionBump {
 	case models.VersionBumpBake:
-		var latest *models.Agent
-		if vs := m.agentVersions[vk]; len(vs) > 0 {
-			latest = vs[len(vs)-1]
-			for _, v := range vs {
-				if v.Version == copy.Version {
-					latest = v
-				}
-			}
-		}
-		version, isNew, _ := models.DecideBakeVersion(copy.Version, latest, &copy)
+		version, isNew, _ := models.DecideBakeVersion(storedVersion, latest, &copy)
 		copy.Version = version
 		if isNew {
 			recordHistory = true
 		} else if latest != nil && latest.ResolvedConfig == nil {
 			refreshLatest = true // the first bake fills in the registered version
 		}
+	case models.VersionBumpNamed:
+		isNew, err := models.DecideNamedVersion(copy.Version, storedVersion, stored, latest, &copy)
+		if err != nil {
+			return err
+		}
+		recordHistory = isNew
+		if !isNew && latest != nil && latest.ResolvedConfig == nil {
+			refreshLatest = true
+		}
 	case "patch":
-		copy.Version = models.BumpPatch(copy.Version)
+		copy.Version = models.BumpPatch(storedVersion)
 		recordHistory = true
 	case "minor":
-		copy.Version = models.BumpMinor(copy.Version)
+		copy.Version = models.BumpMinor(storedVersion)
 		recordHistory = true
 	case "major":
-		copy.Version = models.BumpMajor(copy.Version)
+		copy.Version = models.BumpMajor(storedVersion)
 		recordHistory = true
 	default:
-		// A caller that names a version not yet in the history starts it; one that names an old
-		// version leaves the history alone.
-		if copy.Version != "" {
-			recordHistory = true
-			for _, v := range m.agentVersions[vk] {
-				if v.Version == copy.Version {
-					recordHistory = false
-				}
-			}
-		}
+		// No version was asked for: whatever version the caller's copy carries, the stored one stays.
+		copy.Version = storedVersion
 	}
 	copy.VersionBump = "" // never persist the signal
 	copy.UpdatedAt = time.Now().UTC()
 
-	m.agents[key(agent.Kitchen, agent.Name)] = &copy
+	m.agents[vk] = &copy
 
 	if recordHistory {
 		vCopy := copy
 		m.agentVersions[vk] = append(m.agentVersions[vk], &vCopy)
 	} else if refreshLatest {
 		versions := m.agentVersions[vk]
-		latest := copy
-		*versions[len(versions)-1] = latest
+		for i, v := range versions {
+			if v.Version == copy.Version {
+				snap := copy
+				versions[i] = &snap
+			}
+		}
 	}
+	return nil
+}
 
+func (m *MemoryStore) UpdateAgentLifecycle(_ context.Context, kitchen, name string, guard models.AgentLifecycleGuard, change models.AgentLifecycle) (bool, error) {
+	m.mu.Lock()
+	cur, ok := m.agents[key(kitchen, name)]
+	if !ok {
+		m.mu.Unlock()
+		return false, &ErrNotFound{Entity: "agent", Key: name}
+	}
+	if !guard.Matches(cur) {
+		m.mu.Unlock()
+		return false, nil
+	}
+	next := *cur
+	change.Apply(&next)
+	next.UpdatedAt = time.Now().UTC()
+	m.agents[key(kitchen, name)] = &next
 	m.mu.Unlock()
 	m.requestSave()
-	return nil
+	return true, nil
 }
 
 func (m *MemoryStore) DeleteAgent(_ context.Context, kitchen, name string) error {
@@ -1582,6 +1619,9 @@ func (m *MemoryStore) UpdateApproval(_ context.Context, record *models.ApprovalR
 }
 
 func (m *MemoryStore) ListApprovals(_ context.Context, kitchen, status string, limit int) ([]models.ApprovalRecord, error) {
+	if kitchen == "" {
+		return nil, ErrKitchenRequired
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var result []models.ApprovalRecord
@@ -1619,9 +1659,6 @@ func (m *MemoryStore) GetChannel(_ context.Context, kitchen, name string) (*mode
 	defer m.mu.RUnlock()
 	ch, ok := m.channels[key(kitchen, name)]
 	if !ok {
-	if kitchen == "" {
-		return nil, ErrKitchenRequired
-	}
 		return nil, &ErrNotFound{Entity: "notification_channel", Key: name}
 	}
 	copy := *ch

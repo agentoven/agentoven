@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,6 +45,60 @@ func retryableStatus(status int) bool {
 	return status == 429 || (status >= 500 && status < 600)
 }
 
+// RequestError marks a failure the request or the caller's own account caused: a malformed prompt
+// (400), a model name that does not exist (404), a body that is too large (413), an unprocessable one
+// (422), a provider that says the account has no credit left (402). It says nothing about the
+// provider's health, so it never counts toward opening a circuit: one tenant sending five malformed
+// prompts must not take a healthy provider away from everyone else.
+type RequestError struct {
+	StatusCode int
+	Err        error
+}
+
+func (e *RequestError) Error() string { return e.Err.Error() }
+func (e *RequestError) Unwrap() error { return e.Err }
+
+// RequestRejected wraps err as a RequestError carrying status, for a driver to return.
+func RequestRejected(status int, err error) error {
+	return &RequestError{StatusCode: status, Err: err}
+}
+
+// requestCaused reports whether an HTTP status means the request (or the account behind it) is at
+// fault. A 401 or 403 is not in the list: a bad or forbidden key is the provider's configuration
+// failing, and the circuit, which is per kitchen, should stop sending traffic into it.
+func requestCaused(status int) bool {
+	if status < 400 || status >= 500 {
+		return false
+	}
+	switch status {
+	case 401, 403, 407, 408, 429:
+		return false
+	}
+	return true
+}
+
+// classifyStatus is what a driver returns for a failed HTTP call: Retryable for a rate limit or a
+// provider fault, RequestRejected for a request-caused 4xx, the error as it is otherwise.
+func classifyStatus(status int, err error) error {
+	switch {
+	case retryableStatus(status):
+		return Retryable(status, err)
+	case requestCaused(status):
+		return RequestRejected(status, err)
+	}
+	return err
+}
+
+// providerFault reports whether a call that failed after its retries says the provider is unhealthy.
+// A refusal by a gate, a request-caused error and a caller that gave up are not the provider's doing.
+func providerFault(err error) bool {
+	if err == nil || isGateRefusal(err) || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var re *RequestError
+	return !errors.As(err, &re)
+}
+
 // isRetryable reports whether err is worth another attempt against the same
 // provider: an explicit RetryableError, or a network-level failure (timeout,
 // connection refused, DNS) that never reached the provider's own error
@@ -75,6 +130,7 @@ func isRetryable(err error) bool {
 type circuitState struct {
 	consecutiveFailures int
 	openUntil           time.Time
+	lastFailure         time.Time
 }
 
 const (
@@ -87,11 +143,25 @@ const (
 	// circuitCooldown is how long an open circuit stays open before the next
 	// call is let through as a probe.
 	circuitCooldown = 30 * time.Second
+	// circuitForget is how long a circuit with no new failure is remembered.
+	circuitForget = 10 * time.Minute
 )
 
-// circuitBreaker tracks one circuit per provider name. Providers are few and
-// long-lived (configured, not created per request), so a plain map with a
-// mutex is simpler than anything fancier and never grows unbounded.
+// circuitKey names one circuit: a provider of one kitchen, at one endpoint. Two kitchens that both
+// call their provider "openai" have separate circuits, so one tenant's failures (a revoked key, a
+// budget, a flood of bad requests) cannot take the provider away from another; moving a provider to
+// another endpoint starts it with a closed circuit.
+func circuitKey(provider *models.ModelProvider, req *models.RouteRequest) string {
+	kitchen := provider.Kitchen
+	if kitchen == "" && req != nil {
+		kitchen = req.Kitchen // a platform-wide provider is still judged per calling kitchen
+	}
+	return kitchen + "\x00" + provider.Name + "\x00" + provider.Endpoint
+}
+
+// circuitBreaker tracks one circuit per circuitKey. Entries are removed on the first success, and
+// ones that have been quiet for circuitForget are dropped when another failure is recorded, so a
+// dead kitchen or endpoint does not leave a streak behind forever.
 type circuitBreaker struct {
 	mu    sync.Mutex
 	state map[string]*circuitState
@@ -129,10 +199,16 @@ func (cb *circuitBreaker) recordFailure(provider string) {
 		cb.state[provider] = s
 	}
 	s.consecutiveFailures++
+	s.lastFailure = time.Now()
+	for k, o := range cb.state {
+		if k != provider && time.Since(o.lastFailure) > circuitForget {
+			delete(cb.state, k)
+		}
+	}
 	if s.consecutiveFailures >= circuitFailureThreshold {
 		s.openUntil = time.Now().Add(circuitCooldown)
 		log.Warn().
-			Str("provider", provider).
+			Str("circuit", strings.ReplaceAll(provider, "\x00", "/")).
 			Int("consecutive_failures", s.consecutiveFailures).
 			Dur("cooldown", circuitCooldown).
 			Msg("Circuit breaker opened for provider")
@@ -145,7 +221,8 @@ func (cb *circuitBreaker) recordFailure(provider string) {
 // in front of the whole attempt: a provider whose circuit is open is skipped
 // without spending any of the retry budget on it.
 func (mr *ModelRouter) callWithRetry(ctx context.Context, provider *models.ModelProvider, req *models.RouteRequest) (*models.RouteResponse, error) {
-	if !mr.circuit.allow(provider.Name) {
+	circuit := circuitKey(provider, req)
+	if !mr.circuit.allow(circuit) {
 		return nil, fmt.Errorf("provider %q: circuit open after repeated failures, skipping", provider.Name)
 	}
 
@@ -180,13 +257,15 @@ func (mr *ModelRouter) callWithRetry(ctx context.Context, provider *models.Model
 
 	err := backoff.Retry(operation, backoff.WithMaxRetries(backoffPolicy(ctx), uint64(attempts-1)))
 	if err != nil {
-		mr.circuit.recordFailure(provider.Name)
+		if providerFault(lastErr) {
+			mr.circuit.recordFailure(circuit)
+		}
 		if lastErr != nil {
 			return nil, lastErr
 		}
 		return nil, err
 	}
-	mr.circuit.recordSuccess(provider.Name)
+	mr.circuit.recordSuccess(circuit)
 	return resp, nil
 }
 

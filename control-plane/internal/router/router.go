@@ -784,26 +784,28 @@ func (mr *ModelRouter) RouteStream(ctx context.Context, req *models.RouteRequest
 				continue
 			}
 			var streamed *models.TokenUsage
+			received := 0 // characters of text, thinking and tool arguments the caller was sent
 			err := sd.StreamCall(ctx, &provider, req, func(c *models.StreamChunk) error {
-				if c != nil && c.Usage != nil {
-					streamed = c.Usage
+				if c != nil {
+					if c.Usage != nil {
+						streamed = c.Usage
+					}
+					received += len(c.Content) + len(c.ThinkingContent)
+					if c.ToolCall != nil {
+						received += len(c.ToolCall.Name) + len(c.ToolCall.Arguments)
+					}
 				}
 				return callback(c)
 			})
+			// Whatever ended the stream, what was generated up to then was billed by the provider, so it
+			// is charged: an error half-way, or a client that read the answer and dropped the connection
+			// before the usage chunk, must not spend for free. A stream that produced nothing is released.
+			endSpend(mr.streamCharge(&provider, req, streamed, received))
 			if err != nil {
-				endSpend(nil)
 				log.Warn().Str("provider", provider.Name).Err(err).Msg("Streaming call failed, trying next")
 				lastErr = err
 				continue
 			}
-			done := &models.RouteResponse{}
-			if streamed != nil {
-				done.Usage = *streamed
-				if done.Usage.PriceSource == "" && done.Usage.EstimatedCost == 0 && (done.Usage.InputTokens > 0 || done.Usage.OutputTokens > 0) {
-					mr.settle(&provider, req.Model, &done.Usage)
-				}
-			}
-			endSpend(done)
 			return nil
 		}
 
@@ -813,11 +815,11 @@ func (mr *ModelRouter) RouteStream(ctx context.Context, req *models.RouteRequest
 		if err != nil {
 			lastErr = err
 			attempts = append(attempts, mr.attemptOf(&provider, req, err, time.Since(t0)))
-			continue
-		}
 			if refusalCoversAllProviders(err) {
 				break
 			}
+			continue
+		}
 		mr.trackCost(req.Kitchen, req.AgentRef, resp)
 		mr.finishRoute(ctx, req, resp, attempts, started, nil)
 
@@ -942,8 +944,6 @@ func (mr *ModelRouter) callProvider(ctx context.Context, provider *models.ModelP
 	driverReq := *req
 	driverReq.Model = model
 
-	endSpend, err := mr.spendBegin(ctx, provider, &driverReq)
-	if err != nil {
 	// A repeated request is answered before anything is reserved or sent: it costs nothing and
 	// uses none of the provider's rate limit.
 	if cached, ok := mr.cacheLookup(ctx, provider, &driverReq); ok {
@@ -951,6 +951,8 @@ func (mr *ModelRouter) callProvider(ctx context.Context, provider *models.ModelP
 		return cached, nil
 	}
 
+	endSpend, err := mr.spendBegin(ctx, provider, &driverReq)
+	if err != nil {
 		return nil, err
 	}
 	resp, err := driver.Call(ctx, provider, &driverReq)
@@ -971,9 +973,9 @@ func (mr *ModelRouter) callProvider(ctx context.Context, provider *models.ModelP
 
 	latencyMs := time.Since(start).Milliseconds()
 	resp.LatencyMs = latencyMs
+	mr.cacheStore(ctx, provider, &driverReq, resp)
 	resp.Strategy = req.Strategy
 	if resp.Strategy == "" {
-	mr.cacheStore(ctx, provider, &driverReq, resp)
 		resp.Strategy = models.RoutingFallback
 	}
 
@@ -1646,10 +1648,7 @@ func (mr *ModelRouter) callOllama(ctx context.Context, provider *models.ModelPro
 		} else {
 			msg = fmt.Errorf("ollama: status %d: %s", httpResp.StatusCode, string(respBody))
 		}
-		if retryableStatus(httpResp.StatusCode) {
-			return nil, Retryable(httpResp.StatusCode, msg)
-		}
-		return nil, msg
+		return nil, classifyStatus(httpResp.StatusCode, msg)
 	}
 
 	var oaiResp openAIResponse
@@ -1912,8 +1911,8 @@ func parseOpenAIError(prefix string, status int, body []byte, model string) erro
 	var msg error
 	if json.Unmarshal(body, &apiErr) == nil && apiErr.Error.Message != "" {
 		if apiErr.Error.Code == "model_not_found" || (status == 404 && model != "") {
-			// Never retryable: the model name itself is wrong.
-			return fmt.Errorf("%s: model %q not found — check the model name in your provider config", prefix, model)
+			// Never retryable, and the request's fault: the model name itself is wrong.
+			return RequestRejected(404, fmt.Errorf("%s: model %q not found — check the model name in your provider config", prefix, model))
 		}
 		if apiErr.Error.Code != "" {
 			msg = fmt.Errorf("%s: status %d: %s (%s)", prefix, status, apiErr.Error.Message, apiErr.Error.Code)
@@ -1923,10 +1922,7 @@ func parseOpenAIError(prefix string, status int, body []byte, model string) erro
 	} else {
 		msg = fmt.Errorf("%s: status %d: %s", prefix, status, string(body))
 	}
-	if retryableStatus(status) {
-		return Retryable(status, msg)
-	}
-	return msg
+	return classifyStatus(status, msg)
 }
 
 // parseAnthropicError extracts a human-readable message from an Anthropic JSON error body.
@@ -1939,17 +1935,11 @@ func parseAnthropicError(prefix string, status int, body []byte, model string) e
 	}
 	if json.Unmarshal(body, &apiErr) == nil && apiErr.Error.Message != "" {
 		if apiErr.Error.Type == "not_found_error" {
-			return fmt.Errorf("%s: model %q not found — check the model name (e.g. claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5). Note: Claude 4.6+ uses dateless IDs — do not append a date suffix", prefix, model)
+			return RequestRejected(404, fmt.Errorf("%s: model %q not found — check the model name (e.g. claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5). Note: Claude 4.6+ uses dateless IDs — do not append a date suffix", prefix, model))
 		}
-		if retryableStatus(status) {
-			return Retryable(status, fmt.Errorf("%s: status %d: %s (%s)", prefix, status, apiErr.Error.Message, apiErr.Error.Type))
-		}
-		return fmt.Errorf("%s: status %d: %s (%s)", prefix, status, apiErr.Error.Message, apiErr.Error.Type)
+		return classifyStatus(status, fmt.Errorf("%s: status %d: %s (%s)", prefix, status, apiErr.Error.Message, apiErr.Error.Type))
 	}
-	if retryableStatus(status) {
-		return Retryable(status, fmt.Errorf("%s: status %d: %s", prefix, status, string(body)))
-	}
-	return fmt.Errorf("%s: status %d: %s", prefix, status, string(body))
+	return classifyStatus(status, fmt.Errorf("%s: status %d: %s", prefix, status, string(body)))
 }
 
 // callOpenAITest sends a minimal 1-token request to validate OpenAI/Azure credentials.
@@ -2198,7 +2188,6 @@ func (mr *ModelRouter) finishRoute(ctx context.Context, req *models.RouteRequest
 
 	if resp != nil {
 		trace.OutputText = resp.Content
-		trace.Metadata["cache_hit"] = resp.Cached
 		trace.TotalTokens = resp.Usage.TotalTokens
 		trace.CostUSD = resp.Usage.EstimatedCost
 		trace.ThinkingBlocks = resp.ThinkingBlocks
@@ -2209,6 +2198,7 @@ func (mr *ModelRouter) finishRoute(ctx context.Context, req *models.RouteRequest
 		trace.Metadata["strategy"] = resp.Strategy
 		trace.Metadata["thinking_tokens"] = resp.Usage.ThinkingTokens
 		trace.Metadata["price_source"] = resp.Usage.PriceSource
+		trace.Metadata["cache_hit"] = resp.Cached
 
 		out, _ := json.Marshal(map[string]interface{}{
 			"content":         resp.Content,
@@ -2223,7 +2213,6 @@ func (mr *ModelRouter) finishRoute(ctx context.Context, req *models.RouteRequest
 		answerID := uuid.New().String()
 		calls = append(calls, models.LLMCall{SpanID: answerID, StartedAt: cursor, Response: resp})
 		spans = append(spans, models.Span{
-				"cache_hit":       resp.Cached,
 			ID: answerID, TraceID: traceID, ParentSpanID: rootID,
 			Name: "llm." + resp.Provider, Kind: models.SpanKindLLM, Status: "completed",
 			StartTime: cursor, EndTime: end, DurationMs: resp.LatencyMs,
@@ -2234,6 +2223,7 @@ func (mr *ModelRouter) finishRoute(ctx context.Context, req *models.RouteRequest
 				"thinking_tokens": resp.Usage.ThinkingTokens,
 				"cached_tokens":   resp.Usage.CachedTokens,
 				"price_source":    resp.Usage.PriceSource,
+				"cache_hit":       resp.Cached,
 			},
 		})
 		spans[0].Usage = &usage

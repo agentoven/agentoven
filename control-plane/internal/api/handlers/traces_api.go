@@ -118,12 +118,7 @@ func (h *Handlers) ListTraces(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Total-Count", strconv.Itoa(st.Count))
 		w.Header().Set("Access-Control-Expose-Headers", "X-Total-Count")
 	}
-	if !h.canReadTraceContent(r) {
-		for i := range traces {
-			traces[i].WithholdContent()
-		}
-	}
-	respondJSON(w, http.StatusOK, traces)
+	respondJSON(w, http.StatusOK, h.tracesOut(r, traces))
 }
 
 // TraceStats summarises the traces a filter matches: how many, how many failed, tokens, cost, latency.
@@ -250,7 +245,7 @@ func (h *Handlers) UpdateTrace(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	respondJSON(w, http.StatusOK, trace)
+	respondJSON(w, http.StatusOK, h.traceOut(r, trace))
 }
 
 // AddTraceScore records feedback on a trace (or one of its spans).
@@ -286,7 +281,7 @@ func (h *Handlers) AddTraceScore(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	respondJSON(w, http.StatusCreated, req)
+	respondJSON(w, http.StatusCreated, h.scoreOut(r, &req))
 }
 
 // ListTraceScores returns a trace's feedback.
@@ -304,7 +299,7 @@ func (h *Handlers) ListTraceScores(w http.ResponseWriter, r *http.Request) {
 	if scores == nil {
 		scores = []models.TraceScore{}
 	}
-	respondJSON(w, http.StatusOK, scores)
+	respondJSON(w, http.StatusOK, h.scoresOut(r, scores))
 }
 
 // DeleteTraceScore removes one piece of feedback.

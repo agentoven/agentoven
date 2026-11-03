@@ -308,6 +308,11 @@ type Agent struct {
 	// re-resolving on every request.
 	ResolvedConfig *ResolvedIngredients `json:"resolved_config,omitempty"`
 
+	// Draft holds the edits made to an agent that has been baked, which are not what runs until the
+	// next bake or re-cook applies them (ADR-0043). Every behaviour field above is the baked one.
+	// Nil when nothing is waiting.
+	Draft *AgentEdit `json:"draft,omitempty" db:"-"`
+
 	// Process tracks the runtime state of the spawned agent process.
 	// Populated by the ProcessManager at bake time.
 	Process *ProcessInfo `json:"process,omitempty"`
@@ -775,9 +780,6 @@ type Trace struct {
 	Environment  string `json:"environment,omitempty"`
 	AgentVersion string `json:"agent_version,omitempty"`
 
-	// ContentWithheld is set when the reader may see this trace but not its bodies (ADR-0043).
-	ContentWithheld bool `json:"content_withheld,omitempty" db:"-"`
-
 	// Spans are loaded eagerly by GetTrace (with spans=true) or ListSpansByTrace.
 	// Not persisted on the Trace row itself — stored in the spans table/map.
 	Spans []Span `json:"spans,omitempty" db:"-"`
@@ -848,9 +850,6 @@ type Span struct {
 	Provider     string                 `json:"provider,omitempty" db:"provider"` // provider name (LLM spans)
 	Error        string                 `json:"error,omitempty" db:"error"`       // error message if status=failed
 	Events       []SpanEvent            `json:"events,omitempty"`                 // timed events within the span
-
-	// ContentWithheld is set when the reader may see this span but not its bodies (ADR-0043).
-	ContentWithheld bool `json:"content_withheld,omitempty" db:"-"`
 }
 
 // SpanEvent is a timestamped event within a span (e.g. "first token", "tool selected").
@@ -1027,11 +1026,11 @@ func SortProvidersForSelection(ps []ModelProvider) {
 // MCPTransportStreamableHTTP is the MCPTool.Transport of a tool served by a
 // remote MCP server over streamable HTTP (see internal/mcpgw).
 const MCPTransportStreamableHTTP = "mcp"
+
 // MCPTransportNative is the MCPTool.Transport of a tool the control plane runs itself through an
 // installed contracts.NativeToolRunner (a tool pack's tool). The community edition has no runner,
 // so such a tool fails with a clear error there.
 const MCPTransportNative = "native"
-
 
 type MCPTool struct {
 	ID           string                 `json:"id" db:"id"`

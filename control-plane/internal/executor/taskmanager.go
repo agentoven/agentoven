@@ -314,6 +314,7 @@ func (m *TaskManager) attempt(t *task, run func(ctx context.Context, onEvent fun
 	defer m.releaseSlot(t.snap.Kitchen)
 
 	ctx, cancel := context.WithCancel(WithTaskMode(t.baseCtx))
+	ctx = m.fencedContext(ctx, t)
 	t.mu.Lock()
 	if t.leaseLost { // another replica took the task while it waited for a slot
 		t.mu.Unlock()
@@ -661,6 +662,20 @@ func (m *TaskManager) Cancel(ctx context.Context, kitchen, id string) (TaskSnaps
 		}
 	}
 	if js.Status != RunDone {
+		// Ending a run nobody holds must not race another replica adopting it: a lease that has just
+		// expired is still a task someone may be about to resume. Take the lease first; if someone
+		// else got it in between, the run is theirs and the owner is asked to cancel it.
+		if leases, owner, ttl := m.leaseConfig(); leases != nil {
+			if ok, err := leases.Acquire(ctx, id, owner, ttl); err != nil || !ok {
+				if rc, _ := leases.RequestCancel(ctx, id); rc {
+					s := snapshotOf(id, js)
+					s.Status, s.Owner = TaskRunning, m.holderOf(ctx, id)
+					return s, nil
+				}
+				return snapshotOf(id, js), nil
+			}
+			defer func() { _ = leases.Release(context.WithoutCancel(ctx), id, owner) }()
+		}
 		_ = m.e.journal.MarkOutcome(ctx, id, OutcomeCancelled, "", errors.New("cancelled"))
 		js, _ = m.e.RunState(ctx, kitchen, id)
 	}

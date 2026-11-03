@@ -57,6 +57,10 @@ type (
 	LogJournal      = executor.LogJournal
 	TaskLeases      = executor.TaskLeases
 	LeaseState      = executor.LeaseState
+	// Fence is a task runner's proof that it still holds the task (see FenceFrom): a RecordLog that
+	// receives a context carrying one must refuse the write, with ErrFenced, unless the lease is
+	// still held at Fence.Epoch.
+	Fence = executor.Fence
 	// TaskSnapshot is a background task as a caller sees it; TaskManager runs them.
 	TaskSnapshot = executor.TaskSnapshot
 	TaskManager  = executor.TaskManager
@@ -64,6 +68,16 @@ type (
 
 // ErrRunNotFound is what a RecordLog returns for a run it does not hold.
 var ErrRunNotFound = executor.ErrRunNotFound
+
+// ErrFenced is what a RecordLog returns for a write by a replica that no longer holds the task.
+var ErrFenced = executor.ErrFenced
+
+// WithFence returns ctx carrying f, for a runner that holds a task's lease and wants the journal to
+// refuse its writes once it no longer does. The task manager does this itself for the tasks it runs.
+func WithFence(ctx context.Context, f Fence) context.Context { return executor.WithFence(ctx, f) }
+
+// FenceFrom returns the fence on ctx, set when the run is a task that holds a lease.
+func FenceFrom(ctx context.Context) (Fence, bool) { return executor.FenceFrom(ctx) }
 
 // NewLogJournal returns an execution journal that keeps its records in log. With a log that several
 // control-plane replicas share (a database table), the replicas share their runs and can take over

@@ -33,8 +33,12 @@ type RecordLog interface {
 	// ListUnfinished returns the index entries of runs not marked finished that are not a
 	// subagent's, newest start last. kitchen "" lists every kitchen.
 	ListUnfinished(ctx context.Context, kitchen string) ([]RunMeta, error)
-	// ListAll returns every run's index entry (finished or not), for the janitor.
-	ListAll(ctx context.Context) ([]RunMeta, error)
+	// ListSweepable returns, ordered by trace ID and starting after afterTraceID, at most limit
+	// index entries of runs the janitor may act on: finished runs whose DoneAt (LastUpdate when it
+	// has none) is before doneBefore, and unfinished runs whose LastUpdate is before staleBefore. A
+	// zero time switches that half off. It must be answered from an index, never by reading every
+	// run: replicas call it every hour, and a journal can hold millions of runs.
+	ListSweepable(ctx context.Context, doneBefore, staleBefore time.Time, afterTraceID string, limit int) ([]RunMeta, error)
 	// Delete removes a run and its records. A run that does not exist is not an error.
 	Delete(ctx context.Context, traceID string) error
 }
@@ -75,6 +79,7 @@ type LogJournal struct {
 
 	mu   sync.Mutex
 	runs map[string]*logRun
+	held func(ctx context.Context, kitchen string) bool // see SetHeld
 }
 
 // logRun is the writer's memory of a run between appends: how much of the history is stored (so a
@@ -425,26 +430,67 @@ func (j *LogJournal) Discard(ctx context.Context, traceID string) error {
 	return j.log.Delete(ctx, traceID)
 }
 
+// SetHeld installs the test that keeps a kitchen's journals from being removed: held(kitchen) true
+// means the kitchen's records are under a legal hold, and the janitor neither deletes its finished
+// runs nor ends its stale ones. The journal is a content store (prompts, tool results), so it follows
+// the same hold the rest of the kitchen's records do. Call it before the janitor starts.
+func (j *LogJournal) SetHeld(held func(ctx context.Context, kitchen string) bool) {
+	j.mu.Lock()
+	j.held = held
+	j.mu.Unlock()
+}
+
+// sweepBatch is how many index entries one query of the janitor reads.
+const sweepBatch = 500
+
 // Sweep removes the journals of runs that finished more than doneRetention ago, and ends runs that
 // nothing has written to for staleAfter, recording them as abandoned. A paused run is waiting for a
 // person and is never stale. A zero duration disables that half. Several replicas may sweep at once.
+// It reads only the runs that are due, a batch at a time, not every run there is, and leaves alone
+// the runs of a kitchen that is under legal hold (SetHeld).
 func (j *LogJournal) Sweep(ctx context.Context, now time.Time, doneRetention, staleAfter time.Duration) (removed, abandoned int) {
-	metas, err := j.log.ListAll(ctx)
-	if err != nil {
+	var doneBefore, staleBefore time.Time
+	if doneRetention > 0 {
+		doneBefore = now.Add(-doneRetention)
+	}
+	if staleAfter > 0 {
+		staleBefore = now.Add(-staleAfter)
+	}
+	if doneBefore.IsZero() && staleBefore.IsZero() {
 		return 0, 0
 	}
-	for _, m := range metas {
-		if m.Done {
-			at := m.DoneAt
-			if at.IsZero() {
-				at = m.LastUpdate
-			}
-			if doneRetention > 0 && now.Sub(at) > doneRetention && j.Discard(ctx, m.TraceID) == nil {
-				removed++
-			}
-			continue
+	j.mu.Lock()
+	held := j.held
+	j.mu.Unlock()
+	heldKitchens := map[string]bool{} // asked once per kitchen per sweep
+	isHeld := func(kitchen string) bool {
+		if held == nil {
+			return false
 		}
-		if staleAfter > 0 && now.Sub(m.LastUpdate) > staleAfter {
+		h, seen := heldKitchens[kitchen]
+		if !seen {
+			h = held(ctx, kitchen)
+			heldKitchens[kitchen] = h
+		}
+		return h
+	}
+	after := ""
+	for {
+		metas, err := j.log.ListSweepable(ctx, doneBefore, staleBefore, after, sweepBatch)
+		if err != nil || len(metas) == 0 {
+			return removed, abandoned
+		}
+		for _, m := range metas {
+			after = m.TraceID
+			if isHeld(m.Kitchen) {
+				continue
+			}
+			if m.Done {
+				if j.Discard(ctx, m.TraceID) == nil {
+					removed++
+				}
+				continue
+			}
 			st, err := j.Load(ctx, m.TraceID)
 			if err != nil || st.Status == RunPaused || st.Status == RunDone {
 				continue
@@ -453,8 +499,10 @@ func (j *LogJournal) Sweep(ctx context.Context, now time.Time, doneRetention, st
 				abandoned++
 			}
 		}
+		if len(metas) < sweepBatch {
+			return removed, abandoned
+		}
 	}
-	return removed, abandoned
 }
 
 // StartJanitor sweeps once now and then every interval until ctx ends.

@@ -92,7 +92,7 @@ func (h *Handlers) TraceTimeline(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	respondJSON(w, http.StatusOK, tracetimeline.Build(trace, spans, []tracetimeline.Lane{lane}, tracetimeline.Options{Limit: limit, Cursor: r.URL.Query().Get("cursor")}))
+	respondJSON(w, http.StatusOK, tracetimeline.Build(trace, spans, []tracetimeline.Lane{lane}, tracetimeline.Options{Limit: limit, Cursor: r.URL.Query().Get("cursor"), WithholdErrors: !h.canReadTraceContent(r)}))
 }
 
 // TraceAudit returns the audit events of a trace (and, for a recipe run, of every trace under it) in

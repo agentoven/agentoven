@@ -31,6 +31,12 @@ type TaskLeases interface {
 	// RequestCancel asks the owner of a running task to cancel it, and reports whether a live
 	// lease exists to deliver the request to. The owner sees it on its next Renew.
 	RequestCancel(ctx context.Context, taskID string) (bool, error)
+	// Epoch is the fencing token of owner's live lease on the task: a number that is different every
+	// time the task changes hands (an expired lease taken by anyone, the same owner included, gets a
+	// new one) and never repeats for the same task. held is false when owner has no live lease. A
+	// holder that was frozen past its ttl wakes up with a token the task has moved on from, and the
+	// journal and the tool dispatch refuse it (see Fence).
+	Epoch(ctx context.Context, taskID, owner string) (epoch int64, held bool, err error)
 }
 
 // LeaseState is what a renewal learned.
@@ -45,12 +51,14 @@ type MemoryLeases struct {
 	mu     sync.Mutex
 	now    func() time.Time
 	leases map[string]*memLease
+	epochs int64 // the last epoch handed out; one counter for all tasks, so a token is never reused
 }
 
 type memLease struct {
 	owner     string
 	expires   time.Time
 	cancelReq bool
+	epoch     int64
 }
 
 // NewMemoryLeases returns an empty lease table. now may be nil for the wall clock.
@@ -81,8 +89,18 @@ func (m *MemoryLeases) Acquire(_ context.Context, id, owner string, ttl time.Dur
 		l.expires = m.now().Add(ttl)
 		return true, nil
 	}
-	m.leases[id] = &memLease{owner: owner, expires: m.now().Add(ttl)}
+	m.epochs++
+	m.leases[id] = &memLease{owner: owner, expires: m.now().Add(ttl), epoch: m.epochs}
 	return true, nil
+}
+
+func (m *MemoryLeases) Epoch(_ context.Context, id, owner string) (int64, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if l := m.live(id); l != nil && l.owner == owner {
+		return l.epoch, true, nil
+	}
+	return 0, false, nil
 }
 
 func (m *MemoryLeases) Renew(_ context.Context, id, owner string, ttl time.Duration) (LeaseState, error) {

@@ -58,8 +58,9 @@ func (m *TaskManager) leaseConfig() (TaskLeases, string, time.Duration) {
 
 // leaseHold is a task's lease while this replica holds it.
 type leaseHold struct {
-	stop chan struct{}
-	once sync.Once
+	stop  chan struct{}
+	once  sync.Once
+	epoch int64 // the lease's fencing token (TaskLeases.Epoch) when it was taken
 }
 
 func (h *leaseHold) halt() { h.once.Do(func() { close(h.stop) }) }
@@ -79,7 +80,14 @@ func (m *TaskManager) takeLease(ctx context.Context, t *task) error {
 	if !ok {
 		return ErrTaskOwned
 	}
-	hold := &leaseHold{stop: make(chan struct{})}
+	epoch, held, err := leases.Epoch(context.WithoutCancel(ctx), t.snap.ID, owner)
+	if err != nil {
+		return fmt.Errorf("executor: could not read the task's lease: %w", err)
+	}
+	if !held { // it expired between the two calls, or was taken
+		return ErrTaskOwned
+	}
+	hold := &leaseHold{stop: make(chan struct{}), epoch: epoch}
 	t.mu.Lock()
 	if t.hold != nil {
 		t.hold.halt()
@@ -89,6 +97,22 @@ func (m *TaskManager) takeLease(ctx context.Context, t *task) error {
 	t.mu.Unlock()
 	go m.renewLoop(t, hold, leases, owner, ttl, started)
 	return nil
+}
+
+// fencedContext puts the task's fence on ctx, so that the tool dispatch and a shared journal can refuse
+// this replica once it no longer holds the task. With leases off it returns ctx unchanged.
+func (m *TaskManager) fencedContext(ctx context.Context, t *task) context.Context {
+	leases, owner, _ := m.leaseConfig()
+	t.mu.Lock()
+	hold := t.hold
+	t.mu.Unlock()
+	if leases == nil || hold == nil {
+		return ctx
+	}
+	return WithFence(ctx, Fence{
+		TaskID: t.snap.ID, Owner: owner, Epoch: hold.epoch, leases: leases,
+		lost: func(why string) { m.leaseLost(t, why) },
+	})
 }
 
 // dropLease stops renewing and gives the lease up, unless it was already lost.

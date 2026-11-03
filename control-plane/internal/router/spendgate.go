@@ -129,3 +129,33 @@ func (mr *ModelRouter) spendBegin(ctx context.Context, provider *models.ModelPro
 	}
 	return func(resp *models.RouteResponse) { mr.spendRecord(ctx, provider, req, resp) }, nil
 }
+
+// streamCharge is the response a streamed call is settled with. The usage the provider reported is used
+// when there is one (and priced when the driver did not price it). When the stream ended without it
+// (a mid-stream error, a client that went away, a provider that does not send usage), the missing
+// part is estimated from what was received, at the same four characters a token the reservation was
+// sized with, so the charge errs towards the real bill instead of towards zero. nil means nothing was
+// generated and the reservation is released.
+func (mr *ModelRouter) streamCharge(provider *models.ModelProvider, req *models.RouteRequest, reported *models.TokenUsage, receivedChars int) *models.RouteResponse {
+	if reported == nil && receivedChars == 0 {
+		return nil
+	}
+	var u models.TokenUsage
+	if reported != nil {
+		u = *reported
+	}
+	estimated := false
+	if u.InputTokens == 0 {
+		u.InputTokens, estimated = int64(estimateInputTokens(req)), true
+	}
+	if u.OutputTokens == 0 && u.ThinkingTokens == 0 && receivedChars > 0 {
+		u.OutputTokens, estimated = int64(receivedChars/4+1), true
+	}
+	if u.TotalTokens < u.InputTokens+u.OutputTokens+u.ThinkingTokens {
+		u.TotalTokens = u.InputTokens + u.OutputTokens + u.ThinkingTokens
+	}
+	if estimated || (u.PriceSource == "" && u.EstimatedCost == 0) {
+		mr.settle(provider, req.Model, &u)
+	}
+	return &models.RouteResponse{Usage: u}
+}
