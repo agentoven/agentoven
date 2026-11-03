@@ -341,7 +341,14 @@ func (h *Handlers) RegisterAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	sealed, err := h.sealAgentSecrets(r.Context(), &req)
+	if err != nil {
+		h.dropCredentials(r.Context(), kitchen, sealed, nil)
+		respondError(w, http.StatusInternalServerError, "the secrets in this agent's configuration could not be stored in the vault")
+		return
+	}
 	if err := h.Store.CreateAgent(r.Context(), &req); err != nil {
+		h.dropCredentials(r.Context(), kitchen, sealed, nil)
 		respondCreateError(w, err, "register the agent")
 		return
 	}
@@ -412,18 +419,27 @@ func (h *Handlers) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	// An agent that has been baked runs what was baked: the edit waits in its draft for the next bake
 	// (ADR-0043), so the version a trace names is the configuration that served the call. One that has
 	// never been baked runs nothing yet and takes the edit at once.
+	heldBefore := agentSecretRefs(agent)
 	agent.Edit(edit)
 	if len(req.Tags) > 0 {
 		agent.Tags = mergeTags(agent.Tags, req.Tags) // a copy: the map the store handed out is shared with its own
 	}
 	agent.UpdatedAt = time.Now().UTC()
+	sealed, sealErr := h.sealAgentSecrets(r.Context(), agent)
+	if sealErr != nil {
+		h.dropCredentials(r.Context(), kitchen, sealed, heldBefore)
+		respondError(w, http.StatusInternalServerError, "the secrets in this agent's configuration could not be stored in the vault")
+		return
+	}
 	// An edit is a draft: it does not change the version. The version moves when the agent is baked
 	// with a configuration that differs from the one baked before (models.VersionBumpBake).
 
 	if err := h.Store.UpdateAgent(r.Context(), agent); err != nil {
+		h.dropCredentials(r.Context(), kitchen, sealed, heldBefore)
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	h.reapAgentSecrets(r.Context(), agent, heldBefore)
 	respondJSON(w, http.StatusOK, agent.Redacted())
 }
 
@@ -2869,6 +2885,7 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 	// media content parts; structured data is sent as its JSON text so it is
 	// never silently dropped.
 	var userMessage string
+	var textParts []string // the text parts in order, assembled by a2aJoinText as the pod assembles them
 	var userParts []models.ContentPart
 	var fileGuardText string // what the file parts say to a guardrail (a2a_parts.go)
 	for _, part := range taskReq.Message.Parts {
@@ -2878,7 +2895,7 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 		}
 		switch ptype {
 		case "text", "":
-			userMessage += part.Text
+			textParts = append(textParts, part.Text)
 		case "file":
 			if part.File == nil || (part.File.Bytes == "" && part.File.URI == "" && part.File.BlobRef == "") {
 				a2aRPCError(w, rpcID, -32602, "A file part needs file.bytes (base64), file.uri or file.blob_ref (from POST /api/v1/blobs)", nil)
@@ -2893,7 +2910,7 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 				"name": part.File.Name, "uri": part.File.URI, "mimeType": part.File.MimeType, "bytes": part.File.Bytes})})
 		case "data":
 			if len(part.Data) > 0 {
-				userMessage += "\n" + string(part.Data)
+				textParts = append(textParts, "\n"+string(part.Data))
 			}
 		default:
 			// A part the gateway does not understand is refused, not dropped: the agent
@@ -2902,6 +2919,12 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 			return
 		}
 	}
+
+	if len(textParts) > maxA2ATextParts {
+		a2aRPCError(w, rpcID, -32602, "A message may have at most 256 text parts", nil)
+		return
+	}
+	userMessage = a2aJoinText(textParts)
 
 	taskID := taskReq.ID
 	if taskID == "" {
@@ -3063,6 +3086,11 @@ func (h *Handlers) handleA2ATaskSend(w http.ResponseWriter, r *http.Request, par
 				a2aRPCError(w, rpcID, -32001, "Input blocked by guardrails", eval.Results)
 				return
 			}
+		}
+		if eval := h.firstBlockedPart(r.Context(), gr, textParts); eval != nil {
+			h.emitGuardrailAudit(r.Context(), agent.Kitchen, agentName, "input", eval, nil)
+			a2aRPCError(w, rpcID, -32001, "Input blocked by guardrails", eval.Results)
+			return
 		}
 		if h.Guardrails != nil && len(gr) > 0 {
 			if eval, gErr := h.Guardrails.EvaluateInput(r.Context(), gr, userMessage); gErr != nil {
@@ -4060,7 +4088,7 @@ func (h *Handlers) CreatePrompt(w http.ResponseWriter, r *http.Request) {
 	req.Variables = resolver.ExtractVariables(req.Template)
 
 	// Run prompt validation if auto-validate is enabled
-	settings, _ := h.Store.GetKitchenSettings(r.Context(), kitchen)
+	settings, _ := h.resolvedKitchenSettings(r.Context(), kitchen)
 	var report *models.ValidationReport
 	if settings != nil && settings.AutoValidate {
 		var err error
@@ -4141,7 +4169,7 @@ func (h *Handlers) UpdatePrompt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Run prompt validation if auto-validate is enabled
-	settings, _ := h.Store.GetKitchenSettings(r.Context(), kitchen)
+	settings, _ := h.resolvedKitchenSettings(r.Context(), kitchen)
 	var report *models.ValidationReport
 	if settings != nil && settings.AutoValidate {
 		var err error
@@ -4949,7 +4977,7 @@ func (h *Handlers) InvokeAgent(w http.ResponseWriter, r *http.Request) {
 	// Sanitize variable values before prompt rendering
 	sanitizedVars := req.Variables
 	if len(req.Variables) > 0 {
-		settings, _ := h.Store.GetKitchenSettings(r.Context(), kitchen)
+		settings, _ := h.resolvedKitchenSettings(r.Context(), kitchen)
 		var issues []models.ValidationIssue
 		sanitizedVars, issues, err = h.PromptValidator.SanitizeVariables(r.Context(), req.Variables, settings)
 		if err != nil {
@@ -5263,7 +5291,7 @@ func (h *Handlers) StreamInvokeAgent(w http.ResponseWriter, r *http.Request) {
 
 	sanitizedVars := req.Variables
 	if len(req.Variables) > 0 {
-		settings, _ := h.Store.GetKitchenSettings(r.Context(), kitchen)
+		settings, _ := h.resolvedKitchenSettings(r.Context(), kitchen)
 		var issues []models.ValidationIssue
 		sanitizedVars, issues, err = h.PromptValidator.SanitizeVariables(r.Context(), req.Variables, settings)
 		if err != nil {
@@ -5857,15 +5885,7 @@ func (h *Handlers) GetKitchenSettings(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// Mask the validation API key before returning
-	if settings.ValidationAPIKey != "" {
-		if len(settings.ValidationAPIKey) > 4 {
-			settings.ValidationAPIKey = settings.ValidationAPIKey[:4] + "****"
-		} else {
-			settings.ValidationAPIKey = "****"
-		}
-	}
-	respondJSON(w, http.StatusOK, settings)
+	respondJSON(w, http.StatusOK, settings.Redacted())
 }
 
 // UpdateKitchenSettings updates the settings for the current kitchen.
@@ -5879,8 +5899,10 @@ func (h *Handlers) UpdateKitchenSettings(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Merge with existing settings (preserve API key if not sent)
+	// Merge with existing settings (preserve API key if not sent). Settings read from the API and written
+	// back carry masks, which stand for what is stored.
 	existing, _ := h.Store.GetKitchenSettings(r.Context(), kitchen)
+	req = req.RestoreRedacted(existing)
 	if existing != nil {
 		if req.ValidationAPIKey == "" {
 			req.ValidationAPIKey = existing.ValidationAPIKey
@@ -5898,23 +5920,23 @@ func (h *Handlers) UpdateKitchenSettings(w http.ResponseWriter, r *http.Request)
 
 	req.KitchenID = kitchen
 	req.UpdatedAt = time.Now().UTC()
+	moved, sealErr := h.sealValidationKey(r.Context(), kitchen, &req)
+	if sealErr != nil {
+		respondError(w, http.StatusInternalServerError, sealErr.Error())
+		return
+	}
 
 	if err := h.Store.UpsertKitchenSettings(r.Context(), &req); err != nil {
+		if moved && (existing == nil || existing.ValidationAPIKey != req.ValidationAPIKey) {
+			_ = h.keyVault().Delete(r.Context(), kitchen, validationKeyCredential)
+		}
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	log.Info().Str("kitchen", kitchen).Msg("Kitchen settings updated")
 
-	// Mask API key in response
-	if req.ValidationAPIKey != "" {
-		if len(req.ValidationAPIKey) > 4 {
-			req.ValidationAPIKey = req.ValidationAPIKey[:4] + "****"
-		} else {
-			req.ValidationAPIKey = "****"
-		}
-	}
-	respondJSON(w, http.StatusOK, req)
+	respondJSON(w, http.StatusOK, req.Redacted())
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -5937,7 +5959,7 @@ func (h *Handlers) ValidatePrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	settings, _ := h.Store.GetKitchenSettings(r.Context(), kitchen)
+	settings, _ := h.resolvedKitchenSettings(r.Context(), kitchen)
 
 	report, err := h.PromptValidator.Validate(r.Context(), prompt, settings)
 	if err != nil {

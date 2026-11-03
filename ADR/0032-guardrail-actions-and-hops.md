@@ -78,6 +78,8 @@ knows whose rule it is.
 
 ## Not done
 
+- **Done 2026-11-03 (review 5, findings 7 and 12)**: the proxied A2A guard judges the text the agent receives (`a2aJoinText`, parts joined with nothing, as the pod and the in-process handler do) and each part separately, and results of methods that send no message (`tasks/get`) pass the output rules; `models.RedactConfig`/`Agent.Redacted`/`Guardrail.Redacted`/`KitchenSettings.Redacted` mask rule and ingredient secrets (lists, headers, URL credentials) in every response and masked write-backs keep the stored value; with a vault (`secretref.Vault`) secrets in an agent's rules and ingredients are sealed (`internal/secretseal`) and read back by `guardrails.Effective` and the resolver. Not done: the baked `resolved_config` keeps the values the agent runs on; the community edition has no vault, so its records keep values (masked in responses).
+
 - Redacting inside a held-back SSE stream or a streamed A2A reply (they refuse instead).
 - The model's raw reply remains in the run journal (needed to resume) and in the router's call-capture hook; only what leaves the control
   plane, the trace and its spans, the stored session reply and audit events are redacted. A hosted framework's own turns (`execTraceFromProxy`) are not scrubbed.

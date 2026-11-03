@@ -134,7 +134,7 @@ func (e AgentEdit) Apply(a *Agent) {
 		a.Skills = e.Skills
 	}
 	if e.Guardrails != nil {
-		a.Guardrails = e.Guardrails
+		a.Guardrails = RestoreRedactedGuardrails(e.Guardrails, a.Guardrails)
 	}
 }
 
@@ -160,6 +160,13 @@ func (a *Agent) Edit(e AgentEdit) (kept bool) {
 			base = a.Draft.Ingredients
 		}
 		e.Ingredients = RestoreRedactedIngredients(e.Ingredients, base)
+	}
+	if e.Guardrails != nil {
+		base := a.Guardrails
+		if a.Draft.Guardrails != nil {
+			base = a.Draft.Guardrails
+		}
+		e.Guardrails = RestoreRedactedGuardrails(e.Guardrails, base)
 	}
 	a.Draft.Merge(e)
 	if a.Draft.IsEmpty() {

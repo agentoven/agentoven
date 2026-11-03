@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agentoven/agentoven/control-plane/internal/secretref"
+	"github.com/agentoven/agentoven/control-plane/internal/secretseal"
 	"github.com/agentoven/agentoven/control-plane/internal/store"
 	"github.com/agentoven/agentoven/control-plane/pkg/models"
 	"github.com/rs/zerolog/log"
@@ -26,6 +28,33 @@ var templateVarRegex = regexp.MustCompile(`\{\{(\w+)\}\}`)
 // Resolver validates and resolves agent ingredients against the store.
 type Resolver struct {
 	store store.Store
+	// vault says where the secrets sealed into an ingredient's config are read from (secretseal); nil, or a
+	// source that returns nil (the community edition), means the configs hold their values themselves.
+	vault func() secretref.Vault
+}
+
+// UseVault tells the resolver where to read the secrets that were sealed into ingredient configs. The
+// source is asked on every Resolve, so a vault installed after start-up (Pro) is picked up.
+func (r *Resolver) UseVault(src func() secretref.Vault) { r.vault = src }
+
+// unsealed returns the agent with the references in its ingredients' configs replaced by the secrets they
+// stand for, so the resolved config the agent runs on holds values and not references. The agent that was
+// passed in, and what is stored, are not changed.
+func (r *Resolver) unsealed(ctx context.Context, agent *models.Agent) (*models.Agent, error) {
+	if r.vault == nil || r.vault() == nil || len(agent.Ingredients) == 0 {
+		return agent, nil
+	}
+	cp := *agent
+	cp.Ingredients = make([]models.Ingredient, len(agent.Ingredients))
+	for i, ing := range agent.Ingredients {
+		cfg, err := secretseal.Unseal(ctx, r.vault(), agent.Kitchen, agent.Name, ing.Config)
+		if err != nil {
+			return nil, fmt.Errorf("ingredient %q: %w", ing.Name, err)
+		}
+		ing.Config = cfg
+		cp.Ingredients[i] = ing
+	}
+	return &cp, nil
 }
 
 // NewResolver creates a new ingredient resolver.
@@ -44,6 +73,10 @@ func (r *Resolver) Resolve(ctx context.Context, agent *models.Agent) (*models.Re
 	resolved := &models.ResolvedIngredients{}
 	var errors []string
 
+	agent, err := r.unsealed(ctx, agent)
+	if err != nil {
+		return resolved, err
+	}
 	for _, ing := range agent.Ingredients {
 		switch ing.Kind {
 		case models.IngredientModel:

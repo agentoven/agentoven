@@ -377,14 +377,14 @@ func (e *PolicyError) Error() string {
 
 func (e *PolicyError) Unwrap() error { return e.Err }
 
-// Effective returns the guardrails that apply to an agent: its own rules (own — its list,
+// effective is Effective before the secrets sealed into the rules are read back (sealed.go). It returns the guardrails that apply to an agent: its own rules (own — its list,
 // or that list adjusted by an environment policy) with the kitchen's workspace rules from
 // src applied on top (MergeWithWorkspace). With no source, or no workspace rules for the
 // kitchen, it is own unchanged.
 //
 // It fails closed. If the source cannot be read, or any enabled workspace rule is
 // unreadable, it returns a *PolicyError and the caller must refuse to run the agent.
-func Effective(ctx context.Context, src contracts.WorkspaceGuardrailSource, kitchen, agent string, own []models.Guardrail) ([]models.Guardrail, error) {
+func effective(ctx context.Context, src contracts.WorkspaceGuardrailSource, kitchen, agent string, own []models.Guardrail) ([]models.Guardrail, error) {
 	if src == nil {
 		return stamp(own, kitchen), nil
 	}

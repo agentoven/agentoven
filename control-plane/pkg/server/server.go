@@ -321,6 +321,10 @@ func buildServer(ctx context.Context, cfg *config.Config, pubCfg *Config, dataSt
 		a2aauth.UseSecret(a2aSecret)
 	}
 	h.SecretResolver = secretRes
+	// Secrets sealed into agents' ingredients and guardrail rules are read back from the vault, which Pro
+	// installs on the resolver after this point; the source is asked on every use.
+	h.Resolver.UseVault(secretRes.Vault)
+	grails.UseVault(secretRes.Vault)
 	h.ServerInfo = models.CommunityServerInfo(pubCfg.Version)
 
 	// ── Guardrails (R9) ────────────────────────────────────

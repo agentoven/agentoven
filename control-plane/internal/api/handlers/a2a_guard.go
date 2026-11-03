@@ -23,10 +23,22 @@ import (
 // a2aRequest is the part of a JSON-RPC A2A request the guardrails care about.
 type a2aRequest struct {
 	rpcID     interface{}
-	text      string // the text parts of the message
-	hasMsg    bool   // the method sends a message to the agent
-	streaming bool   // the response is a stream the proxy cannot buffer
+	text      string   // the text parts of the message, assembled as the agent receives them (a2aJoinText)
+	parts     []string // the same text parts one by one, each judged on its own as well
+	hasMsg    bool     // the method sends a message to the agent
+	streaming bool     // the response is a stream the proxy cannot buffer
 }
+
+// maxA2ATextParts bounds how many text parts of one message are judged one by one. A message with more
+// is refused: judging each part costs a guardrail evaluation, and no real caller splits text that finely.
+const maxA2ATextParts = 256
+
+// a2aJoinText is the one way the text parts of a message become the agent's input: concatenated, with
+// nothing between them. The pod does exactly this (agent_runner.py) and so does the in-process handler
+// (handleA2ATaskSend); the guard judges this text so that it judges what the agent receives. A guard that
+// joined with a newline missed every pattern (a blocked word, a card number, an injection phrase) cut at a
+// part boundary, which reached the model whole.
+func a2aJoinText(parts []string) string { return strings.Join(parts, "") }
 
 func parseA2ARequest(body []byte) a2aRequest {
 	var env struct {
@@ -35,8 +47,6 @@ func parseA2ARequest(body []byte) a2aRequest {
 		Params struct {
 			Message struct {
 				Parts []struct {
-					Type string `json:"type"`
-					Kind string `json:"kind"`
 					Text string `json:"text"`
 				} `json:"parts"`
 			} `json:"message"`
@@ -49,14 +59,41 @@ func parseA2ARequest(body []byte) a2aRequest {
 	req := a2aRequest{rpcID: env.ID}
 	req.hasMsg = strings.Contains(m, "send") || strings.Contains(m, "stream") || strings.Contains(m, "subscribe")
 	req.streaming = strings.Contains(m, "stream") || strings.Contains(m, "subscribe")
-	var texts []string
+	// Any part that carries text counts, whatever its declared type: the pod reads every part with a
+	// "text" field, so a part typed "data" with text in it reaches the agent too.
 	for _, p := range env.Params.Message.Parts {
-		if (p.Type == "text" || p.Kind == "text" || (p.Type == "" && p.Kind == "")) && p.Text != "" {
-			texts = append(texts, p.Text)
+		if p.Text != "" {
+			req.parts = append(req.parts, p.Text)
 		}
 	}
-	req.text = strings.Join(texts, "\n")
+	req.text = a2aJoinText(req.parts)
 	return req
+}
+
+// joinSeparator is what the evaluated text of a stage was joined with: a request's text parts as the agent
+// receives them (a2aJoinText), a result's parts as a2aResponseText lays them out.
+func joinSeparator(stage models.GuardrailStage) string {
+	if stage == models.GuardrailStageInput {
+		return ""
+	}
+	return "\n"
+}
+
+// firstBlockedPart judges every text part of a message on its own, on top of the joined text the agent
+// receives, and returns the first evaluation that blocks. A rule anchored to the start or end of the text
+// (or one that measures length) sees a part that the join would bury in the middle of another. A message
+// of a single part is the joined text itself and is judged once, by the caller. An evaluation that fails
+// is skipped here: the joined text is judged by the caller, which handles that failure.
+func (h *Handlers) firstBlockedPart(ctx context.Context, gr []models.Guardrail, parts []string) *models.GuardrailEvaluation {
+	if h.Guardrails == nil || len(gr) == 0 || len(parts) < 2 {
+		return nil
+	}
+	for _, part := range parts {
+		if eval, err := h.Guardrails.EvaluateInput(ctx, gr, part); err == nil && !eval.Passed {
+			return eval
+		}
+	}
+	return nil
 }
 
 // a2aResponseText collects the text an A2A result carries: artifacts, the status message,
@@ -200,8 +237,8 @@ func (h *Handlers) proxyA2AGuarded(w http.ResponseWriter, r *http.Request, backe
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	req := parseA2ARequest(body)
-	if !req.hasMsg {
-		h.proxyA2ARequest(w, r, backendURL, agent.Name, agent.Kitchen, agent.IsManaged())
+	if len(req.parts) > maxA2ATextParts {
+		a2aRPCError(w, req.rpcID, -32602, "A message may have at most 256 text parts", nil)
 		return
 	}
 
@@ -213,37 +250,46 @@ func (h *Handlers) proxyA2AGuarded(w http.ResponseWriter, r *http.Request, backe
 		}
 	}
 
-	input := req.text
-	if input == "" {
-		input = string(body) // an unfamiliar message shape: check the whole envelope rather than nothing
-	} else if extra := a2aNonTextRequest(body); extra != "" {
-		// File names and text files, data parts: judged with the text. A redaction in them cannot be
-		// written back part by part, so redactA2A refuses the message then (fails closed).
-		input += "\n" + extra
-	}
-	if eval, gErr := h.Guardrails.EvaluateInput(r.Context(), gr, input); gErr != nil {
-		log.Warn().Err(gErr).Str("agent", agent.Name).Msg("Input guardrail evaluation error (A2A)")
-		audit("input", nil, gErr)
-	} else if !eval.Passed {
-		audit("input", eval, nil)
-		a2aRPCError(w, req.rpcID, -32001, "Input blocked by guardrails", eval.Results)
-		return
-	} else if eval.Redacted > 0 {
-		rewritten, ok := h.redactA2A(body, req.text == "", eval, gr, models.GuardrailStageInput, a2aRequestParts)
-		if !ok {
-			refused := *eval
-			refused.Passed = false // the redaction could not be applied to the message, so it is refused
-			audit("input", &refused, nil)
+	// A method that sends no message (tasks/get, tasks/cancel) has no input to judge, but what it
+	// returns is a task's content, and a pod may have stored it before any output rule redacted it.
+	if req.hasMsg {
+		if eval := h.firstBlockedPart(r.Context(), gr, req.parts); eval != nil {
+			audit("input", eval, nil)
 			a2aRPCError(w, req.rpcID, -32001, "Input blocked by guardrails", eval.Results)
 			return
 		}
-		r.Body = io.NopCloser(bytes.NewReader(rewritten))
-		audit("input", eval, nil)
-	} else if eval.Fired() {
-		audit("input", eval, nil)
+		input := req.text
+		if input == "" {
+			input = string(body) // an unfamiliar message shape: check the whole envelope rather than nothing
+		} else if extra := a2aNonTextRequest(body); extra != "" {
+			// File names and text files, data parts: judged with the text. A redaction in them cannot be
+			// written back part by part, so redactA2A refuses the message then (fails closed).
+			input += "\n" + extra
+		}
+		if eval, gErr := h.Guardrails.EvaluateInput(r.Context(), gr, input); gErr != nil {
+			log.Warn().Err(gErr).Str("agent", agent.Name).Msg("Input guardrail evaluation error (A2A)")
+			audit("input", nil, gErr)
+		} else if !eval.Passed {
+			audit("input", eval, nil)
+			a2aRPCError(w, req.rpcID, -32001, "Input blocked by guardrails", eval.Results)
+			return
+		} else if eval.Redacted > 0 {
+			rewritten, ok := h.redactA2A(body, req.text == "", eval, gr, models.GuardrailStageInput, a2aRequestParts)
+			if !ok {
+				refused := *eval
+				refused.Passed = false // the redaction could not be applied to the message, so it is refused
+				audit("input", &refused, nil)
+				a2aRPCError(w, req.rpcID, -32001, "Input blocked by guardrails", eval.Results)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(rewritten))
+			audit("input", eval, nil)
+		} else if eval.Fired() {
+			audit("input", eval, nil)
+		}
 	}
 
-	if req.streaming && !outputStageEnabled(gr) {
+	if (req.streaming || !req.hasMsg) && !outputStageEnabled(gr) {
 		// Nothing to check on the way out: relay the stream as it arrives.
 		h.proxyA2ARequest(w, r, backendURL, agent.Name, agent.Kitchen, agent.IsManaged())
 		return
@@ -428,7 +474,9 @@ func (h *Handlers) redactA2A(body []byte, whole bool, eval *models.GuardrailEval
 			joined = append(joined, scrubbed)
 		}
 	}
-	if strings.Join(joined, "\n") != eval.Text {
+	// The evaluated text was assembled the way the agent receives it (a request, a2aJoinText) or the way
+	// a2aResponseText joins a result; the scrubbed parts must add up to the same text.
+	if sep := joinSeparator(stage); strings.Join(joined, sep) != eval.Text {
 		return nil, false
 	}
 	out, err := json.Marshal(doc)

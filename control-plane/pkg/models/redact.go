@@ -1,6 +1,9 @@
 package models
 
-import "strings"
+import (
+	"net/url"
+	"strings"
+)
 
 // RedactedValue stands in for a secret in anything returned to an API caller. A caller can tell a key
 // is set (the value is not empty) without being able to read it.
@@ -10,6 +13,11 @@ const RedactedValue = "****"
 // It is deliberately narrow. Settings such as max_tokens or top_k are not secrets and must stay readable.
 func IsSecretKey(k string) bool {
 	k = strings.ToLower(k)
+	// A reference (secret_ref, api_key_ref) names where a secret lives; it is not the secret, and a client
+	// that reads a rule must see which credential it points at.
+	if strings.HasSuffix(k, "_ref") || strings.HasSuffix(k, "-ref") {
+		return false
+	}
 	for _, part := range []string{"password", "passwd", "secret", "credential", "authorization", "bearer", "apikey", "api_key", "api-key", "accesskey", "privatekey"} {
 		if strings.Contains(k, part) {
 			return true
@@ -40,28 +48,116 @@ func maskPrefix(v string) string {
 	return RedactedValue
 }
 
-// redactMap returns a copy of m with the value of every secret-looking key replaced, at any depth. Only
-// text is masked. A key that is set but empty stays empty, so "not configured" is still visible.
+// secretQueryParams are query parameters that carry a credential whatever they are named exactly: a URL
+// with ?token=... in an ingredient or a rule is a secret even though no field is called "token".
+var secretQueryParams = []string{"token", "key", "sig", "signature", "code", "auth", "apikey", "api_key", "api-key", "access_token", "password", "secret"}
+
+func secretParam(name string) bool {
+	n := strings.ToLower(name)
+	for _, p := range secretQueryParams {
+		if n == p {
+			return true
+		}
+	}
+	return IsSecretKey(n)
+}
+
+// RedactURL masks the credentials a URL carries: the user and password of its userinfo (a token is often
+// the user name) and the value of any secret-looking query parameter. A string that is not a URL, or a URL
+// with nothing secret in it, is returned as it is. The rest of the URL stays readable so a person can still
+// tell which endpoint it is.
+func RedactURL(s string) string {
+	if !strings.Contains(s, "://") {
+		return s
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return s
+	}
+	changed := false
+	if u.User != nil {
+		u.User = url.User(RedactedValue)
+		changed = true
+	}
+	if u.RawQuery != "" {
+		pairs := strings.Split(u.RawQuery, "&")
+		for i, pair := range pairs {
+			name, value, ok := strings.Cut(pair, "=")
+			if unescaped, err := url.QueryUnescape(name); err == nil {
+				name = unescaped
+			}
+			if ok && value != "" && secretParam(name) {
+				pairs[i] = pair[:strings.Index(pair, "=")] + "=" + RedactedValue
+				changed = true
+			}
+		}
+		u.RawQuery = strings.Join(pairs, "&")
+	}
+	if !changed {
+		return s
+	}
+	return u.String()
+}
+
+// redactValue masks one value found in a free-form config: text that is a URL loses its credentials, and
+// a value under a secret key (or under "headers", whose names are free) is masked whole, at any depth in
+// a list or a map. A key that is set but empty stays empty, so "not configured" is still visible.
+func redactValue(v interface{}, secret bool, mask func(string) string) interface{} {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(val))
+		for k, inner := range val {
+			out[k] = redactValue(inner, secret || IsSecretKey(k) || strings.EqualFold(k, "headers"), mask)
+		}
+		return out
+	case map[string]string:
+		out := make(map[string]string, len(val))
+		for k, inner := range val {
+			if inner != "" && (secret || IsSecretKey(k) || strings.EqualFold(k, "headers")) {
+				out[k] = mask(inner)
+			} else {
+				out[k] = RedactURL(inner)
+			}
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(val))
+		for i, inner := range val {
+			out[i] = redactValue(inner, secret, mask)
+		}
+		return out
+	case []string:
+		out := make([]string, len(val))
+		for i, inner := range val {
+			out[i] = redactValue(inner, secret, mask).(string)
+		}
+		return out
+	case string:
+		switch {
+		case val == "", IsReference(val):
+			return val // a reference names where a secret lives; it is what a reader should see
+		case secret:
+			return mask(val)
+		default:
+			return RedactURL(val)
+		}
+	case nil, bool:
+		return v
+	default:
+		if secret {
+			return mask("x") // a number or other scalar under a secret key is masked too
+		}
+		return v
+	}
+}
+
+// redactMap returns a copy of m with the value of every secret-looking key replaced, at any depth, in lists
+// as well as maps, and the credentials in any URL it holds masked.
 func redactMap(m map[string]interface{}, mask func(string) string) map[string]interface{} {
 	if m == nil {
 		return nil
 	}
-	out := make(map[string]interface{}, len(m))
-	for k, v := range m {
-		switch val := v.(type) {
-		case map[string]interface{}:
-			out[k] = redactMap(val, mask)
-		case string:
-			if IsSecretKey(k) && val != "" {
-				out[k] = mask(val)
-			} else {
-				out[k] = val
-			}
-		default:
-			out[k] = v
-		}
-	}
-	return out
+	return redactValue(m, false, mask).(map[string]interface{})
 }
 
 func fullMask(string) string { return RedactedValue }
@@ -128,7 +224,126 @@ func (a Agent) Redacted() Agent {
 		}
 		a.Draft = &d
 	}
+	a.EnvEndpoints = redactStrings(a.EnvEndpoints) // an endpoint can carry a token in its URL
+	a.Guardrails = RedactGuardrails(a.Guardrails)
+	if a.Draft != nil && a.Draft.Guardrails != nil {
+		d := *a.Draft
+		d.Guardrails = RedactGuardrails(a.Draft.Guardrails)
+		a.Draft = &d
+	}
 	return a
+}
+
+// Redacted returns a copy of the rule that is safe to return from the API: a secret in its config (a
+// llamaguard rule's api_key) and the credentials in any URL it holds are masked.
+func (g Guardrail) Redacted() Guardrail {
+	g.Config = RedactConfig(g.Config)
+	return g
+}
+
+// RedactGuardrails does Guardrail.Redacted for a list; nil stays nil so "not set" stays visible.
+func RedactGuardrails(rules []Guardrail) []Guardrail {
+	if rules == nil {
+		return nil
+	}
+	out := make([]Guardrail, len(rules))
+	for i, r := range rules {
+		out[i] = r.Redacted()
+	}
+	return out
+}
+
+// RestoreRedactedGuardrails returns incoming with any masked config value replaced by the one already stored
+// for the same rule (matched by id, else by kind and stage), so a client that reads an agent and writes its
+// rules back cannot replace a rule's api_key with the mask.
+func RestoreRedactedGuardrails(incoming, stored []Guardrail) []Guardrail {
+	if len(incoming) == 0 || len(stored) == 0 {
+		return incoming
+	}
+	out := make([]Guardrail, len(incoming))
+	for i, in := range incoming {
+		for _, old := range stored {
+			if (in.ID != "" && old.ID == in.ID) || (in.ID == "" && old.Kind == in.Kind && old.Stage == in.Stage) {
+				in.Config = restoreMap(in.Config, old.Config)
+				break
+			}
+		}
+		out[i] = in
+	}
+	return out
+}
+
+// Redacted returns a copy of the agent's configuration that is safe to return from the API.
+func (c AgentConfig) Redacted() AgentConfig {
+	c.Agent = c.Agent.Redacted()
+	c.Ingredients = *c.Ingredients.Redacted()
+	return c
+}
+
+// Redacted returns a copy of the kitchen's settings that is safe to return from the API: the key of the
+// validation model is shown as a short prefix, like a provider's.
+func (k KitchenSettings) Redacted() KitchenSettings {
+	if k.ValidationAPIKey != "" && !IsReference(k.ValidationAPIKey) {
+		k.ValidationAPIKey = maskPrefix(k.ValidationAPIKey)
+	}
+	k.ValidationEndpoint = RedactURL(k.ValidationEndpoint)
+	if k.ArchivePolicy != nil {
+		ap := *k.ArchivePolicy // backend settings can hold access keys
+		ap.Config = redactStrings(ap.Config)
+		k.ArchivePolicy = &ap
+	}
+	k.TestRunnerConfig = redactStrings(k.TestRunnerConfig)
+	return k
+}
+
+// redactStrings is redactMap for a map of text: values under secret keys and credentials in URLs are masked.
+func redactStrings(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	return redactValue(m, false, fullMask).(map[string]string)
+}
+
+// RestoreRedacted returns incoming with every masked setting replaced by the one stored, so a client that
+// reads the settings and writes them back cannot overwrite a key with its mask.
+func (k KitchenSettings) RestoreRedacted(stored *KitchenSettings) KitchenSettings {
+	if stored == nil {
+		return k
+	}
+	if IsMasked(k.ValidationAPIKey) {
+		k.ValidationAPIKey = stored.ValidationAPIKey
+	}
+	if k.ValidationEndpoint != stored.ValidationEndpoint && k.ValidationEndpoint == RedactURL(stored.ValidationEndpoint) {
+		k.ValidationEndpoint = stored.ValidationEndpoint
+	}
+	if k.ArchivePolicy != nil && stored.ArchivePolicy != nil {
+		ap := *k.ArchivePolicy
+		ap.Config = restoreStrings(ap.Config, stored.ArchivePolicy.Config)
+		k.ArchivePolicy = &ap
+	}
+	k.TestRunnerConfig = restoreStrings(k.TestRunnerConfig, stored.TestRunnerConfig)
+	return k
+}
+
+func restoreStrings(incoming, stored map[string]string) map[string]string {
+	if incoming == nil {
+		return nil
+	}
+	out := make(map[string]string, len(incoming))
+	for k, v := range incoming {
+		old, ok := stored[k]
+		if ok && old != "" && ((IsSecretKey(k) && IsMasked(v)) || (v != old && v == RedactURL(old))) {
+			v = old
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// IsReference says whether a value is a reference to a secret (vault://, env://, k8s://) rather than the
+// secret itself. A reference is shown as it is.
+func IsReference(v string) bool {
+	return strings.HasPrefix(v, "vault://") || strings.HasPrefix(v, "env://") || strings.HasPrefix(v, "k8s://")
 }
 
 // RedactAgents does Agent.Redacted for a list.
@@ -162,30 +377,49 @@ func (p ModelProvider) Redacted() ModelProvider {
 	return p
 }
 
-// restoreMap puts back, in incoming, the stored value of every secret that still carries the mask. A client
-// that reads an object and writes it back has only ever seen the mask; it must not overwrite the secret with it.
+// restoreValue puts back, in incoming, the stored value of every secret that still carries the mask. A client
+// that reads an object and writes it back has only ever seen the mask; it must not overwrite the secret with
+// it. Text is restored when it is the mask itself (under a secret key) or exactly what RedactURL shows of the
+// stored URL. Lists are matched by position, maps by key.
+func restoreValue(incoming, stored interface{}, secret bool) interface{} {
+	switch val := incoming.(type) {
+	case map[string]interface{}:
+		old, _ := stored.(map[string]interface{})
+		out := make(map[string]interface{}, len(val))
+		for k, inner := range val {
+			out[k] = restoreValue(inner, old[k], secret || IsSecretKey(k) || strings.EqualFold(k, "headers"))
+		}
+		return out
+	case []interface{}:
+		old, _ := stored.([]interface{})
+		out := make([]interface{}, len(val))
+		for i, inner := range val {
+			var o interface{}
+			if i < len(old) {
+				o = old[i]
+			}
+			out[i] = restoreValue(inner, o, secret)
+		}
+		return out
+	case string:
+		oldText, ok := stored.(string)
+		if !ok || oldText == "" {
+			return incoming
+		}
+		if (secret && IsMasked(val)) || (val != oldText && val == RedactURL(oldText)) {
+			return oldText
+		}
+		return incoming
+	default:
+		return incoming
+	}
+}
+
 func restoreMap(incoming, stored map[string]interface{}) map[string]interface{} {
 	if incoming == nil {
 		return nil
 	}
-	out := make(map[string]interface{}, len(incoming))
-	for k, v := range incoming {
-		old := stored[k]
-		switch val := v.(type) {
-		case map[string]interface{}:
-			oldMap, _ := old.(map[string]interface{})
-			out[k] = restoreMap(val, oldMap)
-		case string:
-			if IsSecretKey(k) && IsMasked(val) && old != nil {
-				out[k] = old
-			} else {
-				out[k] = val
-			}
-		default:
-			out[k] = v
-		}
-	}
-	return out
+	return restoreValue(incoming, stored, false).(map[string]interface{})
 }
 
 // RestoreRedactedIngredients returns incoming with any masked config value replaced by the one already stored
