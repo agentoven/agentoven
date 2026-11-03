@@ -2739,6 +2739,9 @@ type Guardrail struct {
 	// every rule it returns, whatever the client sent, so an evaluator that calls out (a custom
 	// endpoint) knows whose rule it is without trusting the rule's own config.
 	KitchenID string `json:"kitchen_id,omitempty"`
+	// AgentName is the agent the rule is being applied for, stamped the same way. A custom endpoint that an
+	// agent names itself is approved for that agent (Pro), and the evaluator needs to know which.
+	AgentName string `json:"agent_name,omitempty"`
 	// Overridable controls whether an agent may replace this rule with its own
 	// configuration when it appears in a WorkspaceGuardrailPolicy.
 	// False (default) = mandatory; the workspace rule always runs.

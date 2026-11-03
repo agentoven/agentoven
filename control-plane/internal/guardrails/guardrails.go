@@ -424,7 +424,10 @@ func effective(ctx context.Context, src contracts.WorkspaceGuardrailSource, kitc
 		if err := ValidateOwn(own); err != nil {
 			return nil, &PolicyError{Kitchen: kitchen, Agent: agent, Err: err}
 		}
-		return stamp(own, kitchen), nil
+		if err := CheckOwnEndpoints(ctx, kitchen, agent, own); err != nil {
+			return nil, &PolicyError{Kitchen: kitchen, Agent: agent, Err: err}
+		}
+		return stamp(own, kitchen, agent), nil
 	}
 	fail := func(err error) ([]models.Guardrail, error) {
 		return nil, &PolicyError{Kitchen: kitchen, Agent: agent, Err: err}
@@ -434,12 +437,17 @@ func effective(ctx context.Context, src contracts.WorkspaceGuardrailSource, kitc
 	if err := ValidateOwn(own); err != nil {
 		return fail(err)
 	}
+	// A custom endpoint the agent names itself runs only once it is approved: an unapproved one stops the
+	// agent, as a workspace rule that cannot be applied does (owner decision S7).
+	if err := CheckOwnEndpoints(ctx, kitchen, agent, own); err != nil {
+		return fail(err)
+	}
 	workspace, err := src.WorkspaceGuardrails(ctx, kitchen)
 	if err != nil {
 		return fail(err)
 	}
 	if len(workspace) == 0 {
-		return stamp(own, kitchen), nil
+		return stamp(own, kitchen, agent), nil
 	}
 	for _, r := range workspace {
 		if !r.Enabled {
@@ -453,19 +461,19 @@ func effective(ctx context.Context, src contracts.WorkspaceGuardrailSource, kitc
 	if err != nil {
 		return fail(err)
 	}
-	return stamp(MergeWithWorkspace(workspace, own, exceptions), kitchen), nil
+	return stamp(MergeWithWorkspace(workspace, own, exceptions), kitchen, agent), nil
 }
 
-// stamp records the kitchen on each rule, overwriting whatever the rule carried: the rule list of an
-// agent comes from a client, and the kitchen it runs in is the server's to say. The caller's slice
-// is not changed.
-func stamp(rules []models.Guardrail, kitchen string) []models.Guardrail {
+// stamp records the kitchen and the agent on each rule, overwriting whatever the rule carried: the rule list
+// of an agent comes from a client, and the kitchen and agent it runs for are the server's to say. The
+// caller's slice is not changed.
+func stamp(rules []models.Guardrail, kitchen, agent string) []models.Guardrail {
 	if len(rules) == 0 {
 		return rules
 	}
 	out := make([]models.Guardrail, len(rules))
 	for i, r := range rules {
-		r.KitchenID = kitchen
+		r.KitchenID, r.AgentName = kitchen, agent
 		out[i] = r
 	}
 	return out

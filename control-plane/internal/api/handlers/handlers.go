@@ -580,6 +580,9 @@ func (h *Handlers) bakeAgent(w http.ResponseWriter, r *http.Request) {
 	if !h.checkAgentBake(w, cat, agent) {
 		return
 	}
+	if !h.checkOwnEndpoints(w, r, agent) {
+		return
+	}
 
 	// ── Validate & resolve ALL ingredients via the Resolver ──────
 	// This replaces the old manual checks with full ingredient resolution:
@@ -1109,6 +1112,9 @@ func (h *Handlers) recookAgent(w http.ResponseWriter, r *http.Request) {
 		agent.Tags = mergeTags(agent.Tags, req.Tags) // a copy: the map the store handed out is shared with its own
 	}
 	if !h.checkAgentBake(w, cat, agent) {
+		return
+	}
+	if !h.checkOwnEndpoints(w, r, agent) {
 		return
 	}
 

@@ -165,3 +165,14 @@ func (h *Handlers) checkAgentGuardrails(ctx context.Context, kitchen string, rul
 	}
 	return grails.CheckEndpoints(ctx, kitchen, rules)
 }
+
+// checkOwnEndpoints refuses a bake or re-cook while a custom endpoint named in the agent's own guardrails is
+// not approved (409): the agent would be refused on its first call anyway, and a bake that says ready and then
+// fails every request is worse than one that says why it did not start (owner decision S7).
+func (h *Handlers) checkOwnEndpoints(w http.ResponseWriter, r *http.Request, agent *models.Agent) bool {
+	if err := grails.CheckOwnEndpoints(r.Context(), agent.Kitchen, agent.Name, agent.Guardrails); err != nil {
+		respondJSON(w, http.StatusConflict, map[string]string{"error": err.Error(), "code": "guardrail_endpoint_not_approved"})
+		return false
+	}
+	return true
+}
