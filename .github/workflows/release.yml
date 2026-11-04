@@ -28,7 +28,6 @@ jobs:
     outputs:
       pypi: ${{ steps.tokens.outputs.pypi }}
       crates: ${{ steps.tokens.outputs.crates }}
-      homebrew: ${{ steps.tokens.outputs.homebrew }}
       latest: ${{ steps.latest.outputs.latest }}
       prerelease: ${{ steps.latest.outputs.prerelease }}
     steps:
@@ -42,7 +41,6 @@ jobs:
         env:
           PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           check() { # output-name, secret-name, secret-value, what-is-skipped
             if [ -n "$3" ]; then
@@ -60,7 +58,6 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           check pypi     PYPI_TOKEN           "$PYPI_TOKEN"           "Publish Python SDK (PyPI)"
           check crates   CARGO_REGISTRY_TOKEN "$CARGO_REGISTRY_TOKEN" "Publish Rust crates (crates.io)"
-          check homebrew HOMEBREW_TAP_TOKEN   "$HOMEBREW_TAP_TOKEN"   "Update Homebrew Formula"
 
       - name: Is this the newest release?
         id: latest
@@ -554,52 +551,7 @@ jobs:
           make_latest: ${{ needs.preflight.outputs.latest }}
           prerelease: ${{ needs.preflight.outputs.prerelease }}
 
-  # ── Update Homebrew tap ──────────────────────────────────────
-  homebrew:
-    name: Update Homebrew Formula
-    needs: [preflight, release]
-    # Only for the newest stable release (the formula must not be moved back to an old tag), and
-    # skipped (with a warning from the preflight job) when HOMEBREW_TAP_TOKEN is not set.
-    if: >-
-      ${{ always()
-      && needs.release.result == 'success'
-      && needs.preflight.outputs.homebrew == 'true'
-      && needs.preflight.outputs.latest == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Get version
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
-
-      - name: Download source tarball and compute SHA
-        id: sha
-        run: |
-          curl -fsSL "https://github.com/agentoven/agentoven/archive/refs/tags/${GITHUB_REF#refs/tags/}.tar.gz" \
-            -o source.tar.gz
-          echo "sha256=$(shasum -a 256 source.tar.gz | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout homebrew-tap
-        uses: actions/checkout@v4
-        with:
-          repository: agentoven/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          path: homebrew-tap
-
-      - name: Update formula
-        run: |
-          cd homebrew-tap
-          sed -i "s|url \".*\"|url \"https://github.com/agentoven/agentoven/archive/refs/tags/v${{ steps.version.outputs.version }}.tar.gz\"|" Formula/agentoven.rb
-          sed -i "s|sha256 \".*\"|sha256 \"${{ steps.sha.outputs.sha256 }}\"|" Formula/agentoven.rb
-
-      - name: Commit and push
-        working-directory: homebrew-tap
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/agentoven.rb
-          if git diff --cached --quiet; then
-            echo "Formula already at ${{ steps.version.outputs.version }}: nothing to commit"
-          else
-            git commit -m "agentoven ${{ steps.version.outputs.version }}"
-            git push
-          fi
+  # The Homebrew tap (agentoven/homebrew-tap) is not updated from here: a workflow in this
+  # repository cannot push to another repository without a personal access token. The tap's own
+  # workflow (update-formula) reads this repository's newest stable release every six hours and
+  # commits the new url and checksum with its own GITHUB_TOKEN.
